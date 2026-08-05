@@ -1,0 +1,353 @@
+import { useCallback, useEffect, useState } from 'react';
+import {
+  callOp,
+  isZero,
+  money,
+  OpFailed,
+  type ApBill,
+  type PayablesResult,
+} from '../api/client';
+
+interface Props {
+  onToast: (msg: string) => void;
+  reloadKey: number;
+  onChanged: () => void;
+}
+
+/** The debit side accepts active, postable expense, inventory or prepayment
+ *  accounts, matching the backend. */
+interface DebitAccount {
+  code: string;
+  name: string;
+  kind: string;
+  is_postable: boolean;
+  is_active: boolean;
+}
+
+/**
+ * Total of the selected amounts.
+ *
+ * Amounts are decimal strings and are not converted to number: this adds
+ * integers in the smallest unit (cents) and reinserts the decimal point
+ * afterwards. TWD books carry two decimals, and integer addition cannot
+ * drift.
+ */
+function sumCents(values: string[]): string {
+  const cents = values.reduce((acc, v) => {
+    const neg = v.startsWith('-');
+    const [whole = '0', frac = ''] = (neg ? v.slice(1) : v).split('.');
+    const n = BigInt(whole) * 100n + BigInt((frac + '00').slice(0, 2));
+    return neg ? acc - n : acc + n;
+  }, 0n);
+  const neg = cents < 0n;
+  const abs = neg ? -cents : cents;
+  return `${neg ? '-' : ''}${abs / 100n}.${String(abs % 100n).padStart(2, '0')}`;
+}
+
+export function Payables({ onToast, reloadKey, onChanged }: Props) {
+  const [data, setData] = useState<PayablesResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const [drawer, setDrawer] = useState(false);
+  const [debitAccounts, setDebitAccounts] = useState<DebitAccount[] | null>(null);
+  const [vendor, setVendor] = useState('');
+  const [billNo, setBillNo] = useState('');
+  const [amount, setAmount] = useState('');
+  const [dueOn, setDueOn] = useState('');
+  const [debitAccountCode, setDebitAccountCode] = useState('');
+  const [memo, setMemo] = useState('');
+  const [savingBill, setSavingBill] = useState(false);
+
+  const load = useCallback(() => {
+    setError(null);
+    callOp<PayablesResult>('list_payables')
+      .then((d) => {
+        setData(d);
+        // Bills already sent for payment cannot be selected again and are
+        // cleared on reload.
+        setPicked((p) => p.filter((no) => d.bills.some((b) => b.bill_no === no && b.state === 'open')));
+      })
+      .catch((e: Error) => setError(e.message));
+  }, []);
+
+  useEffect(load, [load, reloadKey]);
+
+  useEffect(() => {
+    if (!drawer || debitAccounts) return;
+    callOp<{ accounts: DebitAccount[] }>('list_accounts')
+      .then((d) => {
+        const usable = d.accounts.filter((a) => a.is_postable && a.is_active);
+        const preferred = usable.filter((a) => a.kind === 'expense' || a.kind === 'asset');
+        const options = preferred.length > 0 ? preferred : usable;
+        setDebitAccounts(options);
+        setDebitAccountCode((code) => code || options[0]?.code || '');
+      })
+      .catch(() => setDebitAccounts([]));
+  }, [drawer, debitAccounts]);
+
+  async function saveBill() {
+    if (!vendor.trim() || !billNo.trim() || !amount.trim() || !dueOn || !debitAccountCode) {
+      onToast('供應商、單號、金額、到期日與借方科目都要填寫');
+      return;
+    }
+    setSavingBill(true);
+    try {
+      const d = await callOp<{ bill: { bill_no: string; vendor: string; amount: string; voucher_no: string } }>(
+        'create_ap_bill',
+        {
+          vendor: vendor.trim(),
+          bill_no: billNo.trim(),
+          amount: amount.trim(),
+          due_on: dueOn,
+          debit_account_code: debitAccountCode,
+          memo: memo.trim(),
+        },
+        `新增應付帳單 ${vendor.trim()}`,
+      );
+      onToast(
+        `已建立應付帳單 ${d.bill.bill_no}，${money(d.bill.amount)}；傳票 ${d.bill.voucher_no} 待過帳，過帳後列入未付合計`,
+      );
+      setVendor('');
+      setBillNo('');
+      setAmount('');
+      setDueOn('');
+      setMemo('');
+      setDrawer(false);
+      onChanged();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingBill(false);
+    }
+  }
+
+  function toggle(b: ApBill) {
+    if (b.state !== 'open' || !b.recognised) return;
+    setPicked((p) => (p.includes(b.bill_no) ? p.filter((x) => x !== b.bill_no) : [...p, b.bill_no]));
+  }
+
+  const bills = data?.bills ?? [];
+  const chosen = bills.filter((b) => picked.includes(b.bill_no));
+  const total = sumCents(chosen.map((b) => b.outstanding));
+
+  async function submit() {
+    if (chosen.length === 0) return;
+    setBusy(true);
+    try {
+      const d = await callOp<{ batch: { batch_no: string; voucher_no: string; total: string } }>(
+        'create_payment_batch',
+        { bill_nos: picked },
+        `付款 ${chosen.length} 筆`,
+      );
+      onToast(
+        `付款單 ${d.batch.batch_no} 已送出，${money(d.batch.total)}；傳票 ${d.batch.voucher_no} 待過帳，待出納執行匯款`,
+      );
+      setPicked([]);
+      onChanged();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <h1 className="page-title">應付帳款</h1>
+      <p className="page-lede">應付款項。勾選後送出付款單，由出納執行匯款。</p>
+
+      {error && <p className="state-note state-note--error">{error}</p>}
+      {!data && !error && <p className="state-note">讀取中…</p>}
+
+      {data && (
+        <>
+          <div className="card pay-bar">
+            <div>
+              <div className="pay-bar__kicker">已勾選 {chosen.length} 筆，合計</div>
+              <div className="pay-bar__total num">{money(total)}</div>
+            </div>
+            <span className="spacer" />
+            {/* This applies to everyone: a payment batch is an instruction,
+                not a transfer. Whether it can be submitted is the backend's
+                decision. */}
+            <div className="pay-bar__note">
+              付款單僅為付款指示，實際匯款由出納執行，於此送出不會產生資金流出。
+            </div>
+            <button
+              className={`btn${chosen.length === 0 ? ' btn--off' : ''}`}
+              disabled={chosen.length === 0 || busy}
+              onClick={() => void submit()}
+            >
+              {busy ? '送出中…' : '送出付款單'}
+            </button>
+          </div>
+
+          <p className={`recon${data.reconciled ? '' : ' recon--off'}`}>
+            {data.reconciled ? (
+              <>
+                未付合計 <span className="num">{money(data.total)}</span> 就是總帳{' '}
+                <span className="num">2101 應付帳款</span> 的餘額，兩者分開計算，結果相符。
+              </>
+            ) : (
+              <>
+                對不上：明細合計 <span className="num">{money(data.total)}</span>，總帳{' '}
+                <span className="num">2101</span> 是 <span className="num">{money(data.gl_balance)}</span>
+                ，差 <span className="num">{money(data.difference)}</span> 元。
+              </>
+            )}
+            {!isZero(data.not_yet_posted) && (
+              <>
+                {' '}另有 <span className="num">{money(data.not_yet_posted)}</span> 的帳單，來源傳票還沒過帳。
+              </>
+            )}
+          </p>
+
+          <div className="toolbar">
+            <span className="spacer" />
+            <button className="btn btn--compact" onClick={() => setDrawer(true)}>
+              ＋ 新增應付帳單
+            </button>
+          </div>
+
+          <table className="table">
+            <thead>
+              <tr>
+                <th className="col-check" />
+                <th>供應商</th>
+                <th>內容</th>
+                <th>付款日</th>
+                <th className="align-right">金額</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bills.map((b) => {
+                const on = picked.includes(b.bill_no);
+                const pickable = b.state === 'open' && b.recognised;
+                return (
+                  <tr
+                    key={b.bill_no}
+                    className={`${pickable ? 'row--pickable' : ''}${
+                      b.recognised ? '' : ' row--waiting'
+                    }`}
+                    onClick={() => toggle(b)}
+                  >
+                    <td>
+                      <span className={`checkbox${on ? ' checkbox--on' : ''}`}>{on ? '✓' : ''}</span>
+                    </td>
+                    <td>
+                      {b.vendor}
+                      {!b.recognised && <span className="tag tag--pale">來源傳票未過帳</span>}
+                      {b.state === 'paying' && (
+                        <span className="tag tag--warn tag--static">{b.batch_no} 已送出</span>
+                      )}
+                    </td>
+                    <td className="cell-accounts">{b.memo}</td>
+                    <td>
+                      <span className={b.days_overdue > 0 ? 'due due--over' : 'due'}>
+                        {b.due_on.slice(5).replace('-', '/')}
+                      </span>
+                      {b.days_overdue > 0 && <span className="cell-hint">已逾期</span>}
+                    </td>
+                    <td className="num align-right">{money(b.outstanding)}</td>
+                  </tr>
+                );
+              })}
+              {bills.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="cell-muted">
+                    目前沒有待付帳款。請由上方「＋ 新增應付帳單」建立第一筆。
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+
+          <p className="hint">
+            送出付款單會開立一張借應付帳款、貸銀行存款的傳票，每張帳單一行；
+            銀行端僅有一筆匯出，故貸方合併為一行，以利對帳。
+          </p>
+        </>
+      )}
+
+      {drawer && (
+        <div className="overlay overlay--center" onClick={() => setDrawer(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer__head">
+              <div>
+                <div className="drawer__title">新增應付帳單</div>
+                <div className="drawer__subtitle">
+                  同時會產生一張待過帳傳票（借指定科目／貸應付帳款）；這不會直接匯款
+                </div>
+              </div>
+              <button className="btn btn--close" onClick={() => setDrawer(false)} aria-label="關閉">
+                ×
+              </button>
+            </div>
+            <div className="drawer__body">
+              <div className="field-grid">
+                <label className="field">
+                  供應商
+                  <input className="input" value={vendor} onChange={(e) => setVendor(e.target.value)} />
+                </label>
+                <label className="field">
+                  帳單號碼
+                  <input
+                    className="input num"
+                    value={billNo}
+                    placeholder="AP-2607-030"
+                    onChange={(e) => setBillNo(e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  含稅應付總額
+                  <input
+                    className="input num"
+                    inputMode="decimal"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  到期日
+                  <input className="input" type="date" value={dueOn} onChange={(e) => setDueOn(e.target.value)} />
+                </label>
+                <label className="field field--full">
+                  借方科目（費用、存貨或預付款等啟用中的可入帳科目）
+                  <select
+                    className="input"
+                    value={debitAccountCode}
+                    onChange={(e) => setDebitAccountCode(e.target.value)}
+                  >
+                    {(debitAccounts ?? []).map((a) => (
+                      <option key={a.code} value={a.code}>
+                        {a.code} {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field field--full">
+                  帳單內容
+                  <input className="input" value={memo} onChange={(e) => setMemo(e.target.value)} />
+                </label>
+              </div>
+            </div>
+            <div className="drawer__foot">
+              <span className="drawer__foot-note">貸方固定是 2101 應付帳款</span>
+              <button
+                className={`btn${savingBill ? ' btn--off' : ''}`}
+                disabled={savingBill}
+                onClick={() => void saveBill()}
+              >
+                {savingBill ? '存檔中…' : '建立帳單'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,2098 @@
+/* LAYSI ONE - CLASSICAL DESIGN SYSTEM
+ *
+ * Rules (see the frontend contract in docs/architecture.md):
+ *   1. Components may only reference var(--...). No hex, font name or px is
+ *      hard-coded in .tsx or in other CSS rules. A new value gets a variable
+ *      here first.
+ *   2. Compose with lines and rules, never filled blocks. Buttons are outlined.
+ *   3. Corner radius 4px (--radius-md); numbers are always tabular-nums.
+ */
+
+:root {
+  /* Neutral scale
+     Light to dark: 100 is the card surface, 200 the page, 300 the sidebar. */
+  --color-neutral-100: #f8f4f4; /* card, header and input surfaces */
+  --color-neutral-200: #f3f2f2; /* page surface */
+  --color-neutral-300: #eae9e9; /* sidebar surface */
+  --color-neutral-400: #bab6b6; /* disabled marks */
+  --color-neutral-500: #9b9797; /* group headings, least prominent text */
+  --color-neutral-700: #605d5d; /* secondary text */
+  --color-neutral-800: #444141; /* unselected nav text, secondary button text */
+  --color-neutral-900: #201f1d; /* primary text */
+  --color-neutral-950: #2d2b2b; /* toast and phone frame surface */
+
+  /* Accent (one accent, four depths) */
+  --color-accent: #b68235; /* rules and indicators */
+  --color-accent-mid: #a06f24; /* hovered links, mid-depth rules */
+  --color-accent-deep: #7d5411; /* accent text and links */
+  --color-accent-darkest: #5a3b0a; /* body text inside accent blocks */
+  --color-accent-note: #7a6237; /* explanatory text in AI hint blocks */
+
+  /* Semantic aliases */
+  --color-bg: var(--color-neutral-200);
+  --color-surface: var(--color-neutral-300);
+  --color-card: var(--color-neutral-100);
+  --color-ink: var(--color-neutral-900);
+  --color-ink-muted: var(--color-neutral-700);
+  --color-ink-inverse: var(--color-neutral-100);
+
+  /* Rules (composition relies on lines, not fills) */
+  --rule-soft: rgba(32, 31, 29, 0.1); /* table row separators */
+  --rule: rgba(32, 31, 29, 0.16); /* block rules */
+  --rule-strong: rgba(32, 31, 29, 0.28); /* inputs and secondary buttons */
+  --rule-accent: rgba(182, 130, 53, 0.55); /* accent dashed rules */
+  --rule-accent-soft: rgba(182, 130, 53, 0.32);
+  --rule-width: 1px;
+  --rule-width-tab: 1.5px;
+  --rule-width-marker: 2px;
+
+  /* Tints (status hints only, never large fills) */
+  --wash-accent-faint: rgba(182, 130, 53, 0.05);
+  --wash-accent-soft: rgba(182, 130, 53, 0.06);
+  --wash-accent: rgba(182, 130, 53, 0.1);
+  --wash-accent-strong: rgba(182, 130, 53, 0.12);
+  --wash-accent-bold: rgba(182, 130, 53, 0.16);
+  --wash-ink-faint: rgba(32, 31, 29, 0.05);
+  --wash-ink: rgba(32, 31, 29, 0.35);
+  --wash-selection: rgba(182, 130, 53, 0.3);
+  --wash-scrollbar: rgba(32, 31, 29, 0.18);
+
+  /* Typefaces
+   *
+   * The Latin faces carry no CJK glyphs, so every Chinese character is resolved
+   * by the next entry: Noto Sans TC, loaded in index.html. Chinese is set sans
+   * while Latin keeps its serif; a Han serif carries too much stroke contrast
+   * to stay crisp in dense tables at 13-15px. The chain then falls back to
+   * system CJK sans faces, never to generic serif, which resolves to PMingLiU
+   * on Windows and is unreadable at these sizes. */
+  --font-display: 'Cormorant Garamond', 'Noto Sans TC', 'PingFang TC',
+    'Microsoft JhengHei', 'Noto Sans CJK TC', sans-serif;
+  --font-body: 'Lora', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei',
+    'Noto Sans CJK TC', sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
+  --weight-regular: 400;
+  --weight-semibold: 600;
+
+  /* Type scale
+   *
+   * Sized for Chinese, not Latin. A Han character carries far more strokes in
+   * the same em box than a letter does, so the sizes that read comfortably in
+   * English collapse in Chinese: 12px is the floor for auxiliary text and 14px
+   * the floor for body copy. The display sizes are unchanged; they were never
+   * the problem. */
+  --text-2xs: 12px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-sm-plus: 13px;
+  --text-base: 14px;
+  --text-md: 14.5px;
+  --text-lg: 15px;
+  --text-lg-plus: 15.5px;
+  --text-xl: 16px;
+  --text-2xl: 17px;
+  --display-2xs: 16px;
+  --display-xs: 21px;
+  --display-sm: 22px;
+  --display-md: 24px;
+  --display-lg: 26px;
+  --display-xl: 31px;
+  --display-2xl: 36px;
+  --display-3xl: 40px;
+
+  --leading-tight: 1.35;
+  --leading-normal: 1.55;
+  --leading-loose: 1.7;
+  --tracking-tight: -0.015em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.06em;
+  --tracking-wider: 0.08em;
+  --tracking-widest: 0.1em;
+  --tracking-caps: 0.14em;
+
+  /* Spacing */
+  --space-2xs: 2px;
+  --space-xs: 4px;
+  --space-sm: 6px;
+  --space-md: 8px;
+  --space-lg: 10px;
+  --space-xl: 12px;
+  --space-base: 13px;
+  --space-2xl: 14px;
+  --space-3xl: 16px;
+  --space-4xl: 18px;
+  --space-5xl: 20px;
+  --space-6xl: 22px;
+  --space-7xl: 26px;
+  --space-8xl: 30px;
+  --space-9xl: 34px;
+  --space-10xl: 60px;
+
+  /* Radii */
+  --radius-xs: 2px;
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+
+  /* Shadows (overlays only; the page body has none) */
+  --shadow-overlay: 0 12px 32px rgba(45, 43, 43, 0.22);
+  --shadow-toast: 0 12px 32px rgba(45, 43, 43, 0.3);
+
+  /* Layout sizes */
+  --sidebar-width: 238px;
+  --aside-width: 340px;
+  --drawer-width: 660px;
+  --drawer-max-width: 94vw;
+  --chart-height: 150px;
+  --entry-amount-col: 130px;
+  --entry-action-col: 28px;
+  --todo-count-col: 34px;
+  /* A financial statement is a document; a fixed width makes it read like one */
+  --report-width: 720px;
+  --report-code-col: 44px;
+  --code-input-col: 88px;
+  --search-input-col: 280px;
+  /* Login is a form, not a layout: narrow keeps two fields off the full width */
+  --login-width: 380px;
+
+  /* Motion */
+  --motion-fast: 0.15s;
+  --motion-base: 0.2s;
+  --motion-slow: 0.25s;
+  --easing: ease;
+  --z-drawer: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+}
+
+/* Base */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: var(--text-xl);
+  line-height: var(--leading-normal);
+}
+
+a {
+  color: var(--color-accent-deep);
+  text-underline-offset: var(--space-sm);
+}
+
+a:hover {
+  color: var(--color-accent-mid);
+}
+
+input,
+select,
+button,
+textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: var(--rule-width-marker) solid var(--color-accent);
+  outline-offset: var(--space-2xs);
+}
+
+::selection {
+  background: var(--wash-selection);
+}
+
+::-webkit-scrollbar {
+  width: var(--space-lg);
+  height: var(--space-lg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--wash-scrollbar);
+  border-radius: var(--radius-lg);
+}
+
+@keyframes laysi-slide-in {
+  from {
+    transform: translateX(var(--space-7xl));
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes laysi-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes laysi-rise-in {
+  from {
+    transform: translateY(var(--space-lg));
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* Typographic primitives */
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.page-title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-regular);
+  font-size: var(--display-2xl);
+  letter-spacing: var(--tracking-tight);
+  margin: 0 0 var(--space-xs);
+}
+
+.page-title--hero {
+  font-size: var(--display-3xl);
+}
+
+.page-lede {
+  color: var(--color-ink-muted);
+  font-size: var(--text-lg);
+  margin: 0 0 var(--space-6xl);
+}
+
+.section-title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--display-xs);
+  margin: 0 0 var(--space-lg);
+}
+
+.section-title--spaced {
+  margin-top: var(--space-8xl);
+}
+
+.section-note {
+  font-size: var(--text-base);
+  color: var(--color-ink-muted);
+  margin: 0 0 var(--space-xl);
+}
+
+.hint {
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+  margin-top: var(--space-2xl);
+}
+
+/* Buttons (outlined, never filled) */
+
+.btn {
+  cursor: pointer;
+  background: transparent;
+  border: var(--rule-width) solid var(--color-accent);
+  border-radius: var(--radius-md);
+  color: var(--color-accent-deep);
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-lg);
+  padding: var(--space-sm) var(--space-3xl);
+}
+
+.btn:hover {
+  background: var(--wash-accent);
+}
+
+.btn--compact {
+  padding: var(--space-sm) var(--space-2xl);
+}
+
+.btn--ghost {
+  border-color: var(--rule-strong);
+  color: var(--color-neutral-800);
+  font-size: var(--text-base);
+  padding: var(--space-sm) var(--space-xl);
+}
+
+.btn--ghost:hover {
+  background: var(--wash-ink-faint);
+}
+
+.btn--secondary {
+  border-color: var(--rule-strong);
+  color: var(--color-neutral-800);
+}
+
+.btn--secondary:hover {
+  background: var(--wash-ink-faint);
+}
+
+.btn:disabled,
+.btn--off {
+  cursor: not-allowed;
+  opacity: 0.45;
+  border-color: var(--rule-strong);
+  color: var(--color-neutral-800);
+}
+
+.btn:disabled:hover,
+.btn--off:hover {
+  background: transparent;
+}
+
+.btn--dashed {
+  width: 100%;
+  margin-top: var(--space-xl);
+  border: var(--rule-width) dashed var(--rule-strong);
+  color: var(--color-ink-muted);
+  font-family: var(--font-body);
+  font-weight: var(--weight-regular);
+  font-size: var(--text-base);
+  padding: var(--space-md) var(--space-2xl);
+}
+
+.btn--dashed:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent-deep);
+  background: transparent;
+}
+
+.btn--icon {
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  color: var(--color-neutral-500);
+  font-size: var(--text-xl);
+  padding: 0 var(--space-xs);
+  line-height: 1;
+}
+
+.btn--icon:hover {
+  color: var(--color-accent-deep);
+}
+
+.btn--close {
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  font-size: var(--space-5xl);
+  color: var(--color-ink-muted);
+  padding: 0 var(--space-xs);
+  line-height: 1;
+}
+
+.btn--close:hover {
+  color: var(--color-ink);
+}
+
+/* filter chip */
+.chip {
+  cursor: pointer;
+  background: transparent;
+  border: var(--rule-width) solid var(--rule-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-ink-muted);
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-md);
+  padding: var(--space-sm) var(--space-2xl);
+}
+
+.chip:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent-deep);
+}
+
+.chip--on {
+  background: var(--wash-accent-strong);
+  border-color: var(--color-accent);
+  color: var(--color-accent-deep);
+}
+
+/* status label */
+.tag {
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  padding: var(--space-2xs) var(--space-lg);
+  border-radius: var(--radius-xs);
+  display: inline-block;
+  border: var(--rule-width) solid rgba(32, 31, 29, 0.2);
+  color: var(--color-ink-muted);
+}
+
+.tag--warn {
+  border-color: var(--color-accent);
+  color: var(--color-accent-deep);
+  cursor: pointer;
+}
+
+.tag--warn:hover {
+  background: var(--wash-accent);
+}
+
+.tag--bad {
+  border-color: var(--color-accent-mid);
+  background: var(--wash-accent-bold);
+  color: var(--color-accent-darkest);
+}
+
+/* Cards */
+
+.card {
+  border: var(--rule-width) solid var(--rule);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-2xl);
+  margin-bottom: var(--space-7xl);
+}
+
+.stat-card {
+  padding: var(--space-3xl) var(--space-3xl) var(--space-2xl);
+}
+
+.stat-card__kicker {
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+}
+
+.stat-card__value {
+  font-family: var(--font-display);
+  font-size: var(--display-xl);
+  font-weight: var(--weight-regular);
+  font-variant-numeric: tabular-nums;
+  margin: var(--space-md) 0 var(--space-2xs);
+}
+
+.stat-grid--four {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+/* Ageing is four buckets plus a total; the total sits beside them so the
+   relationship is visible. */
+.stat-grid--five {
+  grid-template-columns: repeat(5, 1fr);
+}
+
+/* The total cell is separated by an accent rule, still without a fill. */
+.stat-card--total {
+  border-color: var(--color-accent);
+}
+
+.stat-card--total .stat-card__kicker,
+.stat-card--total .stat-card__value {
+  color: var(--color-accent-deep);
+}
+
+.stat-card__note {
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+}
+
+/* Layout shell */
+
+.shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: var(--sidebar-width);
+  flex: none;
+  background: var(--color-surface);
+  border-right: var(--rule-width) solid var(--rule);
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar__brand {
+  padding: var(--space-6xl) var(--space-5xl) var(--space-3xl);
+}
+
+.sidebar__company {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+  margin-top: var(--space-2xs);
+}
+
+.sidebar__tabs {
+  display: flex;
+  gap: var(--space-6xl);
+  margin-top: var(--space-3xl);
+  border-bottom: var(--rule-width) solid var(--rule);
+}
+
+.sidebar__tab {
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-bottom: var(--rule-width-tab) solid transparent;
+  padding: 0 0 var(--space-md);
+  margin-bottom: calc(-1 * var(--rule-width));
+  font-family: var(--font-display);
+  font-size: var(--display-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-widest);
+  color: var(--color-neutral-500);
+}
+
+.sidebar__tab:hover {
+  color: var(--color-accent-deep);
+}
+
+.sidebar__tab--on {
+  color: var(--color-ink);
+  border-bottom-color: var(--color-accent);
+}
+
+.sidebar__nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 var(--space-lg) var(--space-3xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--rule-width);
+}
+
+.nav-head {
+  padding: var(--space-3xl) var(--space-xl) var(--space-xs);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--color-neutral-500);
+  cursor: default;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  width: 100%;
+  cursor: pointer;
+  padding: var(--space-md) var(--space-xl);
+  border: 0;
+  border-left: var(--rule-width-marker) solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-neutral-800);
+  font-family: var(--font-body);
+  font-size: var(--text-lg);
+  text-align: left;
+}
+
+.nav-item:hover {
+  background: var(--wash-accent);
+}
+
+.nav-item--on {
+  border-left-color: var(--color-accent);
+  background: var(--wash-accent-strong);
+  color: var(--color-ink);
+}
+
+.nav-item__badge {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-2xs);
+  color: var(--color-accent-deep);
+}
+
+.sidebar__who {
+  padding: var(--space-2xl) var(--space-5xl) var(--space-4xl);
+  border-top: var(--rule-width) solid var(--rule);
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+
+.sidebar__who-name {
+  color: var(--color-ink);
+  font-size: var(--text-base);
+}
+
+/* Sign out. Outlined, the same vocabulary as other buttons, scaled to the
+   sidebar. */
+.sidebar__signout {
+  cursor: pointer;
+  margin-top: var(--space-md);
+  background: transparent;
+  border: var(--rule-width) solid var(--rule-accent);
+  border-radius: var(--radius-md);
+  color: var(--color-accent-deep);
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm-plus);
+  padding: var(--space-sm) var(--space-lg);
+}
+
+.sidebar__signout:hover {
+  background: var(--wash-accent-strong);
+}
+
+.sidebar__attribution {
+  margin-top: var(--space-lg);
+  font-size: var(--text-2xs);
+  color: var(--color-neutral-500);
+  line-height: var(--leading-tight);
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xl);
+  padding: var(--space-2xl) var(--space-8xl);
+  border-bottom: var(--rule-width) solid var(--rule);
+  background: var(--color-card);
+}
+
+.header__period {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+}
+
+.header__state {
+  font-size: var(--text-sm);
+  padding: var(--space-2xs) var(--space-md);
+  border: var(--rule-width) solid var(--color-accent);
+  border-radius: var(--radius-xs);
+  color: var(--color-accent-deep);
+}
+
+.header__actions {
+  display: flex;
+  gap: var(--space-xl);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-8xl) var(--space-8xl) var(--space-10xl);
+}
+
+/* Brand wordmark */
+
+.brand-mark {
+  display: block;
+  color: var(--color-ink);
+}
+
+.brand-mark__missing {
+  display: flex;
+  align-items: center;
+  border: var(--rule-width) dashed var(--rule-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-2xs);
+  color: var(--color-neutral-500);
+  line-height: var(--leading-tight);
+}
+
+/* Dashboard */
+
+.dash-columns {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  gap: var(--space-7xl);
+}
+
+.todo-list {
+  border-top: var(--rule-width) solid var(--rule);
+}
+
+.todo {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xl);
+  width: 100%;
+  padding: var(--space-base) var(--space-md) var(--space-base) 0;
+  border: 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-body);
+}
+
+.todo:hover {
+  background: var(--wash-accent-soft);
+}
+
+.todo__count {
+  font-family: var(--font-display);
+  font-size: var(--display-sm);
+  font-weight: var(--weight-regular);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-accent-deep);
+  min-width: var(--todo-count-col);
+}
+
+.todo__label {
+  flex: 1;
+  font-size: var(--text-lg-plus);
+  color: var(--color-ink);
+}
+
+.todo__due {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+
+.cash-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2xl);
+  height: var(--chart-height);
+  border-bottom: var(--rule-width) solid var(--rule);
+  padding: 0 var(--space-xs);
+}
+
+.cash-chart__col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+  height: 100%;
+}
+
+.cash-chart__value {
+  font-size: var(--text-2xs);
+  color: var(--color-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cash-chart__bar {
+  width: 100%;
+  height: var(--bar-height);
+  background: var(--wash-accent-bold);
+  border-top: var(--rule-width-marker) solid var(--color-accent);
+}
+
+.cash-chart__labels {
+  display: flex;
+  gap: var(--space-2xl);
+  padding: var(--space-sm) var(--space-xs) 0;
+}
+
+.cash-chart__month {
+  flex: 1;
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+
+.ai-item {
+  padding: var(--space-base) var(--space-xl);
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+}
+
+.ai-item__head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  font-size: var(--text-md);
+}
+
+.ai-item__time {
+  color: var(--color-ink-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  flex: none;
+}
+
+.ai-item__who {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+  margin-top: var(--space-2xs);
+}
+
+.ai-foot {
+  padding: var(--space-xl) var(--space-xl);
+  font-size: var(--text-base);
+}
+
+/* Tables */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th {
+  text-align: left;
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+  padding: 0 var(--space-lg) var(--space-md) 0;
+  border-bottom: var(--rule-width) solid var(--rule);
+}
+
+.table td {
+  padding: var(--space-xl) var(--space-lg) var(--space-xl) 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+  font-size: var(--text-lg);
+}
+
+.table th:last-child,
+.table td:last-child {
+  padding-right: 0;
+}
+
+.table .align-right {
+  text-align: right;
+}
+
+.table tbody tr:hover {
+  background: var(--wash-accent-soft);
+}
+
+.table tr.row--pending {
+  background: var(--wash-accent-faint);
+}
+
+.cell-muted {
+  color: var(--color-ink-muted);
+}
+
+.cell-accounts {
+  font-size: var(--text-base);
+  color: var(--color-ink-muted);
+}
+
+.toolbar {
+  display: flex;
+  gap: var(--space-md);
+  margin-bottom: var(--space-3xl);
+  align-items: center;
+}
+
+/* Settlement: subsidiary and general ledger reconciliation */
+
+/* This line is the live proof that outstanding receivables equal the 1131
+   ledger balance, so it is always on screen rather than appearing only on
+   error. Quiet when they agree, accented when they do not. */
+.recon {
+  border-left: var(--rule-width-marker) solid var(--rule-accent-soft);
+  padding: var(--space-md) 0 var(--space-md) var(--space-xl);
+  margin: 0 0 var(--space-6xl);
+  font-size: var(--text-base);
+  color: var(--color-ink-muted);
+  line-height: var(--leading-normal);
+}
+
+.recon--off {
+  border-left-color: var(--color-accent);
+  color: var(--color-accent-darkest);
+  background: var(--wash-accent-soft);
+}
+
+/* Settlement: due dates and hints inside tables */
+
+.due {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-neutral-800);
+}
+
+/* Overdue is marked with an underline rather than a red block: composition
+   relies on lines. */
+.due--over {
+  color: var(--color-accent-deep);
+  border-bottom: var(--rule-width) solid var(--color-accent);
+}
+
+.cell-hint {
+  margin-left: var(--space-md);
+  font-size: var(--text-xs);
+  color: var(--color-neutral-500);
+}
+
+/* Notes take their own line: wrapping an amount column splits the number,
+   which is worse than one extra line. */
+.cell-hint--block {
+  display: block;
+  margin-left: 0;
+  margin-top: var(--space-2xs);
+}
+
+/* Document numbers do not wrap: KX-38472940 split across two lines is no
+   longer one number. */
+.cell-nowrap {
+  white-space: nowrap;
+}
+
+/* Label for marking only; not clickable. */
+.tag--static {
+  cursor: default;
+  margin-left: var(--space-md);
+}
+
+.tag--static:hover {
+  background: transparent;
+}
+
+.tag--pale {
+  margin-left: var(--space-md);
+  border-style: dashed;
+  border-color: var(--rule-strong);
+  color: var(--color-neutral-500);
+}
+
+/* Payables: selection and batch total */
+
+.col-check {
+  width: var(--space-9xl);
+}
+
+.row--pickable {
+  cursor: pointer;
+}
+
+/* Rows whose source voucher is unposted: present, but not in the total. Dimmed
+   rather than hidden, so the user can see why one is excluded. */
+.table tr.row--waiting td {
+  color: var(--color-neutral-500);
+}
+
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-4xl);
+  height: var(--space-4xl);
+  border: var(--rule-width) solid var(--rule-strong);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-sm);
+  color: var(--color-accent-deep);
+}
+
+.checkbox--on {
+  border-color: var(--color-accent);
+  background: var(--wash-accent-strong);
+}
+
+.pay-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4xl);
+  padding: var(--space-2xl) var(--space-4xl);
+  margin-bottom: var(--space-5xl);
+}
+
+.pay-bar__kicker {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+
+.pay-bar__total {
+  font-family: var(--font-display);
+  font-size: var(--display-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.pay-bar__note {
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+  max-width: var(--drawer-width);
+  text-align: right;
+}
+
+/* Banking: transactions and match candidates */
+
+.recon-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-6xl);
+  align-items: start;
+}
+
+.bank-list {
+  border-top: var(--rule-width) solid var(--rule);
+}
+
+.bank-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  width: 100%;
+  padding: var(--space-base) var(--space-lg) var(--space-base) 0;
+  border: 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+  border-left: var(--rule-width-marker) solid transparent;
+  background: transparent;
+  font-family: var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.bank-row:hover {
+  background: var(--wash-accent-soft);
+}
+
+.bank-row--on {
+  border-left-color: var(--color-accent);
+  background: var(--wash-accent);
+  padding-left: var(--space-lg);
+}
+
+.bank-row--done {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.bank-row--done:hover {
+  background: transparent;
+}
+
+.bank-row__head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  font-size: var(--text-lg);
+}
+
+.bank-row__meta {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+
+.candidate-list {
+  border-top: var(--rule-width) solid var(--rule);
+  animation: laysi-fade-in var(--motion-base) var(--easing);
+}
+
+.candidate {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xl);
+  padding: var(--space-base) var(--space-lg) var(--space-base) 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+  border-left: var(--rule-width-marker) solid transparent;
+}
+
+/* A candidate matching on both amount and date deserves to stand out, still
+   using lines alone. */
+.candidate--exact {
+  border-left-color: var(--color-accent);
+  padding-left: var(--space-lg);
+}
+
+.candidate__body {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-lg);
+}
+
+.candidate__meta {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.candidate__score {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--color-accent-deep);
+  text-align: right;
+}
+
+/* Tax and assets: two-column layout */
+
+.split-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-7xl);
+  align-items: start;
+}
+
+/* List left, form right: the list needs its amount column, so the left side is
+   wider. */
+.split-columns--wide-left {
+  grid-template-columns: 1.3fr 1fr;
+}
+
+/* Main content left, notes right. The right column has a fixed width and does
+   not stretch with the main content. */
+.split-columns--aside {
+  grid-template-columns: 1fr var(--aside-width);
+}
+
+/* E-invoices: issuing form */
+
+.form-card {
+  padding: var(--space-5xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+}
+
+.form-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-lg);
+  padding: var(--space-lg) 0;
+  border-top: var(--rule-width) solid var(--rule);
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The total row has no frame, only a larger size: composition relies on lines
+   and type, not fills. */
+.form-line--total {
+  border-top: 0;
+  padding-top: 0;
+  font-size: var(--text-xl);
+}
+
+.form-line__amount {
+  font-family: var(--font-display);
+  font-size: var(--display-sm);
+}
+
+.form-note {
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+  line-height: var(--leading-normal);
+  margin: 0;
+}
+
+/* Tax: the form 401 return */
+
+.doc-card {
+  padding: var(--space-6xl) var(--space-7xl);
+}
+
+.doc-card__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-lg);
+  border-bottom: var(--rule-width) solid var(--rule);
+  padding-bottom: var(--space-xl);
+  margin-bottom: var(--space-sm);
+}
+
+.doc-card__title {
+  margin: 0;
+}
+
+.doc-card__badge {
+  font-size: var(--text-sm);
+  color: var(--color-accent-deep);
+}
+
+.doc-card__actions {
+  margin-top: var(--space-5xl);
+  margin-bottom: var(--space-lg);
+}
+
+.doc-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  padding: var(--space-lg) 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The tax is derived from the amount above it, and the indent shows that. */
+.doc-row--sub {
+  padding-left: var(--space-5xl);
+  color: var(--color-ink-muted);
+}
+
+/* The concluding row: a heavier rule above and a larger size, still no fill. */
+.doc-row--total {
+  border-bottom: 0;
+  border-top: var(--rule-width-marker) solid var(--color-accent);
+  margin-top: var(--space-md);
+  padding-top: var(--space-3xl);
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--display-xs);
+  color: var(--color-accent-deep);
+}
+
+/* Tax: withholding by income type */
+
+.wht-list {
+  border-top: var(--rule-width) solid var(--rule);
+}
+
+.wht-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  padding: var(--space-xl) 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+  font-size: var(--text-md);
+  margin: 0;
+}
+
+.wht-row__code {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+  margin-top: var(--space-2xs);
+}
+
+.wht-row__amounts {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.wht-total {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  padding: var(--space-xl) 0 0;
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Financial statements */
+
+/* A statement is a document, not a dashboard; a fixed width makes it read like
+   one. */
+.report-card {
+  max-width: var(--report-width);
+  margin-bottom: var(--space-6xl);
+}
+
+/* Section headings are set apart by size and space alone, with no frame or
+   fill. */
+.report-head {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-2xl);
+  margin: var(--space-4xl) 0 var(--space-sm);
+  padding-bottom: var(--space-sm);
+  border-bottom: var(--rule-width) solid var(--rule);
+}
+
+.report-head:first-of-type {
+  margin-top: var(--space-lg);
+}
+
+/* The account code precedes the name, aligned in a fixed-width column. */
+.report-code {
+  display: inline-block;
+  width: var(--report-code-col);
+  color: var(--color-neutral-500);
+  font-size: var(--text-sm-plus);
+}
+
+/* Settings: fact list */
+
+.fact-card {
+  padding: var(--space-3xl) var(--space-5xl);
+}
+
+.fact {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-3xl);
+  padding: var(--space-lg) 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+  font-size: var(--text-md);
+}
+
+.fact:last-child {
+  border-bottom: 0;
+}
+
+/* Longer values (dimensions, control rules, tokens) stack vertically. */
+.fact--stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2xs);
+}
+
+.fact__key {
+  flex: none;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm-plus);
+}
+
+.fact__value {
+  text-align: right;
+  min-width: 0;
+}
+
+.fact--stacked .fact__value {
+  text-align: left;
+}
+
+.fact__note {
+  display: block;
+  margin-top: var(--space-2xs);
+  font-size: var(--text-xs);
+  color: var(--color-neutral-500);
+  line-height: var(--leading-normal);
+}
+
+.fact__pencil {
+  margin-left: var(--space-md);
+  font-size: var(--text-base);
+}
+
+.fact__edit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex: 1;
+}
+
+/* Roles: permission matrix */
+
+.table .align-center,
+.table th.align-center {
+  text-align: center;
+}
+
+.table--matrix td {
+  vertical-align: top;
+}
+
+/* One permission cell. Three states, distinguished by symbol and rule with no
+   fill. */
+.perm {
+  cursor: pointer;
+  background: transparent;
+  border: var(--rule-width) solid transparent;
+  border-radius: var(--radius-xs);
+  padding: var(--space-2xs) var(--space-md);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  line-height: 1;
+}
+
+.perm:hover {
+  border-color: var(--color-accent);
+}
+
+.perm--full {
+  color: var(--color-accent);
+}
+
+.perm--limited {
+  color: var(--color-accent-mid);
+}
+
+.perm--none {
+  color: var(--color-neutral-400);
+}
+
+.perm:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+/* Roles: approval flow */
+
+.flow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.flow__step-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+}
+
+.flow__step {
+  padding: var(--space-lg) var(--space-2xl);
+}
+
+.flow__role {
+  font-size: var(--text-md);
+}
+
+.flow__cond {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.flow__actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.flow__arrow {
+  color: var(--color-accent);
+}
+
+/* Security: the one-time plaintext */
+
+/* The plaintext is visible only once, so it earns a prominent frame, still
+   drawn with lines alone. */
+.secret-card {
+  border-color: var(--color-accent);
+  padding: var(--space-4xl) var(--space-5xl);
+  margin-bottom: var(--space-6xl);
+}
+
+.secret-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  font-size: var(--text-md);
+  color: var(--color-accent-darkest);
+  margin-bottom: var(--space-xl);
+}
+
+.secret-card__value {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  word-break: break-all;
+  border: var(--rule-width) dashed var(--rule-accent);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg) var(--space-xl);
+  background: var(--wash-accent-faint);
+}
+
+.token__revoke {
+  align-self: flex-start;
+  margin-top: var(--space-md);
+}
+
+/* Expense claims: approval steps */
+
+/* The cell that expands the detail. It looks like a link but is not
+   navigation, so it is a button. */
+.link-cell {
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--color-ink);
+  text-align: left;
+  border-bottom: var(--rule-width) dashed var(--rule-strong);
+}
+
+.link-cell:hover {
+  color: var(--color-accent-deep);
+  border-bottom-color: var(--color-accent);
+}
+
+/* One subheading per step. Approved and pending are distinguished by line and
+   symbol, with no fill. */
+.step-chip {
+  display: block;
+  margin-top: var(--space-2xs);
+}
+
+.step-chip__why {
+  color: var(--color-neutral-500);
+}
+
+/* Small inputs inside tables: an account code is short and a search box long,
+   and neither should fill the column. */
+.entry-input--code {
+  width: var(--code-input-col);
+  margin-right: var(--space-md);
+}
+
+.entry-input--search {
+  width: var(--search-input-col);
+}
+
+/* The file picker is hidden but has to stay in the accessibility tree;
+   display:none would remove it. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Drawer (create a voucher) */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--wash-ink);
+  display: flex;
+  justify-content: flex-end;
+  animation: laysi-fade-in var(--motion-fast) var(--easing);
+  z-index: var(--z-drawer);
+}
+
+.drawer {
+  width: var(--drawer-width);
+  max-width: var(--drawer-max-width);
+  background: var(--color-bg);
+  border-left: var(--rule-width) solid var(--rule-strong);
+  box-shadow: var(--shadow-overlay);
+  display: flex;
+  flex-direction: column;
+  animation: laysi-slide-in var(--motion-base) var(--easing);
+}
+
+.drawer__head {
+  padding: var(--space-6xl) var(--space-7xl) var(--space-2xl);
+  border-bottom: var(--rule-width) solid var(--rule);
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2xl);
+}
+
+.drawer__title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--display-md);
+  margin: 0;
+}
+
+.drawer__subtitle {
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+}
+
+.drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5xl) var(--space-7xl);
+}
+
+.drawer__foot {
+  flex: none;
+  padding: var(--space-3xl) var(--space-7xl);
+  border-top: var(--rule-width) solid var(--rule);
+  display: flex;
+  align-items: center;
+  gap: var(--space-xl);
+  background: var(--color-card);
+}
+
+.drawer__foot-note {
+  flex: 1;
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+
+.field-row {
+  display: flex;
+  gap: var(--space-xl);
+  margin-bottom: var(--space-4xl);
+}
+
+.field {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+
+.field--date {
+  flex: none;
+}
+
+.field--grow {
+  flex: 1;
+}
+
+.input {
+  display: block;
+  width: 100%;
+  margin-top: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border: var(--rule-width) solid var(--rule-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  color: var(--color-ink);
+  font-size: var(--text-lg);
+}
+
+.input--date {
+  width: var(--entry-amount-col);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-note {
+  border: var(--rule-width) dashed var(--rule-accent);
+  border-radius: var(--radius-md);
+  padding: var(--space-base) var(--space-xl);
+  margin-bottom: var(--space-4xl);
+  background: var(--wash-accent-soft);
+}
+
+.ai-note__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xl);
+}
+
+.ai-note__title {
+  font-size: var(--text-base);
+  color: var(--color-accent-darkest);
+}
+
+.ai-note__desc {
+  font-size: var(--text-sm);
+  color: var(--color-accent-note);
+  margin-top: var(--space-2xs);
+}
+
+.ai-note__steps {
+  margin-top: var(--space-xl);
+  padding-top: var(--space-lg);
+  border-top: var(--rule-width) solid var(--rule-accent-soft);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  font-size: var(--text-sm-plus);
+  color: var(--color-accent-darkest);
+  line-height: var(--leading-normal);
+}
+
+.ai-note__code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--color-card);
+  border: var(--rule-width) solid var(--rule-accent);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-sm);
+}
+
+.entry-grid {
+  display: grid;
+  grid-template-columns: 1fr var(--entry-amount-col) var(--entry-amount-col) var(--entry-action-col);
+  gap: var(--space-lg);
+}
+
+.entry-head {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+  padding-bottom: var(--space-sm);
+  border-bottom: var(--rule-width) solid var(--rule);
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+}
+
+.entry-row {
+  padding: var(--space-md) 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+  align-items: center;
+}
+
+.entry-input {
+  padding: var(--space-md) var(--space-md);
+  border: var(--rule-width) solid var(--rule-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  color: var(--color-ink);
+  font-size: var(--text-md);
+  width: 100%;
+}
+
+.entry-input--amount {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.entry-total {
+  margin-top: var(--space-3xl);
+  padding-top: var(--space-xl);
+  border-top: var(--rule-width) solid var(--rule);
+  font-size: var(--text-lg);
+}
+
+.entry-total__label {
+  color: var(--color-ink-muted);
+}
+
+.balance {
+  margin-top: var(--space-lg);
+  font-size: var(--text-base);
+  padding: var(--space-md) var(--space-xl);
+  border-radius: var(--radius-md);
+  background: var(--wash-ink-faint);
+  color: var(--color-ink-muted);
+  border: var(--rule-width) solid rgba(32, 31, 29, 0.14);
+}
+
+.balance--ok {
+  background: var(--wash-accent);
+  color: var(--color-accent-darkest);
+  border-color: rgba(182, 130, 53, 0.5);
+}
+
+/* ── Toast ────────────────────────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: var(--space-7xl);
+  transform: translateX(-50%);
+  background: var(--color-neutral-950);
+  color: var(--color-ink-inverse);
+  border-radius: var(--radius-md);
+  padding: var(--space-xl) var(--space-5xl);
+  font-size: var(--text-md);
+  box-shadow: var(--shadow-toast);
+  animation: laysi-rise-in var(--motion-base) var(--easing);
+  z-index: var(--z-toast);
+}
+
+/* Placeholder screens (later milestones) */
+
+.placeholder {
+  border: var(--rule-width) dashed var(--rule-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-8xl);
+  text-align: center;
+  color: var(--color-ink-muted);
+  font-size: var(--text-lg);
+}
+
+.placeholder__title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--display-xs);
+  color: var(--color-ink);
+  margin: 0 0 var(--space-md);
+}
+
+/* Loading and error states */
+
+.state-note {
+  border: var(--rule-width) solid var(--rule);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  padding: var(--space-5xl) var(--space-6xl);
+  color: var(--color-ink-muted);
+  font-size: var(--text-lg);
+}
+
+.state-note--error {
+  border-color: var(--color-accent);
+  color: var(--color-accent-darkest);
+}
+
+/* Login */
+
+/* The only screen outside .shell. The page holds one form, so it is centred
+   with generous space and otherwise reuses the existing vocabulary: login must
+   not look like a different product. */
+.login {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5xl);
+  padding: var(--space-10xl) var(--space-6xl);
+}
+
+.login__panel {
+  width: 100%;
+  max-width: var(--login-width);
+  padding: var(--space-8xl) var(--space-8xl) var(--space-7xl);
+}
+
+.login__brand {
+  padding-bottom: var(--space-6xl);
+  border-bottom: var(--rule-width) solid var(--rule);
+  margin-bottom: var(--space-7xl);
+}
+
+.login__title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-regular);
+  font-size: var(--display-md);
+  letter-spacing: var(--tracking-tight);
+  margin: 0 0 var(--space-md);
+}
+
+.login__lede {
+  color: var(--color-ink-muted);
+  font-size: var(--text-lg);
+  line-height: var(--leading-normal);
+  margin: 0 0 var(--space-7xl);
+}
+
+.login__field {
+  display: block;
+  margin-bottom: var(--space-4xl);
+}
+
+.login__label {
+  display: block;
+  margin-bottom: var(--space-sm);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-ink-muted);
+}
+
+.login__alert {
+  padding: var(--space-xl) var(--space-2xl);
+  font-size: var(--text-base);
+  margin: 0 0 var(--space-4xl);
+}
+
+.login__hint {
+  display: block;
+  margin-top: var(--space-md);
+  font-size: var(--text-sm-plus);
+  line-height: var(--leading-normal);
+}
+
+.login__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* "or" sits on a rule: the two sign-in methods are alternatives, not a
+   primary and a fallback. */
+.login__alt {
+  margin-top: var(--space-7xl);
+  padding-top: var(--space-7xl);
+  border-top: var(--rule-width) solid var(--rule);
+}
+
+.login__alt-rule {
+  display: block;
+  margin-bottom: var(--space-2xl);
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--color-neutral-500);
+}
+
+.login__oauth {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+}
+
+.login__note {
+  margin: var(--space-2xl) 0 0;
+  font-size: var(--text-sm-plus);
+  line-height: var(--leading-normal);
+  color: var(--color-ink-muted);
+}
+
+.login__foot {
+  max-width: var(--login-width);
+  margin: 0;
+  text-align: center;
+  font-size: var(--text-sm-plus);
+  line-height: var(--leading-normal);
+  color: var(--color-neutral-500);
+}
+
+/* First-run reminder (sidebar) */
+
+/* The company name is still empty. The wizard is not forced to completion, but
+   the sidebar keeps a visible way back into it. */
+.sidebar__setup {
+  margin: 0 var(--space-5xl) var(--space-3xl);
+  padding: var(--space-xl) var(--space-2xl);
+  border: var(--rule-width) dashed var(--color-accent);
+  border-radius: var(--radius-md);
+  background: var(--wash-accent-soft);
+}
+
+.sidebar__setup-note {
+  font-size: var(--text-sm);
+  color: var(--color-accent-darkest);
+  line-height: var(--leading-normal);
+  margin: 0 0 var(--space-md);
+}
+
+/* Master data forms: shared by create and edit */
+
+/* A compact two-column form, for master data with many fields such as accounts
+   and employees. */
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-xl) var(--space-3xl);
+  margin-bottom: var(--space-4xl);
+}
+
+.field--full {
+  grid-column: 1 / -1;
+}
+
+.field__hint {
+  display: block;
+  margin-top: var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--color-neutral-500);
+  line-height: var(--leading-normal);
+}
+
+/* Form-specific help text, closer to the field than .hint and without the
+   large spacing. */
+.form-warn {
+  border-left: var(--rule-width-marker) solid var(--color-accent);
+  padding: var(--space-md) 0 var(--space-md) var(--space-xl);
+  margin: 0 0 var(--space-4xl);
+  font-size: var(--text-sm-plus);
+  color: var(--color-accent-darkest);
+  background: var(--wash-accent-soft);
+  line-height: var(--leading-normal);
+}
+
+/* Centred dialog (for actions like void and reverse that need a deliberate choice) */
+
+/* Shares the backdrop with .overlay; the content is centred rather than pinned
+   to the right. */
+.overlay--center {
+  justify-content: center;
+  align-items: center;
+  padding: var(--space-6xl);
+}
+
+.modal {
+  width: min(560px, 100%);
+  max-height: 88vh;
+  background: var(--color-bg);
+  border: var(--rule-width) solid var(--rule-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-overlay);
+  display: flex;
+  flex-direction: column;
+  animation: laysi-rise-in var(--motion-base) var(--easing);
+}
+
+/* The two options are cards side by side, forcing the difference to be read
+   before choosing, rather than two identical buttons. */
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xl);
+}
+
+.choice {
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  background: var(--color-card);
+  border: var(--rule-width) solid var(--rule-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-4xl);
+}
+
+.choice:hover {
+  border-color: var(--color-accent);
+}
+
+.choice--on {
+  border-color: var(--color-accent);
+  background: var(--wash-accent-soft);
+}
+
+.choice__title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-xl);
+  color: var(--color-ink);
+}
+
+.choice__desc {
+  margin-top: var(--space-xs);
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+  line-height: var(--leading-normal);
+}
+
+/* First-run wizard */
+
+.wizard-steps {
+  display: flex;
+  gap: var(--space-6xl);
+  margin-bottom: var(--space-6xl);
+  border-bottom: var(--rule-width) solid var(--rule);
+}
+
+.wizard-step {
+  padding-bottom: var(--space-md);
+  margin-bottom: calc(-1 * var(--rule-width));
+  border-bottom: var(--rule-width-marker) solid transparent;
+  font-size: var(--text-sm-plus);
+  color: var(--color-neutral-500);
+}
+
+.wizard-step--on {
+  color: var(--color-accent-deep);
+  border-bottom-color: var(--color-accent);
+}
+
+.wizard-step--done {
+  color: var(--color-ink-muted);
+}
+
+.wizard-panel {
+  max-width: var(--drawer-width);
+  padding: var(--space-6xl) var(--space-7xl);
+}
+
+.wizard-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-xl);
+  margin-top: var(--space-6xl);
+  padding-top: var(--space-5xl);
+  border-top: var(--rule-width) solid var(--rule);
+}

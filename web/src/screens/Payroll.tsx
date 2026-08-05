@@ -1,0 +1,419 @@
+import { useCallback, useEffect, useState } from 'react';
+import {
+  callOp,
+  isZero,
+  money,
+  OpFailed,
+  type PayrollRunResult,
+  type PayrollSummary,
+  type PayslipList,
+} from '../api/client';
+
+interface Props {
+  onToast: (msg: string) => void;
+  reloadKey: number;
+  onChanged: () => void;
+}
+
+export function Payroll({ onToast, reloadKey, onChanged }: Props) {
+  const [summary, setSummary] = useState<PayrollSummary | null>(null);
+  const [slips, setSlips] = useState<PayslipList | null>(null);
+  const [slipError, setSlipError] = useState<string | null>(null);
+  const [period, setPeriod] = useState<string | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<PayrollRunResult | null>(null);
+
+  // Fields for running payroll.
+  const [runPeriod, setRunPeriod] = useState('');
+  const [payOn, setPayOn] = useState('');
+
+  const load = useCallback(() => {
+    setError(null);
+    setSlipError(null);
+    callOp<PayrollSummary>('get_payroll_summary', period ? { period } : {})
+      .then((s) => {
+        setSummary(s);
+        // The pre-emptive block is based on `detail_visible` from the backend,
+        // not the signed-in role: the decision is still the backend's and the
+        // frontend only draws what it was told. This is not fear of being
+        // refused, it is avoiding an audit entry for a call certain to be
+        // blocked on every visit. To see that it really blocks, try it below.
+        if (!s.detail_visible) {
+          setSlips(null);
+          return;
+        }
+        callOp<PayslipList>('list_payslips', period ? { period } : {})
+          .then(setSlips)
+          .catch((e: Error) => {
+            setSlips(null);
+            setSlipError(e.message);
+          });
+      })
+      .catch((e: Error) => setError(e.message));
+  }, [period]);
+
+  useEffect(load, [load, reloadKey]);
+
+  /** Deliberately hit the owner-only wall. That refusal is real and is
+   *  written to the audit trail. */
+  async function tryDetail() {
+    setSlipError(null);
+    try {
+      const d = await callOp<PayslipList>('list_payslips', period ? { period } : {});
+      setSlips(d);
+    } catch (e) {
+      const msg = e instanceof OpFailed ? e.error.message : String(e);
+      setSlipError(msg);
+      onToast(`已被拒絕：${msg}`);
+    }
+  }
+
+  async function run() {
+    setBusy(true);
+    try {
+      const d = await callOp<PayrollRunResult>(
+        'run_payroll',
+        {
+          ...(runPeriod.trim() ? { period: runPeriod.trim() } : {}),
+          ...(payOn ? { pay_on: payOn } : {}),
+        },
+        `計算 ${runPeriod.trim() || '本期'} 薪資`,
+      );
+      setResult(d);
+      onToast(
+        `${d.run.period} 已完成計算：${d.run.headcount} 人實發 ${money(d.run.net_total)}，` +
+          `${d.run.voucher_no ?? '傳票'} 待過帳`,
+      );
+      onChanged();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const run0 = summary?.run ?? null;
+
+  return (
+    <div>
+      <h1 className="page-title">薪資作業</h1>
+      <p className="page-lede">
+        本月應發、代扣與公司負擔金額，以及與總帳的勾稽結果。
+      </p>
+
+      {error && <p className="state-note state-note--error">{error}</p>}
+      {!summary && !error && <p className="state-note">讀取中…</p>}
+
+      {summary && (
+        <>
+          <div className="toolbar">
+            {summary.periods.map((p) => (
+              <button
+                key={p}
+                className={`chip${p === summary.period ? ' chip--on' : ''}`}
+                onClick={() => setPeriod(p)}
+              >
+                {p}
+              </button>
+            ))}
+            <span className="spacer" />
+            <span className="section-note">
+              {run0 ? `${run0.headcount} 人 · 給付日 ${run0.pay_on}` : '尚無任何期別的薪資計算紀錄'}
+            </span>
+          </div>
+
+          {run0 ? (
+            <>
+              <div className="stat-grid">
+                <div className="card stat-card">
+                  <div className="stat-card__kicker">應發總額</div>
+                  <div className="stat-card__value num">{money(run0.gross_total)}</div>
+                  <div className="stat-card__note">本薪與加班費合計</div>
+                </div>
+                <div className="card stat-card">
+                  <div className="stat-card__kicker">代扣</div>
+                  <div className="stat-card__value num">{money(run0.deduction_total)}</div>
+                  <div className="stat-card__note">勞保、健保自付與代扣所得稅</div>
+                </div>
+                <div className="card stat-card">
+                  <div className="stat-card__kicker">實發</div>
+                  <div className="stat-card__value num">{money(run0.net_total)}</div>
+                  <div className="stat-card__note">實際匯出金額</div>
+                </div>
+                <div className="card stat-card stat-card--total">
+                  <div className="stat-card__kicker">公司另負擔</div>
+                  <div className="stat-card__value num">{money(run0.employer_total)}</div>
+                  <div className="stat-card__note">勞健保與勞退，公司負擔部分不自薪資扣除</div>
+                </div>
+              </div>
+
+              {/* The HR gross total and ledger account 6111 are two
+                  independently computed paths. */}
+              <p className={`recon${summary.reconciled ? '' : ' recon--off'}`}>
+                {summary.reconciled ? (
+                  <>
+                    人資已過帳的應發合計{' '}
+                    <span className="num">{money(summary.hr_posted_total)}</span> 就是總帳{' '}
+                    <span className="num">6111 薪資支出</span> 的餘額，
+                    兩者分開計算，結果相符。
+                  </>
+                ) : (
+                  <>
+                    對不上：人資這邊已過帳的應發合計{' '}
+                    <span className="num">{money(summary.hr_posted_total)}</span>，總帳{' '}
+                    <span className="num">6111</span> 是{' '}
+                    <span className="num">{money(summary.gl_balance)}</span>，差{' '}
+                    <span className="num">{money(summary.difference)}</span> 元，請先暫緩發薪。
+                  </>
+                )}
+                {!isZero(summary.not_yet_posted) && (
+                  <>
+                    {' '}另有 <span className="num">{money(summary.not_yet_posted)}</span>{' '}
+                    的薪資傳票尚未過帳，薪資計算完成不代表已入總帳。
+                  </>
+                )}
+              </p>
+
+              <p className="recon recon--off">{summary.employer_note}</p>
+
+              <div className="card fact-card">
+                <div className="fact">
+                  <span className="fact__key">薪資傳票</span>
+                  <span className="fact__value num">
+                    {run0.voucher_no ?? '—'}
+                    {run0.voucher_status && (
+                      <span className="tag tag--static">
+                        {run0.voucher_status === 'posted' ? '已過帳' : '待過帳'}
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div className="fact">
+                  <span className="fact__key">本期適用規則版本</span>
+                  <span className="fact__value num">
+                    勞保 {run0.rulesets.labor_insurance}　健保 {run0.rulesets.health_insurance}
+                    　勞退 {run0.rulesets.pension}　扣繳 {run0.rulesets.withholding}
+                  </span>
+                </div>
+                <div className="fact">
+                  <span className="fact__key">計算人員與時間</span>
+                  <span className="fact__value">
+                    {run0.created_by} · {run0.created_at.slice(0, 10)}
+                    {run0.note && <span className="fact__note">{run0.note}</span>}
+                  </span>
+                </div>
+              </div>
+            </>
+          ) : (
+            <p className="state-note">
+              尚無任何期別的薪資計算紀錄。請由下方「計算本期薪資」開始，將產生一張
+              待過帳傳票。
+            </p>
+          )}
+
+          <h3 className="section-title section-title--spaced">逐人薪資明細</h3>
+
+          {/* This is one of the few rules in the system that genuinely stops a
+              person. Say so clearly rather than showing a red line. */}
+          {!summary.detail_visible && (
+            <>
+              {/* The backend states this itself; show it verbatim. The frontend
+                  neither rewrites it nor invents its own. */}
+              <p className="recon recon--off">
+                <strong>本段限負責人檢視。</strong> {summary.detail_note}
+                {' '}也可以由下方實際呼叫驗證：後端將拒絕，該次拒絕寫入稽核。
+              </p>
+              <div className="toolbar">
+                <button className="btn btn--compact btn--secondary" onClick={() => void tryDetail()}>
+                  仍要嘗試（將被拒絕，並留下稽核紀錄）
+                </button>
+              </div>
+            </>
+          )}
+
+          {slipError && <p className="state-note state-note--error">{slipError}</p>}
+
+          {slips && (
+            <>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>員工</th>
+                    <th className="align-right">本薪</th>
+                    <th className="align-right">加班</th>
+                    <th className="align-right">代扣</th>
+                    <th className="align-right">實發</th>
+                    <th className="align-right">公司另負擔</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {slips.rows.map((s) => (
+                    <tr key={s.emp_no} className={s.recompute_matches ? undefined : 'row--pending'}>
+                      <td>
+                        {s.name}
+                        <span className="cell-hint cell-hint--block num">
+                          {s.emp_no} · {s.dept_label ?? '未指定'} · {s.title}
+                        </span>
+                        {s.prorated && (
+                          <span className="cell-hint cell-hint--block">{s.note}</span>
+                        )}
+                        {!s.recompute_matches && (
+                          <span className="tag tag--bad tag--static">
+                            重算結果與儲存值不符
+                          </span>
+                        )}
+                      </td>
+                      <td className="num align-right">{money(s.base_salary)}</td>
+                      <td className="num align-right">{money(s.overtime)}</td>
+                      <td className="num align-right">
+                        {money(s.deduction)}
+                        <span className="cell-hint cell-hint--block num">
+                          勞保 {money(s.labor_employee)} · 健保 {money(s.health_employee)} · 稅{' '}
+                          {money(s.income_tax)}
+                        </span>
+                      </td>
+                      <td className="num align-right">{money(s.net)}</td>
+                      <td className="num align-right">
+                        {money(s.employer_total)}
+                        <span className="cell-hint cell-hint--block num">
+                          勞保 {money(s.labor_employer)} · 健保 {money(s.health_employer)} · 勞退{' '}
+                          {money(s.pension_employer)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className={`recon${slips.recompute_all_match ? '' : ' recon--off'}`}>
+                {slips.recompute_note}
+                {!slips.recompute_all_match &&
+                  ' 部分列不符，常見原因為投保級距已變更，而該期薪資單保存的是當時的計算結果。'}
+              </p>
+            </>
+          )}
+
+          <h3 className="section-title section-title--spaced">計算本期薪資</h3>
+          <div className="split-columns">
+            <div className="card form-card">
+              <div className="field-row">
+                <label className="field field--date">
+                  期別
+                  <input
+                    className="input input--date"
+                    placeholder="2026-07"
+                    value={runPeriod}
+                    onChange={(e) => setRunPeriod(e.target.value)}
+                  />
+                </label>
+                <label className="field field--date">
+                  給付日
+                  <input
+                    className="input input--date"
+                    type="date"
+                    value={payOn}
+                    onChange={(e) => setPayOn(e.target.value)}
+                  />
+                </label>
+                <span className="spacer" />
+              </div>
+              <button className="btn" disabled={busy} onClick={() => void run()}>
+                {busy ? '計算中…' : '計算薪資並產生傳票'}
+              </button>
+              <p className="form-note">
+                保費依<strong>期末日</strong>解析規則（該期適用的版本），扣繳依
+                <strong>給付日</strong>解析（扣繳義務於給付時發生）。
+                兩者通常落在同一月份，差異僅出現於跨月發薪，跨月發薪時就要分清楚這兩個日期。
+              </p>
+              <p className="form-note">
+                本操作屬高風險：一次決定全公司當月薪資並產生傳票。
+                同一期僅能計算一次，更正請開立反向分錄。傳票狀態為<strong>待過帳</strong>，
+                薪資計算完成不代表已入總帳。
+              </p>
+            </div>
+
+            <div>
+              {result ? (
+                <div className="card doc-card">
+                  <div className="doc-card__head">
+                    <h3 className="section-title doc-card__title">
+                      {result.run.period} 已完成計算
+                    </h3>
+                    <span className="doc-card__badge num">
+                      {result.run.voucher_no ?? '—'} 待過帳
+                    </span>
+                  </div>
+                  <div className="doc-row">
+                    <span>應發總額</span>
+                    <span className="num">{money(result.run.gross_total)}</span>
+                  </div>
+                  <div className="doc-row doc-row--sub">
+                    <span>勞保自付</span>
+                    <span className="num">
+                      {money(result.deduction_breakdown.labor_employee)}
+                    </span>
+                  </div>
+                  <div className="doc-row doc-row--sub">
+                    <span>健保自付</span>
+                    <span className="num">
+                      {money(result.deduction_breakdown.health_employee)}
+                    </span>
+                  </div>
+                  <div className="doc-row doc-row--sub">
+                    <span>
+                      代扣所得稅（{result.withholding.income_name}，率{' '}
+                      {result.withholding.rate}）
+                    </span>
+                    <span className="num">{money(result.deduction_breakdown.income_tax)}</span>
+                  </div>
+                  <div className="doc-row doc-row--total">
+                    <span>實發</span>
+                    <span className="num">{money(result.run.net_total)}</span>
+                  </div>
+
+                  {result.warnings.length > 0 && (
+                    <p className="recon recon--off">
+                      低於法定最低工資，薪資仍照常發放。此情形應予揭露而非阻擋：
+                      {result.warnings.map((w) => (
+                        <span className="step-chip" key={w.emp_no}>
+                          {w.name}（{w.emp_no}）：{w.issue}
+                        </span>
+                      ))}
+                    </p>
+                  )}
+                  {result.skipped.length > 0 && (
+                    <p className="hint">
+                      本期未計薪人員：
+                      {result.skipped.map((s) => (
+                        <span className="step-chip" key={s.emp_no}>
+                          {s.name}（{s.emp_no}）：{s.reason}
+                        </span>
+                      ))}
+                    </p>
+                  )}
+                  <p className="hint">
+                    扣繳率依{' '}
+                    <span className="num">
+                      withholding {result.withholding.ruleset.version}
+                    </span>{' '}
+                    解析（{result.withholding.ruleset.effective_from} 起適用），
+                    非寫於程式碼。依據：{result.withholding.ruleset.source_note}
+                  </p>
+                  <p className="hint">{result.employer_note}</p>
+                </div>
+              ) : (
+                <p className="section-note">
+                  傳票的三段是：借 <span className="num">6111 薪資支出</span>（逐部門一行，
+                  部門損益才看得到人事成本）／貸 <span className="num">2117 代扣款</span>／貸{' '}
+                  <span className="num">1102 銀行存款</span>。
+                  公司負擔的勞健保與勞退不在本張傳票內，該部分屬公司費用，非員工代扣。
+                </p>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

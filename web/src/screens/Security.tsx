@@ -1,0 +1,298 @@
+import { useCallback, useEffect, useState } from 'react';
+import { useCurrentUser } from '../auth';
+import {
+  callOp,
+  getHealthz,
+  OpFailed,
+  type ApiTokenList,
+  type Healthz,
+  type SecurityPolicy,
+  type SystemHealth,
+} from '../api/client';
+
+interface Props {
+  onToast: (msg: string) => void;
+  reloadKey: number;
+}
+
+/**
+ * Shorten a timestamp to "07/24 16:08", or say it has never been used.
+ *
+ * Uses the browser's local time zone rather than slicing the ISO string: the
+ * backend stores UTC, and slicing would turn "last used 16:08" into
+ * "08:08", while the user remembers the time on their own clock.
+ */
+function when(v: string | null): string {
+  if (!v) return '尚未使用';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return v;
+  const two = (n: number) => String(n).padStart(2, '0');
+  return `${two(d.getMonth() + 1)}/${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+export function Security({ onToast, reloadKey }: Props) {
+  const [policy, setPolicy] = useState<SecurityPolicy | null>(null);
+  const [tokens, setTokens] = useState<ApiTokenList | null>(null);
+  const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [hz, setHz] = useState<Healthz | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<number | null>(null);
+  /** The freshly issued plaintext. Visible only once, so it stays on screen
+   *  until the user dismisses it. */
+  const [issued, setIssued] = useState<{ name: string; secret: string } | null>(null);
+
+  // Who does a new token act as? Whoever issued it. A hard-coded name would
+  // show an audit trail of API calls by someone who never signed in, while
+  // the person actually responsible leaves no trace.
+  const me = useCurrentUser();
+
+  const load = useCallback(() => {
+    setError(null);
+    Promise.all([
+      callOp<SecurityPolicy>('get_security_policy'),
+      callOp<ApiTokenList>('list_api_tokens'),
+      callOp<SystemHealth>('get_system_health'),
+    ])
+      .then(([p, t, h]) => {
+        setPolicy(p);
+        setTokens(t);
+        setHealth(h);
+      })
+      .catch((e: Error) => setError(e.message));
+    // /healthz is a separate path: only the server process knows the brand
+    // fingerprint and the RustFS state.
+    getHealthz().then(setHz).catch(() => setHz(null));
+  }, []);
+
+  useEffect(load, [load, reloadKey]);
+
+  async function revoke(id: number, name: string) {
+    setBusy(id);
+    try {
+      await callOp<unknown>('revoke_api_token', { id });
+      onToast(`已撤銷「${name}」，使用該 Token 的連線立即失效，如需使用請重新核發`);
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function issue() {
+    try {
+      const d = await callOp<{ token: { name: string }; secret: string }>('issue_api_token', {
+        name: '新連線',
+        kind: 'mcp',
+        scope: '唯讀',
+        actor: me.display_name,
+        actor_role: me.role,
+        rotate_days: 90,
+      });
+      setIssued({ name: d.token.name, secret: d.secret });
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    }
+  }
+
+  return (
+    <div>
+      <h1 className="page-title">安全與營運</h1>
+      <p className="page-lede">本頁供負責人與資訊人員檢視，每一條控制規則皆標示是否已實際執行。</p>
+
+      {error && <p className="state-note state-note--error">{error}</p>}
+      {!policy && !error && <p className="state-note">讀取中…</p>}
+
+      {issued && (
+        <div className="card secret-card">
+          <div className="secret-card__head">
+            <strong>「{issued.name}」的 Token（僅顯示一次）</strong>
+            <span className="spacer" />
+            <button className="btn--close" onClick={() => setIssued(null)}>
+              ×
+            </button>
+          </div>
+          <code className="secret-card__value num">{issued.secret}</code>
+          <p className="form-note">
+            請立即複製保存。系統僅保留 BLAKE3 雜湊與前八碼，無法回查；遺失時只能重新核發。
+          </p>
+        </div>
+      )}
+
+      {policy && tokens && health && (
+        <div className="split-columns">
+          <section>
+            <h3 className="section-title">控制規則</h3>
+            <div className="card fact-card">
+              {policy.rules.map((r) => (
+                <div className="fact fact--stacked" key={r.code}>
+                  <span className="fact__key">
+                    {r.label}
+                    <span className={`tag${r.enforced ? ' tag--warn tag--static' : ' tag--pale'}`}>
+                      {r.enforced ? '執行中' : '尚未執行'}
+                    </span>
+                  </span>
+                  <span className="fact__value">
+                    {r.value}
+                    {r.detail && <span className="fact__note">{r.detail}</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="recon">
+              {policy.enforced_count} 條執行中，{policy.total - policy.enforced_count} 條尚未執行。
+              「AI 禁止事項」該列直接反映「MCP 與 AI」的開關現況，調整工具開關後即時更新。
+            </p>
+
+            <h3 className="section-title section-title--spaced">系統健康</h3>
+            <div className="card fact-card">
+              <div className="fact">
+                <span className="fact__key">PostgreSQL</span>
+                <span className="fact__value">
+                  {hz?.db.ok ?? true ? '正常' : '無法連線'} · migration 至{' '}
+                  <span className="num">{health.migration ?? '未知'}</span>
+                </span>
+              </div>
+              <div className="fact">
+                <span className="fact__key">RustFS</span>
+                <span className="fact__value">
+                  {hz ? (hz.rustfs.ok ? '正常' : '無法連線') : '無法讀取'}
+                  <span className="fact__note">{hz?.rustfs.endpoint ?? '由 /healthz 回報'}</span>
+                </span>
+              </div>
+              <div className="fact">
+                <span className="fact__key">品牌完整性</span>
+                <span className="fact__value">
+                  {hz ? (
+                    <>
+                      {hz.brand.signed ? '已簽章' : '未簽章'} · {hz.brand.files} 個檔案
+                      <span className="fact__note num">指紋 {hz.brand.fingerprint}</span>
+                    </>
+                  ) : (
+                    '無法讀取'
+                  )}
+                  <span className="fact__note">
+                    驗證未通過時伺服器會拒絕啟動，因此本行可見即代表驗證通過。
+                  </span>
+                </span>
+              </div>
+              <div className="fact">
+                <span className="fact__key">帳務</span>
+                <span className="fact__value num">
+                  已過帳 {health.stats.posted_vouchers} 張 · 待過帳{' '}
+                  {health.stats.unposted_vouchers} 張 · 科目 {health.stats.accounts} 個
+                </span>
+              </div>
+              <div className="fact">
+                <span className="fact__key">稽核紀錄</span>
+                <span className="fact__value">
+                  <span className="num">
+                    {health.stats.audit_entries} 筆（{health.stats.audit_blocked} 筆被擋下）
+                  </span>
+                  <span className="fact__note">唯讀操作與被擋下的呼叫均寫入稽核。</span>
+                </span>
+              </div>
+              <div className="fact">
+                <span className="fact__key">法規版本</span>
+                <span className="fact__value">
+                  {health.rulesets.filter((r) => r.applicable).length} / {health.rulesets.length}{' '}
+                  個領域今天有適用版本
+                  {health.rulesets_missing > 0 && (
+                    <span className="fact__note">
+                      {health.rulesets
+                        .filter((r) => !r.applicable)
+                        .map((r) => r.domain)
+                        .join('、')}{' '}
+                      查無適用版本時，相關計算一律回覆錯誤，不採用預設值。
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className="fact">
+                <span className="fact__key">MCP 工具</span>
+                <span className="fact__value num">
+                  {health.stats.tools_enabled} / {health.stats.tools_total} 個對 AI 開啟
+                </span>
+              </div>
+            </div>
+            <p className="hint">
+              品牌指紋與 RustFS 狀態取自 <span className="num">GET /healthz</span>，其餘取自
+              資料庫；啟動時的驗證結果僅存在於伺服器行程，無法自資料庫查得。
+            </p>
+          </section>
+
+          <section>
+            <h3 className="section-title">Token 與連線</h3>
+            <p className="section-note">{tokens.storage_note}</p>
+            <div className="card fact-card">
+              {tokens.tokens.map((t) => (
+                <div className="fact fact--stacked" key={t.id}>
+                  <span className="fact__key">
+                    {t.name}
+                    <span className="tag tag--pale tag--static">{t.kind_label}</span>
+                    {t.overdue && <span className="tag tag--bad tag--static">已達輪替期限</span>}
+                  </span>
+                  <span className="fact__value">
+                    <span className="num">{t.prefix}…</span>　{t.scope}
+                    <span className="fact__note">
+                      代表 {t.actor}
+                      {t.actor_role_name ? `（${t.actor_role_name}）` : ''} · 最後使用{' '}
+                      <span className="num">{when(t.last_used_at)}</span> · {t.expiry_note}
+                      {t.rotate_due_on && (
+                        <>
+                          （<span className="num">{t.rotate_due_on}</span> 到期）
+                        </>
+                      )}
+                    </span>
+                  </span>
+                  <button
+                    className="btn btn--compact btn--secondary token__revoke"
+                    disabled={busy === t.id}
+                    onClick={() => void revoke(t.id, t.name)}
+                  >
+                    {busy === t.id ? '撤銷中…' : '撤銷'}
+                  </button>
+                </div>
+              ))}
+              {tokens.tokens.length === 0 && (
+                <p className="form-note">目前沒有有效的 Token。</p>
+              )}
+            </div>
+
+            <div className="toolbar doc-card__actions">
+              <button className="btn btn--compact" onClick={() => void issue()}>
+                核發新 Token
+              </button>
+              <button className="btn btn--compact btn--secondary btn--off" disabled>
+                立即備份
+              </button>
+              <button className="btn btn--compact btn--secondary btn--off" disabled>
+                匯出全部資料
+              </button>
+            </div>
+
+            {/* The most important honest statement on this screen. The list
+                looks like a lock, but it is not one yet. */}
+            <p className="recon recon--off">{tokens.wiring_note}</p>
+
+            <p className="hint">
+              新發的 Token 代表 <span className="num">{me.display_name}</span>
+              （角色 <span className="num">{me.role}</span>），即目前登入者。
+              以該 Token 進行的每一次呼叫皆以此名義寫入稽核，
+              其權限不會超出登入者本身。
+            </p>
+            <p className="hint">
+              核發 Token 標示為「限老闆」，撤銷則僅需一般身分。這樣設計是為了讓 Token 外洩時可以立即
+              撤銷，不用等負責人到場；需要負責人核可的是核發，不是撤銷。
+            </p>
+            <p className="hint">
+              資料表不存明文，僅保留 BLAKE3 雜湊與前八碼。資料庫遭複製時取得的是雜湊值，
+              而非可直接連線的憑證；理由與密碼不存明文相同，且 Token 的權限往往大於個人密碼。
+            </p>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      品牌字標不放在前端。頁面上的 logo 一律向後端取得：
+      GET /v1/brand/mark.svg —— 由 Rust 即時產生，受 BSL 1.1 與完整性驗證保護。
+      因此本目錄下沒有、也不得有任何 logo 檔案或 favicon 字標。
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!--
+      Noto Sans TC 必須一起載入。Cormorant Garamond 與 Lora 都沒有中文字符，
+      少了它，全站中文會落到通用字體（Windows 上是新細明體），筆畫在 14px 以下
+      糊成一團。Google Fonts 以 unicode-range 切成子集，只會下載實際用到的那幾段。
+    -->
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600&family=Lora:wght@400;600&family=Noto+Sans+TC:wght@400;500;700&display=swap"
+    />
+    <title>Laysi One</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
