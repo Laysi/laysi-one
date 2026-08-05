@@ -5,6 +5,7 @@ members = [
     "crates/laysi-domain",
     "crates/laysi-regulation",
     "crates/laysi-store",
+    "crates/laysi-ops",
 ]
 
 [workspace.package]
@@ -17,6 +18,7 @@ rust-version = "1.85"
 laysi-brand = { path = "crates/laysi-brand" }
 laysi-domain = { path = "crates/laysi-domain" }
 laysi-regulation = { path = "crates/laysi-regulation" }
+laysi-ops = { path = "crates/laysi-ops" }
 laysi-store = { path = "crates/laysi-store" }
 
 # RustFS is S3 compatible, so the official S3 SDK can point at it and there is
