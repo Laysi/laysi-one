@@ -1,0 +1,20 @@
+[package]
+name = "laysi-brand"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+description = "Laysi One 品牌識別：向量字標產生與完整性驗證（BSL 授權保護元件）"
+
+[dependencies]
+blake3.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[[bin]]
+name = "laysi-brandhash"
+path = "src/bin/brandhash.rs"

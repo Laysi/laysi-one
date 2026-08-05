@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/laysi-brand",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license-file = "../LICENSE-BSL.txt"
+rust-version = "1.85"
+
+[workspace.dependencies]
+laysi-brand = { path = "crates/laysi-brand" }
+
+# RustFS is S3 compatible, so the official S3 SDK can point at it and there is
+# no need to sign SigV4 by hand. Default features are off to avoid the aws-lc-rs
+# that `default-https-client` pulls in: it needs cmake to build, and the build
+# image (rust:1-slim-bookworm) has none. The ring-based rustls is pure Rust and
+# builds anywhere.
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "rt-tokio",
+    "behavior-version-latest",
+] }
+aws-smithy-http-client = { version = "1", features = ["rustls-ring"] }
+aws-smithy-types = "1"
+
+anyhow = "1"
+argon2 = "0.5"
+async-trait = "0.1"
+# File content travels as base64 in JSON: uploads go through the operation
+# registry so that they are MCP tools as well.
+base64 = "0.22"
+axum = "0.8"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
+openidconnect = "4.0.1"
+rand = "0.8"
+rust_decimal = { version = "1", features = ["serde-with-str", "db-postgres"] }
+rust_decimal_macros = "1"
+schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "macros",
+    "migrate",
+    "chrono",
+    "uuid",
+    "rust_decimal",
+    "json",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
