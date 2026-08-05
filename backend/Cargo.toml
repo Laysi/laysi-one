@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/laysi-brand",
+    "crates/laysi-domain",
 ]
 
 [workspace.package]
@@ -12,6 +13,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 laysi-brand = { path = "crates/laysi-brand" }
+laysi-domain = { path = "crates/laysi-domain" }
 
 # RustFS is S3 compatible, so the official S3 SDK can point at it and there is
 # no need to sign SigV4 by hand. Default features are off to avoid the aws-lc-rs

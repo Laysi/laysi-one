@@ -1,0 +1,20 @@
+[package]
+name = "laysi-domain"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+description = "Laysi One 純領域模型：金額、複式分錄、試算表"
+
+[dependencies]
+chrono.workspace = true
+rust_decimal.workspace = true
+schemars.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The contract requires amounts to be strings in JSON, and the test has to
+# serialise for real to verify it.
+serde_json.workspace = true
+rust_decimal_macros.workspace = true
