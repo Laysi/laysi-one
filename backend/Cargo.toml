@@ -6,6 +6,7 @@ members = [
     "crates/laysi-regulation",
     "crates/laysi-store",
     "crates/laysi-ops",
+    "crates/laysi-server",
 ]
 
 [workspace.package]
