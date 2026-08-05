@@ -1,0 +1,8 @@
+backend/target/
+web/node_modules/
+web/dist/
+.git/
+.env
+# The vendor signing key never enters the image. The public key does, because
+# verification needs it.
+backend/brand/vendor.key
