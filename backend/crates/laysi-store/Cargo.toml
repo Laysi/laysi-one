@@ -1,0 +1,34 @@
+[package]
+name = "laysi-store"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+description = "Laysi One 儲存層：PostgreSQL repository 與 RustFS 物件儲存"
+
+[dependencies]
+laysi-domain.workspace = true
+laysi-regulation.workspace = true
+
+anyhow.workspace = true
+# RustFS (S3 compatible) object storage. Document files really live there and
+# the database keeps only the key, size, MIME type and BLAKE3 hash; see
+# src/storage.rs.
+aws-sdk-s3.workspace = true
+aws-smithy-http-client.workspace = true
+aws-smithy-types.workspace = true
+# API tokens store only a hash and the first eight characters; the plaintext is
+# never persisted (see migrations/0006). The same hash function also proves an
+# uploaded file was not swapped.
+blake3.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
