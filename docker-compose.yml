@@ -1,0 +1,165 @@
+# Laysi One: self-hosted deployment
+#
+#   cp .env.example .env   # change the passwords and tokens first
+#   docker compose up -d --build
+#   open http://localhost:8088
+#
+# api verifies brand integrity at startup and exits with code 78 rather than
+# serving when it fails. That is deliberate; see
+# backend/crates/laysi-brand/src/integrity.rs.
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laysi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?請在 .env 設定資料庫密碼}
+      POSTGRES_DB: ${POSTGRES_DB:-laysi}
+      # Collation uses ICU rather than an OS locale: the postgres image does not
+      # generate zh_TW.utf8, and setting LANG makes initdb fail outright. ICU is
+      # built in and needs no locale package.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=zh-TW --locale=C.UTF-8"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laysi} -d ${POSTGRES_DB:-laysi}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # RustFS: an S3-compatible object store written in Rust, holding scanned
+  # documents and attachments. 9000 is the S3 API, 9001 the admin console.
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.11
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?請在 .env 設定物件儲存金鑰}
+    volumes:
+      - rustfsdata:/data
+    healthcheck:
+      # The image is busybox based, with curl but no bash. The S3 root returns
+      # 403 or 404 without credentials, which still proves the service is alive,
+      # so any HTTP status counts as healthy and curl -f must not be used.
+      test:
+        - CMD-SHELL
+        - curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/ | grep -qE '^[2344][0-9][0-9]$$'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # Everything REST and the frontend need, except /mcp (LAYSI_SERVE=app). That
+  # publicly exposed protocol is served by the separate mcp service below, and
+  # the reduction in attack surface is that this process has no /mcp route at
+  # all rather than a network-layer block. This service publishes no port; only
+  # web reaches it through the Caddy reverse proxy.
+  api:
+    build:
+      # The build context is the repository root: brand integrity compiles
+      # LICENSE-BSL.txt into the binary, so it has to be inside the context.
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      LAYSI_SERVE: app
+      DATABASE_URL: postgres://${POSTGRES_USER:-laysi}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-laysi}
+      BIND_ADDR: 0.0.0.0:8080
+      # The document module stores files in RustFS, so api needs the credentials
+      # too. Without them /healthz reports rustfs as unconfigured and the
+      # document screen is disabled.
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?請在 .env 設定物件儲存金鑰}
+      RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-60}
+      SESSION_ABSOLUTE_HOURS: ${SESSION_ABSOLUTE_HOURS:-168}
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:5173}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/laysi-server", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Serves only /healthz and /mcp (LAYSI_SERVE=mcp). This process has no REST at
+  # all, no session cookie and no login endpoint to attack. It is the only
+  # backend service publishing a port: AI connectors (Claude Code, the desktop
+  # app) connect to it directly, bypassing the web container. Only the port is
+  # exposed; put TLS and a domain behind a reverse proxy of your choice (Caddy,
+  # Traefik, nginx). None is bundled.
+  #
+  # Reuses backend/Dockerfile: the same image and the same postgres, differing
+  # only in LAYSI_SERVE and the published port.
+  mcp:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      LAYSI_SERVE: mcp
+      DATABASE_URL: postgres://${POSTGRES_USER:-laysi}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-laysi}
+      BIND_ADDR: 0.0.0.0:8080
+      # The RustFS credentials are given here as well, deliberately.
+      # upload_document and get_document are registry operations and therefore
+      # MCP tools; withholding the credentials would not remove them, only make
+      # them answer "object storage is not connected" when called. That would
+      # leave the document module broken for AI rather than disabled, and would
+      # make "every operation is available over MCP" untrue. What actually
+      # governs whether AI may use these two tools is mcp_tool_grant and the
+      # role permission, both of which run in dispatch before object storage is
+      # touched. The credentials open no extra hole; they only let an already
+      # permitted call work.
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?請在 .env 設定物件儲存金鑰}
+      RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
+      # Maximum calls per token per minute; 0 means unlimited.
+      MCP_RATE_LIMIT_PER_MINUTE: ${MCP_RATE_LIMIT_PER_MINUTE:-60}
+      # Comma-separated Origin allow list, guarding against DNS rebinding. Empty
+      # accepts only callers that send no Origin (normal AI connectors do not).
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/laysi-server", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    ports:
+      # The only published backend port. TLS and the domain are left to whoever
+      # runs a reverse proxy in front of it.
+      - "${MCP_PORT:-8089}:8080"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8088}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  rustfsdata:

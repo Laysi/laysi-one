@@ -1,0 +1,61 @@
+{
+	# No admin API: nothing in this deployment reconfigures Caddy at runtime,
+	# and the endpoint would otherwise listen on 2019 inside the container.
+	admin off
+	# TLS and the public hostname belong to whatever reverse proxy the operator
+	# puts in front of compose. This container only ever speaks plain HTTP on
+	# the port compose publishes.
+	auto_https off
+}
+
+:80 {
+	encode zstd gzip
+
+	# REST and the brand mark. The mark must be reachable: the frontend has no
+	# local logo to fall back on, so a broken proxy shows a failed-to-load state
+	# rather than quietly substituting text.
+	handle /v1/* {
+		reverse_proxy api:8080
+	}
+
+	# System health. Only the server process knows the brand integrity
+	# fingerprint and the RustFS connection state, and the security screen needs
+	# this route to report them truthfully.
+	handle /healthz {
+		reverse_proxy api:8080
+	}
+
+	# MCP streamable HTTP. AI clients hold long connections, so responses are
+	# flushed immediately rather than buffered.
+	#
+	# This targets the `mcp` service, not `api`: `api` runs LAYSI_SERVE=app and
+	# does not mount /mcp at all. This route is only a convenience entry point on
+	# the same domain. To let external AI clients connect, expose the mcp
+	# service's own port (MCP_PORT, default 8089) behind a reverse proxy; that
+	# path does not pass through this container.
+	handle /mcp* {
+		reverse_proxy mcp:8080 {
+			flush_interval -1
+			transport http {
+				read_timeout 300s
+			}
+		}
+	}
+
+	# Single-page app: any unmatched path falls back to index.html.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Vite emits content-hashed filenames under /assets, so a changed file is a
+	# changed URL and the response can be cached indefinitely. Everything else
+	# (index.html above all) must revalidate: without this a browser applies
+	# heuristic freshness, keeps an old index.html, and therefore keeps loading
+	# the previous bundle, making a deploy look like it changed nothing.
+	@assets path /assets/*
+	@revalidate not path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	header @revalidate Cache-Control "no-cache"
+}
