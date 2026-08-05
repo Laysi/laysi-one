@@ -1,0 +1,46 @@
+# Annual leave entitlement
+#
+# Entitlement by length of service. `tiers` must be ordered by ascending
+# `months`, and a lookup takes the last row where service >= months. Past ten
+# years, one more day per additional year up to a cap; that part is a rule
+# rather than an enumeration, so it is expressed separately in
+# `over_ten_years`.
+
+domain = "annual_leave"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "勞動基準法第 38 條"
+
+[[payload.tiers]]
+months = "6"
+days = "3"
+
+[[payload.tiers]]
+months = "12"
+days = "7"
+
+[[payload.tiers]]
+months = "24"
+days = "10"
+
+[[payload.tiers]]
+months = "36"
+days = "14"
+
+[[payload.tiers]]
+months = "60"
+days = "15"
+
+[[payload.tiers]]
+months = "120"
+days = "16"
+
+[payload.over_ten_years]
+# Days added per completed year past ten, and the overall cap.
+increment_per_year = "1"
+max_days = "30"
+
+[payload.settlement]
+# Unused leave: the employer pays wages for it at year end or on termination.
+note = "勞基法施行細則第 24 條之 1；年度終結未休日數應折發工資"
+carry_over_months = "12"

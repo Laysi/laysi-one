@@ -1,0 +1,21 @@
+# Labour insurance, ordinary risk premium
+#
+# This file is the only source of labour insurance figures. None of these
+# values may appear in code. When the annual schedule changes, edit here and add
+# a ruleset with a later effective_from; no Rust has to be rewritten.
+
+domain = "labor_insurance"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "勞工保險條例第 13 條、第 15 條；2026 年適用之勞工保險投保薪資分級表"
+
+[payload]
+# Insured salary ceiling. Salaries above it are charged at the ceiling.
+max_insured_salary = "45800"
+# Ordinary risk premium rate, excluding employment and occupational accident
+# insurance.
+premium_rate = "0.11"
+# Three-way split, summing to 1.
+employer_share = "0.70"
+employee_share = "0.20"
+government_share = "0.10"

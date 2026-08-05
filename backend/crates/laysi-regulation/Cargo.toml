@@ -1,0 +1,19 @@
+[package]
+name = "laysi-regulation"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+description = "Laysi One 法規引擎：生效日版本化規則與純函式計算子"
+
+[dependencies]
+chrono.workspace = true
+rust_decimal.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true

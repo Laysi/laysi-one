@@ -1,0 +1,29 @@
+# Fixed asset depreciation
+#
+# The useful life schedule decides how much may be charged each year. Charges
+# beyond the scheduled life are not deductible for tax, so the life is a
+# regulation value rather than an accounting policy choice.
+
+domain = "depreciation"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "所得稅法第 51 條；固定資產耐用年數表"
+
+[payload]
+# Methods this system supports. Straight line by default.
+methods = ["straight_line", "declining_balance"]
+default_method = "straight_line"
+# Salvage rate: under the straight-line method salvage may be estimated at one
+# tenth of cost.
+residual_rate = "0"
+# Less than a full year is prorated by month, and a part month counts as one.
+proration = "monthly"
+
+[payload.useful_lives]
+# category = useful life in years
+building_improvement = "10"   # 房屋建築及設備（裝修）
+vehicle = "5"                 # 運輸設備（自用小客車）
+computer = "3"                # 電腦及週邊設備
+office_equipment = "5"        # 辦公設備
+machinery = "8"               # 機械及設備
+furniture = "5"               # 生財器具

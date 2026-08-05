@@ -1,0 +1,13 @@
+# Value-added tax, general calculation
+
+domain = "vat"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "加值型及非加值型營業稅法第 10 條、第 35 條；一般稅額計算，每二月一期"
+
+[payload]
+# VAT rate.
+rate = "0.05"
+# Filing period in months. Two months per period, filed within fifteen days of
+# the following period.
+period_months = "2"

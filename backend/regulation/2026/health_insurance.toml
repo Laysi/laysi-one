@@ -1,0 +1,21 @@
+# National health insurance, ordinary premium
+#
+# The health and labour insurance brackets are different schedules: an employee
+# can be at the labour ceiling while still climbing the health brackets, which
+# is why they are separate domains.
+
+domain = "health_insurance"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "全民健康保險法第 18 條、第 27 條；一般保險費率與平均眷口數"
+
+[payload]
+# Ordinary premium rate.
+rate = "0.0517"
+# Three-way split, summing to 1.
+employer_share = "0.60"
+employee_share = "0.30"
+government_share = "0.10"
+# Average dependants: the employer share uses this multiplier, while the
+# employee pays for their actual dependants, up to three.
+avg_dependents = "1.61"

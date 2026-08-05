@@ -1,0 +1,13 @@
+# Labour pension, employer contribution
+#
+# Under the new scheme the employer contributes the full amount to the
+# employee's individual account. This is not insurance and has no split.
+
+domain = "pension"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "勞工退休金條例第 14 條；雇主提繳率不得低於勞工每月工資的 6%"
+
+[payload]
+# Employer contribution rate (the statutory floor, which this system uses).
+employer_rate = "0.06"

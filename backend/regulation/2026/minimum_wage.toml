@@ -1,0 +1,13 @@
+# Minimum wage
+#
+# Used by the payroll compliance check: any employee's monthly or hourly wage
+# below this is unlawful.
+
+domain = "minimum_wage"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "最低工資法第 9 條；2026 年適用之最低工資"
+
+[payload]
+monthly = "29500"
+hourly = "196"

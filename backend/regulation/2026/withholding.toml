@@ -1,0 +1,49 @@
+# Withholding rates by income type
+#
+# Tax to withhold when income is paid. `code` is the income code on the
+# withholding statement, required when filing. Payments below `threshold` are
+# exempt from withholding entirely: it decides whether to withhold, and is not
+# an allowance.
+
+domain = "withholding"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "各類所得扣繳率標準第 2 條、第 13 條；所得稅法第 88 條"
+
+[[payload.codes]]
+code = "50"
+name = "薪資所得"
+# Either the salary withholding table, or 5% of the monthly total at the
+# taxpayer's election.
+rate = "0.05"
+threshold = "0"
+note = "本系統採 5% 就源扣繳；員工可申請改按扣繳稅額表計算"
+
+[[payload.codes]]
+code = "9A"
+name = "執行業務所得"
+rate = "0.10"
+threshold = "20000"
+note = "每次給付未達起扣點免予扣繳"
+
+[[payload.codes]]
+code = "9B"
+name = "稿費"
+rate = "0.10"
+threshold = "20000"
+note = "同一年度給付總額未達 180,000 者，全年免稅"
+
+[[payload.codes]]
+code = "51"
+name = "租賃所得"
+rate = "0.10"
+threshold = "20000"
+note = "每次給付未達起扣點免予扣繳"
+
+[payload.supplementary_health]
+# Second-generation health insurance supplementary premium. Separate from the
+# ordinary premium, with a different base and rate.
+rate = "0.0211"
+# Charged only when a single payment reaches this amount.
+threshold = "20000"
+note = "全民健康保險法第 31 條；高額獎金、兼職所得、執行業務收入等六類"
