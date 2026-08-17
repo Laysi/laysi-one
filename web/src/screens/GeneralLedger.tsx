@@ -22,20 +22,6 @@ interface Props {
   onChanged: () => void;
 }
 
-/**
- * There are two ways to correct a posted voucher. They look alike and mean
- * entirely different things, and this dialog exists to force the choice
- * rather than offering two buttons side by side to press at random.
- *
- * - `void`: the voucher should never have existed (posted twice, wrong party
- *   entirely). Voided, with a mandatory reason.
- * - `reverse`: the transaction did happen but was recorded wrongly (wrong
- *   amount or account). A new voucher with the opposite entries is created,
- *   which is the accounting-correct way, and the original stays untouched.
- *
- * Both are `high_risk` and irreversible, so after choosing the type the
- * consequences are shown again and a second confirmation is required.
- */
 type CorrectionKind = 'void' | 'reverse';
 
 interface Correction {
@@ -73,8 +59,6 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
       onToast(`${no} 已過帳`);
       onChanged();
     } catch (e) {
-      // post_voucher is a high-risk tool that is off by default, so being
-      // blocked is a normal result that should be visible.
       const msg = e instanceof OpFailed ? e.error.message : String(e);
       onToast(msg);
     }
@@ -144,8 +128,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
     <div>
       <h1 className="page-title">傳票 · 總帳</h1>
       <p className="page-lede">
-        已過帳傳票不得修改，更正方式為開立反向分錄或作廢。此規則由資料庫強制，
-        繞過應用層也一樣。
+        已過帳傳票不能修改，要更正請開立反向分錄或作廢。
       </p>
 
       <div className="toolbar">
@@ -168,61 +151,63 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
       {!vouchers && !error && <p className="state-note">讀取中…</p>}
 
       {vouchers && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>傳票號碼</th>
-              <th>日期</th>
-              <th>摘要</th>
-              <th>科目</th>
-              <th style={{ textAlign: 'right' }}>金額</th>
-              <th>狀態</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {vouchers.map((v) => (
-              <tr key={v.no}>
-                <td className="num">{v.no}</td>
-                <td className="num cell-muted">{v.date.slice(5)}</td>
-                <td>{v.memo}</td>
-                <td className="cell-accounts">{v.accounts_label}</td>
-                <td className="num" style={{ textAlign: 'right' }}>
-                  {money(v.amount)}
-                </td>
-                <td>
-                  <span
-                    className={`tag${v.status === 'pending' ? ' tag--warn' : ''}${
-                      v.status === 'draft' ? ' tag--bad' : ''
-                    }`}
-                  >
-                    {STATUS_LABEL[v.status]}
-                  </span>
-                </td>
-                <td style={{ textAlign: 'right' }}>
-                  {v.status === 'pending' || v.status === 'draft' ? (
-                    <button className="btn btn--compact" onClick={() => void post(v.no)}>
-                      過帳
-                    </button>
-                  ) : v.status === 'posted' ? (
-                    <button className="btn btn--compact btn--secondary" onClick={() => openCorrection(v)}>
-                      更正
-                    </button>
-                  ) : (
-                    <span className="cell-muted">—</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {vouchers.length === 0 && (
+        <div className="table-scroll">
+          <table className="table">
+            <thead>
               <tr>
-                <td colSpan={7} className="cell-muted">
-                  目前篩選條件下沒有傳票。
-                </td>
+                <th>傳票號碼</th>
+                <th>日期</th>
+                <th>摘要</th>
+                <th>科目</th>
+                <th style={{ textAlign: 'right' }}>金額</th>
+                <th>狀態</th>
+                <th />
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {vouchers.map((v) => (
+                <tr key={v.no}>
+                  <td className="num">{v.no}</td>
+                  <td className="num cell-muted">{v.date.slice(5)}</td>
+                  <td>{v.memo}</td>
+                  <td className="cell-accounts">{v.accounts_label}</td>
+                  <td className="num" style={{ textAlign: 'right' }}>
+                    {money(v.amount)}
+                  </td>
+                  <td>
+                    <span
+                      className={`tag${v.status === 'pending' ? ' tag--warn' : ''}${
+                        v.status === 'draft' ? ' tag--bad' : ''
+                      }`}
+                    >
+                      {STATUS_LABEL[v.status]}
+                    </span>
+                  </td>
+                  <td style={{ textAlign: 'right' }}>
+                    {v.status === 'pending' || v.status === 'draft' ? (
+                      <button className="btn btn--compact" onClick={() => void post(v.no)}>
+                        過帳
+                      </button>
+                    ) : v.status === 'posted' ? (
+                      <button className="btn btn--compact btn--secondary" onClick={() => openCorrection(v)}>
+                        更正
+                      </button>
+                    ) : (
+                      <span className="cell-muted">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {vouchers.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="cell-muted">
+                    目前篩選條件下沒有傳票。
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {correction && (

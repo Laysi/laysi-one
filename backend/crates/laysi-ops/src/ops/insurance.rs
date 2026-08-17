@@ -244,7 +244,7 @@ impl Operation for GetInsuranceSummary {
         ]);
 
         let summary = format!(
-            "讀勞健保與勞退 · {} 人 · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）· 依 labor_insurance {}、health_insurance {}、pension {}",
+            "讀勞健保與勞退 · {} 人 · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）· 依勞保 {}、健保 {}、勞退 {} 規則",
             rows.len(),
             money(employer_total),
             money(labor_er),
@@ -313,7 +313,7 @@ impl Operation for ComputeInsurance {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "試算一個投保級距的勞保、健保與勞退各要出多少，並回報依哪一版規則、公司與員工各分攤多少比例。換一個 as_of 就換一套費率。"
+        "試算一個投保級距的勞保、健保與勞退各要出多少，並回報依哪一版規則、公司與員工各分攤多少比例。換一個適用日期就換一套費率。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ComputeInsuranceInput>()
@@ -330,7 +330,7 @@ impl Operation for ComputeInsurance {
         let p = premiums_on(as_of, i.insured_salary, health, pension_wage)?;
 
         let summary = format!(
-            "試算保費 · 勞保級距 {} 健保級距 {} · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）員工自付 {} · 依 labor_insurance {}、health_insurance {}、pension {}",
+            "試算保費 · 勞保級距 {} 健保級距 {} · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）員工自付 {} · 依勞保 {}、健保 {}、勞退 {} 規則",
             money(i.insured_salary),
             money(health),
             money(p.employer_total()),

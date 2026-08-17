@@ -104,20 +104,20 @@ pub struct AccountInput {
 fn require_account_report_fields(input: &Value) -> Result<(), OpError> {
     let Some(object) = input.as_object() else {
         return Err(OpError::BadInput(
-            "科目輸入必須是物件；report_group 與 cash_flow_section 都要明確提供，\
+            "科目輸入必須是物件；報表分組與現金流量活動別都要明確提供，\
              因其決定科目出現在三張財務報表的哪一段，系統不代為推定。"
                 .into(),
         ));
     };
     if !object.contains_key("report_group") {
         return Err(OpError::BadInput(
-            "report_group 必填：其決定科目在資產負債表或損益表的分段，無法由科目名稱推定。"
+            "報表分組必填：其決定科目在資產負債表或損益表的分段，無法由科目名稱推定。"
                 .into(),
         ));
     }
     if !object.contains_key("cash_flow_section") {
         return Err(OpError::BadInput(
-            "cash_flow_section 必填：它決定科目在現金流量表的活動別；損益科目也要明確送 null，不能省略。"
+            "現金流量活動別必填：它決定科目在現金流量表的活動別；損益科目也要明確留空，不能省略。"
                 .into(),
         ));
     }
@@ -175,7 +175,7 @@ fn validate_account(input: &AccountInput) -> Result<String, OpError> {
     };
     if !report_ok {
         return Err(OpError::BadInput(format!(
-            "report_group「{}」與 kind「{}」不相容；這個欄位決定資產負債表或損益表的分段，請依該類別選擇 0006 允許的值。",
+            "報表分組「{}」與科目類別「{}」不相容；該分組決定科目落在資產負債表或損益表的哪一段，請改選該類別允許的分組。",
             input.report_group, input.kind
         )));
     }
@@ -191,7 +191,7 @@ fn validate_account(input: &AccountInput) -> Result<String, OpError> {
     };
     if !section_value_ok || !section_kind_ok {
         return Err(OpError::BadInput(format!(
-            "cash_flow_section 與 kind「{}」不相容：資產、負債、權益要指定活動別，只有資產可用 cash；收益與費用必須明確送 null，因為它們已併入本期損益。",
+            "現金流量活動別與科目類別「{}」不相容：資產、負債、權益要指定活動別，只有資產可用 cash；收益與費用必須留空，因為它們已併入本期損益。",
             input.kind
         )));
     }
@@ -232,7 +232,7 @@ impl Operation for CreateAccount {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立會計科目。report_group 與 cash_flow_section 為必填，因其決定科目出現在資產負債表、損益表與現金流量表的哪一段，系統不代為推定；normal_side 依類別帶入慣例值，備抵科目可覆寫。"
+        "建立會計科目。報表分組與現金流量活動別為必填，因其決定科目出現在資產負債表、損益表與現金流量表的哪一段，系統不代為推定；借貸方向依類別帶入慣例值，備抵科目可覆寫。"
     }
     fn input_schema(&self) -> Value {
         account_schema()
@@ -265,7 +265,7 @@ impl Operation for UpdateAccount {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "完整更新或停用會計科目，不提供刪除。report_group 與 cash_flow_section 仍必填，因為它們決定三張報表的分段；停用只阻止新分錄，歷史帳保留。"
+        "完整更新或停用會計科目，不提供刪除。報表分組與現金流量活動別仍必填，因為它們決定三張報表的分段；停用只阻止新分錄，歷史帳保留。"
     }
     fn input_schema(&self) -> Value {
         account_schema()
@@ -371,14 +371,12 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
         return Err(OpError::BadInput("status 只能是 active、leaving 或 left".into()));
     }
     if matches!(input.status.as_str(), "leaving" | "left") && input.left_on.is_none() {
-        return Err(OpError::BadInput(format!(
-            "status 為 {} 時 left_on 為必填；資料庫的 employee_leaving_has_a_date／employee_left_has_a_date 會拒絕未帶日期的離職狀態。",
-            input.status
-        )));
+        let label = if input.status == "leaving" { "待離職" } else { "已離職" };
+        return Err(OpError::BadInput(format!("狀態為{label}時必須填寫離職日。")));
     }
     if input.left_on.is_some_and(|left_on| left_on < input.hired_on) {
         return Err(OpError::BadInput(
-            "left_on 不能早於 hired_on；離職日必須在到職日當天或之後".into(),
+            "離職日必須在到職日當天或之後".into(),
         ));
     }
     if input.base_salary <= Money::ZERO {
@@ -432,7 +430,7 @@ impl Operation for CreateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立員工主檔，只保存遮罩身分證字號；三個投保級距是向主管機關申報的事實，照輸入保存而不套 ruleset 修正。這不會建立登入帳號，user_account 仍要用 laysi-admin 管理。"
+        "建立員工主檔，只保存遮罩身分證字號；三個投保級距是向主管機關申報的事實，照輸入保存而不套 ruleset 修正。這不會建立登入帳號，登入帳號由系統管理員另行建立。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -452,7 +450,7 @@ impl Operation for CreateEmployee {
             json!({
                 "employee": employee,
                 "login_account_created": false,
-                "login_note": "建立員工不等於建立登入帳號；請用 laysi-admin 管理 user_account。",
+                "login_note": "建立員工不等於建立登入帳號；登入帳號由系統管理員另行建立。",
             }),
             summary,
         ))
@@ -470,7 +468,7 @@ impl Operation for UpdateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "完整更新員工主檔。完整身分證字號仍會被拒絕，投保級距照申報事實保存；status 為 leaving 或 left 時必須有 left_on。這不會建立或修改登入帳號。"
+        "完整更新員工主檔。完整身分證字號仍會被拒絕，投保級距照申報事實保存；狀態為待離職或已離職時必須填離職日。這不會建立或修改登入帳號。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -488,7 +486,7 @@ impl Operation for UpdateEmployee {
             json!({
                 "employee": employee,
                 "login_account_changed": false,
-                "login_note": "員工主檔與 user_account 分開；登入帳號由 laysi-admin 管理。",
+                "login_note": "員工主檔與登入帳號分開；登入帳號由系統管理員另行建立。",
             }),
             summary,
         ))
@@ -516,7 +514,7 @@ fn validate_bank_account(input: &CreateBankAccountInput) -> Result<(), OpError> 
     }
     if input.gl_code.trim().is_empty() {
         return Err(OpError::BadInput(
-            "gl_code 必填：銀行收付款與核銷必須知道要寫進哪個總帳科目".into(),
+            "綁定的總帳科目必填：銀行收付款與核銷必須知道要寫進哪個科目".into(),
         ));
     }
     Ok(())
@@ -533,7 +531,7 @@ impl Operation for CreateBankAccount {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立銀行帳戶，gl_code 必填，且必須指向啟用中的可入帳資產科目；未綁定總帳科目時，銀行收付款與核銷無法入帳。"
+        "建立銀行帳戶，必須綁定一個啟用中的可入帳資產科目；未綁定總帳科目時，銀行收付款與核銷無法入帳。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateBankAccountInput>()
@@ -596,7 +594,7 @@ impl Operation for CreateDimensionValue {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "在既有維度下新增一個值，不會建立新維度。department 維度的值可供員工與分錄部門欄位使用；複合外鍵會阻止部門欄位指到其他維度。"
+        "在既有維度下新增一個值，不會建立新維度。department 維度的值可供員工與分錄部門欄位使用；部門欄位不接受其他維度的值。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateDimensionValueInput>()
@@ -672,7 +670,7 @@ impl Operation for SetApprovalRule {
         Risk::BossOnly
     }
     fn summary(&self) -> &'static str {
-        "新增、覆寫或刪除一關費用簽核規則；相同 step_no 會覆蓋，min_amount 為 null 代表一律需要。金額是公司政策而非法規，留在資料表；整套流程至少保留一關。"
+        "新增、覆寫或刪除一關費用簽核規則；相同關卡編號會覆蓋，未設金額門檻代表一律需要。金額是公司政策而非法規，可隨時調整；整套流程至少保留一關。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<SetApprovalRuleInput>()
@@ -766,7 +764,7 @@ mod tests {
             "cash_flow_section": null
         }))
         .unwrap_err();
-        assert!(error.to_string().contains("report_group"));
+        assert!(error.to_string().contains("報表分組"));
         assert!(error.to_string().contains("損益表"));
         assert_eq!(CreateAccount.risk(), Risk::NeedsConfirm);
     }
@@ -794,7 +792,7 @@ mod tests {
         let mut input = valid_employee();
         input.status = "leaving".into();
         let error = validate_employee(&input).unwrap_err();
-        assert!(error.to_string().contains("left_on"));
+        assert!(error.to_string().contains("離職日"));
         assert!(UpdateEmployee.summary().contains("登入帳號"));
     }
 
@@ -806,7 +804,7 @@ mod tests {
             gl_code: String::new(),
             sort_order: 0,
         };
-        assert!(validate_bank_account(&input).unwrap_err().to_string().contains("gl_code"));
+        assert!(validate_bank_account(&input).unwrap_err().to_string().contains("總帳科目"));
         assert_eq!(CreateBankAccount.risk(), Risk::NeedsConfirm);
     }
 

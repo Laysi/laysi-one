@@ -14,8 +14,6 @@ interface Props {
   reloadKey: number;
 }
 
-/** Three states per cell, cycled by clicking, matching the table's level
- *  column. */
 const CYCLE = ['full', 'limited', 'none'] as const;
 type Level = (typeof CYCLE)[number];
 
@@ -44,15 +42,9 @@ export function Roles({ onToast, reloadKey }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
-  // set_approval_rule is owner only. This does not decide whether you are
-  // the owner: the backend checks on click, and its wording is shown when
-  // the call is refused.
   const [stepForm, setStepForm] = useState<StepForm>(emptyStepForm(1));
   const [savingStep, setSavingStep] = useState(false);
 
-  // Every cell is clickable. Whether it takes effect is the backend's
-  // permission check. On a screen about who may do what, the frontend
-  // computing that itself is exactly what it must not demonstrate.
   const load = useCallback(() => {
     setError(null);
     Promise.all([
@@ -160,90 +152,86 @@ export function Roles({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">角色與核准</h1>
-      <p className="page-lede">角色權限與簽核關卡設定，僅負責人可異動。</p>
+      <p className="page-lede">僅負責人可異動。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!matrix && !error && <p className="state-note">讀取中…</p>}
 
       {matrix && flow && (
         <>
-          {/* This paragraph must stay, though it now says the opposite: this
-              matrix really does stop people. */}
+
           <p className={`recon${matrix.enforced ? '' : ' recon--off'}`}>
             <strong>{matrix.enforced ? '本矩陣執行中。' : '本矩陣目前未執行。'}</strong>{' '}
             {matrix.enforcement_note}
           </p>
 
-          <table className="table table--matrix">
-            <thead>
-              <tr>
-                <th>權限</th>
-                {matrix.roles.map((r) => (
-                  <th key={r.code} className="align-center">
-                    {r.name}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {matrix.permissions.map((p) => (
-                <tr key={p.code}>
-                  <td>
-                    {p.label}
-                    {p.missing_ops.length > 0 && p.op_names.length === 0 && (
-                      <span className="tag tag--pale tag--static">對應操作尚未實作</span>
-                    )}
-                    <span className="cell-hint cell-hint--block">
-                      {p.op_names.length > 0 ? (
-                        <>對應 {p.op_names.join('、')}</>
-                      ) : (
-                        p.note
-                      )}
-                    </span>
-                    {p.boss_only_ops.length > 0 && (
-                      <span className="cell-hint cell-hint--block">
-                        其中 {p.boss_only_ops.join('、')} 另標示為「限老闆」，為本列之外的
-                        額外限制；即使本列權限給滿，非負責人仍無法通過。
-                      </span>
-                    )}
-                  </td>
-                  {matrix.roles.map((r) => {
-                    const level = levelOf(matrix.grants, r.code, p.code);
-                    const key = `${r.code}/${p.code}`;
-                    return (
-                      <td key={r.code} className="align-center">
-                        <button
-                          className={`perm perm--${level}`}
-                          title={`點選以切換：${LEVEL_NOTE[level]} → ${
-                            LEVEL_NOTE[CYCLE[(CYCLE.indexOf(level) + 1) % CYCLE.length] as Level]
-                          }`}
-                          disabled={busy === key}
-                          onClick={() => void toggle(r.code, p.code, level)}
-                        >
-                          {MARK[level]}
-                        </button>
-                      </td>
-                    );
-                  })}
+          <div className="table-scroll">
+            <table className="table table--matrix">
+              <thead>
+                <tr>
+                  <th>權限</th>
+                  {matrix.roles.map((r) => (
+                    <th key={r.code} className="align-center">
+                      {r.name}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {matrix.permissions.map((p) => (
+                  <tr key={p.code}>
+                    <td>
+                      {p.label}
+                      {p.missing_ops.length > 0 && p.op_names.length === 0 && (
+                        <span className="tag tag--pale tag--static">對應操作尚未實作</span>
+                      )}
+                      <span className="cell-hint cell-hint--block">
+                        {p.op_names.length > 0 ? (
+                          <>對應 {p.op_names.join('、')}</>
+                        ) : (
+                          p.note
+                        )}
+                      </span>
+                      {p.boss_only_ops.length > 0 && (
+                        <span className="cell-hint cell-hint--block">
+                          其中 {p.boss_only_ops.join('、')} 另標示為「限老闆」，為本列之外的
+                          額外限制；即使本列權限給滿，非負責人仍無法通過。
+                        </span>
+                      )}
+                    </td>
+                    {matrix.roles.map((r) => {
+                      const level = levelOf(matrix.grants, r.code, p.code);
+                      const key = `${r.code}/${p.code}`;
+                      return (
+                        <td key={r.code} className="align-center">
+                          <button
+                            className={`perm perm--${level}`}
+                            title={`點選以切換：${LEVEL_NOTE[level]} → ${
+                              LEVEL_NOTE[CYCLE[(CYCLE.indexOf(level) + 1) % CYCLE.length] as Level]
+                            }`}
+                            disabled={busy === key}
+                            onClick={() => void toggle(r.code, p.code, level)}
+                          >
+                            {MARK[level]}
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="hint">● 完整　○ 有限　— 無。點選欄位可切換，並記錄異動人員與時間。</p>
 
           <p className="hint">
-            ● 完整　○ 有限　— 無。點選欄位可切換，並記錄異動人員與時間。
-            變更權限本身也需具備權限，權限不足時會被拒絕並顯示擋下的規則，
-            該次呼叫同樣寫入稽核。
+            關閉任一欄位，該角色下一次呼叫即遭拒絕，不需重新登入，
+            <strong>包含關閉本項授權本身</strong>。
           </p>
           <p className="hint">
-            「— 無」要特別留意：本表採 deny-by-default，關閉任一欄位後，該角色下一次呼叫
-            即遭拒絕，不用重新登入或重啟，
-            <strong>含關閉本項授權</strong>。
-          </p>
-          <p className="hint">
-            工具開關（「MCP 與 AI」那一頁）管的是 <span className="num">AI</span> 能呼叫什麼，
-            本矩陣管的是<span className="num">人員</span>能做什麼。將 post_voucher 對 AI 關閉，
-            不應影響會計人員過帳，因此兩者分屬不同設定表。
+            本矩陣管的是<span className="num">人員</span>能做什麼；
+            「MCP 與 AI」那一頁管的是 <span className="num">AI</span> 能呼叫什麼，兩者互不影響。
           </p>
 
           <h3 className="section-title section-title--spaced">簽核流程</h3>
@@ -281,10 +269,7 @@ export function Roles({ onToast, reloadKey }: Props) {
               </div>
             ))}
           </div>
-          <p className="hint">
-            金額門檻屬公司政策，存於資料表而非程式碼；各公司門檻不同，調整門檻不應需要重新
-            編譯。{flow.enforcement_note}
-          </p>
+          <p className="hint">金額門檻屬公司政策，可隨時調整。{flow.enforcement_note}</p>
 
           <div className="card form-card">
             <h3 className="section-title">
@@ -294,7 +279,7 @@ export function Roles({ onToast, reloadKey }: Props) {
             </h3>
             <p className="section-note">
               關卡編號相同時直接覆寫：沿用既有編號即為編輯，填入新編號即為新增。
-              本操作標示為「限老闆」，權限不足時會被拒絕並顯示後端訊息。
+              異動簽核關卡限負責人。
             </p>
             <div className="field-grid">
               <label className="field">

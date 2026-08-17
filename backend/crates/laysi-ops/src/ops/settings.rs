@@ -272,7 +272,7 @@ impl Operation for ListDimensions {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀既有維度與其值：部門、專案、成本中心、付款條件。這個操作只讀設定；department 維度已用複合外鍵掛到分錄與員工。"
+        "讀既有維度與其值：部門、專案、成本中心、付款條件。這個操作只讀設定；department 維度已掛到分錄與員工的部門欄位。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -311,7 +311,7 @@ impl Operation for ListRoles {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀角色權限矩陣：哪個角色有哪些權限、完整還是有限。Registry::dispatch 會在每次呼叫時即時強制檢查。"
+        "讀角色權限矩陣：哪個角色有哪些權限、完整還是有限。每次呼叫都會即時強制檢查。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -385,9 +385,8 @@ impl Operation for ListRoles {
                 // and must be shown on screen.
                 "enforced": true,
                 "enforcement_note":
-                    "Registry::dispatch 每次呼叫都即時查 role_permission 與\
-                     permission.op_names；查無資料列或操作不在集合內即拒絕，並寫入\
-                     blocked 稽核。Risk::BossOnly 為額外的風險限制。",
+                    "每次呼叫都即時查詢該角色被授予的權限；未獲授權、或操作不在授權\
+                     範圍內即拒絕，並留下一筆被擋下的紀錄。「限老闆」為額外的風險限制。",
                 "actor_role": ctx.actor_role,
             }),
             summary,
@@ -417,7 +416,7 @@ impl Operation for SetRolePermission {
         Risk::BossOnly
     }
     fn summary(&self) -> &'static str {
-        "設定或收回權限矩陣的一格。level 用 full／limited／none；改動會從下一次操作呼叫起立即生效。"
+        "設定或收回權限矩陣的一格。權限層級用 full／limited／none；改動會從下一次操作呼叫起立即生效。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<SetRolePermissionInput>()
@@ -464,7 +463,7 @@ impl Operation for ListApprovalRules {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀費用報支的簽核流程：幾關、每一關是誰、超過多少錢才需要。金額門檻是公司政策，存在資料表裡，不是寫死在程式碼中。"
+        "讀費用報支的簽核流程：幾關、每一關是誰、超過多少錢才需要。金額門檻是公司政策，可隨時調整，不是寫死在程式碼中。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -493,8 +492,8 @@ impl Operation for ListApprovalRules {
                 "steps": steps,
                 "enforced": true,
                 "enforcement_note":
-                    "費用報支會依 approval_rule.min_amount 現算所需關卡；\
-                     set_approval_rule 可 upsert 或刪除一關，但流程至少保留一關。",
+                    "費用報支會依各關的金額門檻現算所需關卡；同一個關卡編號可覆寫\
+                     或刪除，但流程至少保留一關。",
             }),
             summary,
         ))

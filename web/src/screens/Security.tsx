@@ -15,13 +15,6 @@ interface Props {
   reloadKey: number;
 }
 
-/**
- * Shorten a timestamp to "07/24 16:08", or say it has never been used.
- *
- * Uses the browser's local time zone rather than slicing the ISO string: the
- * backend stores UTC, and slicing would turn "last used 16:08" into
- * "08:08", while the user remembers the time on their own clock.
- */
 function when(v: string | null): string {
   if (!v) return '尚未使用';
   const d = new Date(v);
@@ -37,13 +30,8 @@ export function Security({ onToast, reloadKey }: Props) {
   const [hz, setHz] = useState<Healthz | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
-  /** The freshly issued plaintext. Visible only once, so it stays on screen
-   *  until the user dismisses it. */
   const [issued, setIssued] = useState<{ name: string; secret: string } | null>(null);
 
-  // Who does a new token act as? Whoever issued it. A hard-coded name would
-  // show an audit trail of API calls by someone who never signed in, while
-  // the person actually responsible leaves no trace.
   const me = useCurrentUser();
 
   const load = useCallback(() => {
@@ -59,8 +47,7 @@ export function Security({ onToast, reloadKey }: Props) {
         setHealth(h);
       })
       .catch((e: Error) => setError(e.message));
-    // /healthz is a separate path: only the server process knows the brand
-    // fingerprint and the RustFS state.
+
     getHealthz().then(setHz).catch(() => setHz(null));
   }, []);
 
@@ -99,7 +86,6 @@ export function Security({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">安全與營運</h1>
-      <p className="page-lede">本頁供負責人與資訊人員檢視，每一條控制規則皆標示是否已實際執行。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!policy && !error && <p className="state-note">讀取中…</p>}
@@ -115,7 +101,7 @@ export function Security({ onToast, reloadKey }: Props) {
           </div>
           <code className="secret-card__value num">{issued.secret}</code>
           <p className="form-note">
-            請立即複製保存。系統僅保留 BLAKE3 雜湊與前八碼，無法回查；遺失時只能重新核發。
+            請立即複製保存。系統只留前八碼與不可還原的雜湊，無法回查；遺失時只能重新核發。
           </p>
         </div>
       )}
@@ -155,7 +141,7 @@ export function Security({ onToast, reloadKey }: Props) {
                 </span>
               </div>
               <div className="fact">
-                <span className="fact__key">RustFS</span>
+                <span className="fact__key">物件儲存</span>
                 <span className="fact__value">
                   {hz ? (hz.rustfs.ok ? '正常' : '無法連線') : '無法讀取'}
                   <span className="fact__note">{hz?.rustfs.endpoint ?? '由 /healthz 回報'}</span>
@@ -216,10 +202,6 @@ export function Security({ onToast, reloadKey }: Props) {
                 </span>
               </div>
             </div>
-            <p className="hint">
-              品牌指紋與 RustFS 狀態取自 <span className="num">GET /healthz</span>，其餘取自
-              資料庫；啟動時的驗證結果僅存在於伺服器行程，無法自資料庫查得。
-            </p>
           </section>
 
           <section>
@@ -272,23 +254,16 @@ export function Security({ onToast, reloadKey }: Props) {
               </button>
             </div>
 
-            {/* The most important honest statement on this screen. The list
-                looks like a lock, but it is not one yet. */}
             <p className="recon recon--off">{tokens.wiring_note}</p>
 
             <p className="hint">
               新發的 Token 代表 <span className="num">{me.display_name}</span>
-              （角色 <span className="num">{me.role}</span>），即目前登入者。
-              以該 Token 進行的每一次呼叫皆以此名義寫入稽核，
-              其權限不會超出登入者本身。
+              （角色 <span className="num">{me.role}</span>），權限不會超出你本身，
+              呼叫也以此名義寫入稽核。
             </p>
+
             <p className="hint">
-              核發 Token 標示為「限老闆」，撤銷則僅需一般身分。這樣設計是為了讓 Token 外洩時可以立即
-              撤銷，不用等負責人到場；需要負責人核可的是核發，不是撤銷。
-            </p>
-            <p className="hint">
-              資料表不存明文，僅保留 BLAKE3 雜湊與前八碼。資料庫遭複製時取得的是雜湊值，
-              而非可直接連線的憑證；理由與密碼不存明文相同，且 Token 的權限往往大於個人密碼。
+              核發限老闆，撤銷不限——Token 外洩時任何人都能立即撤銷，不必等負責人到場。
             </p>
           </section>
         </div>

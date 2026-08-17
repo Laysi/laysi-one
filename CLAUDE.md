@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 專案
 
 Laysi One 是台灣中小企業的財務＋人資正式產品，不預載任何特定公司的營運資料。
+評估用的示範資料只能由 `laysi-admin seed-demo` 手動種入（見 `docs/architecture.md`）。
 Rust（axum + sqlx）＋ React（Vite + TS）＋ PostgreSQL 17 ＋ RustFS ＋ Docker Compose。
 授權為 **BSL 1.1**（見 `LICENSE-BSL.txt`），不是開源授權。
 
@@ -23,6 +24,7 @@ cargo test -p laysi-ops registry_holds # 單一測試（比對名稱前綴）
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p laysi-server              # 需要 DATABASE_URL
 cargo run -p laysi-server --bin laysi-admin -- list-users
+cargo run -p laysi-server --bin laysi-admin -- seed-demo   # 示範資料，僅限拋棄式安裝
 
 # 從操作註冊表重新產生前端型別（改過 laysi-ops 就要跑）
 cargo run -p laysi-server --bin laysi-schema -- ../web/src/api/generated.ts
@@ -42,6 +44,8 @@ cp .env.example .env && docker compose up -d --build   # 前端在 :8088
 
 本機開發不需要 `sqlx-cli`：migrations 由 `sqlx::migrate!()` 在啟動時套用，
 查詢一律用**執行期** `sqlx::query`（不是 `query!` 巨集），所以編譯不需要資料庫。
+`laysi-store/build.rs` 會 `rerun-if-changed=../../migrations`——**沒有它，新增一個
+migration 檔不會觸發重編**，伺服器會帶著舊的 migration 集合啟動且不報錯。
 
 ## 架構：四個不明顯但關鍵的設計
 
@@ -112,6 +116,14 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 - **UI 文案一律繁體中文，語氣為清晰簡潔的商務風格**。不使用原型的口語腔
   （「今天的帳，還好嗎？」「別人還沒付我」已全數改為「財務總覽」「應收帳款」）。
   畫面文字包含後端 ops 產出的 `kicker`／`label`／`note`，兩邊同一套語氣。
+- **`page-lede` 只寫使用者需要知道、而畫面上看不到的事**，不寫「這頁有什麼」——
+  標題已經說過了。純複述內容或解釋設計決策的一律刪掉。
+- **數字用 `.num`，它有自己的 `--font-numeric`**（Source Serif 4，lining +
+  tabular）。該規則排在所有元件規則之後，因為元件也設 `font-family`，同權重下由
+  檔案順序決定勝負。
+- **`web/src` 底下不寫註解**（`.ts`／`.tsx`／`.css` 皆然，`api/generated.ts` 由
+  產生器自帶的兩行標頭除外）。理由與設計說明寫在 `docs/architecture.md`，不要
+  複製一份到元件旁邊。後端 Rust 仍照上一條寫英文註解。
 - **金額一律 `rust_decimal::Decimal`，絕不用 f64**；JSON 上是字串
   （`#[serde(with = "rust_decimal::serde::str")]`），前端也不轉成 number。
 - 前端只能用 `web/src/styles/classical.css` 的 CSS 變數，**不得寫死 hex／字型／px**。
@@ -121,18 +133,24 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 ## 目前進度
 
 已完成並驗證：資料庫不變量、法規引擎、操作註冊表、REST + MCP、品牌完整性、
-RustFS 物件儲存，以及 **28 個畫面、87 個操作**，分成三段導覽（`FINANCE_NAV`／
-`HR_NAV`／`ME_NAV`）：
+RustFS 物件儲存，以及 **32 個畫面、96 個操作**，分成三個分頁
+（`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
-- **財務 17 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、電子發票／稅務／
-  固定資產、費用報支／預算／財務報表、文件管理／匯入整合、基礎設定／角色核准／
-  MCP／安全營運。
-- **人資 7 畫面**：人資總覽／員工名冊／到離職異動、出勤與請假、薪資作業／
-  勞健保勞退、扣繳與法遵。
-- **員工自助 4 畫面**：我的首頁／我的請款／我的薪資單／我的請假。
+- **財務 13 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、電子發票／稅務／
+  固定資產、費用報支／預算／財務報表、文件管理／匯入整合。
+- **系統 4 畫面**：基礎設定／角色核准／MCP／安全營運。原本掛在財務樹底下，
+  但那是管理這套系統，不是財務工作。**它不是第四個分頁**：前三個是每天待著的
+  地方，這個是偶爾去一次的地方，所以放在左下角帳號列旁邊，角色開不起任何一個
+  畫面時連按鈕都不出現。
+- **人資 7 畫面**：人資總覽／員工名冊／到離職異動、出勤與休假（含打卡與補登）、
+  薪資作業／勞健保勞退、扣繳與法遵。
+- **員工自助 8 畫面**：打卡／個人專區／休假申請／請款申請／我的休假／我的請款／
+  我的薪資單／我的 MCP。分成「提出申請」與「查詢紀錄」兩組，因為填表與查進度是
+  兩件事。
 
-原型是 30 個畫面，人資段原先估為 9 個。目前的 15 個人資操作攤在 7 個畫面上，
-差的 2 個沒有對應操作，**不確定原型上那兩個是什麼**。要補之前先回去讀
+原型是 30 個畫面，但兩邊的數字不是同一組：人資段原先估為 9 個，目前的人資操作
+攤在 7 個畫面上，差的 2 個沒有對應操作，**不確定原型上那兩個是什麼**；自助段
+則多出休假申請、請款申請與打卡三個畫面。要補人資那兩個之前先回去讀
 `財務系統原型.dc.html`，不要自行補兩個畫面。
 
 **財務報表由總帳現算，系統裡沒有一張報表數字表**。新增科目時要在
@@ -159,14 +177,73 @@ OIDC 四項設定齊全時採 discovery + Authorization Code + PKCE，且只接�
 扣繳以**給付日**解析（扣繳義務發生在給付當下）。薪資過帳產生待過帳傳票
 （借 6111 ／貸 2117、1102）；公司負擔的保費**不在那張傳票裡**，那條銜接還沒接上，
 畫面照實標成未接上，不逕行併進 6111。加班費金額由差勤系統帶入，**系統不自己乘
-倍數**，因為規則庫還沒收錄勞基法第 24 條。`get_hr_compliance` 的 `checked` 與
-`passed` 是兩件事，沒收錄的規則一律 `checked = false` 並附 `not_checked_reason`。
+倍數**，因為規則庫還沒收錄勞基法第 24 條；打卡推導出的加班同樣只有時數。
 
-**員工自助的授權靠輸入形狀，不靠 `Risk`**：五個 `*_my_*` 操作**都不接受任何指定
+**換畫面只有一條路：`App.tsx` 的 `go()`**。它同時 `setScreen` 與 `pushState`；
+直接 `setScreen` 的地方網址不會動，症狀是「只有落地那一頁有網址」。
+`popstate` 的 handler 掛在 `[]` effect 上，判斷寫在每次 render 更新的 ref 裡，
+不要直接閉包住 `permissions`／`landing`。
+
+**網址就是頁面狀態**：`nav.ts` 的 `SCREEN_PATH` 對應 `ScreenId` ↔ 路徑，
+`App.tsx` 用 History API，沒有 router 套件；`section` 由 `screen` 推導而不是自己
+一份 state。落地畫面是**我的 → 打卡**（`SECTION_ORDER` 以 `me` 開頭），打卡另有
+一顆常駐在我的分段 header 上的按鈕。
+
+**打卡卡片是直向置中限寬的**：橫向 flex 會把按鈕推到右上——最常用的操作落在
+最不容易看到的位置。順序是時鐘 → 按鈕 → 今日狀態，且只有一顆按鈕（上下班順序由
+資料庫強制，兩顆裡永遠有一顆是死的）。備註在按鈕正上方展開，不另闢區塊。
+補登的時間欄用純文字不用 `<input type="time">`：後者的 12／24 小時制跟著瀏覽器
+語系走，也不收秒，而 `correct_punch` 收秒。
+
+**彈性工時（0019）與遲到寬限是兩件事**：寬限原諒遲到但下班時間不動，彈性把整天
+往後移、長度不變。`expected_end()` 因此吃「幾點到」，`overtime_seconds()` 收
+`(arrived, left)`。早到不縮短當天。留空＝不採彈性工時。
+
+**打卡（0016）記錄到秒**，時數與加班以秒計算、遲到在秒的精度上比較；
+`correct_punch` 收 `HH:MM:SS`，只給分鐘時記為秒零。勞基法第 30 條第 7 項要求的是
+「至分鐘為止」，記到秒是超過而非符合，所以程式與畫面都不宣稱這是法規要求。
+**打卡與 `attendance` 月統計互不覆蓋**：打卡是原始事件，`attendance` 是
+來源系統主張的彙總，操作把兩邊都算出來並回報差額。`punch_clock` **不收時間欄位**，
+記的就是呼叫當下那一刻，連 `LAYSI_TODAY` 都不移動它；漏打只能由人資
+`correct_punch` 補登，`source` 記成 `manual` 並在畫面上標示。上下班時間是公司政策，
+放在 `company_setting` 的 `work_start`／`work_end`／`late_grace_minutes`，**空值時
+不判定遲到**（`late()` 回 `Option<bool>`，`None` 表示沒問，不是「沒遲到」）。
+資料庫用 `UNIQUE (employee_id, punched_on, kind)` 與一條比對 `+08:00` 本地日期的
+CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_OFFSET_HOURS`，
+`today()` 也已改用它（原本讀 UTC，本地 00:00–08:00 建的單據會記成前一天）。
+
+`get_hr_compliance` 的 `checked` 與 `passed` 是兩件事，沒收錄的規則一律
+`checked = false` 並附 `not_checked_reason`。
+
+**員工自助的授權靠輸入形狀，不靠 `Risk`**：十二個自助操作**都不接受任何指定
 對象的參數**，對象由可信 session 的 `ctx.employee_id` 決定。`selfservice.rs` 的
 `no_self_service_input_can_select_another_employee` 把每個操作的 `Input` 欄位集合
-逐字釘死：**加任何一個欄位都會讓測試紅**。
+逐字釘死：**加任何一個欄位都會讓測試紅**。`submit_my_expense_claim` 之所以不共用
+`submit_expense_claim`，就是因為後者帶 `claimant`；自助版本另外不收費用科目
+（留給會計那一關）也不收文件編號（職員沒有文件權限，填得進來的必然是別人的）。
+
+**收據是送位元組，不是指既有文件（0020）**：`attach_my_expense_receipt` 收
+`file_name` ＋ `content_base64`，輸入指不到任何既有文件。`claim_no` 指的是單、
+單屬於人，所以 0020 給 `expense_claim` 加了 `employee_id` 並寫進 `WHERE`——
+`claimant` 是顯示名稱、會同名，不能當寫入側的鍵；會計代建的單那一欄是 NULL，
+自助這側看不到。只有 `submitted`／`approving` 收件。先建單再附件（`link_ref`
+要單號），所以上傳失敗時單已存在，畫面要說哪幾個沒附上並請去「我的請款」補，
+不要重送整張單。
+
+**檔案內容不進稽核紀錄**：`dispatch` 寫 `ai_audit_log` 前先過 `redact_for_audit`，
+超過 512 位元組的字串改記長度。判準是值的長度不是欄位名，新的帶位元組操作自動
+涵蓋；是哪個檔案由 `document_version` 的 BLAKE3 回答（那是落地位元組的雜湊）。
+
+**用 MCP 不是主管特權（0017、0018）**：`issue_my_api_token` 不收 `actor`／
+`actor_role`，一律取自 session，所以那把 Token 能做的事與本人完全相同。所有權的鍵
+是 `api_token.owner_employee_id`（`actor` 是顯示名稱、會同名，不能當鍵），只有自助
+核發會寫入；`revoke_my_api_token` 把它寫進 `WHERE`，別人的 id 是「查無此列」。
+同一欄也是 `mcp::token_identity` 取得 `employee_id` 的唯一來源——不從姓名猜，
+老闆代發的 Token 沒有 owner，自助操作對它一律回「尚未連結員工資料」。0018 因此
+才把五個唯讀自助工具對 AI 打開；寫入類與薪資明細維持關閉。
 
 **新增操作時 migration 的 `mcp_tool_grant` 要同步**：`laysi-ops` 有測試以
-`include_str!` 直接讀 0008／0009／0012／0014，比對 Registry 與 grant 的名稱集合。
-這條測試是因為 0008 種了 15 筆 grant 卻只實作 10 個操作才補上的。
+`include_str!` 直接讀 0008／0009／0012／0014／0015／0016／0017，比對 Registry 與
+grant 的名稱集合（0020 也在裡面）。0018 只 UPDATE 既有 grant、不新增，所以不在那份清單裡。這條測試是因為 0008 種了 15 筆 grant 卻只實作 10 個操作才補上的。
+改寫既有 permission 的 migration（0015、0016、0017）在測試的重播清單裡要按順序排在最後，
+理由與 PostgreSQL 最後套用它們相同。

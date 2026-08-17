@@ -14,7 +14,6 @@ interface Props {
   onChanged: () => void;
 }
 
-/** Human-readable batch status. */
 const BATCH_LABEL: Record<ImportBatchRow['status'], string> = {
   preview: '預覽，尚未寫入',
   committed: '已匯入',
@@ -105,38 +104,40 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
         <div className="split-columns split-columns--wide-left">
           <section>
             <h3 className="section-title">匯入來源</h3>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>來源</th>
-                  <th>格式</th>
-                  <th>頻率</th>
-                  <th className="align-right">狀態</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.sources.map((s) => (
-                  <tr key={s.code} className={s.supported ? undefined : 'row--waiting'}>
-                    <td>
-                      {s.label}
-                      <span className="cell-hint cell-hint--block">{s.note}</span>
-                    </td>
-                    <td className="cell-accounts">{s.format}</td>
-                    <td className="cell-accounts">{s.cadence}</td>
-                    <td className="align-right">
-                      {s.supported ? (
-                        <span className="tag tag--warn tag--static">可匯入</span>
-                      ) : (
-                        <span className="tag tag--pale tag--static">尚未實作</span>
-                      )}
-                      {s.last_batch_no && (
-                        <span className="cell-hint cell-hint--block num">{s.last_batch_no}</span>
-                      )}
-                    </td>
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>來源</th>
+                    <th>格式</th>
+                    <th>頻率</th>
+                    <th className="align-right">狀態</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.sources.map((s) => (
+                    <tr key={s.code} className={s.supported ? undefined : 'row--waiting'}>
+                      <td>
+                        {s.label}
+                        <span className="cell-hint cell-hint--block">{s.note}</span>
+                      </td>
+                      <td className="cell-accounts">{s.format}</td>
+                      <td className="cell-accounts">{s.cadence}</td>
+                      <td className="align-right">
+                        {s.supported ? (
+                          <span className="tag tag--warn tag--static">可匯入</span>
+                        ) : (
+                          <span className="tag tag--pale tag--static">尚未實作</span>
+                        )}
+                        {s.last_batch_no && (
+                          <span className="cell-hint cell-hint--block num">{s.last_batch_no}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
             <div className="toolbar doc-card__actions">
               <input
@@ -191,99 +192,103 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
                 </div>
 
                 {preview.batch.issues.length > 0 && (
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>列</th>
-                        <th>問題</th>
-                        <th>更正方式</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {preview.batch.issues.map((i, n) => (
-                        <tr key={n} className={i.severity === 'error' ? 'row--pending' : undefined}>
-                          <td className="num">第 {i.row_no} 列</td>
-                          <td>
-                            <span
-                              className={`tag tag--static${i.severity === 'error' ? ' tag--bad' : ' tag--pale'}`}
-                            >
-                              {i.severity === 'error' ? '錯誤' : '提醒'}
-                            </span>{' '}
-                            {i.issue}
-                          </td>
-                          <td className="cell-accounts">{i.fix}</td>
+                  <div className="table-scroll">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>列</th>
+                          <th>問題</th>
+                          <th>更正方式</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {preview.batch.issues.map((i, n) => (
+                          <tr key={n} className={i.severity === 'error' ? 'row--pending' : undefined}>
+                            <td className="num">第 {i.row_no} 列</td>
+                            <td>
+                              <span
+                                className={`tag tag--static${i.severity === 'error' ? ' tag--bad' : ' tag--pale'}`}
+                              >
+                                {i.severity === 'error' ? '錯誤' : '提醒'}
+                              </span>{' '}
+                              {i.issue}
+                            </td>
+                            <td className="cell-accounts">{i.fix}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </>
             )}
 
             <h3 className="section-title section-title--spaced">匯入紀錄</h3>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>批次</th>
-                  <th>檔案</th>
-                  <th>結果</th>
-                  <th className="align-right">動作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.batches.map((b) => (
-                  <tr key={b.batch_no}>
-                    <td className="num cell-nowrap">
-                      {b.batch_no}
-                      <span className="cell-hint cell-hint--block">{b.source_label}</span>
-                    </td>
-                    <td>
-                      {b.file_name}
-                      <span className="cell-hint cell-hint--block">
-                        {b.row_count} 列 · {b.created_by}
-                      </span>
-                    </td>
-                    <td>
-                      <span
-                        className={`tag tag--static${b.status === 'committed' ? ' tag--warn' : ' tag--pale'}`}
-                      >
-                        {BATCH_LABEL[b.status]}
-                      </span>
-                      {b.voucher_nos.length > 0 && (
-                        <span className="cell-hint cell-hint--block num">
-                          {b.voucher_nos.length} 張傳票
-                        </span>
-                      )}
-                      {b.error_count > 0 && (
-                        <span className="cell-hint cell-hint--block">
-                          {b.error_count} 個錯誤
-                        </span>
-                      )}
-                    </td>
-                    <td className="align-right">
-                      {b.status === 'committed' ? (
-                        <button
-                          className="btn btn--compact btn--secondary"
-                          disabled={busy}
-                          onClick={() => void rollback(b.batch_no)}
-                        >
-                          回滾
-                        </button>
-                      ) : (
-                        <span className="cell-muted">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {data.batches.length === 0 && (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
                   <tr>
-                    <td colSpan={4} className="cell-muted">
-                      尚無匯入紀錄。
-                    </td>
+                    <th>批次</th>
+                    <th>檔案</th>
+                    <th>結果</th>
+                    <th className="align-right">動作</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.batches.map((b) => (
+                    <tr key={b.batch_no}>
+                      <td className="num cell-nowrap">
+                        {b.batch_no}
+                        <span className="cell-hint cell-hint--block">{b.source_label}</span>
+                      </td>
+                      <td>
+                        {b.file_name}
+                        <span className="cell-hint cell-hint--block">
+                          {b.row_count} 列 · {b.created_by}
+                        </span>
+                      </td>
+                      <td>
+                        <span
+                          className={`tag tag--static${b.status === 'committed' ? ' tag--warn' : ' tag--pale'}`}
+                        >
+                          {BATCH_LABEL[b.status]}
+                        </span>
+                        {b.voucher_nos.length > 0 && (
+                          <span className="cell-hint cell-hint--block num">
+                            {b.voucher_nos.length} 張傳票
+                          </span>
+                        )}
+                        {b.error_count > 0 && (
+                          <span className="cell-hint cell-hint--block">
+                            {b.error_count} 個錯誤
+                          </span>
+                        )}
+                      </td>
+                      <td className="align-right">
+                        {b.status === 'committed' ? (
+                          <button
+                            className="btn btn--compact btn--secondary"
+                            disabled={busy}
+                            onClick={() => void rollback(b.batch_no)}
+                          >
+                            回滾
+                          </button>
+                        ) : (
+                          <span className="cell-muted">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {data.batches.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="cell-muted">
+                        尚無匯入紀錄。
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
             <p className="hint">{data.commit_note}</p>
           </section>
 
@@ -291,7 +296,6 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
             <h3 className="section-title">對外整合</h3>
             <p className="section-note">
               {data.live_integrations} / {data.integrations.length} 條實際運作中。
-              整合是否接上取自資料表欄位，非畫面文案。
             </p>
             <div className="card fact-card">
               {data.integrations.map((i) => (
@@ -310,8 +314,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
               ))}
             </div>
             <p className="hint">
-              原型將六條整合皆標示為「啟用」，該狀態來自設計稿而非系統實況。本頁照實際狀態
-              標示：將未接上的整合標為啟用，等同對外承諾不存在的功能。
+              標為「未啟用」的整合尚未接上，不會有任何資料進出。
             </p>
           </section>
         </div>

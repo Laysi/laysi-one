@@ -80,9 +80,12 @@ fn token_identity(token: &laysi_store::ApiToken) -> crate::auth::VerifiedIdentit
     crate::auth::VerifiedIdentity {
         actor: token.actor.clone(),
         actor_role: token.actor_role.clone(),
-        // api_token has no user_account link, so an employee record must not be
-        // guessed from a name.
-        employee_id: None,
+        // Only from the column an employee set on their own token through
+        // `issue_my_api_token`. A token the owner issued on the
+        // installation's behalf leaves it NULL and stays unlinked: the
+        // employee is still never guessed from `actor`, which is a display
+        // name two people can share.
+        employee_id: token.owner_employee_id,
     }
 }
 
@@ -420,6 +423,7 @@ mod tests {
                 created_by: "整合測試",
                 rotate_days: None,
                 expiry_note: "測試結束即撤銷",
+                owner_employee_id: None,
             })
             .await
             .expect("應可簽發測試 MCP token");
@@ -499,6 +503,7 @@ mod tests {
                 created_by: "整合測試",
                 rotate_days: Some(1),
                 expiry_note: "測試用：1 天後過期",
+                owner_employee_id: None,
             })
             .await
             .expect("應可簽發測試 MCP token");
@@ -558,6 +563,7 @@ mod tests {
             expiry_note: String::new(),
             revoked_at: revoked.then(Utc::now),
             revoked_by: String::new(),
+            owner_employee_id: None,
         }
     }
 

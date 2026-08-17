@@ -113,8 +113,8 @@ impl OpCtx {
     pub fn objects(&self) -> Result<&laysi_store::ObjectStore, OpError> {
         self.objects.as_ref().ok_or_else(|| {
             OpError::BadInput(
-                "尚未接上物件儲存：請設定 RUSTFS_ENDPOINT、RUSTFS_ACCESS_KEY、\
-                 RUSTFS_SECRET_KEY 後重啟伺服器。系統不會改以資料庫存放檔案。"
+                "尚未接上物件儲存，文件功能無法使用；請洽系統管理員完成設定。\
+                 系統不會改以資料庫存放檔案。"
                     .into(),
             )
         })
@@ -264,6 +264,36 @@ impl Default for Registry {
     }
 }
 
+/// Longest string kept verbatim in the audit trail. Longer ones are recorded
+/// by length instead of by value.
+const MAX_AUDITED_STRING: usize = 512;
+
+/// Parameters as the audit trail should hold them.
+///
+/// File contents travel through the parameters as base64, so without this
+/// every upload would leave a second copy of the file in `ai_audit_log`,
+/// megabytes at a time, in a table meant to be read by people. Which file it
+/// was is still answerable: `document_version` keeps the BLAKE3, and that hash
+/// is over the bytes that landed rather than over the bytes that were sent.
+///
+/// The rule is the length of the value, not the name of the field, so a
+/// future operation that carries bytes is covered without being listed here.
+fn redact_for_audit(input: &Value) -> Value {
+    match input {
+        Value::String(text) if text.len() > MAX_AUDITED_STRING => {
+            Value::String(format!("[內容 {} 位元組，未存入稽核紀錄]", text.len()))
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_for_audit).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), redact_for_audit(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 impl Registry {
     pub fn new() -> Self {
         Self { ops: ops::all() }
@@ -336,7 +366,7 @@ impl Registry {
                         op.risk().as_db(),
                         ctx.prompt.as_deref(),
                         ctx.channel.as_db(),
-                        &input,
+                        &redact_for_audit(&input),
                         &out.summary,
                         "ok",
                         out.voucher_no.as_deref(),
@@ -368,7 +398,7 @@ impl Registry {
                 op.risk().as_db(),
                 ctx.prompt.as_deref(),
                 ctx.channel.as_db(),
-                input,
+                &redact_for_audit(input),
                 summary,
                 outcome,
                 None,
@@ -383,6 +413,25 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An uploaded file must not land in the audit table a second time, and
+    /// everything a person reads the audit for must survive that.
+    #[test]
+    fn audited_parameters_keep_the_short_fields_and_drop_the_file() {
+        let content = "A".repeat(MAX_AUDITED_STRING + 1);
+        let redacted = redact_for_audit(&serde_json::json!({
+            "claim_no": "EX2608-004",
+            "file_name": "高鐵票.pdf",
+            "content_base64": content,
+            "nested": [{ "content_base64": content }],
+        }));
+
+        assert_eq!(redacted["claim_no"], serde_json::json!("EX2608-004"));
+        assert_eq!(redacted["file_name"], serde_json::json!("高鐵票.pdf"));
+        let marker = format!("[內容 {} 位元組，未存入稽核紀錄]", content.len());
+        assert_eq!(redacted["content_base64"], serde_json::json!(marker));
+        assert_eq!(redacted["nested"][0]["content_base64"], serde_json::json!(marker));
+    }
 
     #[test]
     fn registry_holds_every_operation_exactly_once() {
@@ -443,9 +492,10 @@ mod tests {
             .collect()
     }
 
-    /// 0008 and 0009 seed the HR and self-service grants. One operation short
-    /// and AI sees a switch it cannot call; one too many and there is no
-    /// default MCP policy for it. The two sets must match exactly.
+    /// 0008, 0009, 0015, 0016, 0017 and 0020 seed the HR and self-service
+    /// grants. One
+    /// operation short and AI sees a switch it cannot call; one too many and
+    /// there is no default MCP policy for it. The two sets must match exactly.
     #[test]
     fn hr_and_self_service_registry_matches_the_migration_grants() {
         use std::collections::BTreeSet;
@@ -453,13 +503,17 @@ mod tests {
         let migration_names: BTreeSet<&str> = [
             include_str!("../../../migrations/0008_hr_employees_attendance_payroll.sql"),
             include_str!("../../../migrations/0009_staff_self_service.sql"),
+            include_str!("../../../migrations/0015_self_service_expense_claim.sql"),
+            include_str!("../../../migrations/0016_attendance_punch.sql"),
+            include_str!("../../../migrations/0017_self_service_mcp.sql"),
+            include_str!("../../../migrations/0020_expense_claim_receipt.sql"),
         ]
         .into_iter()
         .flat_map(grant_names)
         .collect();
         assert!(
             !migration_names.is_empty(),
-            "沒有從 0008／0009 migration 抓到任何人資或自助工具"
+            "沒有從 0008／0009／0015／0016／0017／0020 migration 抓到任何人資或自助工具"
         );
 
         let hr_modules = [
@@ -485,7 +539,7 @@ mod tests {
         );
         assert_eq!(
             registry_names, migration_names,
-            "Registry 的人資／自助操作與 0008／0009 migration 種下的 mcp_tool_grant 不一致"
+            "Registry 的人資／自助操作與 0008／0009／0015／0016／0017 migration 種下的 mcp_tool_grant 不一致"
         );
     }
 
@@ -609,6 +663,13 @@ mod tests {
             include_str!("../../../migrations/0011_permission_coverage.sql"),
             include_str!("../../../migrations/0012_master_data_ops.sql"),
             include_str!("../../../migrations/0014_voucher_correction.sql"),
+            // 0015 onwards rewrite permissions earlier migrations wrote, so
+            // they have to be replayed in order for the same reason
+            // PostgreSQL applies them in order.
+            include_str!("../../../migrations/0015_self_service_expense_claim.sql"),
+            include_str!("../../../migrations/0016_attendance_punch.sql"),
+            include_str!("../../../migrations/0017_self_service_mcp.sql"),
+            include_str!("../../../migrations/0020_expense_claim_receipt.sql"),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {

@@ -1,34 +1,21 @@
-/* LAYSI ONE - CLASSICAL DESIGN SYSTEM
- *
- * Rules (see the frontend contract in docs/architecture.md):
- *   1. Components may only reference var(--...). No hex, font name or px is
- *      hard-coded in .tsx or in other CSS rules. A new value gets a variable
- *      here first.
- *   2. Compose with lines and rules, never filled blocks. Buttons are outlined.
- *   3. Corner radius 4px (--radius-md); numbers are always tabular-nums.
- */
-
 :root {
-  /* Neutral scale
-     Light to dark: 100 is the card surface, 200 the page, 300 the sidebar. */
-  --color-neutral-100: #f8f4f4; /* card, header and input surfaces */
-  --color-neutral-200: #f3f2f2; /* page surface */
-  --color-neutral-300: #eae9e9; /* sidebar surface */
-  --color-neutral-400: #bab6b6; /* disabled marks */
-  --color-neutral-500: #9b9797; /* group headings, least prominent text */
-  --color-neutral-700: #605d5d; /* secondary text */
-  --color-neutral-800: #444141; /* unselected nav text, secondary button text */
-  --color-neutral-900: #201f1d; /* primary text */
-  --color-neutral-950: #2d2b2b; /* toast and phone frame surface */
 
-  /* Accent (one accent, four depths) */
-  --color-accent: #b68235; /* rules and indicators */
-  --color-accent-mid: #a06f24; /* hovered links, mid-depth rules */
-  --color-accent-deep: #7d5411; /* accent text and links */
-  --color-accent-darkest: #5a3b0a; /* body text inside accent blocks */
-  --color-accent-note: #7a6237; /* explanatory text in AI hint blocks */
+  --color-neutral-100: #f8f4f4;
+  --color-neutral-200: #f3f2f2;
+  --color-neutral-300: #eae9e9;
+  --color-neutral-400: #bab6b6;
+  --color-neutral-500: #9b9797;
+  --color-neutral-700: #605d5d;
+  --color-neutral-800: #444141;
+  --color-neutral-900: #201f1d;
+  --color-neutral-950: #2d2b2b;
 
-  /* Semantic aliases */
+  --color-accent: #b68235;
+  --color-accent-mid: #a06f24;
+  --color-accent-deep: #7d5411;
+  --color-accent-darkest: #5a3b0a;
+  --color-accent-note: #7a6237;
+
   --color-bg: var(--color-neutral-200);
   --color-surface: var(--color-neutral-300);
   --color-card: var(--color-neutral-100);
@@ -36,17 +23,15 @@
   --color-ink-muted: var(--color-neutral-700);
   --color-ink-inverse: var(--color-neutral-100);
 
-  /* Rules (composition relies on lines, not fills) */
-  --rule-soft: rgba(32, 31, 29, 0.1); /* table row separators */
-  --rule: rgba(32, 31, 29, 0.16); /* block rules */
-  --rule-strong: rgba(32, 31, 29, 0.28); /* inputs and secondary buttons */
-  --rule-accent: rgba(182, 130, 53, 0.55); /* accent dashed rules */
+  --rule-soft: rgba(32, 31, 29, 0.1);
+  --rule: rgba(32, 31, 29, 0.16);
+  --rule-strong: rgba(32, 31, 29, 0.28);
+  --rule-accent: rgba(182, 130, 53, 0.55);
   --rule-accent-soft: rgba(182, 130, 53, 0.32);
   --rule-width: 1px;
   --rule-width-tab: 1.5px;
   --rule-width-marker: 2px;
 
-  /* Tints (status hints only, never large fills) */
   --wash-accent-faint: rgba(182, 130, 53, 0.05);
   --wash-accent-soft: rgba(182, 130, 53, 0.06);
   --wash-accent: rgba(182, 130, 53, 0.1);
@@ -57,29 +42,16 @@
   --wash-selection: rgba(182, 130, 53, 0.3);
   --wash-scrollbar: rgba(32, 31, 29, 0.18);
 
-  /* Typefaces
-   *
-   * The Latin faces carry no CJK glyphs, so every Chinese character is resolved
-   * by the next entry: Noto Sans TC, loaded in index.html. Chinese is set sans
-   * while Latin keeps its serif; a Han serif carries too much stroke contrast
-   * to stay crisp in dense tables at 13-15px. The chain then falls back to
-   * system CJK sans faces, never to generic serif, which resolves to PMingLiU
-   * on Windows and is unreadable at these sizes. */
   --font-display: 'Cormorant Garamond', 'Noto Sans TC', 'PingFang TC',
     'Microsoft JhengHei', 'Noto Sans CJK TC', sans-serif;
   --font-body: 'Lora', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei',
     'Noto Sans CJK TC', sans-serif;
   --font-mono: ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
+  --font-numeric: 'Source Serif 4', 'Lora', 'Noto Sans TC', 'PingFang TC',
+    'Microsoft JhengHei', 'Noto Sans CJK TC', serif;
   --weight-regular: 400;
   --weight-semibold: 600;
 
-  /* Type scale
-   *
-   * Sized for Chinese, not Latin. A Han character carries far more strokes in
-   * the same em box than a letter does, so the sizes that read comfortably in
-   * English collapse in Chinese: 12px is the floor for auxiliary text and 14px
-   * the floor for body copy. The display sizes are unchanged; they were never
-   * the problem. */
   --text-2xs: 12px;
   --text-xs: 12px;
   --text-sm: 13px;
@@ -109,7 +81,6 @@
   --tracking-widest: 0.1em;
   --tracking-caps: 0.14em;
 
-  /* Spacing */
   --space-2xs: 2px;
   --space-xs: 4px;
   --space-sm: 6px;
@@ -127,44 +98,53 @@
   --space-9xl: 34px;
   --space-10xl: 60px;
 
-  /* Radii */
   --radius-xs: 2px;
   --radius-sm: 3px;
   --radius-md: 4px;
   --radius-lg: 6px;
 
-  /* Shadows (overlays only; the page body has none) */
   --shadow-overlay: 0 12px 32px rgba(45, 43, 43, 0.22);
   --shadow-toast: 0 12px 32px rgba(45, 43, 43, 0.3);
 
-  /* Layout sizes */
   --sidebar-width: 238px;
+
+  --sidebar-drawer-width: 300px;
   --aside-width: 340px;
   --drawer-width: 660px;
   --drawer-max-width: 94vw;
   --chart-height: 150px;
+  --date-input-col: 158px;
+  --time-input-col: 116px;
   --entry-amount-col: 130px;
   --entry-action-col: 28px;
   --todo-count-col: 34px;
-  /* A financial statement is a document; a fixed width makes it read like one */
+
   --report-width: 720px;
   --report-code-col: 44px;
   --code-input-col: 88px;
   --search-input-col: 280px;
-  /* Login is a form, not a layout: narrow keeps two fields off the full width */
-  --login-width: 380px;
 
-  /* Motion */
+  --login-width: 380px;
+  --punch-width: 460px;
+
+  --tap-target: 40px;
+
+  --text-field-touch: 16px;
+  --table-min-narrow: 460px;
+  --table-min-wide: 640px;
+  --table-min-matrix: 820px;
+
   --motion-fast: 0.15s;
   --motion-base: 0.2s;
   --motion-slow: 0.25s;
   --easing: ease;
+
+  --z-nav-scrim: 30;
+  --z-nav: 31;
   --z-drawer: 40;
   --z-modal: 50;
   --z-toast: 60;
 }
-
-/* Base */
 
 *,
 *::before,
@@ -252,12 +232,6 @@ textarea {
   }
 }
 
-/* Typographic primitives */
-
-.num {
-  font-variant-numeric: tabular-nums;
-}
-
 .page-title {
   font-family: var(--font-display);
   font-weight: var(--weight-regular);
@@ -299,8 +273,6 @@ textarea {
   margin-top: var(--space-2xl);
 }
 
-/* Buttons (outlined, never filled) */
-
 .btn {
   cursor: pointer;
   background: transparent;
@@ -319,6 +291,10 @@ textarea {
 
 .btn--compact {
   padding: var(--space-sm) var(--space-2xl);
+}
+
+.btn--spaced {
+  margin-top: var(--space-3xl);
 }
 
 .btn--ghost {
@@ -399,7 +375,6 @@ textarea {
   color: var(--color-ink);
 }
 
-/* filter chip */
 .chip {
   cursor: pointer;
   background: transparent;
@@ -423,7 +398,6 @@ textarea {
   color: var(--color-accent-deep);
 }
 
-/* status label */
 .tag {
   font-size: var(--text-sm);
   white-space: nowrap;
@@ -449,8 +423,6 @@ textarea {
   background: var(--wash-accent-bold);
   color: var(--color-accent-darkest);
 }
-
-/* Cards */
 
 .card {
   border: var(--rule-width) solid var(--rule);
@@ -490,13 +462,14 @@ textarea {
   grid-template-columns: repeat(4, 1fr);
 }
 
-/* Ageing is four buckets plus a total; the total sits beside them so the
-   relationship is visible. */
+.stat-grid--two {
+  grid-template-columns: repeat(2, 1fr);
+}
+
 .stat-grid--five {
   grid-template-columns: repeat(5, 1fr);
 }
 
-/* The total cell is separated by an accent rule, still without a fill. */
 .stat-card--total {
   border-color: var(--color-accent);
 }
@@ -511,11 +484,11 @@ textarea {
   color: var(--color-ink-muted);
 }
 
-/* Layout shell */
-
 .shell {
   display: flex;
+
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
@@ -634,11 +607,16 @@ textarea {
   font-size: var(--text-base);
 }
 
-/* Sign out. Outlined, the same vocabulary as other buttons, scaled to the
-   sidebar. */
-.sidebar__signout {
-  cursor: pointer;
+.sidebar__account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
   margin-top: var(--space-md);
+}
+
+.sidebar__signout,
+.sidebar__admin {
+  cursor: pointer;
   background: transparent;
   border: var(--rule-width) solid var(--rule-accent);
   border-radius: var(--radius-md);
@@ -649,15 +627,15 @@ textarea {
   padding: var(--space-sm) var(--space-lg);
 }
 
-.sidebar__signout:hover {
+.sidebar__signout:hover,
+.sidebar__admin:hover {
   background: var(--wash-accent-strong);
 }
 
-.sidebar__attribution {
-  margin-top: var(--space-lg);
-  font-size: var(--text-2xs);
-  color: var(--color-neutral-500);
-  line-height: var(--leading-tight);
+.sidebar__admin--on {
+  color: var(--color-ink);
+  border-color: var(--color-accent);
+  background: var(--wash-accent-strong);
 }
 
 .main {
@@ -677,7 +655,24 @@ textarea {
   background: var(--color-card);
 }
 
-.header__period {
+.header__section {
+  flex: none;
+  font-family: var(--font-display);
+  font-size: var(--display-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-widest);
+}
+
+.header__section:has(+ .header__meta) {
+  padding-right: var(--space-3xl);
+  border-right: var(--rule-width) solid var(--rule);
+}
+
+.header__meta {
+  display: contents;
+}
+
+.header__context {
   font-family: var(--font-display);
   font-size: var(--text-xl);
   font-weight: var(--weight-semibold);
@@ -697,6 +692,42 @@ textarea {
   gap: var(--space-xl);
 }
 
+.header__menu {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--tap-target);
+  height: var(--tap-target);
+  margin-left: calc(-1 * var(--space-md));
+  cursor: pointer;
+  background: transparent;
+  border: var(--rule-width) solid var(--rule-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-neutral-800);
+  font-size: var(--text-xl);
+  line-height: 1;
+}
+
+.header__menu:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent-deep);
+}
+
+.header__brand {
+  display: none;
+  align-items: center;
+}
+
+.scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-nav-scrim);
+  background: var(--wash-ink);
+  animation: laysi-fade-in var(--motion-fast) var(--easing);
+}
+
 .spacer {
   flex: 1;
 }
@@ -706,8 +737,6 @@ textarea {
   overflow-y: auto;
   padding: var(--space-8xl) var(--space-8xl) var(--space-10xl);
 }
-
-/* Brand wordmark */
 
 .brand-mark {
   display: block;
@@ -724,8 +753,6 @@ textarea {
   color: var(--color-neutral-500);
   line-height: var(--leading-tight);
 }
-
-/* Dashboard */
 
 .dash-columns {
   display: grid;
@@ -850,7 +877,18 @@ textarea {
   font-size: var(--text-base);
 }
 
-/* Tables */
+.table-scroll {
+  overflow-x: auto;
+
+  overscroll-behavior-x: contain;
+}
+
+.dash-columns > *,
+.split-columns > *,
+.recon-columns > *,
+.stat-grid > * {
+  min-width: 0;
+}
 
 .table {
   width: 100%;
@@ -878,6 +916,16 @@ textarea {
 .table th:last-child,
 .table td:last-child {
   padding-right: 0;
+}
+
+.table.table--inset th:first-child,
+.table.table--inset td:first-child {
+  padding-left: var(--space-lg);
+}
+
+.table.table--inset th:last-child,
+.table.table--inset td:last-child {
+  padding-right: var(--space-lg);
 }
 
 .table .align-right {
@@ -908,11 +956,109 @@ textarea {
   align-items: center;
 }
 
-/* Settlement: subsidiary and general ledger reconciliation */
+.toolbar--spaced {
+  margin-top: var(--space-3xl);
+}
 
-/* This line is the live proof that outstanding receivables equal the 1131
-   ledger balance, so it is always on screen rather than appearing only on
-   error. Quiet when they agree, accented when they do not. */
+.punch-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-4xl);
+  width: 100%;
+  max-width: var(--punch-width);
+  margin: 0 auto var(--space-6xl);
+  padding: var(--space-5xl) var(--space-6xl);
+  text-align: center;
+}
+
+.punch-now {
+  min-width: 0;
+}
+
+.punch-now__label {
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+}
+
+.punch-now__clock {
+  font-family: var(--font-display);
+  font-size: var(--display-3xl);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-tight);
+  margin-top: var(--space-2xs);
+  line-height: var(--leading-tight);
+}
+
+.punch-now__date {
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+  margin-top: var(--space-2xs);
+}
+
+.punch-actions {
+  display: grid;
+}
+
+.btn--punch {
+  padding: var(--space-3xl) var(--space-6xl);
+  font-size: var(--display-xs);
+  letter-spacing: var(--tracking-wide);
+  border-width: var(--rule-width-tab);
+}
+
+.punch-done {
+  padding: var(--space-3xl) var(--space-6xl);
+  font-family: var(--font-display);
+  font-size: var(--display-xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-ink-muted);
+  border: var(--rule-width) dashed var(--rule);
+}
+
+.punch-state {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-7xl);
+  padding-top: var(--space-3xl);
+  border-top: var(--rule-width) solid var(--rule-soft);
+}
+
+.punch-state__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.punch-state__value {
+  font-family: var(--font-display);
+  font-size: var(--display-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.punch-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3xl);
+  font-size: var(--text-sm-plus);
+}
+
+.punch-note .input {
+  flex: 1 1 auto;
+  text-align: center;
+}
+
+.cell-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
 .recon {
   border-left: var(--rule-width-marker) solid var(--rule-accent-soft);
   padding: var(--space-md) 0 var(--space-md) var(--space-xl);
@@ -928,15 +1074,11 @@ textarea {
   background: var(--wash-accent-soft);
 }
 
-/* Settlement: due dates and hints inside tables */
-
 .due {
   font-variant-numeric: tabular-nums;
   color: var(--color-neutral-800);
 }
 
-/* Overdue is marked with an underline rather than a red block: composition
-   relies on lines. */
 .due--over {
   color: var(--color-accent-deep);
   border-bottom: var(--rule-width) solid var(--color-accent);
@@ -948,21 +1090,16 @@ textarea {
   color: var(--color-neutral-500);
 }
 
-/* Notes take their own line: wrapping an amount column splits the number,
-   which is worse than one extra line. */
 .cell-hint--block {
   display: block;
   margin-left: 0;
   margin-top: var(--space-2xs);
 }
 
-/* Document numbers do not wrap: KX-38472940 split across two lines is no
-   longer one number. */
 .cell-nowrap {
   white-space: nowrap;
 }
 
-/* Label for marking only; not clickable. */
 .tag--static {
   cursor: default;
   margin-left: var(--space-md);
@@ -979,8 +1116,6 @@ textarea {
   color: var(--color-neutral-500);
 }
 
-/* Payables: selection and batch total */
-
 .col-check {
   width: var(--space-9xl);
 }
@@ -989,8 +1124,6 @@ textarea {
   cursor: pointer;
 }
 
-/* Rows whose source voucher is unposted: present, but not in the total. Dimmed
-   rather than hidden, so the user can see why one is excluded. */
 .table tr.row--waiting td {
   color: var(--color-neutral-500);
 }
@@ -1037,8 +1170,6 @@ textarea {
   max-width: var(--drawer-width);
   text-align: right;
 }
-
-/* Banking: transactions and match candidates */
 
 .recon-columns {
   display: grid;
@@ -1111,8 +1242,6 @@ textarea {
   border-left: var(--rule-width-marker) solid transparent;
 }
 
-/* A candidate matching on both amount and date deserves to stand out, still
-   using lines alone. */
 .candidate--exact {
   border-left-color: var(--color-accent);
   padding-left: var(--space-lg);
@@ -1137,8 +1266,6 @@ textarea {
   text-align: right;
 }
 
-/* Tax and assets: two-column layout */
-
 .split-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1146,19 +1273,17 @@ textarea {
   align-items: start;
 }
 
-/* List left, form right: the list needs its amount column, so the left side is
-   wider. */
 .split-columns--wide-left {
   grid-template-columns: 1.3fr 1fr;
 }
 
-/* Main content left, notes right. The right column has a fixed width and does
-   not stretch with the main content. */
 .split-columns--aside {
   grid-template-columns: 1fr var(--aside-width);
 }
 
-/* E-invoices: issuing form */
+.split-columns--spaced {
+  margin-top: var(--space-8xl);
+}
 
 .form-card {
   padding: var(--space-5xl);
@@ -1178,8 +1303,6 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
-/* The total row has no frame, only a larger size: composition relies on lines
-   and type, not fills. */
 .form-line--total {
   border-top: 0;
   padding-top: 0;
@@ -1191,14 +1314,61 @@ textarea {
   font-size: var(--display-sm);
 }
 
+.file-input {
+  font-family: var(--font-body);
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+  padding: var(--space-base) 0;
+}
+
+.file-input::file-selector-button {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-plus);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-ink);
+  background: transparent;
+  border: var(--rule-width) solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-2xl);
+  margin-right: var(--space-2xl);
+  cursor: pointer;
+}
+
+.file-input::file-selector-button:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent-deep);
+}
+
+.file-input--hidden {
+  display: none;
+}
+
+.file-list {
+  list-style: none;
+  margin: var(--space-base) 0 0;
+  padding: 0;
+}
+
+.file-list__item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2xl);
+  padding: var(--space-sm) 0;
+  border-top: var(--rule-width) solid var(--rule-soft);
+  font-size: var(--text-sm-plus);
+}
+
+.file-list__name {
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
 .form-note {
   font-size: var(--text-sm-plus);
   color: var(--color-ink-muted);
   line-height: var(--leading-normal);
   margin: 0;
 }
-
-/* Tax: the form 401 return */
 
 .doc-card {
   padding: var(--space-6xl) var(--space-7xl);
@@ -1238,13 +1408,11 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
-/* The tax is derived from the amount above it, and the indent shows that. */
 .doc-row--sub {
   padding-left: var(--space-5xl);
   color: var(--color-ink-muted);
 }
 
-/* The concluding row: a heavier rule above and a larger size, still no fill. */
 .doc-row--total {
   border-bottom: 0;
   border-top: var(--rule-width-marker) solid var(--color-accent);
@@ -1255,8 +1423,6 @@ textarea {
   font-size: var(--display-xs);
   color: var(--color-accent-deep);
 }
-
-/* Tax: withholding by income type */
 
 .wht-list {
   border-top: var(--rule-width) solid var(--rule);
@@ -1292,17 +1458,11 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
-/* Financial statements */
-
-/* A statement is a document, not a dashboard; a fixed width makes it read like
-   one. */
 .report-card {
   max-width: var(--report-width);
   margin-bottom: var(--space-6xl);
 }
 
-/* Section headings are set apart by size and space alone, with no frame or
-   fill. */
 .report-head {
   font-family: var(--font-display);
   font-weight: var(--weight-semibold);
@@ -1316,15 +1476,12 @@ textarea {
   margin-top: var(--space-lg);
 }
 
-/* The account code precedes the name, aligned in a fixed-width column. */
 .report-code {
   display: inline-block;
   width: var(--report-code-col);
   color: var(--color-neutral-500);
   font-size: var(--text-sm-plus);
 }
-
-/* Settings: fact list */
 
 .fact-card {
   padding: var(--space-3xl) var(--space-5xl);
@@ -1344,7 +1501,6 @@ textarea {
   border-bottom: 0;
 }
 
-/* Longer values (dimensions, control rules, tokens) stack vertically. */
 .fact--stacked {
   flex-direction: column;
   align-items: stretch;
@@ -1386,8 +1542,6 @@ textarea {
   flex: 1;
 }
 
-/* Roles: permission matrix */
-
 .table .align-center,
 .table th.align-center {
   text-align: center;
@@ -1397,8 +1551,6 @@ textarea {
   vertical-align: top;
 }
 
-/* One permission cell. Three states, distinguished by symbol and rule with no
-   fill. */
 .perm {
   cursor: pointer;
   background: transparent;
@@ -1430,8 +1582,6 @@ textarea {
   cursor: wait;
   opacity: 0.45;
 }
-
-/* Roles: approval flow */
 
 .flow {
   display: flex;
@@ -1470,10 +1620,6 @@ textarea {
   color: var(--color-accent);
 }
 
-/* Security: the one-time plaintext */
-
-/* The plaintext is visible only once, so it earns a prominent frame, still
-   drawn with lines alone. */
 .secret-card {
   border-color: var(--color-accent);
   padding: var(--space-4xl) var(--space-5xl);
@@ -1505,10 +1651,6 @@ textarea {
   margin-top: var(--space-md);
 }
 
-/* Expense claims: approval steps */
-
-/* The cell that expands the detail. It looks like a link but is not
-   navigation, so it is a button. */
 .link-cell {
   cursor: pointer;
   background: transparent;
@@ -1526,8 +1668,6 @@ textarea {
   border-bottom-color: var(--color-accent);
 }
 
-/* One subheading per step. Approved and pending are distinguished by line and
-   symbol, with no fill. */
 .step-chip {
   display: block;
   margin-top: var(--space-2xs);
@@ -1537,19 +1677,6 @@ textarea {
   color: var(--color-neutral-500);
 }
 
-/* Small inputs inside tables: an account code is short and a search box long,
-   and neither should fill the column. */
-.entry-input--code {
-  width: var(--code-input-col);
-  margin-right: var(--space-md);
-}
-
-.entry-input--search {
-  width: var(--search-input-col);
-}
-
-/* The file picker is hidden but has to stay in the accessibility tree;
-   display:none would remove it. */
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -1560,8 +1687,6 @@ textarea {
   clip-path: inset(50%);
   white-space: nowrap;
 }
-
-/* Drawer (create a voucher) */
 
 .overlay {
   position: fixed;
@@ -1658,7 +1783,12 @@ textarea {
 }
 
 .input--date {
-  width: var(--entry-amount-col);
+  width: var(--date-input-col);
+  font-variant-numeric: tabular-nums;
+}
+
+.input--time {
+  width: var(--time-input-col);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1741,6 +1871,15 @@ textarea {
   width: 100%;
 }
 
+.entry-input--code {
+  width: var(--code-input-col);
+  margin-right: var(--space-md);
+}
+
+.entry-input--search {
+  width: var(--search-input-col);
+}
+
 .entry-input--amount {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -1773,8 +1912,6 @@ textarea {
   border-color: rgba(182, 130, 53, 0.5);
 }
 
-/* ── Toast ────────────────────────────────────────────────────────────── */
-
 .toast {
   position: fixed;
   left: 50%;
@@ -1789,8 +1926,6 @@ textarea {
   animation: laysi-rise-in var(--motion-base) var(--easing);
   z-index: var(--z-toast);
 }
-
-/* Placeholder screens (later milestones) */
 
 .placeholder {
   border: var(--rule-width) dashed var(--rule-strong);
@@ -1809,8 +1944,6 @@ textarea {
   margin: 0 0 var(--space-md);
 }
 
-/* Loading and error states */
-
 .state-note {
   border: var(--rule-width) solid var(--rule);
   border-radius: var(--radius-md);
@@ -1825,11 +1958,6 @@ textarea {
   color: var(--color-accent-darkest);
 }
 
-/* Login */
-
-/* The only screen outside .shell. The page holds one form, so it is centred
-   with generous space and otherwise reuses the existing vocabulary: login must
-   not look like a different product. */
 .login {
   min-height: 100vh;
   display: flex;
@@ -1898,8 +2026,6 @@ textarea {
   justify-content: flex-end;
 }
 
-/* "or" sits on a rule: the two sign-in methods are alternatives, not a
-   primary and a fallback. */
 .login__alt {
   margin-top: var(--space-7xl);
   padding-top: var(--space-7xl);
@@ -1938,10 +2064,6 @@ textarea {
   color: var(--color-neutral-500);
 }
 
-/* First-run reminder (sidebar) */
-
-/* The company name is still empty. The wizard is not forced to completion, but
-   the sidebar keeps a visible way back into it. */
 .sidebar__setup {
   margin: 0 var(--space-5xl) var(--space-3xl);
   padding: var(--space-xl) var(--space-2xl);
@@ -1957,10 +2079,6 @@ textarea {
   margin: 0 0 var(--space-md);
 }
 
-/* Master data forms: shared by create and edit */
-
-/* A compact two-column form, for master data with many fields such as accounts
-   and employees. */
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1980,8 +2098,6 @@ textarea {
   line-height: var(--leading-normal);
 }
 
-/* Form-specific help text, closer to the field than .hint and without the
-   large spacing. */
 .form-warn {
   border-left: var(--rule-width-marker) solid var(--color-accent);
   padding: var(--space-md) 0 var(--space-md) var(--space-xl);
@@ -1992,10 +2108,6 @@ textarea {
   line-height: var(--leading-normal);
 }
 
-/* Centred dialog (for actions like void and reverse that need a deliberate choice) */
-
-/* Shares the backdrop with .overlay; the content is centred rather than pinned
-   to the right. */
 .overlay--center {
   justify-content: center;
   align-items: center;
@@ -2014,8 +2126,6 @@ textarea {
   animation: laysi-rise-in var(--motion-base) var(--easing);
 }
 
-/* The two options are cards side by side, forcing the difference to be read
-   before choosing, rather than two identical buttons. */
 .choice-list {
   display: flex;
   flex-direction: column;
@@ -2056,8 +2166,6 @@ textarea {
   line-height: var(--leading-normal);
 }
 
-/* First-run wizard */
-
 .wizard-steps {
   display: flex;
   gap: var(--space-6xl);
@@ -2095,4 +2203,334 @@ textarea {
   margin-top: var(--space-6xl);
   padding-top: var(--space-5xl);
   border-top: var(--rule-width) solid var(--rule);
+}
+
+.num {
+  font-family: var(--font-numeric);
+  font-variant-numeric: lining-nums tabular-nums;
+  font-feature-settings: 'lnum' 1, 'tnum' 1;
+}
+
+@media (max-width: 1180px) {
+  .stat-grid--five {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: var(--z-nav);
+    width: min(var(--sidebar-drawer-width), 86vw);
+    border-right-color: var(--rule-strong);
+    transform: translateX(-100%);
+
+    visibility: hidden;
+    transition:
+      transform var(--motion-base) var(--easing),
+      visibility var(--motion-base) var(--easing);
+  }
+
+  .sidebar--open {
+    transform: none;
+    visibility: visible;
+    box-shadow: var(--shadow-overlay);
+  }
+
+  .sidebar__who {
+    padding-bottom: calc(var(--space-4xl) + env(safe-area-inset-bottom));
+  }
+
+  .scrim {
+    display: block;
+  }
+
+  .header__menu,
+  .header__brand {
+    display: inline-flex;
+  }
+
+  .header {
+    gap: var(--space-lg);
+    padding: var(--space-xl) var(--space-3xl);
+  }
+
+  .content {
+    padding: var(--space-6xl) var(--space-5xl) var(--space-9xl);
+  }
+
+  .dash-columns,
+  .split-columns,
+  .split-columns--wide-left,
+  .split-columns--aside,
+  .recon-columns {
+    grid-template-columns: 1fr;
+    gap: var(--space-8xl);
+  }
+
+  .stat-grid,
+  .stat-grid--four,
+  .stat-grid--five {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-xl);
+    margin-bottom: var(--space-6xl);
+  }
+
+  .toolbar {
+    flex-wrap: wrap;
+  }
+
+  .entry-input--search {
+    max-width: 100%;
+  }
+
+  .table-scroll .table {
+    min-width: var(--table-min-narrow);
+  }
+
+  .table-scroll .table:has(th:nth-child(4)) {
+    min-width: var(--table-min-wide);
+  }
+
+  .table-scroll .table:has(th:nth-child(6)) {
+    min-width: var(--table-min-matrix);
+  }
+}
+
+@media (max-width: 560px) {
+  .header {
+    flex-wrap: wrap;
+    padding: var(--space-lg) var(--space-2xl);
+  }
+
+  .header__brand {
+    display: none;
+  }
+
+  .header__meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-lg);
+  }
+
+  .content {
+    padding: var(--space-5xl) var(--space-3xl) var(--space-8xl);
+  }
+
+  .page-title {
+    font-size: var(--display-lg);
+  }
+
+  .page-title--hero {
+    font-size: var(--display-xl);
+  }
+
+  .page-lede {
+    margin-bottom: var(--space-5xl);
+  }
+
+  .stat-grid,
+  .stat-grid--four,
+  .stat-grid--five {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-card {
+    padding: var(--space-2xl);
+  }
+
+  .punch-card {
+    gap: var(--space-3xl);
+    padding: var(--space-3xl);
+  }
+
+  .punch-now__clock {
+    font-size: var(--display-2xl);
+  }
+
+  .punch-state {
+    gap: var(--space-5xl);
+  }
+
+  .btn--punch {
+    padding: var(--space-3xl) var(--space-2xl);
+  }
+
+  .stat-card__value {
+    font-size: var(--display-md);
+  }
+
+  .btn,
+  .chip,
+  .nav-item,
+  .sidebar__signout {
+    min-height: var(--tap-target);
+  }
+
+  .input,
+  .entry-input,
+  select.input,
+  textarea.input {
+    font-size: var(--text-field-touch);
+  }
+
+  .field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .field-row {
+    flex-direction: column;
+    gap: var(--space-xl);
+  }
+
+  .field--date {
+    flex: 1;
+  }
+
+  .input--date,
+  .input--time {
+    width: 100%;
+  }
+
+  .entry-grid {
+    grid-template-columns: 1fr 1fr var(--entry-action-col);
+    gap: var(--space-md);
+  }
+
+  .entry-grid > :first-child {
+    grid-column: 1 / -1;
+  }
+
+  .drawer {
+    width: 100%;
+    max-width: 100%;
+    border-left: 0;
+  }
+
+  .drawer__head {
+    padding: var(--space-5xl) var(--space-3xl) var(--space-xl);
+  }
+
+  .drawer__body {
+    padding: var(--space-3xl);
+  }
+
+  .drawer__foot {
+    flex-wrap: wrap;
+    padding: var(--space-xl) var(--space-3xl);
+    padding-bottom: calc(var(--space-xl) + env(safe-area-inset-bottom));
+  }
+
+  .drawer__foot-note {
+    flex-basis: 100%;
+    order: 1;
+  }
+
+  .overlay--center {
+    padding: var(--space-3xl);
+  }
+
+  .modal {
+    max-height: 92dvh;
+  }
+
+  .doc-card {
+    padding: var(--space-5xl) var(--space-3xl);
+  }
+
+  .fact-card {
+    padding: var(--space-xl) var(--space-3xl);
+  }
+
+  .form-card,
+  .wizard-panel {
+    padding: var(--space-3xl);
+  }
+
+  .login__panel {
+    padding: var(--space-6xl) var(--space-5xl);
+  }
+
+  .fact,
+  .form-line,
+  .doc-row,
+  .wht-row,
+  .pay-bar {
+    flex-wrap: wrap;
+  }
+
+  .fact:has(.fact__note) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2xs);
+  }
+
+  .fact:has(.fact__note) .fact__value {
+    text-align: left;
+  }
+
+  .pay-bar {
+    gap: var(--space-lg) var(--space-2xl);
+    padding: var(--space-xl) var(--space-2xl);
+  }
+
+  .pay-bar__note {
+    text-align: left;
+  }
+
+  .wizard-steps {
+    gap: var(--space-3xl);
+    overflow-x: auto;
+  }
+
+  .wizard-step {
+    white-space: nowrap;
+  }
+
+  .wizard-actions {
+    flex-wrap: wrap;
+  }
+
+  .cash-chart {
+    gap: var(--space-md);
+  }
+
+  .cash-chart__labels {
+    gap: var(--space-md);
+  }
+
+  .table th {
+    font-size: var(--text-xs);
+  }
+
+  .table td {
+    padding: var(--space-lg) var(--space-md) var(--space-lg) 0;
+    font-size: var(--text-base);
+  }
+
+  .toast {
+    left: var(--space-3xl);
+    right: var(--space-3xl);
+    transform: none;
+    bottom: calc(var(--space-7xl) + env(safe-area-inset-bottom));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar {
+    transition: none;
+  }
+
+  .overlay,
+  .scrim,
+  .drawer,
+  .modal,
+  .toast,
+  .candidate-list {
+    animation: none;
+  }
 }

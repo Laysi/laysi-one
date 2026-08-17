@@ -349,7 +349,7 @@ impl Operation for ListWithholding {
         }
 
         let summary = format!(
-            "查詢 {month} 各類所得扣繳 · {} 筆 · 扣繳稅款 {} · 補充保費 {} · 依 withholding {}",
+            "查詢 {month} 各類所得扣繳 · {} 筆 · 扣繳稅款 {} · 補充保費 {} · 依扣繳規則 {}",
             rows.len(),
             money(tax_total),
             money(supp_total),
@@ -418,7 +418,7 @@ impl Operation for ComputeWithholding {
         let below = i.gross_amount < rule.threshold;
 
         let summary = format!(
-            "試算扣繳 · {} {} 給付 {} → 扣繳 {}{} · 依 withholding {}",
+            "試算扣繳 · {} {} 給付 {} → 扣繳 {}{} · 依扣繳規則 {}",
             i.income_code,
             rule.name,
             money(i.gross_amount),

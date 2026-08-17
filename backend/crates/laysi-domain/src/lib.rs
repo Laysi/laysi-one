@@ -10,9 +10,39 @@
 //! waste: this layer produces messages a person can act on, and SQL holds
 //! even when something bypasses the application.
 
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+/// Hours east of UTC that the business runs on.
+///
+/// This is a single-country product and Taiwan has been UTC+8 all year round
+/// with no daylight saving since 1979, so a fixed offset is exact here rather
+/// than an approximation of a time zone database.
+///
+/// It matters more than it looks. Reading the server's UTC clock puts every
+/// event between 00:00 and 08:00 local on the previous day: a voucher dated
+/// yesterday, an arrival at 07:50 recorded against the day before. The same
+/// offset is written into the CHECK on `attendance_punch`, so the database
+/// agrees with this constant.
+pub const BUSINESS_UTC_OFFSET_HOURS: i32 = 8;
+
+/// The business time zone as a chrono offset.
+pub fn business_offset() -> FixedOffset {
+    FixedOffset::east_opt(BUSINESS_UTC_OFFSET_HOURS * 3600)
+        .expect("BUSINESS_UTC_OFFSET_HOURS 必須在 chrono 接受的範圍內")
+}
+
+/// Wall-clock date and time of an instant, as a person here would read it.
+pub fn business_time(at: DateTime<Utc>) -> NaiveDateTime {
+    at.with_timezone(&business_offset()).naive_local()
+}
+
+/// Today's date in the business time zone.
+pub fn business_today() -> NaiveDate {
+    business_time(Utc::now()).date()
+}
 
 /// Money type.
 ///
@@ -351,6 +381,20 @@ mod tests {
         let liability =
             TrialBalanceRow::new("2101", "應付帳款", dec!(156300), dec!(224300), Side::Credit);
         assert_eq!(liability.balance, dec!(68000), "負債貸餘為正");
+    }
+
+    /// The eight hours that separate a UTC clock from the business day. Any
+    /// instant in that window belongs to a different date depending on which
+    /// clock is read, which is exactly the mistake this offset exists to
+    /// prevent.
+    #[test]
+    fn the_business_day_is_not_the_utc_day() {
+        let early = DateTime::parse_from_rfc3339("2026-08-06T23:50:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(early.date_naive().to_string(), "2026-08-06");
+        assert_eq!(business_time(early).date().to_string(), "2026-08-07");
+        assert_eq!(business_time(early).time().to_string(), "07:50:00");
     }
 
     /// Amounts must be strings in JSON, or the frontend will read them as

@@ -305,9 +305,10 @@ laysi-admin list-users
 連到既有員工主檔。`link-oauth` 不建立帳號，provider 應填 discovery issuer
 （尾端 `/` 會正規化），subject 填 IdP 的 `sub`。
 
-資料庫完全沒有 `user_account` 時，帳密登入回 503 與明確的
-`laysi-admin create-user` 指示；這是唯一會揭露「帳號總數為零」的 bootstrap
-狀態。只要已有任一帳號，所有一般登入失敗就恢復成同一個訊息。
+資料庫完全沒有 `user_account` 時，帳密登入回 503 與「請由管理員建立第一個帳號」；
+這是唯一會揭露「帳號總數為零」的 bootstrap 狀態。訊息本身不印指令——看到登入畫面
+的人未必有主機權限，指令在本文件與 `laysi-admin --help` 裡。只要已有任一帳號，
+所有一般登入失敗就恢復成同一個訊息。
 
 ## 角色權限：deny-by-default，dispatch 即時強制
 
@@ -320,7 +321,7 @@ laysi-admin list-users
 `limited` 仍代表可以進入該組操作，部門或本人範圍由各操作的查詢條件繼續縮小。
 `Risk::BossOnly` 保留為額外的風險限制，權限資料列不會把非老闆提升成老闆。
 0011 先涵蓋原有 76 個操作，0012 再加入 9 個主檔與應收應付建立操作，0014
-加入作廢與反向沖銷；目前 87 個 Registry 操作各恰好屬於一條 permission。
+加入作廢與反向沖銷；目前 95 個 Registry 操作各恰好屬於一條 permission。
 純字串測試會依序重播 0006、0008、0009、0011、0012、0014 的 INSERT／UPDATE，
 缺漏與重複都不准通過。
 
@@ -435,7 +436,7 @@ integration                 對外整合，`live` 標明有沒有實際接上
 user_account                登入帳號；可選擇連到 employee，密碼雜湊可為 NULL
 user_identity               以 IdP 的 provider + subject 唯一識別；email 只供稽核
 user_session                只存 token 雜湊、到期與撤銷狀態，明文不落地
-permission.op_names         87 個 Registry 操作各恰好屬於一條 permission
+permission.op_names         95 個 Registry 操作各恰好屬於一條 permission
 account.is_active           0012 新增；停用阻止新分錄，但保留歷史帳
 integration.mcp             0013 更新為 api_token 雜湊驗證與資料列身分綁定
 voucher.reverses            0014 新增；沖銷傳票指回原傳票，UNIQUE 防止重複沖銷
@@ -501,7 +502,7 @@ pub trait Operation: Send + Sync + 'static {
 
 pub struct Registry { /* … */ }
 impl Registry {
-    pub fn new() -> Self;             // 註冊目前全部 87 個操作
+    pub fn new() -> Self;             // 註冊目前全部 95 個操作
     pub fn get(&self, name: &str) -> Option<&dyn Operation>;
     pub fn iter(&self) -> impl Iterator<Item = &dyn Operation>;
     /// 統一入口：工具開關 → 風險 → 角色權限 → 執行 → 稽核。
@@ -654,15 +655,114 @@ impl Registry {
 裡的名稱集合完全相等；`laysi-ops` 以 `include_str!` 直接讀 migration 的測試
 守住這條契約。完成本模組後 Registry 共 **71 個操作**。
 
-### 員工自助模組（0009）
+### 員工自助的 MCP（0017、0018）
+
+| name | risk | input | output 重點 |
+|---|---|---|---|
+| `issue_my_api_token` | NeedsConfirm | `{ label, scope?, rotate_days? }` | 明文只回一次；actor／role 取自 session |
+| `list_my_api_tokens` | ReadOnly | `{ include_revoked? }` | 本人核發的 Token＋本人在 MCP 上可用的工具 |
+| `revoke_my_api_token` | NeedsConfirm | `{ id }` | 所屬員工寫在 WHERE 條件裡 |
+
+**「用 MCP」不是主管的特權。** `issue_api_token` 是 `BossOnly`，而且輸入帶
+`actor` 與 `actor_role`——就算給了職員權限，那個形狀也允許他指定 Token 代表誰。
+自助版本兩個欄位都沒有，代表對象與角色一律取自 session，因此**這把 Token 能做的
+事與本人完全相同，不會更多**：職員的 Token 就是職員。
+
+`api_token.owner_employee_id`（0017）是所有權的鍵。`actor` 是顯示名稱、可能同名，
+不能拿來判斷歸屬。只有 `issue_my_api_token` 會寫入這一欄，老闆代發的 Token 留
+NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續查詢，所以
+**別人的 id 是「查無此列」，不是查到之後才拒絕**。
+
+**這一欄同時補上 MCP 缺的那一半身分。** `mcp::token_identity` 原本一律回
+`employee_id: None`，理由是「不能從姓名猜員工」——那個理由現在仍然成立，但
+`owner_employee_id` 不是猜的，是本人在自己的 session 裡按下按鈕寫進去的。於是
+0018 把五個唯讀自助工具對 AI 打開：沒有這一步，「我的 MCP」在全新安裝上會發出
+一把什麼都不能呼叫的 Token。老闆代發的 Token 依然沒有 owner，自助操作對它一律
+回「尚未連結員工資料」，不猜。
+
+寫入類與薪資明細維持關閉。`punch_clock` 最明確：讓助理替你打卡的工具就是偽造出勤
+紀錄的工具；`issue_my_api_token` 若對 AI 開放，Token 就能再生 Token，撤銷也追不上。
+
+`no_self_service_input_can_select_another_employee` 的黑名單擋下了
+`issue_my_api_token` 原本的 `name` 欄位——在這個模組裡 `name` 一直是人名。正確的
+回應是把欄位改叫 `label`，不是替測試加例外。
+
+### 打卡（0016）
+
+| name | risk | input | output 重點 |
+|---|---|---|---|
+| `punch_clock` | NeedsConfirm | `{ kind, note? }` | 本人上／下班卡，時間取伺服器時鐘 |
+| `list_my_punches` | ReadOnly | `{ month? }` | 本人逐日明細、月統計、與 `attendance` 對帳 |
+| `list_attendance_punches` | ReadOnly | `{ month?, emp_no? }` | 全公司逐人統計與對帳；帶 `emp_no` 另附逐日明細 |
+| `correct_punch` | NeedsConfirm | `{ emp_no, punched_on, kind, at, note? }` | 補登，`source = manual` |
+
+`attendance` 一直有欄位放月統計，卻沒有任何東西產生它——0016 補上被彙總的那個
+原始事件。**兩者互不覆蓋**：打卡是這裡的人記下來的，`attendance` 是來源系統
+主張的，操作把兩邊都算出來並回報差額，形狀與薪資用 `payroll_year_totals` 對
+`employee_income` 的作法相同。
+
+**打卡記錄到秒。** `punched_at` 是 `timestamptz`，本來就有秒；操作層一律以
+`%H:%M:%S` 呈現，時數與加班以 `num_seconds()` 計算，遲到判定也在秒的精度上比較
+（`09:05:00` 不算、`09:05:01` 算）。`correct_punch` 接受 `HH:MM:SS`，只給到分鐘時
+記為秒零——補登是憑記憶填的，秒本來就不知道，而 `source = manual` 已經說明了這
+一列是誰填的。
+
+**補登的時間欄是純文字，不是 `<input type="time">`。** 那個型別的顯示格式跟著
+瀏覽器語系走，會出現 12 小時制的 AM／PM，而 `lang` 屬性只有部分瀏覽器理會；它
+也不接受秒，而 `correct_punch` 是接受秒的。文字欄位 24 小時制是定義而不是設定，
+且與 API 收的字串格式一模一樣，前端只需在送出前擋掉不合法的值。
+
+順帶一提，勞基法第 30 條第 7 項寫的是出勤紀錄「應逐日記載勞工出勤情形**至分鐘
+為止**」，也就是到分鐘即已足夠；記到秒是超過而不是符合。程式與畫面因此都不宣稱
+這是法規要求，只是照實記錄時鐘給的值。上下班時間（`work_start`／`work_end`）仍是
+`HH:MM`，那是公司政策而不是事件。
+
+**`punch_clock` 不收時間欄位。** 打卡記錄的就是「呼叫的那一刻」，能填時間就不是
+打卡了。連 `LAYSI_TODAY` 也不移動它：那個環境變數是給示範安裝挪業務日期用的，
+而打卡寫的是真實瞬間。漏打或打錯只有一條路——由人資 `correct_punch` 補登，
+`source` 記成 `manual`，畫面上標示「補登」。整天由別人填的紀錄與本人按下的
+紀錄不是同一種證據，所以這一欄必須留下來。
+
+資料庫擋住兩件事：`UNIQUE (employee_id, punched_on, kind)` 讓一天只有一組
+上下班；`CHECK (punched_on = (punched_at AT TIME ZONE INTERVAL '+08:00')::date)`
+讓「哪一天」與「哪一刻」不會各說各話。用固定 `+08:00` 而不是
+`AT TIME ZONE 'Asia/Taipei'`，是因為後者只有 STABLE、不能寫進 CHECK；台灣自
+1979 年起沒有日光節約時間，兩者在這裡是同一件事。同一個常數是
+`laysi_domain::BUSINESS_UTC_OFFSET_HOURS`。
+
+**彈性工時（0019）與遲到寬限是兩件事。** 寬限（`late_grace_minutes`）原諒遲到，
+但下班時間不動；彈性（`flex_window_minutes`）把整天往後移，長度不變。同一個
+09:45 到班，在一小時寬限下不算遲到但仍要 18:00 走，在一小時彈性下不算遲到而且要
+18:45 走。`WorkSchedule::expected_end()` 因此要吃「幾點到」，`overtime_seconds()`
+也跟著改成 `(arrived, left)` 兩個參數——加班是超過**這個人**那天該走的時間，不是
+超過一個全公司共用的時間。
+
+早到不會把那一天縮短（`shift_minutes` 夾在 `0..=flex`）：沒有人被要求早到，讓它
+生效等於把好意變成義務。留空表示不採彈性工時，也就是所有既有安裝現在的行為。
+
+**上下班時間是公司政策，住在 `company_setting`（`work_start`／`work_end`／
+`flex_window_minutes`／`late_grace_minutes`），不在 Rust 裡。** 全新安裝這三格是空的，此時
+「這個人遲到了嗎」不是回答「沒有」，而是**不問**：`WorkSchedule::late()` 回
+`Option<bool>`，`None` 一路傳到畫面上顯示為「未設定上班時間」。預設 09:00 等於
+本系統替別人的公司編了一條規定，再拿它去判定員工。
+
+**加班只算時數，不算金額。** 勞基法第 24 條的倍數是法規數字且仍未收錄至
+`backend/regulation/`，所以 0016 沒有打開 0008 當初刻意拒絕的那個計算。
+
+順帶修掉一個既有問題：`today()` 原本讀 UTC 日期，於是本地時間 00:00–08:00 之間
+建立的任何單據都會記成前一天。現在走 `laysi_domain::business_today()`。
+
+### 員工自助模組（0009、0015、0016、0020）
 
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `get_my_home` | ReadOnly | `{}` | 本人基本資料、年資、本月出勤、特休餘額、送出的單走到哪 |
 | `list_my_payslips` | ReadOnly | `{}` | **只有本人的**薪資單 |
-| `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單與特休額度／已休／剩餘 |
+| `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘，以及 `leave_kinds` |
 | `request_leave` | NeedsConfirm | `{ kind, from_on, to_on, days, reason? }` | `{ request }`，編號 `LV{民國年月}-{三碼}` |
 | `list_my_expense_claims` | ReadOnly | `{}` | 本人送出的報支與逐關進度 |
+| `submit_my_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, pay_method?, memo? }` | `{ claim }`，編號 `EX{民國年月}-{三碼}` |
+| `attach_my_expense_receipt` | NeedsConfirm | `{ claim_no, file_name, content_base64 }` | `{ receipt, receipts }`，收據進 RustFS |
 
 **這個模組的授權不靠 `Risk`，靠輸入形狀。** `list_payslips` 是 `BossOnly`，
 但員工本人必須看得到自己的薪資單，而他不是老闆。作法是：**自助操作一律不接受
@@ -670,22 +770,55 @@ impl Registry {
 以填，就沒有辦法填別人的名字；這比在查詢裡加過濾條件更難寫錯。
 
 `ops/selfservice.rs` 的 `no_self_service_input_can_select_another_employee`
-測試把五個操作的 `Input` 屬性集合**逐字釘死**（`request_leave` 只有
-`kind`／`from_on`／`to_on`／`days`／`reason`，其餘四個是空集合），另加一份
-`employee_id`／`emp_no`／`name`／`actor`／`claimant`／`user_id` 的黑名單。
-**加任何一個欄位都會讓測試紅**，因為這是本模組唯一的授權保證。
+測試把十二個操作的 `Input` 屬性集合**逐字釘死**（`request_leave` 只有
+`kind`／`from_on`／`to_on`／`days`／`reason`，`submit_my_expense_claim` 只有
+`title`／`amount`／`spent_on`／`pay_method`／`memo`，`punch_clock` 只有
+`kind`／`note`，`list_my_punches` 只有 `month`——那是期別不是人——其餘四個是
+空集合），另加一份
+`employee_id`／`emp_no`／`name`／`actor`／`claimant`／`user_id`／`dept_code`
+的黑名單。**加任何一個欄位都會讓測試紅**，因為這是本模組唯一的授權保證。
+
+`submit_my_expense_claim` 與 `submit_expense_claim` 是兩個操作而不是同一個：
+後者帶 `claimant`，把它授權給職員等於允許以他人名義報支，所以它留在
+`request_payment` 權限裡。自助版本的申請人姓名與部門一律取自 `ctx.employee_id`
+對應的員工主檔，另外**不收費用科目也不收收據文件編號**——科目是「會計確認科目」
+那一關要決定的事，而職員沒有文件權限，能填進來的編號必然是別人的，回應會連
+帶洩漏該文件名稱。單據本身仍是 `expense_claim` 的普通資料列，走同一組
+`approval_rule` 關卡，0015 不動任何資料表。
+
+**收據是送位元組，不是指一份既有文件（0020）。** 上一段擋掉的是「指向已經存在
+的文件」，不是「附一個檔案」——收據本來就是後者。`attach_my_expense_receipt`
+因此收 `file_name` 與 `content_base64`，輸入裡沒有任何東西能指到既有文件。
+
+擋不住的是 `claim_no`，它指的是報支單，而報支單屬於人。所以 0020 為
+`expense_claim` 加上 `employee_id`：`claimant` 是顯示名稱、會同名，讀那一側沿用
+它還可以接受，寫這一側不行。查詢是
+`WHERE claim_no = $1 AND employee_id = $2`，**別人的單號是查無此列**，不是查到
+之後才拒絕；會計代建的單 `employee_id` 為 NULL，因此在自助這一側完全看不到。
+狀態限 `submitted` 與 `approving`：收據是還沒作成的決定的憑據，決定作完之後
+背後的憑證不該再變。
+
+流程是先建單、再附件——反過來的話 `link_ref` 沒有單號可寫。因此上傳失敗時單
+已經存在，畫面照實說明哪幾個檔案沒附上，並要求到「我的請款」重附，**不要重送
+整張單**；`accepts_receipt` 就是那顆按鈕出不出現的依據。
+
+**檔案內容不進稽核紀錄。** `Registry::dispatch` 在寫 `ai_audit_log` 之前先過
+`redact_for_audit`，超過 512 位元組的字串改記長度。判準是值的長度而不是欄位
+名稱，所以之後任何帶位元組的操作都自動涵蓋。是哪一個檔案仍然查得到：
+`document_version` 存著 BLAKE3，而且那是**落地的位元組**的雜湊，不是送出的。
 
 `ctx.employee_id` 直接取自已驗證 session 所屬的 `user_account.employee_id`，
 再以主鍵查 `employee`；不使用姓名比對，也沒有同名時任選一筆的問題。未連結
 員工資料的外部會計師帳號會回 `BadInput`，明確說明自助功能需要員工主檔，
 不回空清單；空清單容易被讀成「我沒有薪資單」。
 
-0009 的五個 `mcp_tool_grant` **一律 `enabled = false`**：MCP token 沒有
+自助的 `mcp_tool_grant` **一律 `enabled = false`**：MCP token 沒有
 `user_account.employee_id` 連結，而且它代表的系統身分與坐在畫面前的人是兩回事，
 預設對 AI 開放沒有道理。
-上節的 migration parity 測試同時涵蓋 0008 與 0009。完成本模組後 Registry
-共 **76 個操作**；0012 再加入 9 個主檔與應收應付建立操作，0014 再加入作廢與
-反向沖銷，目前共 **87 個**。
+上節的 migration parity 測試同時涵蓋 0008、0009 與 0015。完成 0009 後 Registry
+共 **76 個操作**；0012 再加入 9 個主檔與應收應付建立操作，0014 加入作廢與
+反向沖銷，0015 加入 `submit_my_expense_claim`，0016 加入四個打卡操作，0017 加入三個自助 MCP 操作，
+0020 加入 `attach_my_expense_receipt`，目前共 **96 個**。
 
 `Voucher` 的 JSON 形狀：
 
@@ -737,7 +870,6 @@ impl Registry {
   "actor": "目前使用者", "actor_role": "acct", "employee_id": 1,
   "oauth": { "enabled": true, "provider": "https://accounts.example.com" },
   "version": "0.1.0", "licence": "BSL",
-  "attribution": "Laysi One · Business Source License 1.1",
   "brand_build": "<16 碼指紋>" }
 ```
 
@@ -815,9 +947,152 @@ Vite + React + TypeScript。設計語彙來自 **Classical** 設計系統：
 **只能引用變數**，不得寫死 hex／字體名／px。
 
 Logo 一律 `<img src="/v1/brand/mark.svg">`，**前端不得自帶任何 logo 檔案或
-以文字重繪品牌名**。頁尾顯示 `/v1/meta` 回傳的 `attribution`。
+以文字重繪品牌名**。
 
 **前端同樣不得自帶任何法規數字。** 稅率、級距、耐用年數一律由後端從 ruleset
 帶下來，這條規則與「不得自帶 logo」同級。畫面上要即時試算稅額時，用後端
 回傳的費率，不要在 TS 裡寫 `0.05`。金額運算用 `client.ts` 的
 `multiplyToDollars` / `addDecimals`（BigInt），不經過 `number`。
+
+### 示範資料：`laysi-admin seed-demo`
+
+產品出廠是空的，這條指令是唯一的例外，而且必須手動執行。已經有傳票的安裝會被
+拒絕，除非加 `--force`。
+
+- **一律走 `Registry::dispatch`**，不直接寫 SQL。這樣種出來的資料會自己成立：
+  應收明細對得上 1131、薪資對得上 6111、資產負債表平衡，且每一筆都有稽核。
+- **傳票必須依日期順序建立。** `doc_sequence` 每個 prefix 只有一列，期別一變
+  就把計數器歸 1，所以先開 6 月再回頭開 5 月會撞號。`demo.rs` 的 `Step` 先收集
+  再 `sort_by_key(date)` 就是為了這件事——這也是**回頭補開上期傳票會撞號**的
+  同一個限制。
+- **有三處不是操作**：發票字軌、預算版本與歷史打卡。前兩者沒有任何操作可以
+  建立，全新安裝因此無法開發票、也無法設預算，補了操作之後就該刪掉；第三者
+  不一樣，`punch_clock` **刻意**只記錄呼叫當下的時刻，所以「補一個月的歷史打卡」
+  本來就不該有操作，那段 SQL 會一直留著並照實說明它不是打出來的。
+- 金額是編造的公司資料；**沒有任何法規數字**，投保薪資直接沿用各人薪資。
+
+### Header 屬於當前分段，不是全站共用
+
+`FINANCE_NAV`／`HR_NAV`／`ME_NAV` 是三個系統，不是同一個系統的三種檢視，所以
+header 不能共用；`SYSTEM_NAV` 是第四棵樹但不是分頁（見下）。header 先標明現在在
+哪個系統，再只帶那個系統自己的脈絡與動作：
+
+| 分段 | 脈絡 | 動作 |
+| --- | --- | --- |
+| 財務 | `會計期間` + `period_state`（來自 `/v1/meta`） | ＋ 建立傳票 |
+| 人資 | 無 | 無 |
+| 我的 | 登入者姓名 | 無 |
+| 系統 | 無 | 無 |
+
+**系統不是分頁，是左下角帳號列旁邊的一個按鈕。** 它跟財務、人資、我的不是同一種
+東西：那三個是每天要待著的地方，系統是偶爾去一次的地方，放成第四個分頁會讓它看
+起來跟前三個一樣常用。按鈕只在角色開得起其中至少一個畫面時才出現，多數角色看不到。
+
+**這四個畫面原本掛在財務樹底下。** 基礎設定、角色與核准、MCP 與 AI、安全與營運
+四個畫面原本掛在 `FINANCE_NAV` 最底下，理由只是財務那棵樹最長，不是它們屬於
+財務。誰可以簽核什麼、AI 能呼叫哪些工具、品牌簽章有沒有通過，講的是這套系統
+本身；會計結帳時不會打開它們，而會打開它們的人當下並不在做會計。它們背後的
+權限（`manage_access`、`manage_settings`）也是管理權限，所以多數角色根本不會
+看到這個分頁。
+
+- **會計期間與「＋ 建立傳票」只出現在財務。** 員工在看自己的薪資單時，會計
+  期間不是他的脈絡，而建立傳票這個呼叫後端本來就會拒絕。
+- **人資刻意留空。** 它的月份只會重複今天的日期，而每個人資畫面各自選期別；
+  把月份放進 header 會被讀成一個系統其實沒有的篩選條件。寧可空著。
+- 分段名與脈絡之間的分隔線用 `:has(+ .header__meta)` 畫，沒有脈絡就不畫，
+  避免出現後面沒有東西的分隔線。
+- 新增分段或新增 header 元素時，先問「這件事對這個系統是不是真的成立」，
+  不成立就不要放。
+
+### 數字用自己的字體
+
+`--font-display` 是 Cormorant Garamond，一套筆畫極細的展示用襯線體。它拿來排標題
+沒問題，拿來排 31px 的金額與 40px 的時鐘就很難認——而這是一套財務系統，數字就是
+內容。`.num` 因此有自己的 `--font-numeric`（Source Serif 4），並明確指定
+`lining-nums tabular-nums`，讓每一位數等寬、等高、成欄對齊。
+
+**`.num` 的規則必須排在所有元件規則之後。** `.stat-card__value` 之類的元件也設
+`font-family`，兩者都是單一 class、權重相同，勝負只由檔案順序決定。這與先前
+`.entry-input` 的問題同一類。
+
+### 頁面說明只寫使用者需要知道的事
+
+`page-lede` 一度全部寫成「這頁有什麼」——那是規格註記，不是給使用者看的字。
+判準改成：**寫使用者需要知道、而畫面上看不到的事**；只是複述頁面內容的就刪掉，
+標題已經說過了。
+
+- 留下的例如：「已過帳傳票不能修改，要更正請開立反向分錄或作廢」「到期日加註底線
+  者已逾票期」「匯入一律先執行預覽」——都是能據以行動的規則或圖例。
+- 刪掉的例如：「本月出勤與加班統計，以及待簽核的休假單」「各期實發金額、代扣項目
+  與公司負擔部分」——畫面本來就長那樣。
+- 也刪掉設計說明：「畫面與 AI 使用同一份操作註冊表，並非另行實作的介面」是架構
+  文件的內容，不是 MCP 設定頁的內容。
+
+### 網址就是頁面狀態
+
+沒有引入 router 套件：`nav.ts` 的 `SCREEN_PATH` 把每個 `ScreenId` 對到一個路徑，
+`screenForPath` 是它的反查，`App.tsx` 用 History API 推入與監聽 `popstate`。
+`web/Caddyfile` 早就有 `try_files {path} /index.html`，Vite dev server 預設也做
+history fallback，所以重新整理與直接貼網址都會落在同一個畫面。
+
+- 路徑帶分段前綴（`/me/clock`、`/finance/ledger`、`/hr/attendance`、
+  `/system/security`），因為分段本來就是四個不同的系統。
+- **`section` 不再是獨立 state，而是由 `screen` 推導**（`sectionOf`）。兩個 state
+  可能不同步，一個不會。
+- 進站時網址指到的畫面要先過 `screenAllowed`（角色權限 ＋ 自助段需要員工主檔）才
+  採用，否則換成該身分的落地畫面並 `replaceState`。貼一個沒有權限的網址不會讓畫面
+  停在會被後端拒絕的狀態。
+- **只有一條換畫面的路：`go()`。** 側邊欄一度直接 `setScreen`，結果網址只有進站
+  那一次會寫，看起來像「只有 `/me/clock` 有路由」。任何新的導覽點都要走 `go()`，
+  不要自己 `setScreen`。
+- `popstate` 的處理函式掛在 `[]` 相依的 effect 上，因此不能直接閉包住
+  `permissions`／`landing`，會停在第一次 render 的值。判斷寫在一個每次 render
+  更新的 ref 裡。
+
+### 落地在「我的」，不是「財務」
+
+`SECTION_ORDER` 以 `me` 開頭，所以分頁順序與落地畫面都是我的，而 `ME_NAV` 的第一
+個項目是打卡——打卡是全公司每人每天用兩次的操作，會計每天用的畫面再多也只有一個
+人在用。
+
+打卡因此有兩個入口：專屬畫面，以及**我的分段 header 上的常駐按鈕**，和財務段的
+「＋ 建立傳票」同一個位置。header 那顆按鈕直接呼叫 `punch_clock`，並顯示今天已打
+的時間；今天打完了就變成回到打卡畫面的連結。
+
+**打卡卡片是直向、置中、限寬的。** 一開始是橫向 flex（時鐘｜狀態｜按鈕），狀態
+那格 `flex: 1` 會把按鈕推到最右，螢幕越寬推得越遠——最常用的操作被擠到最不容易
+看到的角落。改成單欄之後閱讀順序是時鐘 → 按鈕 → 今日狀態，按鈕就在視線落點的
+正下方，並以 `--punch-width` 限寬置中，不隨螢幕變寬而散開。
+
+**只有一顆按鈕，不是兩顆。** 上下班的順序由資料庫強制（沒有上班卡不能打下班
+卡），所以兩顆按鈕裡永遠有一顆是死的。改成一顆顯示「該打哪一種」的按鈕，兩邊
+都做完則換成「今日已完成」。
+
+備註欄原本是畫面下方另一個區塊，標題寫「下一次打卡的備註」——要先往下捲、填字、
+再捲回上面按按鈕。現在它是卡片裡按鈕上方的一行「加上說明」，展開就是輸入框，
+填完往下按就是那一顆。
+
+### 響應式：桌機版是定義，小螢幕只做減法
+
+三個斷點，全部寫在 `classical.css` 末尾的 Responsive 區塊，不散落在各元件：
+
+| 斷點 | 改變 |
+| --- | --- |
+| `1180px` | 帳齡五格 `stat-grid--five` 收成三欄 |
+| `900px` | 側邊欄離開版面，改為覆蓋式抽屜；所有雙欄 grid 收成單欄；表格啟用橫向捲動 |
+| `560px` | 手機：統計卡單欄、觸控尺寸、欄位字級 16px、分錄列重排 |
+
+規則：
+
+- **媒體查詢的 px 是本檔唯一容許的裸數值**，因為 `@media` 讀不到 CSS 變數。
+  三個數字集中在該區塊的註解裡，其餘尺寸（`--sidebar-drawer-width`、
+  `--tap-target`、`--table-min-*`）仍然是 `:root` 變數。
+- **小螢幕只移除欄位與留白，不新增元件、不換一套導覽。** 側邊欄在 900px 以下
+  只換 `position` 與 `transform`，內容與四棵導覽樹
+  完全相同；不得為手機另寫一份導覽。
+- **每個 `<table class="table">` 都必須包在 `<div class="table-scroll">` 裡。**
+  分錄列壓不進手機寬度，所以表格在自己的盒子裡橫向捲動，頁面本身永遠不橫捲。
+  最小寬度依欄數由 `:has(th:nth-child(n))` 分三級。新增表格時一併加外層 div。
+- 欄位字級在 560px 以下是 `--text-field-touch`（16px）：iOS 在此之下會在聚焦時
+  自動放大整頁。
+- `.shell` 用 `100dvh`（`100vh` 為 fallback），否則最後一列會被手機網址列蓋住。

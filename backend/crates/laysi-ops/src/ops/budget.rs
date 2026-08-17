@@ -211,7 +211,7 @@ impl Operation for GetBudgetStatus {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀預算執行率：預算數來自 budget 表，實際數一律由已過帳分錄即時計算，系統不儲存任何實際數。提醒門檻取自公司設定。"
+        "讀預算執行率：預算數為設定值，實際數一律由已過帳分錄即時計算，系統不儲存任何實際數。提醒門檻取自公司設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<BudgetStatusInput>()
@@ -292,7 +292,7 @@ impl Operation for GetBudgetStatus {
                 "alert_count": over,
                 // This has to appear on screen: the only question anyone asks
                 // about the "actual" column is where it came from.
-                "actual_source": "由已過帳分錄（voucher_line）即時計算，系統不儲存實際數",
+                "actual_source": "已過帳分錄的即時計算結果",
             }),
             summary,
         ))
@@ -308,7 +308,7 @@ async fn alert_percent(ctx: &OpCtx) -> Result<Money, OpError> {
         .find(|s| s.code == "budget_alert_percent")
         .ok_or_else(|| {
             OpError::BadInput(
-                "公司設定未提供 budget_alert_percent；提醒門檻屬設定值，程式不代為推定".into(),
+                "公司設定未提供預算提醒門檻；該門檻屬設定值，系統不代為推定".into(),
             )
         })?;
     raw.value.trim().parse::<Money>().map_err(|_| {
@@ -329,7 +329,7 @@ impl Operation for GetDepartmentPl {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀部門損益：依 voucher_line.dept_id 區分的收入與成本費用。未指定部門者列為「未指定」且不分攤，因此各列加總必等於損益表的本期損益。"
+        "讀部門損益：依分錄所屬部門區分的收入與成本費用。未指定部門者列為「未指定」且不分攤，因此各列加總必等於損益表的本期損益。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<BudgetPeriodInput>()

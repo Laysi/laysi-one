@@ -303,11 +303,20 @@ async fn main() -> anyhow::Result<()> {
 
 // Identity
 
+/// The current business date.
+///
+/// Not the server's UTC date. The container runs on UTC and the business runs
+/// on UTC+8, so between midnight and 08:00 local the two disagree and every
+/// document created in that window would be dated the day before.
+///
+/// `LAYSI_TODAY` overrides the date for demonstration installs. It does not
+/// move the clock: a clock-in records the real instant it happened, and the
+/// database checks that its date and its timestamp agree.
 pub fn today() -> chrono::NaiveDate {
     std::env::var("LAYSI_TODAY")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| chrono::Utc::now().date_naive())
+        .unwrap_or_else(laysi_domain::business_today)
 }
 
 pub fn ctx_from(
@@ -432,7 +441,6 @@ async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
         },
         "version": env!("CARGO_PKG_VERSION"),
         "licence": "BSL",
-        "attribution": laysi_brand::ATTRIBUTION,
         "brand_build": s.brand.fingerprint,
     }))
     .into_response()

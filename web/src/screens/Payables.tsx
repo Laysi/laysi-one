@@ -14,8 +14,6 @@ interface Props {
   onChanged: () => void;
 }
 
-/** The debit side accepts active, postable expense, inventory or prepayment
- *  accounts, matching the backend. */
 interface DebitAccount {
   code: string;
   name: string;
@@ -24,14 +22,6 @@ interface DebitAccount {
   is_active: boolean;
 }
 
-/**
- * Total of the selected amounts.
- *
- * Amounts are decimal strings and are not converted to number: this adds
- * integers in the smallest unit (cents) and reinserts the decimal point
- * afterwards. TWD books carry two decimals, and integer addition cannot
- * drift.
- */
 function sumCents(values: string[]): string {
   const cents = values.reduce((acc, v) => {
     const neg = v.startsWith('-');
@@ -65,8 +55,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
     callOp<PayablesResult>('list_payables')
       .then((d) => {
         setData(d);
-        // Bills already sent for payment cannot be selected again and are
-        // cleared on reload.
+
         setPicked((p) => p.filter((no) => d.bills.some((b) => b.bill_no === no && b.state === 'open')));
       })
       .catch((e: Error) => setError(e.message));
@@ -158,7 +147,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">應付帳款</h1>
-      <p className="page-lede">應付款項。勾選後送出付款單，由出納執行匯款。</p>
+      <p className="page-lede">勾選後送出付款單，由出納執行匯款。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -171,9 +160,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
               <div className="pay-bar__total num">{money(total)}</div>
             </div>
             <span className="spacer" />
-            {/* This applies to everyone: a payment batch is an instruction,
-                not a transfer. Whether it can be submitted is the backend's
-                decision. */}
+
             <div className="pay-bar__note">
               付款單僅為付款指示，實際匯款由出納執行，於此送出不會產生資金流出。
             </div>
@@ -213,58 +200,60 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
             </button>
           </div>
 
-          <table className="table">
-            <thead>
-              <tr>
-                <th className="col-check" />
-                <th>供應商</th>
-                <th>內容</th>
-                <th>付款日</th>
-                <th className="align-right">金額</th>
-              </tr>
-            </thead>
-            <tbody>
-              {bills.map((b) => {
-                const on = picked.includes(b.bill_no);
-                const pickable = b.state === 'open' && b.recognised;
-                return (
-                  <tr
-                    key={b.bill_no}
-                    className={`${pickable ? 'row--pickable' : ''}${
-                      b.recognised ? '' : ' row--waiting'
-                    }`}
-                    onClick={() => toggle(b)}
-                  >
-                    <td>
-                      <span className={`checkbox${on ? ' checkbox--on' : ''}`}>{on ? '✓' : ''}</span>
-                    </td>
-                    <td>
-                      {b.vendor}
-                      {!b.recognised && <span className="tag tag--pale">來源傳票未過帳</span>}
-                      {b.state === 'paying' && (
-                        <span className="tag tag--warn tag--static">{b.batch_no} 已送出</span>
-                      )}
-                    </td>
-                    <td className="cell-accounts">{b.memo}</td>
-                    <td>
-                      <span className={b.days_overdue > 0 ? 'due due--over' : 'due'}>
-                        {b.due_on.slice(5).replace('-', '/')}
-                      </span>
-                      {b.days_overdue > 0 && <span className="cell-hint">已逾期</span>}
-                    </td>
-                    <td className="num align-right">{money(b.outstanding)}</td>
-                  </tr>
-                );
-              })}
-              {bills.length === 0 && (
+          <div className="table-scroll">
+            <table className="table table--inset">
+              <thead>
                 <tr>
-                  <td colSpan={5} className="cell-muted">
-                    目前沒有待付帳款。請由上方「＋ 新增應付帳單」建立第一筆。
-                  </td>
+                  <th className="col-check" />
+                  <th>供應商</th>
+                  <th>內容</th>
+                  <th>付款日</th>
+                  <th className="align-right">金額</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {bills.map((b) => {
+                  const on = picked.includes(b.bill_no);
+                  const pickable = b.state === 'open' && b.recognised;
+                  return (
+                    <tr
+                      key={b.bill_no}
+                      className={`${pickable ? 'row--pickable' : ''}${
+                        b.recognised ? '' : ' row--waiting'
+                      }`}
+                      onClick={() => toggle(b)}
+                    >
+                      <td>
+                        <span className={`checkbox${on ? ' checkbox--on' : ''}`}>{on ? '✓' : ''}</span>
+                      </td>
+                      <td>
+                        {b.vendor}
+                        {!b.recognised && <span className="tag tag--pale">來源傳票未過帳</span>}
+                        {b.state === 'paying' && (
+                          <span className="tag tag--warn tag--static">{b.batch_no} 已送出</span>
+                        )}
+                      </td>
+                      <td className="cell-accounts">{b.memo}</td>
+                      <td>
+                        <span className={b.days_overdue > 0 ? 'due due--over' : 'due'}>
+                          {b.due_on.slice(5).replace('-', '/')}
+                        </span>
+                        {b.days_overdue > 0 && <span className="cell-hint">已逾期</span>}
+                      </td>
+                      <td className="num align-right">{money(b.outstanding)}</td>
+                    </tr>
+                  );
+                })}
+                {bills.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="cell-muted">
+                      目前沒有待付帳款。請由上方「＋ 新增應付帳單」建立第一筆。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
           <p className="hint">
             送出付款單會開立一張借應付帳款、貸銀行存款的傳票，每張帳單一行；

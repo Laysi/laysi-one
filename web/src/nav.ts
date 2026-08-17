@@ -1,11 +1,3 @@
-/**
- * Sidebar navigation structure.
- *
- * The information architecture shows the whole system rather than only the
- * screens that are finished. An unimplemented entry explains which stage it
- * belongs to instead of disappearing or offering a broken link.
- */
-
 export type ScreenId =
   | 'dash'
   | 'gl'
@@ -20,11 +12,12 @@ export type ScreenId =
   | 'rep'
   | 'doc'
   | 'imp'
+
   | 'setup'
   | 'roles'
   | 'mcp'
   | 'sec'
-  // HR
+
   | 'hrdash'
   | 'hr'
   | 'onb'
@@ -32,19 +25,22 @@ export type ScreenId =
   | 'pay'
   | 'ins'
   | 'wht'
-  // Employee self-service
+
   | 'me'
+  | 'meclock'
+  | 'meleavenew'
+  | 'meexpnew'
   | 'meexp'
   | 'mepay'
-  | 'meleave';
+  | 'meleave'
+  | 'memcp';
 
 export interface NavItem {
   kind: 'item';
   id: ScreenId;
   label: string;
-  /** Implemented. Others show a placeholder note. */
+  op: string;
   ready?: boolean;
-  /** Which count the badge shows, decided by the screen's data. */
   badge?: 'pending' | 'draft';
 }
 
@@ -57,73 +53,134 @@ export type NavEntry = NavItem | NavHead;
 
 export const FINANCE_NAV: NavEntry[] = [
   { kind: 'head', label: '日常' },
-  { kind: 'item', id: 'dash', label: '總覽', ready: true },
-  { kind: 'item', id: 'gl', label: '傳票 · 總帳', ready: true, badge: 'pending' },
+  { kind: 'item', id: 'dash', label: '總覽', op: 'get_dashboard', ready: true },
+  { kind: 'item', id: 'gl', label: '傳票 · 總帳', op: 'search_vouchers', ready: true, badge: 'pending' },
+  { kind: 'item', id: 'inv', label: '電子發票', op: 'list_einvoices', ready: true },
   { kind: 'head', label: '收付' },
-  { kind: 'item', id: 'ar', label: '應收帳款', ready: true },
-  { kind: 'item', id: 'ap', label: '應付帳款', ready: true },
-  { kind: 'item', id: 'bank', label: '銀行與現金', ready: true },
-  { kind: 'head', label: '稅務' },
-  { kind: 'item', id: 'inv', label: '電子發票', ready: true },
-  { kind: 'item', id: 'tax', label: '稅務 401 / 403', ready: true },
-  { kind: 'head', label: '費用與資產' },
-  { kind: 'item', id: 'exp', label: '費用報支', ready: true },
-  { kind: 'item', id: 'fa', label: '固定資產', ready: true },
-  { kind: 'item', id: 'budget', label: '預算與管理', ready: true },
-  { kind: 'head', label: '報表與文件' },
-  { kind: 'item', id: 'rep', label: '財務報表', ready: true },
-  { kind: 'item', id: 'doc', label: '文件管理', ready: true },
-  { kind: 'item', id: 'imp', label: '匯入與整合', ready: true },
-  { kind: 'head', label: '基礎與系統' },
-  { kind: 'item', id: 'setup', label: '基礎設定', ready: true },
-  { kind: 'item', id: 'roles', label: '角色與核准', ready: true },
-  { kind: 'item', id: 'mcp', label: 'MCP 與 AI', ready: true },
-  { kind: 'item', id: 'sec', label: '安全與營運', ready: true },
+  { kind: 'item', id: 'ar', label: '應收帳款', op: 'get_ar_aging', ready: true },
+  { kind: 'item', id: 'ap', label: '應付帳款', op: 'list_payables', ready: true },
+  { kind: 'item', id: 'bank', label: '銀行與現金', op: 'get_cash_position', ready: true },
+  { kind: 'head', label: '費用' },
+  { kind: 'item', id: 'exp', label: '費用報支', op: 'list_expense_claims', ready: true },
+  { kind: 'item', id: 'budget', label: '預算與管理', op: 'get_budget_status', ready: true },
+  { kind: 'head', label: '結帳與申報' },
+  { kind: 'item', id: 'rep', label: '財務報表', op: 'get_balance_sheet', ready: true },
+  { kind: 'item', id: 'tax', label: '稅務 401 / 403', op: 'get_vat_return', ready: true },
+  { kind: 'item', id: 'fa', label: '固定資產', op: 'list_fixed_assets', ready: true },
+  { kind: 'head', label: '資料' },
+  { kind: 'item', id: 'doc', label: '文件管理', op: 'list_documents', ready: true },
+  { kind: 'item', id: 'imp', label: '匯入與整合', op: 'list_imports', ready: true },
 ];
 
-/**
- * The HR navigation tree.
- *
- * Two trees rather than one long one: accounting works in finance all day
- * and HR works here, and stacking 24 entries into one column would make
- * both scroll further. Switching changes the tree, not the identity.
- */
+export const SYSTEM_NAV: NavEntry[] = [
+  { kind: 'head', label: '設定' },
+  { kind: 'item', id: 'setup', label: '基礎設定', op: 'get_company_settings', ready: true },
+  { kind: 'item', id: 'roles', label: '角色與核准', op: 'list_roles', ready: true },
+  { kind: 'head', label: 'AI 與監控' },
+  { kind: 'item', id: 'mcp', label: 'MCP 與 AI', op: 'list_ai_audit', ready: true },
+  { kind: 'item', id: 'sec', label: '安全與營運', op: 'get_security_policy', ready: true },
+];
+
 export const HR_NAV: NavEntry[] = [
+  { kind: 'head', label: '每月作業' },
+  { kind: 'item', id: 'hrdash', label: '人資總覽', op: 'get_hr_dashboard', ready: true },
+  { kind: 'item', id: 'att', label: '出勤與休假', op: 'get_attendance', ready: true },
+  { kind: 'item', id: 'pay', label: '薪資作業', op: 'get_payroll_summary', ready: true },
+  { kind: 'item', id: 'ins', label: '勞健保與勞退', op: 'get_insurance_summary', ready: true },
   { kind: 'head', label: '人員' },
-  { kind: 'item', id: 'hrdash', label: '人資總覽', ready: true },
-  { kind: 'item', id: 'hr', label: '員工名冊', ready: true },
-  { kind: 'item', id: 'onb', label: '到離職與異動', ready: true },
-  { kind: 'head', label: '出勤' },
-  { kind: 'item', id: 'att', label: '出勤與請假', ready: true },
-  { kind: 'head', label: '薪酬' },
-  { kind: 'item', id: 'pay', label: '薪資作業', ready: true },
-  { kind: 'item', id: 'ins', label: '勞健保與勞退', ready: true },
+  { kind: 'item', id: 'hr', label: '員工名冊', op: 'list_employees', ready: true },
+  { kind: 'item', id: 'onb', label: '到離職與異動', op: 'list_employee_movements', ready: true },
   { kind: 'head', label: '法遵' },
-  { kind: 'item', id: 'wht', label: '扣繳與法遵', ready: true },
+  { kind: 'item', id: 'wht', label: '扣繳與法遵', op: 'get_hr_compliance', ready: true },
 ];
 
-/**
- * The employee self-service tree.
- *
- * A third tree. None of the five operations behind these four screens has
- * an input field that can name another person; the subject always comes
- * from `ctx.actor`. It therefore stays out of the finance and HR trees: a
- * staff member's sidebar has no reason to list the general ledger or
- * payroll.
- */
 export const ME_NAV: NavEntry[] = [
   { kind: 'head', label: '我的' },
-  { kind: 'item', id: 'me', label: '我的首頁', ready: true },
-  { kind: 'item', id: 'meexp', label: '我的請款', ready: true },
-  { kind: 'item', id: 'mepay', label: '我的薪資單', ready: true },
-  { kind: 'item', id: 'meleave', label: '我的請假', ready: true },
+
+  { kind: 'item', id: 'meclock', label: '打卡', op: 'punch_clock', ready: true },
+  { kind: 'item', id: 'me', label: '個人專區', op: 'get_my_home', ready: true },
+  { kind: 'head', label: '提出申請' },
+
+  { kind: 'item', id: 'meleavenew', label: '休假申請', op: 'request_leave', ready: true },
+  {
+    kind: 'item',
+    id: 'meexpnew',
+    label: '請款申請',
+    op: 'submit_my_expense_claim',
+    ready: true,
+  },
+  { kind: 'head', label: '查詢紀錄' },
+  { kind: 'item', id: 'meleave', label: '我的休假', op: 'list_my_leave_requests', ready: true },
+  { kind: 'item', id: 'meexp', label: '我的請款', op: 'list_my_expense_claims', ready: true },
+  { kind: 'item', id: 'mepay', label: '我的薪資單', op: 'list_my_payslips', ready: true },
+  { kind: 'head', label: '連線' },
+  { kind: 'item', id: 'memcp', label: '我的 MCP', op: 'list_my_api_tokens', ready: true },
 ];
 
-/**
- * Screens not yet implemented, with a note on where they are scheduled.
- *
- * Currently empty: 17 finance, 7 HR and 4 self-service screens are all
- * connected. The type stays so that adding one later needs no structural
- * change.
- */
-export const ROADMAP: Partial<Record<ScreenId, string>> = {};
+export function visibleEntries(entries: NavEntry[], permissions: string[]): NavEntry[] {
+  const allowed = new Set(permissions);
+  const kept = entries.filter((e) => e.kind === 'head' || allowed.has(e.op));
+  return kept.filter(
+    (e, i) => e.kind !== 'head' || kept[i + 1]?.kind === 'item',
+  );
+}
+
+export function firstScreen(entries: NavEntry[], permissions: string[]): ScreenId | null {
+  const visible = visibleEntries(entries, permissions);
+  const item = visible.find((e): e is NavItem => e.kind === 'item');
+  return item ? item.id : null;
+}
+
+export const SCREEN_PATH: Record<ScreenId, string> = {
+  meclock: '/me/clock',
+  me: '/me',
+  meleavenew: '/me/leave/new',
+  meexpnew: '/me/expense/new',
+  meleave: '/me/leave',
+  meexp: '/me/expense',
+  mepay: '/me/payslip',
+  memcp: '/me/mcp',
+
+  dash: '/finance',
+  gl: '/finance/ledger',
+  inv: '/finance/einvoice',
+  ar: '/finance/receivables',
+  ap: '/finance/payables',
+  bank: '/finance/bank',
+  exp: '/finance/expenses',
+  budget: '/finance/budget',
+  rep: '/finance/reports',
+  tax: '/finance/tax',
+  fa: '/finance/assets',
+  doc: '/finance/documents',
+  imp: '/finance/imports',
+
+  hrdash: '/hr',
+  att: '/hr/attendance',
+  pay: '/hr/payroll',
+  ins: '/hr/insurance',
+  hr: '/hr/employees',
+  onb: '/hr/movements',
+  wht: '/hr/withholding',
+
+  setup: '/system/settings',
+  roles: '/system/roles',
+  mcp: '/system/mcp',
+  sec: '/system/security',
+};
+
+const PATH_SCREEN: Record<string, ScreenId> = Object.fromEntries(
+  Object.entries(SCREEN_PATH).map(([id, path]) => [path, id as ScreenId]),
+);
+
+export function screenForPath(path: string): ScreenId | null {
+  const clean = path.replace(/\/+$/, '') || '/';
+  return PATH_SCREEN[clean] ?? null;
+}
+
+const ALL_NAV: NavEntry[] = [...FINANCE_NAV, ...HR_NAV, ...ME_NAV, ...SYSTEM_NAV];
+
+export function screenOp(id: ScreenId): string | null {
+  const item = ALL_NAV.find((e): e is NavItem => e.kind === 'item' && e.id === id);
+  return item ? item.op : null;
+}

@@ -11,8 +11,6 @@ interface Props {
   reloadKey: number;
 }
 
-/** Step one filing period back or forward, derived from the period start and
- *  end; the length in months is the backend's decision. */
 function shift(v: VatReturn, direction: -1 | 1): string {
   const base = direction < 0 ? v.period_from : v.period_to;
   const [y, m, d] = base.split('-').map((s) => Number(s));
@@ -20,8 +18,7 @@ function shift(v: VatReturn, direction: -1 | 1): string {
   const month = (m ?? 1) + step;
   const year = (y ?? 2026) + Math.floor((month - 1) / 12);
   const norm = ((month - 1) % 12 + 12) % 12 + 1;
-  // Use the 15th to avoid differing month lengths; landing anywhere inside
-  // the period is enough.
+
   return `${year}-${String(norm).padStart(2, '0')}-${String(Math.min(d ?? 15, 15)).padStart(2, '0')}`;
 }
 
@@ -49,11 +46,11 @@ export function Tax({ reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">稅務</h1>
-      <p className="page-lede">
-        {vat
-          ? `401 營業稅每 ${vat.period_months} 個月一期。本頁數字均由已過帳傳票計算，未過帳者不計入。`
-          : '401 營業稅申報試算。'}
-      </p>
+      {vat && (
+        <p className="page-lede">
+          401 營業稅每 {vat.period_months} 個月一期。本頁數字只採計已過帳傳票。
+        </p>
+      )}
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!vat && !error && <p className="state-note">讀取中…</p>}
@@ -83,8 +80,6 @@ export function Tax({ reloadKey }: Props) {
               </p>
             )}
 
-            {/* An all-zero return is not a fault; there are no posted
-                transactions in this period yet. Say so, and explain why. */}
             {isZero(vat.output_tax) && isZero(vat.input_tax) && (
               <p className="hint">
                 本期尚無已過帳的銷項或進項，各欄皆為零。
@@ -117,8 +112,7 @@ export function Tax({ reloadKey }: Props) {
               </button>
             </div>
             <p className="form-note">
-              媒體申報檔要照財政部的格式產生，會計師覆核要搭配簽核流程；
-              兩項功能尚未接上，故按鈕暫時停用。
+              媒體申報檔與會計師覆核尚未接上，按鈕暫時停用。
             </p>
           </section>
 
@@ -168,7 +162,7 @@ export function Tax({ reloadKey }: Props) {
 
             <p className="hint">
               上月扣繳稅款應於次月 10 日前繳納，系統將提醒。扣繳率與起扣點依給付日適用的
-              規則計算（withholding {wht.ruleset_versions.join('、') || '—'}），非由畫面設定。
+              扣繳規則計算（{wht.ruleset_versions.join('、') || '—'}）。
             </p>
           </section>
         </div>
@@ -176,8 +170,7 @@ export function Tax({ reloadKey }: Props) {
 
       {vat && (
         <>
-          {/* Output tax on the return and account 2211 are two independently
-              computed paths. Equality is a conclusion, not an assumption. */}
+
           <p className={`recon${vat.reconciled ? '' : ' recon--off'}`}>
             {vat.reconciled ? (
               <>
@@ -209,9 +202,9 @@ export function Tax({ reloadKey }: Props) {
             )}
           </p>
           <p className="hint">
-            稅率 {vat.ruleset.rate_percent}% 與「每 {vat.period_months} 個月一期」均取自法規規則庫
-            （<span className="num">vat {vat.ruleset.version}</span>，{vat.ruleset.effective_from} 起）
-            ，非寫於程式碼。依據：{vat.ruleset.source_note}
+            稅率 {vat.ruleset.rate_percent}% 與「每 {vat.period_months} 個月一期」均取自營業稅規則
+            （<span className="num">{vat.ruleset.version}</span>，{vat.ruleset.effective_from} 起）
+            。依據：{vat.ruleset.source_note}
           </p>
         </>
       )}

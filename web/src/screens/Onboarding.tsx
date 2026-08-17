@@ -7,8 +7,6 @@ interface Props {
   onChanged: () => void;
 }
 
-/** Status label for a request. Completed ones stay quiet; in-progress ones
- *  stand out. */
 function statusTag(m: MovementRow): string {
   return m.status === 'done' ? 'tag tag--static' : 'tag tag--warn tag--static';
 }
@@ -19,7 +17,6 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
 
-  // Fields for raising a new request.
   const [empNo, setEmpNo] = useState('');
   const [kind, setKind] = useState('');
   const [effectiveOn, setEffectiveOn] = useState('');
@@ -93,9 +90,6 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">到離職與異動</h1>
-      <p className="page-lede">
-        到職、離職、調薪與調部門異動。各類單據的簽核關卡由設定表決定。
-      </p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -109,91 +103,92 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
               </span>
             </div>
 
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>異動單</th>
-                  <th>生效日</th>
-                  <th className="align-right">進度</th>
-                  <th>目前關卡</th>
-                  <th className="align-right">動作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.movements.map((m) => (
-                  <tr key={m.movement_no} className={m.status === 'open' ? 'row--pending' : undefined}>
-                    <td>
-                      <button
-                        className="link-cell"
-                        onClick={() => setOpen(open === m.movement_no ? null : m.movement_no)}
-                      >
-                        {m.name} · {m.kind_label}
-                      </button>
-                      <span className="cell-hint cell-hint--block num">
-                        {m.movement_no} · {m.emp_no}
-                        {m.dept_label && ` · ${m.dept_label}`}
-                      </span>
-                      {(m.from_value || m.to_value) && (
-                        <span className="cell-hint cell-hint--block">
-                          {m.from_value || '—'} → {m.to_value || '—'}
-                        </span>
-                      )}
-                      {open === m.movement_no && (
-                        <span className="cell-hint cell-hint--block">
-                          {m.steps.map((s) => (
-                            <span key={s.step_no} className="step-chip">
-                              {s.done ? '✓' : '○'} {s.label}
-                              <span className="step-chip__why">
-                                （{s.done ? `${s.done_by ?? '—'} 已完成` : s.note}）
-                              </span>
-                            </span>
-                          ))}
-                          {m.reason && <span className="step-chip">事由：{m.reason}</span>}
-                        </span>
-                      )}
-                    </td>
-                    <td className="num cell-nowrap">{m.effective_on}</td>
-                    <td className="num align-right">
-                      {m.done_count} / {m.step_count}
-                    </td>
-                    <td>
-                      <span className={statusTag(m)}>{m.step_label}</span>
-                    </td>
-                    <td className="align-right">
-                      {m.next_step ? (
-                        <button
-                          className="btn btn--compact"
-                          disabled={busy === m.movement_no}
-                          title={`將「${m.next_step.label}」標記為完成`}
-                          onClick={() => void completeStep(m)}
-                        >
-                          {busy === m.movement_no ? '處理中…' : '本關卡已完成'}
-                        </button>
-                      ) : (
-                        <span className="cell-muted">
-                          {m.status === 'done' ? '已結案' : '待結案'}
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {data.movements.length === 0 && (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
                   <tr>
-                    <td colSpan={5} className="cell-muted">
-                      目前沒有任何異動單。
-                    </td>
+                    <th>異動單</th>
+                    <th>生效日</th>
+                    <th className="align-right">進度</th>
+                    <th>目前關卡</th>
+                    <th className="align-right">動作</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.movements.map((m) => (
+                    <tr key={m.movement_no} className={m.status === 'open' ? 'row--pending' : undefined}>
+                      <td>
+                        <button
+                          className="link-cell"
+                          onClick={() => setOpen(open === m.movement_no ? null : m.movement_no)}
+                        >
+                          {m.name} · {m.kind_label}
+                        </button>
+                        <span className="cell-hint cell-hint--block num">
+                          {m.movement_no} · {m.emp_no}
+                          {m.dept_label && ` · ${m.dept_label}`}
+                        </span>
+                        {(m.from_value || m.to_value) && (
+                          <span className="cell-hint cell-hint--block">
+                            {m.from_value || '—'} → {m.to_value || '—'}
+                          </span>
+                        )}
+                        {open === m.movement_no && (
+                          <span className="cell-hint cell-hint--block">
+                            {m.steps.map((s) => (
+                              <span key={s.step_no} className="step-chip">
+                                {s.done ? '✓' : '○'} {s.label}
+                                <span className="step-chip__why">
+                                  （{s.done ? `${s.done_by ?? '—'} 已完成` : s.note}）
+                                </span>
+                              </span>
+                            ))}
+                            {m.reason && <span className="step-chip">事由：{m.reason}</span>}
+                          </span>
+                        )}
+                      </td>
+                      <td className="num cell-nowrap">{m.effective_on}</td>
+                      <td className="num align-right">
+                        {m.done_count} / {m.step_count}
+                      </td>
+                      <td>
+                        <span className={statusTag(m)}>{m.step_label}</span>
+                      </td>
+                      <td className="align-right">
+                        {m.next_step ? (
+                          <button
+                            className="btn btn--compact"
+                            disabled={busy === m.movement_no}
+                            title={`將「${m.next_step.label}」標記為完成`}
+                            onClick={() => void completeStep(m)}
+                          >
+                            {busy === m.movement_no ? '處理中…' : '本關卡已完成'}
+                          </button>
+                        ) : (
+                          <span className="cell-muted">
+                            {m.status === 'done' ? '已結案' : '待結案'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {data.movements.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="cell-muted">
+                        目前沒有任何異動單。
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
 
             <p className="hint">
               開立離職單時，該員工在名冊與薪資作業即標示為「離職中」並記錄預定離職日，
               不待最後一關才反映；完成最後一關後才會變成「已離職」。
             </p>
             <p className="hint">
-              關卡所列名稱為<strong>承辦人</strong>，非系統的阻擋依據。實際阻擋來自角色權限，
-              其判定的是能否呼叫該操作，不細分關卡輪次；兩者為不同機制。
+              關卡所列名稱為<strong>承辦人</strong>；實際阻擋來自角色權限，兩者是不同機制。
             </p>
           </section>
 
@@ -274,8 +269,7 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
                 {busy === 'new' ? '開單中…' : '開單'}
               </button>
               <p className="form-note">
-                開立單據不等同生效，加保、退保與調薪都要完成全部關卡；
-                故本操作標示為「需人確認」，而非高風險。
+                開立單據不等同生效，加保、退保與調薪都要完成全部關卡。
               </p>
             </div>
 
@@ -297,8 +291,7 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
               </div>
             ))}
             <p className="hint">
-              上述流程取自 {data.flow_source}，不同公司僅需調整該表，不用修改程式；
-              作法與費用報支的簽核關卡一致。
+              上述流程取自 {data.flow_source}，可依公司需要調整。
             </p>
           </section>
         </div>

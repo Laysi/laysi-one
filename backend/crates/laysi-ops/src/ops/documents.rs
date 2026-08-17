@@ -37,7 +37,7 @@ const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 const BYTES_PER_MB: f64 = 1024.0 * 1024.0;
 
 /// Human-readable file size.
-fn human_size(bytes: i64) -> String {
+pub(crate) fn human_size(bytes: i64) -> String {
     let b = bytes as f64;
     if b >= BYTES_PER_GB {
         format!("{:.1} GB", b / BYTES_PER_GB)
@@ -72,7 +72,7 @@ fn ocr_label(status: &str) -> &'static str {
 
 /// Short form of a hash, e.g. `a91f…c4e2`. The full value is returned
 /// alongside; the short form is only for reading.
-fn short_checksum(sum: &str) -> String {
+pub(crate) fn short_checksum(sum: &str) -> String {
     if sum.len() < 12 {
         return sum.to_string();
     }
@@ -133,7 +133,7 @@ impl Operation for ListDocuments {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及 RustFS 的實際用量。OCR 一律回 pending；系統未配置辨識引擎，不提供推估的辨識率。"
+        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。OCR 一律回 pending；系統未配置辨識引擎，不提供推估的辨識率。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListDocumentsInput>()
@@ -148,7 +148,7 @@ impl Operation for ListDocuments {
         // and the bucket holds 5 MB, it shows up here, the same approach as
         // reconciling AR detail to the ledger.
         let (bucket, storage_error) = match ctx.objects.as_ref() {
-            None => (None, Some("還沒接上物件儲存（RUSTFS_* 環境變數沒設齊）".to_string())),
+            None => (None, Some("尚未接上物件儲存".to_string())),
             Some(o) => match o.usage().await {
                 Ok(u) => (
                     Some(json!({
@@ -192,7 +192,7 @@ impl Operation for ListDocuments {
                 "storage_error": storage_error,
                 // Both of these must be shown on screen, not left in the code.
                 "ocr_note": "尚未接上 OCR 引擎，所有文件的辨識狀態都是「待處理」。全文搜尋只找得到檔名與關聯單據號。",
-                "immutability_note": "上傳後檔案不可覆寫，改版會存成新版本；稽核封存的文件連老闆也刪不掉（由資料庫的 trigger 擋）。",
+                "immutability_note": "上傳後檔案不可覆寫，改版會存成新版本；稽核封存的文件連負責人也刪不掉。",
                 "max_object_bytes": MAX_OBJECT_BYTES,
             }),
             summary,
@@ -260,7 +260,7 @@ impl Operation for UploadDocument {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "上傳一份檔案到 RustFS 物件儲存，並掛到一張單據上。內容以 base64 傳入；系統存下 BLAKE3 雜湊，之後每次取回都會比對。同一個編號再上傳一次就是新版本，舊版不會被覆寫。"
+        "上傳一份檔案到物件儲存，並掛到一張單據上。內容以 base64 傳入；系統存下內容雜湊，之後每次取回都會比對。同一個編號再上傳一次就是新版本，舊版不會被覆寫。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UploadDocumentInput>()
@@ -278,7 +278,7 @@ impl Operation for UploadDocument {
         }
         if body.len() > MAX_OBJECT_BYTES {
             return Err(OpError::BadInput(format!(
-                "檔案 {} 位元組，超過單檔上限 {}。內容走 JSON 的 base64，要更大的檔案得先改成串流上傳。",
+                "檔案 {} 位元組，超過單檔上限 {}。",
                 body.len(),
                 MAX_OBJECT_BYTES
             )));
@@ -349,7 +349,7 @@ impl Operation for UploadDocument {
             .await?;
 
         let summary = format!(
-            "上傳 {} · {} v{} {} · BLAKE3 {}{}",
+            "上傳 {} · {} v{} {} · 指紋 {}{}",
             doc.file_name,
             doc.doc_no,
             doc.version_no,
@@ -395,7 +395,7 @@ impl Operation for GetDocument {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "從 RustFS 取回一份文件並重算 BLAKE3 與登記值比對。預設只回驗證結果與後設資料；include_content 為 true 才把內容以 base64 帶回來。雜湊對不上就回錯誤，不交出內容。"
+        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才把內容以 base64 帶回來。雜湊對不上就回錯誤，不交出內容。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<GetDocumentInput>()

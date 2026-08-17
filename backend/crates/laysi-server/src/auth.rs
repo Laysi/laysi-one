@@ -322,7 +322,7 @@ pub async fn login(
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "no_user_account",
-                "系統尚未建立任何使用者帳號，請先執行 laysi-admin create-user",
+                "系統尚未建立任何使用者帳號，請由管理員在伺服器上建立第一個帳號",
             );
         }
         Ok(_) => {}
@@ -441,7 +441,7 @@ pub async fn change_password(
         return error_response(
             StatusCode::BAD_REQUEST,
             "local_password_not_set",
-            "本帳號未設定本機密碼，請先由管理員執行 laysi-admin reset-password",
+            "本帳號未設定本機密碼，請洽管理員重設密碼",
         );
     };
     let current_matches = match password_matches(input.current_password, current_hash).await {
@@ -530,12 +530,35 @@ async fn user_json_with_role(state: &Shared, user: &UserAccount) -> Value {
             None
         }
     };
+
+    // The operations this role may call, so the sidebar can list only the
+    // sections the person can work in. This is the same set `dispatch`
+    // consults, read from the same tables; it decides what is drawn, never
+    // what is allowed. Every call is still checked server-side, so a stale or
+    // tampered copy of this list gains nothing.
+    //
+    // An empty list on error rather than a fabricated one: a sidebar with no
+    // sections is visibly wrong, while a full sidebar that then refuses every
+    // click looks like the product is broken.
+    let permissions = match state.store.permitted_ops(&user.role_code).await {
+        Ok(ops) => {
+            let mut ops: Vec<String> = ops.into_iter().collect();
+            ops.sort();
+            ops
+        }
+        Err(error) => {
+            tracing::error!(%error, "查詢角色權限失敗，導覽將不列出任何分段");
+            Vec::new()
+        }
+    };
+
     let mut value = user_json(user);
     if let Some(object) = value.as_object_mut() {
         object.insert(
             "role_name".into(),
             json!(name.unwrap_or_else(|| user.role_code.clone())),
         );
+        object.insert("permissions".into(), json!(permissions));
     }
     value
 }

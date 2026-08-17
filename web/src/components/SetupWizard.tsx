@@ -3,11 +3,7 @@ import { callOp, OpFailed, type CompanySettingRow, type DimensionList } from '..
 
 interface Props {
   onToast: (msg: string) => void;
-  /** A step actually saved, so the parent re-reads `/v1/meta` and
-   *  `setup_required` follows. */
   onProgress: () => void;
-  /** The user pressed skip or finished the last step. This does not mean
-   *  setup is complete, only that the wizard closes. */
   onExit: () => void;
 }
 
@@ -28,20 +24,9 @@ interface Account {
   is_active: boolean;
 }
 
-/**
- * First-run wizard.
- *
- * `setup_required` only checks whether the company name is empty, so only
- * the first step (company details) is genuinely required. The bank account
- * and department steps are guidance rather than gates and can both be
- * skipped, then completed later under Settings or Banking. Every step can be
- * abandoned entirely: some people want to look around first, and forcing a
- * form to completion only makes them close the tab.
- */
 export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   const [step, setStep] = useState<Step>('company');
 
-  // Step 1: company details
   const [settings, setSettings] = useState<CompanySettingRow[] | null>(null);
   const [companyName, setCompanyName] = useState('');
   const [taxId, setTaxId] = useState('');
@@ -81,7 +66,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
     }
   }
 
-  // Step 2: the first bank account
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [bankName, setBankName] = useState('');
   const [bankNo, setBankNo] = useState('');
@@ -121,7 +105,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
     }
   }
 
-  // Step 3: the first department
   const [dims, setDims] = useState<DimensionList | null>(null);
   const [deptCode, setDeptCode] = useState('');
   const [deptLabel, setDeptLabel] = useState('');
@@ -209,9 +192,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                 />
               </label>
 
-              {/* The fiscal year, functional currency and other settings are not
-                  editable here, using the same `editable` flag as the settings
-                  page rather than a rule the wizard invents. */}
               {settings.some((s) => !s.editable) && (
                 <p className="field__hint">
                   {settings

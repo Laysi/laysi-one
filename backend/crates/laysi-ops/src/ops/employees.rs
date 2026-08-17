@@ -139,7 +139,7 @@ impl Operation for GetHrDashboard {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀人資總覽：在職人數、本月到離職、待簽核的請假單與異動單，以及人資與財務各條銜接的接上狀態"
+        "讀人資總覽：在職人數、本月到離職、待簽核的休假單與異動單，以及人資與財務各條銜接的接上狀態"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -176,8 +176,8 @@ impl Operation for GetHrDashboard {
               "note": format!("其中 {leaving} 位離職中") },
             { "kicker": "這個月進出", "value": format!("+{joined} / -{departed}"),
               "note": format!("{open_movements} 張異動單還在跑") },
-            { "kicker": "待簽核請假單", "value": leaves.len().to_string(),
-              "note": "請假單簽核" },
+            { "kicker": "待簽核休假單", "value": leaves.len().to_string(),
+              "note": "休假單簽核" },
             { "kicker": latest.map(|r| format!("{} 薪資成本", r.period)).unwrap_or_else(|| "薪資成本".into()),
               "value": latest.map(|r| money(r.gross_total)).unwrap_or_else(|| "—".into()),
               "note": latest.map(|r| format!("公司另負擔 {}", money(r.employer_total)))
@@ -188,7 +188,7 @@ impl Operation for GetHrDashboard {
         if !leaves.is_empty() {
             todos.push(json!({
                 "count": leaves.len().to_string(),
-                "label": "張請假單等簽核",
+                "label": "張休假單等簽核",
                 "due": leaves.first().map(|l| l.from_on.to_string()).unwrap_or_default(),
                 "screen": "hr_att",
             }));
@@ -242,7 +242,7 @@ impl Operation for GetHrDashboard {
             {
                 "label": "薪資費用 → 部門損益",
                 "implemented": true,
-                "detail": "薪資傳票的借方逐部門一行並掛載 voucher_line.dept_id，因此「預算與管理」的部門損益可看到各部門人事成本。未指定部門的員工彙總為「未指定」一行，不分攤。",
+                "detail": "薪資傳票的借方逐部門各一行，因此「預算與管理」的部門損益可看到各部門人事成本。未指定部門的員工彙總為「未指定」一行，不分攤。",
                 "screen": "budget",
             },
             {
@@ -268,7 +268,7 @@ impl Operation for GetHrDashboard {
         ]);
 
         let summary = format!(
-            "讀人資總覽 · 在職 {active} 人 · 本月 +{joined}/-{departed} · {} 張請假單待簽 · {open_movements} 張異動單進行中",
+            "讀人資總覽 · 在職 {active} 人 · 本月 +{joined}/-{departed} · {} 張休假單待簽 · {open_movements} 張異動單進行中",
             leaves.len()
         );
         Ok(OpOutcome::new(
@@ -311,7 +311,7 @@ impl Operation for ListEmployees {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由 annual_leave 規則計算，不儲存於資料庫）。**不含月薪與投保級距**；薪資明細見 list_payslips，該操作限老闆。"
+        "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由特休規則計算，不逐人設定）。**不含月薪與投保級距**；薪資明細見 list_payslips，該操作限老闆。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListEmployeesInput>()
@@ -378,7 +378,7 @@ impl Operation for ListEmployees {
         by_dept.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
         let summary = format!(
-            "讀員工名冊 · {} 筆（在職 {active}）· 平均年資 {} · 特休依 annual_leave {}",
+            "讀員工名冊 · {} 筆（在職 {active}）· 平均年資 {} · 特休依特休規則 {}",
             rows.len(),
             service_label(avg_months),
             rs.version
@@ -397,7 +397,7 @@ impl Operation for ListEmployees {
                 "annual_leave_ruleset": crate::ops::insurance::ruleset_json(rs),
                 // A blank column reads as "no data" more easily than a sentence
                 // explaining where the figure lives.
-                "salary_note": "名冊不含月薪與投保級距。個人薪資明細見「薪資作業」（list_payslips，限老闆）；投保級距見「勞健保與勞退」，該數字為向勞保局申報值，供會計核對繳款單。",
+                "salary_note": "名冊不含月薪與投保級距。個人薪資明細見「薪資作業」，限負責人檢視；投保級距見「勞健保與勞退」，該數字為向勞保局申報值，供會計核對繳款單。",
                 "id_note": "身分證字號只存遮罩後的形式，完整字號不在這套系統裡。",
             }),
             summary,
@@ -418,7 +418,7 @@ impl Operation for ListEmployeeMovements {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀到離職與異動單：每一張走到哪一關、還差哪幾關。流程本身（到職四步、離職四步…）查自 hr_flow_step，不寫死在程式裡。"
+        "讀到離職與異動單：每一張走到哪一關、還差哪幾關。流程本身（到職四步、離職四步…）為公司設定，不寫死在程式裡。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::LimitInput>()
@@ -447,7 +447,7 @@ impl Operation for ListEmployeeMovements {
 
         let open = movements.iter().filter(|m| m.status == "open").count();
         let summary = format!(
-            "讀到離職與異動 · {} 張（{open} 張進行中）· 流程查自 hr_flow_step",
+            "讀到離職與異動 · {} 張（{open} 張進行中）· 流程依公司設定",
             movements.len()
         );
         Ok(OpOutcome::new(
@@ -455,7 +455,7 @@ impl Operation for ListEmployeeMovements {
                 "movements": movements.iter().map(|m| movement_json(m, &flow)).collect::<Vec<_>>(),
                 "flows": kinds,
                 "open_count": open,
-                "flow_source": "hr_flow_step（公司自己的流程，不是法規）",
+                "flow_source": "公司自訂設定，非法規要求",
             }),
             summary,
         ))

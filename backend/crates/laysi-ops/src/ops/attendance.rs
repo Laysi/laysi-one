@@ -1,8 +1,20 @@
-//! Attendance, leave requests and approvals.
+//! Attendance, clock-in records, leave requests and approvals.
 //!
 //! The ruleset library does not yet carry overtime multipliers, so
 //! [`GetAttendance`] passes through the `overtime_pay` supplied by the
-//! timekeeping system without recomputing it.
+//! timekeeping system without recomputing it. Punches are subject to the same
+//! rule from the other direction: [`PunchSummary`] derives overtime *hours*
+//! from the clock and never turns them into an amount.
+//!
+//! Punches and the monthly `attendance` row are two accounts of the same
+//! month and neither overwrites the other. The punches are what the people
+//! here recorded; the `attendance` row is what a source system asserts. The
+//! operations compute both and report the difference, which is the same shape
+//! as payroll reconciling `payroll_year_totals` against `employee_income`.
+//!
+//! Working hours are company policy, so they are read from `company_setting`
+//! at call time, never held in this file. When `work_start` is blank the
+//! answer to "was this person late" is *not asked*, not "no".
 //!
 //! The database stores only approved annual leave days. The entitlement is
 //! derived from the `annual_leave` ruleset and completed months of service;
@@ -16,10 +28,11 @@ use crate::ops::employees::service_months;
 use crate::ops::insurance::ruleset_json;
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::{Datelike, NaiveDate};
-use laysi_domain::Money;
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use laysi_domain::{business_offset, business_time, Money};
 use laysi_regulation::Ruleset;
-use laysi_store::LeaveRequest;
+use laysi_store::{AttendancePunch, AttendanceRow, LeaveRequest};
+use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -29,6 +42,8 @@ use std::collections::BTreeMap;
 pub fn ops() -> Vec<Box<dyn Operation>> {
     vec![
         Box::new(GetAttendance),
+        Box::new(ListAttendancePunches),
+        Box::new(CorrectPunch),
         Box::new(ListLeaveRequests),
         Box::new(DecideLeaveRequest),
     ]
@@ -36,6 +51,370 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
 
 fn valid_month(month: &str) -> bool {
     chrono::NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").is_ok()
+}
+
+// Clock-in records
+
+/// The two things a punch can be.
+pub(crate) const PUNCH_KINDS: &[&str] = &["in", "out"];
+
+pub(crate) fn punch_kind_label(kind: &str) -> &'static str {
+    if kind == "in" {
+        "上班"
+    } else {
+        "下班"
+    }
+}
+
+/// Wall-clock format for a punch. Seconds are shown because they are stored:
+/// truncating the display would make two punches a minute apart look
+/// identical on screen while the record says otherwise.
+pub(crate) const PUNCH_TIME: &str = "%H:%M:%S";
+
+/// Turn a wall-clock time on a working day into the instant it names.
+///
+/// The offset is fixed rather than looked up, so this never returns an
+/// ambiguous or missing local time the way a daylight-saving zone would.
+pub fn business_instant(day: NaiveDate, at: NaiveTime) -> DateTime<Utc> {
+    business_offset()
+        .from_local_datetime(&day.and_time(at))
+        .single()
+        .expect("固定時區的本地時間必然唯一對應一個瞬間")
+        .with_timezone(&Utc)
+}
+
+/// When the working day starts and ends, as the company has stated it.
+///
+/// Every field is optional because a fresh install has stated nothing. The
+/// alternative — assuming 09:00 to 18:00 — would be this system inventing a
+/// fact about someone else's company and then judging people against it.
+pub(crate) struct WorkSchedule {
+    pub starts_at: Option<NaiveTime>,
+    pub ends_at: Option<NaiveTime>,
+    /// Minutes after `starts_at` that still count as on time.
+    pub grace_minutes: i64,
+    /// Whether that number was stated, as opposed to falling back to zero.
+    pub grace_stated: bool,
+    /// How much later than `starts_at` the day may begin, with the expected
+    /// end shifting by the same amount. Zero means no flexitime.
+    ///
+    /// Distinct from `grace_minutes`, and the distinction is the point: grace
+    /// forgives a late arrival and still expects the same departure,
+    /// flexitime moves the whole day and keeps its length.
+    pub flex_minutes: i64,
+}
+
+impl WorkSchedule {
+    pub async fn load(ctx: &OpCtx) -> Result<Self, OpError> {
+        let settings = ctx.store.company_settings().await?;
+        let value = |code: &str| {
+            settings
+                .iter()
+                .find(|s| s.code == code)
+                .map(|s| s.value.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let time = |code: &str| {
+            value(code).and_then(|v| NaiveTime::parse_from_str(&v, "%H:%M").ok())
+        };
+        let minutes = |code: &str| value(code).and_then(|v| v.parse::<i64>().ok());
+        let grace = minutes("late_grace_minutes");
+        Ok(Self {
+            starts_at: time("work_start"),
+            ends_at: time("work_end"),
+            grace_minutes: grace.unwrap_or(0).max(0),
+            grace_stated: grace.is_some(),
+            flex_minutes: minutes("flex_window_minutes").unwrap_or(0).max(0),
+        })
+    }
+
+    pub fn flexible(&self) -> bool {
+        self.flex_minutes > 0
+    }
+
+    /// The latest an arrival may be and still count as on time, before grace.
+    pub fn latest_start(&self) -> Option<NaiveTime> {
+        Some(self.starts_at? + chrono::Duration::minutes(self.flex_minutes))
+    }
+
+    /// How much this day is shifted by, given when the person arrived.
+    ///
+    /// Never negative: arriving early does not shorten the day. Nobody was
+    /// asked to come early, and letting it count would turn a favour into an
+    /// obligation to leave later than agreed.
+    fn shift_minutes(&self, arrived: Option<NaiveDateTime>) -> i64 {
+        let (Some(starts_at), Some(arrived)) = (self.starts_at, arrived) else {
+            return 0;
+        };
+        let start = arrived.date().and_time(starts_at);
+        (arrived - start).num_minutes().clamp(0, self.flex_minutes)
+    }
+
+    /// When this person's day is expected to end, or `None` without an end
+    /// time. Under flexitime it moves with the arrival; otherwise it is the
+    /// same for everybody.
+    pub fn expected_end(
+        &self,
+        date: NaiveDate,
+        arrived: Option<NaiveDateTime>,
+    ) -> Option<NaiveDateTime> {
+        Some(
+            date.and_time(self.ends_at?)
+                + chrono::Duration::minutes(self.shift_minutes(arrived)),
+        )
+    }
+
+    /// The moment after which an arrival counts as late: the start, plus the
+    /// flexitime window, plus grace.
+    fn arrival_deadline(&self, date: NaiveDate) -> Option<NaiveDateTime> {
+        Some(
+            date.and_time(self.starts_at?)
+                + chrono::Duration::minutes(self.flex_minutes + self.grace_minutes),
+        )
+    }
+
+    /// Whether an arrival was late, or `None` when no start time is stated.
+    pub fn late(&self, arrived: NaiveDateTime) -> Option<bool> {
+        Some(arrived > self.arrival_deadline(arrived.date())?)
+    }
+
+    /// How far past the deadline an arrival was, or `None` when no start time
+    /// is stated. Zero when on time.
+    pub fn late_by_seconds(&self, arrived: NaiveDateTime) -> Option<i64> {
+        Some((arrived - self.arrival_deadline(arrived.date())?).num_seconds().max(0))
+    }
+
+    /// Seconds worked past the end of *this person's* day, or `None` when no
+    /// end time is stated. Under flexitime a later start means a later end,
+    /// so the arrival is part of the answer. Hours only: turning them into pay
+    /// needs the article 24 multipliers, which are regulation values and are
+    /// not in the rule library.
+    pub fn overtime_seconds(
+        &self,
+        arrived: Option<NaiveDateTime>,
+        left: NaiveDateTime,
+    ) -> Option<i64> {
+        let end = self.expected_end(left.date(), arrived)?;
+        Some((left - end).num_seconds().max(0))
+    }
+
+    pub fn json(&self) -> Value {
+        let hhmm = |t: NaiveTime| t.format("%H:%M").to_string();
+        json!({
+            "work_start": self.starts_at.map(hhmm),
+            "work_end": self.ends_at.map(hhmm),
+            "grace_minutes": self.grace_minutes,
+            "grace_stated": self.grace_stated,
+            "flex_minutes": self.flex_minutes,
+            "flexible": self.flexible(),
+            "latest_start": self.latest_start().map(hhmm),
+            "judges_lateness": self.starts_at.is_some(),
+            "counts_overtime": self.ends_at.is_some(),
+            "source": "company_setting 的 work_start／work_end／flex_window_minutes／late_grace_minutes",
+            "note": match (self.starts_at, self.ends_at) {
+                (None, None) => "尚未設定上下班時間，因此只記錄打卡時間，不判定遲到也不計加班時數。",
+                (None, Some(_)) => "尚未設定上班時間，因此不判定遲到。",
+                (Some(_), None) => "尚未設定下班時間，因此不計加班時數。",
+                (Some(_), Some(_)) if self.flexible() =>
+                    "採彈性工時：在彈性區間內開始上班都算準時，下班時間同步順延，工作總時數不變。",
+                (Some(_), Some(_)) => "遲到與加班時數依公司設定的上下班時間判定。",
+            },
+        })
+    }
+}
+
+/// One working day of one person, built from that day's punches.
+pub(crate) struct PunchDay {
+    pub date: NaiveDate,
+    pub arrived: Option<NaiveDateTime>,
+    pub left: Option<NaiveDateTime>,
+    pub arrived_source: Option<String>,
+    pub left_source: Option<String>,
+    pub note: String,
+}
+
+impl PunchDay {
+    pub fn worked_seconds(&self) -> Option<i64> {
+        let (arrived, left) = (self.arrived?, self.left?);
+        Some((left - arrived).num_seconds().max(0))
+    }
+
+    /// A day with an arrival and no departure. Common and worth naming: it is
+    /// the state a person is in right now, and also the state a forgotten
+    /// punch leaves behind.
+    pub fn open(&self) -> bool {
+        self.arrived.is_some() && self.left.is_none()
+    }
+
+    pub fn json(&self, schedule: &WorkSchedule) -> Value {
+        let clock = |t: Option<NaiveDateTime>| t.map(|t| t.format(PUNCH_TIME).to_string());
+        let late = self.arrived.and_then(|a| schedule.late(a));
+        json!({
+            "date": self.date,
+            "weekday": weekday_label(self.date),
+            "in_at": clock(self.arrived),
+            "out_at": clock(self.left),
+            "in_source": self.arrived_source,
+            "out_source": self.left_source,
+            "manual": self.arrived_source.as_deref() == Some("manual")
+                || self.left_source.as_deref() == Some("manual"),
+            "worked_seconds": self.worked_seconds(),
+            "worked_hours": self.worked_seconds().map(|s| hours(s).to_string()),
+            "open": self.open(),
+            "late": late,
+            "late_seconds": self.arrived.and_then(|a| schedule.late_by_seconds(a)),
+            "expected_end": schedule
+                .expected_end(self.date, self.arrived)
+                .map(|t| t.format(PUNCH_TIME).to_string()),
+            "overtime_seconds": self.left.and_then(|l| schedule.overtime_seconds(self.arrived, l)),
+            "note": self.note,
+        })
+    }
+}
+
+fn weekday_label(date: NaiveDate) -> &'static str {
+    match date.weekday() {
+        chrono::Weekday::Mon => "一",
+        chrono::Weekday::Tue => "二",
+        chrono::Weekday::Wed => "三",
+        chrono::Weekday::Thu => "四",
+        chrono::Weekday::Fri => "五",
+        chrono::Weekday::Sat => "六",
+        chrono::Weekday::Sun => "日",
+    }
+}
+
+/// Seconds as hours to one decimal place.
+fn hours(seconds: i64) -> Decimal {
+    (Decimal::from(seconds) / Decimal::from(3600)).round_dp(1)
+}
+
+/// Group one person's punches into days.
+///
+/// The rows arrive ordered by day and then by kind, so an arrival is always
+/// seen before the departure it belongs to.
+pub(crate) fn punch_days(punches: &[AttendancePunch]) -> Vec<PunchDay> {
+    let mut days: Vec<PunchDay> = Vec::new();
+    for punch in punches {
+        let local = business_time(punch.punched_at);
+        if days.last().map(|d| d.date) != Some(punch.punched_on) {
+            days.push(PunchDay {
+                date: punch.punched_on,
+                arrived: None,
+                left: None,
+                arrived_source: None,
+                left_source: None,
+                note: String::new(),
+            });
+        }
+        let day = days.last_mut().expect("剛才推入了一天");
+        if punch.kind == "in" {
+            day.arrived = Some(local);
+            day.arrived_source = Some(punch.source.clone());
+        } else {
+            day.left = Some(local);
+            day.left_source = Some(punch.source.clone());
+        }
+        if !punch.note.is_empty() {
+            if !day.note.is_empty() {
+                day.note.push_str(" · ");
+            }
+            day.note.push_str(&punch.note);
+        }
+    }
+    days
+}
+
+/// What a month of punches adds up to.
+///
+/// Everything here is derived. Nothing is written back to `attendance`: the
+/// imported row stays as the source system left it, and the difference is
+/// reported instead.
+pub(crate) struct PunchSummary {
+    pub days_with_arrival: i64,
+    pub complete_days: i64,
+    pub open_days: i64,
+    pub worked_seconds: i64,
+    pub late_days: Option<i64>,
+    pub overtime_seconds: Option<i64>,
+    pub manual_days: i64,
+}
+
+pub(crate) fn summarise(days: &[PunchDay], schedule: &WorkSchedule) -> PunchSummary {
+    PunchSummary {
+        days_with_arrival: days.iter().filter(|d| d.arrived.is_some()).count() as i64,
+        complete_days: days.iter().filter_map(PunchDay::worked_seconds).count() as i64,
+        open_days: days.iter().filter(|d| d.open()).count() as i64,
+        worked_seconds: days.iter().filter_map(PunchDay::worked_seconds).sum(),
+        late_days: schedule.starts_at.map(|_| {
+            days.iter()
+                .filter(|d| d.arrived.and_then(|a| schedule.late(a)) == Some(true))
+                .count() as i64
+        }),
+        overtime_seconds: schedule.ends_at.map(|_| {
+            days.iter()
+                .filter_map(|d| d.left.and_then(|l| schedule.overtime_seconds(d.arrived, l)))
+                .sum()
+        }),
+        manual_days: days
+            .iter()
+            .filter(|d| {
+                d.arrived_source.as_deref() == Some("manual")
+                    || d.left_source.as_deref() == Some("manual")
+            })
+            .count() as i64,
+    }
+}
+
+impl PunchSummary {
+    pub fn json(&self) -> Value {
+        json!({
+            "days_with_arrival": self.days_with_arrival,
+            "complete_days": self.complete_days,
+            "open_days": self.open_days,
+            "worked_seconds": self.worked_seconds,
+            "worked_hours": hours(self.worked_seconds).to_string(),
+            "late_days": self.late_days,
+            "overtime_seconds": self.overtime_seconds,
+            "overtime_hours": self.overtime_seconds.map(|s| hours(s).to_string()),
+            "manual_days": self.manual_days,
+            "overtime_pay_computed": false,
+            "overtime_note": "只算加班時數，不算金額：加班費倍數是法規數字且尚未收錄至規則庫。",
+        })
+    }
+}
+
+/// Compare the punches against the imported monthly row.
+///
+/// `None` when there is no imported row to compare with, which is a fact
+/// worth stating rather than a zero difference.
+pub(crate) fn reconciliation(summary: &PunchSummary, imported: Option<&AttendanceRow>) -> Value {
+    let Some(row) = imported else {
+        return json!({
+            "imported": false,
+            "note": "本月沒有匯入的出勤統計可以對照，畫面上的數字全部由打卡推導。",
+        });
+    };
+    let worked_gap = Decimal::from(summary.complete_days) - row.worked_days;
+    let late_gap = summary.late_days.map(|late| late - i64::from(row.late_count));
+    let overtime_gap = summary
+        .overtime_seconds
+        .map(|s| hours(s) - row.overtime_hours);
+    json!({
+        "imported": true,
+        "worked_days": { "imported": row.worked_days.to_string(),
+                         "from_punches": summary.complete_days,
+                         "difference": worked_gap.to_string() },
+        "late_count": { "imported": row.late_count, "from_punches": summary.late_days,
+                        "difference": late_gap },
+        "overtime_hours": { "imported": row.overtime_hours.to_string(),
+                            "from_punches": summary.overtime_seconds.map(|s| hours(s).to_string()),
+                            "difference": overtime_gap.map(|d| d.to_string()) },
+        "matches": worked_gap.is_zero()
+            && late_gap.is_none_or(|g| g == 0)
+            && overtime_gap.is_none_or(|g| g.is_zero()),
+        "note": "打卡與匯入的月統計互不覆蓋。兩邊不同時照實回報差額，由人資決定哪一邊要更正。",
+    })
 }
 
 /// Values accepted by `leave_request.kind`. A migration test compares this
@@ -155,7 +534,7 @@ impl Operation for GetAttendance {
     }
 
     fn summary(&self) -> &'static str {
-        "讀某個月的逐人出勤、請假、遲到與加班時數。加班費金額由差勤系統帶入；規則庫尚未收錄加班費倍數，本系統不自行重算。"
+        "讀某個月的逐人出勤、休假、遲到與加班時數。加班費金額由差勤系統帶入；規則庫尚未收錄加班費倍數，本系統不自行重算。"
     }
 
     fn input_schema(&self) -> Value {
@@ -203,7 +582,7 @@ impl Operation for GetAttendance {
             .collect::<Vec<_>>();
 
         let summary = format!(
-            "讀 {month} 出勤 · {} 人 · 出勤 {} 日、請假 {} 日、加班 {} 小時 · 加班費 {} 由來源系統帶入",
+            "讀 {month} 出勤 · {} 人 · 出勤 {} 日、休假 {} 日、加班 {} 小時 · 加班費 {} 由來源系統帶入",
             attendance_rows.len(),
             worked_days.normalize(),
             leave_days.normalize(),
@@ -226,7 +605,219 @@ impl Operation for GetAttendance {
                     "late_count": late_count,
                 },
                 "overtime_recomputed": false,
-                "overtime_note": "加班費倍數尚未收錄至規則庫，金額由差勤系統帶入，本系統不依時數自行計算。如需重算，要先補上可依日期解析的加班費規則。",
+                "overtime_note": "加班費倍數尚未收錄至規則庫，金額由差勤系統帶入，本系統不依時數自行計算。",
+            }),
+            summary,
+        ))
+    }
+}
+
+// Punches, company-wide
+
+struct ListAttendancePunches;
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ListAttendancePunchesInput {
+    /// Month (YYYY-MM). Defaults to this month.
+    #[serde(default)]
+    pub month: Option<String>,
+    /// Employee number. Without it the reply is one summary row per person;
+    /// with it, the day-by-day detail for that person as well.
+    #[serde(default)]
+    pub emp_no: Option<String>,
+}
+
+#[async_trait]
+impl Operation for ListAttendancePunches {
+    fn name(&self) -> &'static str {
+        "list_attendance_punches"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+
+    fn summary(&self) -> &'static str {
+        "讀某個月全公司的打卡紀錄：逐人統計（實際打滿的天數、時數、遲到天數、加班時數），並與匯入的出勤月統計對帳回報差額。指定員工編號時另附該員的逐日明細。上下班時間取自公司設定，未設定時不判定遲到。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<ListAttendancePunchesInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: ListAttendancePunchesInput = parse(input)?;
+        let month = i
+            .month
+            .unwrap_or_else(|| ctx.today.format("%Y-%m").to_string());
+        if !valid_month(&month) {
+            return Err(OpError::BadInput(format!(
+                "月份要寫成 YYYY-MM，收到的是「{month}」"
+            )));
+        }
+        let only = match &i.emp_no {
+            None => None,
+            Some(emp_no) => Some(ctx.store.employee(emp_no).await?),
+        };
+
+        let schedule = WorkSchedule::load(ctx).await?;
+        let punches = ctx
+            .store
+            .punches(&month, only.as_ref().map(|e| e.id))
+            .await?;
+        let imported = ctx.store.attendance(&month).await?;
+
+        // One bucket per person, keyed by employee so the summary rows and
+        // the imported rows line up on a primary key rather than a name.
+        let mut by_employee: BTreeMap<i32, Vec<AttendancePunch>> = BTreeMap::new();
+        for punch in punches {
+            by_employee.entry(punch.employee_id).or_default().push(punch);
+        }
+
+        let mut rows = Vec::new();
+        let mut detail = Value::Null;
+        for (employee_id, punches) in &by_employee {
+            let days = punch_days(punches);
+            let summary = summarise(&days, &schedule);
+            let row = imported.iter().find(|r| r.employee_id == *employee_id);
+            let first = &punches[0];
+            rows.push(json!({
+                "emp_no": first.emp_no,
+                "name": first.name,
+                "dept_label": first.dept_label,
+                "summary": summary.json(),
+                "reconciliation": reconciliation(&summary, row),
+            }));
+            if only.as_ref().is_some_and(|e| e.id == *employee_id) {
+                detail = json!(days.iter().map(|d| d.json(&schedule)).collect::<Vec<_>>());
+            }
+        }
+
+        let open_days: i64 = rows
+            .iter()
+            .filter_map(|r| r["summary"]["open_days"].as_i64())
+            .sum();
+        let mismatched = rows
+            .iter()
+            .filter(|r| r["reconciliation"]["matches"] == json!(false))
+            .count();
+        let summary = format!(
+            "讀 {month} 打卡 · {} 人有紀錄 · {open_days} 天只打上班沒打下班 · {mismatched} 人與匯入的月統計對不上",
+            rows.len()
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "month": month,
+                "months": ctx.store.attendance_months().await?,
+                "schedule": schedule.json(),
+                "rows": rows,
+                "employee": only.as_ref().map(|e| json!({ "emp_no": e.emp_no, "name": e.name })),
+                "days": detail,
+                "open_days": open_days,
+                "mismatched": mismatched,
+            }),
+            summary,
+        ))
+    }
+}
+
+// Correcting a punch
+
+struct CorrectPunch;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CorrectPunchInput {
+    /// Whose record to correct.
+    pub emp_no: String,
+    /// The working day.
+    pub punched_on: NaiveDate,
+    /// `in` or `out`.
+    pub kind: String,
+    /// Wall-clock time on that day in the company's own time zone, `HH:MM:SS`.
+    /// `HH:MM` is accepted and stored as second zero, because a correction is
+    /// a remembered time and the second is not known; `source` already marks
+    /// the row as entered by hand.
+    pub at: String,
+    /// Why it is being entered by hand. Kept on the record.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[async_trait]
+impl Operation for CorrectPunch {
+    fn name(&self) -> &'static str {
+        "correct_punch"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。已存在的同一格會被覆蓋，這正是本操作存在的理由；漏打卡沒有其他更正管道。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<CorrectPunchInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: CorrectPunchInput = parse(input)?;
+        if !PUNCH_KINDS.contains(&i.kind.as_str()) {
+            return Err(OpError::BadInput(format!(
+                "打卡別只接受 in（上班）或 out（下班），收到「{}」",
+                i.kind
+            )));
+        }
+        let text = i.at.trim();
+        let at = NaiveTime::parse_from_str(text, "%H:%M:%S")
+            .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M"))
+            .map_err(|_| {
+                OpError::BadInput(format!("時間要寫成 HH:MM:SS 或 HH:MM，收到的是「{}」", i.at))
+            })?;
+        if i.punched_on > ctx.today {
+            return Err(OpError::BadInput("不能替未來的日期補登打卡".into()));
+        }
+
+        let employee = ctx.store.employee(&i.emp_no).await?;
+        let punch = ctx
+            .store
+            .record_punch(
+                laysi_store::NewPunch {
+                    employee_id: employee.id,
+                    punched_on: i.punched_on,
+                    punched_at: business_instant(i.punched_on, at),
+                    kind: &i.kind,
+                    source: "manual",
+                    note: i.note.as_deref().unwrap_or("").trim(),
+                    actor: &ctx.actor,
+                },
+                true,
+            )
+            .await?;
+
+        let schedule = WorkSchedule::load(ctx).await?;
+        let month = i.punched_on.format("%Y-%m").to_string();
+        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?);
+        let day = days.iter().find(|d| d.date == i.punched_on);
+
+        let summary = format!(
+            "{} {} 的{}卡補登為 {} · 由 {} 手動輸入",
+            employee.emp_no,
+            i.punched_on,
+            punch_kind_label(&i.kind),
+            business_time(punch.punched_at).format(PUNCH_TIME),
+            ctx.actor
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "employee": { "emp_no": employee.emp_no, "name": employee.name },
+                "day": day.map(|d| d.json(&schedule)),
+                "schedule": schedule.json(),
+                "source": "manual",
+                "note": "來源為 manual 的打卡在明細上會標示出來，因為整天由他人填寫的紀錄與本人按下的紀錄不是同一種證據。",
             }),
             summary,
         ))
@@ -258,7 +849,7 @@ impl Operation for ListLeaveRequests {
     }
 
     fn summary(&self) -> &'static str {
-        "讀請假單與逐人特休餘額。額度依查詢當日的 annual_leave ruleset 與年資現算，資料庫只留已核准的實休天數。"
+        "讀休假單與逐人特休餘額。額度依查詢當日適用的特休規則與年資現算，系統只留已核准的實休天數。"
     }
 
     fn input_schema(&self) -> Value {
@@ -324,7 +915,7 @@ impl Operation for ListLeaveRequests {
             .count();
 
         let summary = format!(
-            "讀請假單 · {} 張（{pending} 張等簽）· 特休額度依 annual_leave {} 現算",
+            "讀休假單 · {} 張（{pending} 張等簽）· 特休額度依特休規則 {} 現算",
             rows.len(),
             rs.version
         );
@@ -336,7 +927,7 @@ impl Operation for ListLeaveRequests {
                 "annual_leave_year": ctx.today.year(),
                 "annual_leave_ruleset": ruleset_json(rs),
                 "annual_leave_quota_stored": false,
-                "annual_leave_note": "資料庫只存已核准、實際休掉的天數；額度每次由年資與 annual_leave 規則現算。離職員工的年資停在離職日，不會離職後繼續累加。",
+                "annual_leave_note": "系統只存已核准、實際休掉的天數；額度每次由年資與特休規則現算。離職員工的年資停在離職日，不會離職後繼續累加。",
             }),
             summary,
         ))
@@ -367,7 +958,7 @@ impl Operation for DecideLeaveRequest {
     }
 
     fn summary(&self) -> &'static str {
-        "准假或駁回一張仍在等簽核的請假單，留下決定者、身分與說明。不是 pending 時由 store 拒絕，不在操作層先做一份可能過期的判斷。"
+        "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕。"
     }
 
     fn input_schema(&self) -> Value {
@@ -409,6 +1000,222 @@ impl Operation for DecideLeaveRequest {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    fn punch(day: &str, kind: &str, at: &str, source: &str) -> AttendancePunch {
+        let punched_on = NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap();
+        let time = NaiveTime::parse_from_str(at, "%H:%M:%S")
+            .or_else(|_| NaiveTime::parse_from_str(at, "%H:%M"))
+            .unwrap();
+        AttendancePunch {
+            id: 1,
+            employee_id: 1,
+            emp_no: "E003".into(),
+            name: "黃柏叡".into(),
+            dept_label: Some("業務部".into()),
+            punched_on,
+            punched_at: business_instant(punched_on, time),
+            kind: kind.into(),
+            source: source.into(),
+            note: String::new(),
+            created_by: "黃柏叡".into(),
+        }
+    }
+
+    fn schedule(start: Option<&str>, end: Option<&str>, grace: i64) -> WorkSchedule {
+        flex_schedule(start, end, grace, 0)
+    }
+
+    fn flex_schedule(
+        start: Option<&str>,
+        end: Option<&str>,
+        grace: i64,
+        flex: i64,
+    ) -> WorkSchedule {
+        let time = |v: Option<&str>| v.map(|v| NaiveTime::parse_from_str(v, "%H:%M").unwrap());
+        WorkSchedule {
+            starts_at: time(start),
+            ends_at: time(end),
+            grace_minutes: grace,
+            grace_stated: true,
+            flex_minutes: flex,
+        }
+    }
+
+    /// Grace forgives, flexitime moves. The same 09:45 arrival is late under
+    /// an hour of grace and on time under an hour of flexitime, and only
+    /// flexitime changes when the day is expected to end.
+    #[test]
+    fn flexitime_moves_the_day_where_grace_only_forgives() {
+        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at);
+        let day = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
+        let arrived = at("09:45:00");
+
+        let grace = schedule(Some("09:00"), Some("18:00"), 60);
+        assert_eq!(grace.late(arrived), Some(false), "一小時寬限內不算遲到");
+        assert_eq!(
+            grace.expected_end(day, Some(arrived)),
+            Some(day.and_hms_opt(18, 0, 0).unwrap()),
+            "寬限不改下班時間"
+        );
+
+        let flex = flex_schedule(Some("09:00"), Some("18:00"), 0, 60);
+        assert_eq!(flex.late(arrived), Some(false));
+        assert_eq!(
+            flex.expected_end(day, Some(arrived)),
+            Some(day.and_hms_opt(18, 45, 0).unwrap()),
+            "彈性把整天往後移，時數不變"
+        );
+        assert_eq!(flex.latest_start().map(|t| t.to_string()), Some("10:00:00".into()));
+    }
+
+    /// The window is a cap in one direction only: past it you are late, and
+    /// arriving early never shortens the day.
+    #[test]
+    fn the_flex_window_caps_lateness_but_early_arrival_earns_nothing() {
+        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at);
+        let day = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
+        let flex = flex_schedule(Some("09:00"), Some("18:00"), 5, 60);
+
+        assert_eq!(flex.late(at("10:05:00")), Some(false), "區間加寬限的邊界");
+        assert_eq!(flex.late(at("10:05:01")), Some(true));
+
+        let early = at("08:00:00");
+        assert_eq!(
+            flex.expected_end(day, Some(early)),
+            Some(day.and_hms_opt(18, 0, 0).unwrap()),
+            "早到不會提早下班"
+        );
+        assert_eq!(
+            flex.overtime_seconds(Some(early), at("18:00:00")),
+            Some(0),
+            "早到的那一小時不算加班"
+        );
+
+        let late_start = at("10:00:00");
+        assert_eq!(
+            flex.overtime_seconds(Some(late_start), at("19:00:00")),
+            Some(0),
+            "10 點到、19 點走，剛好做滿，不是加班"
+        );
+        assert_eq!(
+            flex.overtime_seconds(Some(late_start), at("19:30:00")),
+            Some(30 * 60)
+        );
+    }
+
+    /// A punch is stored as an instant. Reading it back must give the time
+    /// the person saw on the wall, not the time on a UTC server clock, and
+    /// the second must survive both directions.
+    #[test]
+    fn a_punch_reads_back_at_the_time_it_was_made() {
+        let day = punch("2026-08-06", "in", "08:55:37", "self");
+        assert_eq!(
+            business_time(day.punched_at).format(PUNCH_TIME).to_string(),
+            "08:55:37"
+        );
+        assert_eq!(day.punched_at.format(PUNCH_TIME).to_string(), "00:55:37", "存的是 UTC 瞬間");
+    }
+
+    /// The record keeps seconds, so the second decides a borderline arrival
+    /// rather than being rounded away.
+    #[test]
+    fn the_second_decides_a_borderline_arrival() {
+        let sched = schedule(Some("09:00"), Some("18:00"), 5);
+        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at);
+        assert_eq!(sched.late(at("09:05:00")), Some(false), "剛好等於寬限不算遲到");
+        assert_eq!(sched.late(at("09:05:01")), Some(true), "多一秒就是遲到");
+        assert_eq!(sched.late_by_seconds(at("09:05:01")), Some(1));
+        assert_eq!(sched.late_by_seconds(at("09:00:00")), Some(0));
+
+        let days = punch_days(&[
+            punch("2026-08-06", "in", "09:00:00", "self"),
+            punch("2026-08-06", "out", "18:00:30", "self"),
+        ]);
+        assert_eq!(days[0].worked_seconds(), Some(9 * 3600 + 30));
+        assert_eq!(sched.overtime_seconds(days[0].arrived, days[0].left.unwrap()), Some(30));
+    }
+
+    /// Lateness is a question the system refuses to answer until the company
+    /// has said when the day starts. `None` is not `false`.
+    #[test]
+    fn lateness_is_unanswered_rather_than_false_without_a_start_time() {
+        let arrived = business_time(punch("2026-08-06", "in", "10:30", "self").punched_at);
+        assert_eq!(schedule(None, None, 0).late(arrived), None);
+        assert_eq!(schedule(Some("09:00"), None, 0).late(arrived), Some(true));
+    }
+
+    /// The grace period comes from company settings, so the same arrival is
+    /// late at one company and not at another with no change here.
+    #[test]
+    fn the_grace_period_decides_a_borderline_arrival() {
+        let arrived = business_time(punch("2026-08-06", "in", "09:05", "self").punched_at);
+        assert_eq!(schedule(Some("09:00"), None, 0).late(arrived), Some(true));
+        assert_eq!(schedule(Some("09:00"), None, 5).late(arrived), Some(false), "剛好等於寬限不算遲到");
+        assert_eq!(schedule(Some("09:00"), None, 10).late(arrived), Some(false));
+    }
+
+    /// Days are built from the punch rows, and a day with only an arrival
+    /// stays open rather than counting as a worked day.
+    #[test]
+    fn an_unfinished_day_is_open_not_a_worked_day() {
+        let sched = schedule(Some("09:00"), Some("18:00"), 5);
+        let days = punch_days(&[
+            punch("2026-08-05", "in", "08:58", "self"),
+            punch("2026-08-05", "out", "19:30", "self"),
+            punch("2026-08-06", "in", "09:20", "self"),
+        ]);
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].worked_seconds(), Some(632 * 60));
+        assert!(!days[0].open());
+        assert_eq!(days[1].worked_seconds(), None);
+        assert!(days[1].open());
+
+        let stats = summarise(&days, &sched);
+        assert_eq!(stats.days_with_arrival, 2);
+        assert_eq!(stats.complete_days, 1, "只打了上班的那天不算工作日");
+        assert_eq!(stats.open_days, 1);
+        assert_eq!(stats.late_days, Some(1), "9:20 超過 9:00 加五分鐘");
+        assert_eq!(stats.overtime_seconds, Some(90 * 60), "19:30 比 18:00 晚 90 分鐘");
+    }
+
+    /// Punches never overwrite the imported monthly row. When they disagree
+    /// the difference is reported, in both directions.
+    #[test]
+    fn punches_and_the_imported_month_are_reconciled_not_merged() {
+        let sched = schedule(Some("09:00"), Some("18:00"), 0);
+        let days = punch_days(&[
+            punch("2026-08-05", "in", "08:58", "self"),
+            punch("2026-08-05", "out", "18:00", "self"),
+        ]);
+        let stats = summarise(&days, &sched);
+
+        let imported = AttendanceRow {
+            employee_id: 1,
+            emp_no: "E003".into(),
+            name: "黃柏叡".into(),
+            dept_label: None,
+            title: "業務專員".into(),
+            month: "2026-08".into(),
+            required_days: Money::from(21),
+            worked_days: Money::from(3),
+            leave_days: Money::ZERO,
+            overtime_hours: Money::ZERO,
+            overtime_pay: Money::ZERO,
+            late_count: 0,
+            note: String::new(),
+        };
+
+        let out = reconciliation(&stats, Some(&imported));
+        assert_eq!(out["matches"], json!(false));
+        assert_eq!(out["worked_days"]["from_punches"], json!(1));
+        assert_eq!(out["worked_days"]["imported"], json!("3"));
+        assert_eq!(out["worked_days"]["difference"], json!("-2"));
+
+        // No imported row at all is a different statement from "they agree".
+        let none = reconciliation(&stats, None);
+        assert_eq!(none["imported"], json!(false));
+        assert!(none.get("matches").is_none());
+    }
 
     /// Every value in the `leave_request.kind` CHECK needs its own label. If a
     /// migration adds a type and this does not follow, the screen quietly

@@ -16,8 +16,10 @@ const USAGE: &str = "\
 用法：
   laysi-admin create-user --username <u> --role <role> --display-name <n> [--employee-no <E001>] [--email <e>]
   laysi-admin reset-password --username <u>
+  laysi-admin link-employee --username <u> --employee-no <E001>
   laysi-admin link-oauth --username <u> --provider <p> --subject <sub>
-  laysi-admin list-users";
+  laysi-admin list-users
+  laysi-admin seed-demo [--force]        種入示範資料（僅供評估用的拋棄式安裝）";
 
 struct Cli {
     command: String,
@@ -49,8 +51,10 @@ async fn run() -> anyhow::Result<()> {
     match cli.command.as_str() {
         "create-user" => create_user(&store, &cli).await,
         "reset-password" => reset_password(&store, &cli).await,
+        "link-employee" => link_employee(&store, &cli).await,
         "link-oauth" => link_oauth(&store, &cli).await,
         "list-users" => list_users(&store).await,
+        "seed-demo" => seed_demo(&store, &cli).await,
         _ => unreachable!("parse_args 已拒絕未知子指令"),
     }
 }
@@ -73,14 +77,23 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Cli> {
         if !allowed.contains(&flag.as_str()) {
             bail!("子指令 {command} 不接受參數「{flag}」\n\n{USAGE}");
         }
-        let value = args
-            .next()
-            .ok_or_else(|| anyhow!("參數 {flag} 缺少值\n\n{USAGE}"))?;
+        let value = if valueless(&flag) {
+            "true".to_string()
+        } else {
+            args.next()
+                .ok_or_else(|| anyhow!("參數 {flag} 缺少值\n\n{USAGE}"))?
+        };
         if options.insert(flag.clone(), value).is_some() {
             bail!("參數 {flag} 重複出現");
         }
     }
     Ok(Cli { command, options })
+}
+
+/// Flags that carry no value. Everything else takes the next argument, so
+/// without this `--force` would swallow whatever followed it.
+fn valueless(flag: &str) -> bool {
+    flag == "--force"
 }
 
 fn allowed_options(command: &str) -> Option<&'static [&'static str]> {
@@ -93,8 +106,10 @@ fn allowed_options(command: &str) -> Option<&'static [&'static str]> {
             "--email",
         ]),
         "reset-password" => Some(&["--username"]),
+        "link-employee" => Some(&["--username", "--employee-no"]),
         "link-oauth" => Some(&["--username", "--provider", "--subject"]),
         "list-users" => Some(&[]),
+        "seed-demo" => Some(&["--force"]),
         _ => None,
     }
 }
@@ -193,6 +208,31 @@ async fn reset_password(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Point an existing login at a roster row.
+///
+/// `create-user --employee-no` only covers accounts made after the person was
+/// on the roster. The owner needs this too: an owner is an employee, and
+/// without the link the self-service screens have nobody to be about.
+async fn link_employee(store: &Store, cli: &Cli) -> anyhow::Result<()> {
+    let username = required(cli, "--username")?.trim();
+    let employee_no = required(cli, "--employee-no")?.trim();
+    let user = store
+        .user_by_username(username)
+        .await
+        .context("查詢使用者帳號失敗")?
+        .ok_or_else(|| anyhow!("找不到使用者帳號「{username}」"))?;
+    let employee = store
+        .employee(employee_no)
+        .await
+        .with_context(|| format!("找不到員工編號「{employee_no}」"))?;
+    store
+        .set_employee_link(user.id, Some(employee.id))
+        .await
+        .context("連結員工資料失敗")?;
+    eprintln!("已把帳號 {username} 連到員工 {employee_no}（{}）。", employee.name);
+    Ok(())
+}
+
 fn normalize_provider(value: &str) -> String {
     value.trim().trim_end_matches('/').to_string()
 }
@@ -214,6 +254,87 @@ async fn link_oauth(store: &Store, cli: &Cli) -> anyhow::Result<()> {
         .await
         .context("連結 OAuth 身分失敗；請確認 provider 與 subject 尚未被其他帳號使用")?;
     eprintln!("已把 {provider} 的 subject「{subject}」連到帳號 {username}。");
+    Ok(())
+}
+
+/// Demo data, then a staff login to read it with.
+///
+/// The seeding itself refuses to touch an installation that already has
+/// vouchers unless `--force` is given; see `laysi_server::demo`.
+async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
+    let force = cli.options.contains_key("--force");
+    let today = std::env::var("LAYSI_TODAY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive());
+
+    let calls = laysi_server::demo::seed(store, today, force).await?;
+
+    // The owner is an employee too. Any existing owner login is pointed at
+    // the roster's own manager row, so 我的 is not missing for the account
+    // most likely to be looking at it.
+    if let Some(owner) = store
+        .users()
+        .await
+        .context("讀取使用者清單失敗")?
+        .into_iter()
+        .find(|u| u.role_code == "boss" && u.employee_id.is_none())
+    {
+        let manager = store
+            .employee(laysi_server::demo::OWNER_EMPLOYEE_NO)
+            .await
+            .context("找不到示範用的負責人員工資料")?;
+        store
+            .set_employee_link(owner.id, Some(manager.id))
+            .await
+            .context("連結負責人帳號與員工資料失敗")?;
+        eprintln!(
+            "已把負責人帳號 {} 連到員工 {}（{}）。",
+            owner.username,
+            laysi_server::demo::OWNER_EMPLOYEE_NO,
+            manager.name
+        );
+    }
+
+    // A staff login for the self-service screens. Without one those four
+    // screens can only show "this account is not linked to an employee",
+    // which is the least interesting thing they do.
+    let username = "demo";
+    let temporary = password::temporary_password();
+    if store
+        .user_by_username(username)
+        .await
+        .context("無法檢查示範帳號")?
+        .is_none()
+    {
+        let employee = store
+            .employee(laysi_server::demo::STAFF_EMPLOYEE_NO)
+            .await
+            .context("找不到示範員工，示範資料可能沒有種完")?;
+        let password_hash = password::hash_password(&temporary)
+            .map_err(|error| anyhow!("無法產生 Argon2id 密碼雜湊：{error}"))?;
+        store
+            .create_user(CreateUser {
+                username,
+                display_name: &employee.name,
+                email: "",
+                password_hash: Some(&password_hash),
+                role_code: "staff",
+                employee_id: Some(employee.id),
+                status: "active",
+                must_change_password: true,
+                created_by: "laysi-admin",
+            })
+            .await
+            .context("建立示範員工帳號失敗")?;
+        println!("{temporary}");
+        eprintln!("已建立員工自助示範帳號 {username}（{}）；首次登入必須更換密碼。", employee.name);
+    } else {
+        eprintln!("帳號 {username} 已存在，未重新建立；需要新密碼請用 reset-password。");
+    }
+
+    eprintln!("已種入示範資料：{calls} 次操作，全部經由 Registry::dispatch，稽核軌跡完整。");
+    eprintln!("這是拋棄式安裝用的評估資料，不要種在正式帳務上。");
     Ok(())
 }
 
@@ -277,6 +398,15 @@ mod tests {
             "again",
         ]))
         .is_err());
+    }
+
+    /// `--force` carries no value, so it must not eat the argument after it
+    /// and must still be rejected on subcommands that do not take it.
+    #[test]
+    fn force_is_a_valueless_flag() {
+        let cli = parse_args(strings(&["seed-demo", "--force"])).expect("seed-demo --force 應可解析");
+        assert!(cli.options.contains_key("--force"));
+        assert!(parse_args(strings(&["list-users", "--force"])).is_err());
     }
 
     #[test]

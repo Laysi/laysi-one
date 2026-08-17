@@ -199,10 +199,19 @@ pub enum StoreError {
     #[error("異動單 {no} 的第 {step} 關已經完成過了")]
     MovementStepAlreadyDone { no: String, step: i32 },
 
-    #[error("找不到請假單 {no}")]
+    #[error("找不到休假單 {no}")]
     LeaveNotFound { no: String },
 
-    #[error("請假單 {no} 已經是「{status}」了，簽過的不能再簽一次")]
+    #[error("{date} 已經打過{kind}卡（{at}），一天只記一次；如需更正請由人資補登")]
+    PunchAlreadyRecorded { date: String, kind: String, at: String },
+
+    #[error("{date} 還沒有上班卡，不能只打下班卡")]
+    PunchOutWithoutIn { date: String },
+
+    #[error("下班時間 {out} 不能早於上班時間 {in_at}")]
+    PunchOutBeforeIn { out: String, in_at: String },
+
+    #[error("休假單 {no} 已經是「{status}」了，簽過的不能再簽一次")]
     LeaveAlreadyDecided { no: String, status: String },
 
     #[error("{period} 的薪資已經算過了（傳票 {voucher}），同一期不能發兩次")]
@@ -2617,6 +2626,32 @@ impl Store {
             linked_at: row.get("linked_at"),
         })
     }
+    /// Point a login at a roster row, or clear the link with `None`.
+    ///
+    /// Needed for accounts created before the person had an employee record,
+    /// and for the owner, who is an employee too: without a link the four
+    /// self-service screens have no subject to be about.
+    pub async fn set_employee_link(
+        &self,
+        user_id: i32,
+        employee_id: Option<i32>,
+    ) -> Result<UserAccount> {
+        let row = sqlx::query(
+            "UPDATE user_account
+                SET employee_id = $2
+              WHERE id = $1
+             RETURNING id, username, display_name, email, password_hash, role_code,
+                       employee_id, status, must_change_password, created_at, created_by,
+                       last_login_at",
+        )
+        .bind(user_id)
+        .bind(employee_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::UserNotFound { id: user_id })?;
+        Ok(row_to_user_account(&row))
+    }
+
     /// Create a session and update the last login time, in one transaction so
     /// neither happens alone.
     pub async fn create_session(&self, req: CreateSession<'_>) -> Result<UserSession> {
@@ -2856,16 +2891,35 @@ impl Store {
     }
 
     pub async fn api_tokens(&self, include_revoked: bool) -> Result<Vec<ApiToken>> {
+        self.api_tokens_filtered(include_revoked, None).await
+    }
+
+    /// Tokens one employee issued for themselves.
+    pub async fn api_tokens_owned_by(
+        &self,
+        employee_id: i32,
+        include_revoked: bool,
+    ) -> Result<Vec<ApiToken>> {
+        self.api_tokens_filtered(include_revoked, Some(employee_id)).await
+    }
+
+    async fn api_tokens_filtered(
+        &self,
+        include_revoked: bool,
+        owner_employee_id: Option<i32>,
+    ) -> Result<Vec<ApiToken>> {
         Ok(sqlx::query(
             "SELECT t.id, t.name, t.kind, t.scope, t.prefix, t.actor, t.actor_role,
                     r.name AS actor_role_name, t.created_at, t.created_by,
                     t.last_used_at, t.rotate_days, t.expiry_note,
-                    t.revoked_at, t.revoked_by
+                    t.revoked_at, t.revoked_by, t.owner_employee_id
                FROM api_token t LEFT JOIN role r ON r.code = t.actor_role
               WHERE ($1 OR t.revoked_at IS NULL)
+                AND ($2::int IS NULL OR t.owner_employee_id = $2)
               ORDER BY t.revoked_at NULLS FIRST, t.last_used_at DESC NULLS LAST, t.id",
         )
         .bind(include_revoked)
+        .bind(owner_employee_id)
         .fetch_all(&self.pool)
         .await?
         .iter()
@@ -2884,7 +2938,7 @@ impl Store {
             "SELECT t.id, t.name, t.kind, t.scope, t.prefix, t.actor, t.actor_role,
                     r.name AS actor_role_name, t.created_at, t.created_by,
                     t.last_used_at, t.rotate_days, t.expiry_note,
-                    t.revoked_at, t.revoked_by
+                    t.revoked_at, t.revoked_by, t.owner_employee_id
                FROM api_token t LEFT JOIN role r ON r.code = t.actor_role
               WHERE t.token_hash = $1",
         )
@@ -2925,8 +2979,8 @@ impl Store {
 
         let id: i32 = sqlx::query(
             "INSERT INTO api_token (name, kind, scope, prefix, token_hash, actor, actor_role,
-                                    created_by, rotate_days, expiry_note)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
+                                    created_by, rotate_days, expiry_note, owner_employee_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id",
         )
         .bind(req.name)
         .bind(req.kind)
@@ -2938,6 +2992,7 @@ impl Store {
         .bind(req.created_by)
         .bind(req.rotate_days)
         .bind(req.expiry_note)
+        .bind(req.owner_employee_id)
         .fetch_one(&self.pool)
         .await?
         .get("id");
@@ -2953,17 +3008,42 @@ impl Store {
     /// Revoke a token. An already revoked token keeps its original timestamp;
     /// the moment of revocation is an audit fact.
     pub async fn revoke_api_token(&self, id: i32, actor: &str) -> Result<ApiToken> {
+        self.revoke_token_where(id, None, actor).await
+    }
+
+    /// Revoke a token the caller issued for themselves.
+    ///
+    /// The employee is part of the WHERE clause and of the lookup that
+    /// follows, so someone else's id finds no row at all rather than being
+    /// found and then refused.
+    pub async fn revoke_own_api_token(
+        &self,
+        id: i32,
+        employee_id: i32,
+        actor: &str,
+    ) -> Result<ApiToken> {
+        self.revoke_token_where(id, Some(employee_id), actor).await
+    }
+
+    async fn revoke_token_where(
+        &self,
+        id: i32,
+        owner_employee_id: Option<i32>,
+        actor: &str,
+    ) -> Result<ApiToken> {
         let done = sqlx::query(
             "UPDATE api_token SET revoked_at = now(), revoked_by = $2
-              WHERE id = $1 AND revoked_at IS NULL",
+              WHERE id = $1 AND revoked_at IS NULL
+                AND ($3::int IS NULL OR owner_employee_id = $3)",
         )
         .bind(id)
         .bind(actor)
+        .bind(owner_employee_id)
         .execute(&self.pool)
         .await?;
 
         let token = self
-            .api_tokens(true)
+            .api_tokens_filtered(true, owner_employee_id)
             .await?
             .into_iter()
             .find(|t| t.id == id)
@@ -3280,6 +3360,76 @@ impl Store {
             .ok_or_else(|| StoreError::ClaimNotFound { no: claim_no.to_string() })
     }
 
+    /// One claim belonging to one employee. The employee is part of the WHERE
+    /// clause rather than a check afterwards, so another person's claim number
+    /// is a missing row and not a rejected match. Claims filed by accounting
+    /// carry no employee id and are therefore invisible here.
+    pub async fn expense_claim_of_employee(
+        &self,
+        claim_no: &str,
+        employee_id: i32,
+    ) -> Result<ExpenseClaim> {
+        let owned: Option<String> =
+            sqlx::query("SELECT claim_no FROM expense_claim WHERE claim_no = $1 AND employee_id = $2")
+                .bind(claim_no)
+                .bind(employee_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get("claim_no"));
+        match owned {
+            Some(no) => self.expense_claim(&no).await,
+            None => Err(StoreError::ClaimNotFound { no: claim_no.to_string() }),
+        }
+    }
+
+    /// Documents attached to one record, oldest first.
+    pub async fn documents_linked_to(
+        &self,
+        link_type: &str,
+        link_ref: &str,
+    ) -> Result<Vec<DocumentRow>> {
+        Ok(sqlx::query(
+            "SELECT d.doc_no, d.name, d.kind, d.link_type, d.link_ref, d.archived,
+                    d.note, d.created_at, d.created_by,
+                    v.version_no, v.object_key, v.file_name, v.byte_size, v.content_type,
+                    v.checksum, v.ocr_status, v.uploaded_at, v.uploaded_by,
+                    n.versions, n.total_bytes
+               FROM document d
+               JOIN LATERAL (SELECT * FROM document_version dv
+                              WHERE dv.document_id = d.id
+                              ORDER BY dv.version_no DESC LIMIT 1) v ON true
+               JOIN LATERAL (SELECT COUNT(*) AS versions, COALESCE(SUM(dv.byte_size),0)::bigint AS total_bytes
+                               FROM document_version dv WHERE dv.document_id = d.id) n ON true
+              WHERE d.link_type = $1 AND d.link_ref = $2 AND NOT d.archived
+              ORDER BY d.id",
+        )
+        .bind(link_type)
+        .bind(link_ref)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(row_to_document)
+        .collect())
+    }
+
+    /// Point a claim at its receipt, but never replace one it already has.
+    /// Later attachments stay reachable through the document's own link.
+    pub async fn set_claim_document_if_absent(
+        &self,
+        claim_no: &str,
+        document_id: i32,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE expense_claim SET document_id = $2
+              WHERE claim_no = $1 AND document_id IS NULL",
+        )
+        .bind(claim_no)
+        .bind(document_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Submit a claim. Step 1 (the claimant uploading) completes on submission.
     pub async fn submit_expense_claim(&self, req: SubmitExpenseClaim<'_>) -> Result<ExpenseClaim> {
         let dept_id = match req.dept_code {
@@ -3295,8 +3445,9 @@ impl Store {
         let id: i32 = sqlx::query(
             "INSERT INTO expense_claim
                (claim_no, title, claimant, claimant_role, dept_id, spent_on, amount,
-                suggested_account_code, pay_method, status, document_id, memo, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'submitted',$10,$11,$3) RETURNING id",
+                suggested_account_code, pay_method, status, document_id, memo, created_by,
+                employee_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'submitted',$10,$11,$3,$12) RETURNING id",
         )
         .bind(&claim_no)
         .bind(req.title)
@@ -3309,6 +3460,7 @@ impl Store {
         .bind(req.pay_method)
         .bind(req.document_id)
         .bind(req.memo)
+        .bind(req.employee_id)
         .fetch_one(&mut *tx)
         .await?
         .get("id");
@@ -4563,6 +4715,130 @@ impl Store {
             .ok_or(StoreError::LeaveNotFound { no: leave_no })
     }
 
+    /// Every punch of one month, optionally narrowed to one employee.
+    ///
+    /// Ordered so that a day's arrival always precedes its departure, which
+    /// is what the pairing in `ops/attendance.rs` walks over.
+    pub async fn punches(
+        &self,
+        month: &str,
+        employee_id: Option<i32>,
+    ) -> Result<Vec<AttendancePunch>> {
+        Ok(sqlx::query(
+            "SELECT p.id, p.employee_id, e.emp_no, e.name, d.label AS dept_label,
+                    p.punched_on, p.punched_at, p.kind, p.source, p.note, p.created_by
+               FROM attendance_punch p
+               JOIN employee e             ON e.id = p.employee_id
+               LEFT JOIN dimension_value d ON d.id = e.dept_id
+              WHERE to_char(p.punched_on, 'YYYY-MM') = $1
+                AND ($2::int IS NULL OR p.employee_id = $2)
+              ORDER BY e.emp_no, p.punched_on, p.kind",
+        )
+        .bind(month)
+        .bind(employee_id)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(punch_row)
+        .collect())
+    }
+
+    /// Record one punch.
+    ///
+    /// The two orderings a UNIQUE constraint cannot express are checked here
+    /// inside the transaction: a day may not have two arrivals, and a
+    /// departure may not precede the arrival it belongs to. `replace` is what
+    /// separates an employee pressing the button, which must refuse to
+    /// overwrite, from HR correcting a missed punch, which exists to.
+    pub async fn record_punch(&self, p: NewPunch<'_>, replace: bool) -> Result<AttendancePunch> {
+        let mut tx = self.pool.begin().await?;
+
+        let existing = sqlx::query(
+            "SELECT kind, punched_at FROM attendance_punch
+              WHERE employee_id = $1 AND punched_on = $2
+              FOR UPDATE",
+        )
+        .bind(p.employee_id)
+        .bind(p.punched_on)
+        .fetch_all(&mut *tx)
+        .await?;
+        let at_of = |kind: &str| -> Option<DateTime<Utc>> {
+            existing
+                .iter()
+                .find(|row| row.get::<String, _>("kind") == kind)
+                .map(|row| row.get("punched_at"))
+        };
+        let local = |at: DateTime<Utc>| laysi_domain::business_time(at).format("%H:%M:%S").to_string();
+
+        if !replace {
+            if let Some(at) = at_of(p.kind) {
+                return Err(StoreError::PunchAlreadyRecorded {
+                    date: p.punched_on.to_string(),
+                    kind: if p.kind == "in" { "上班".into() } else { "下班".into() },
+                    at: local(at),
+                });
+            }
+        }
+
+        match p.kind {
+            "out" => {
+                let Some(in_at) = at_of("in") else {
+                    return Err(StoreError::PunchOutWithoutIn {
+                        date: p.punched_on.to_string(),
+                    });
+                };
+                if p.punched_at < in_at {
+                    return Err(StoreError::PunchOutBeforeIn {
+                        out: local(p.punched_at),
+                        in_at: local(in_at),
+                    });
+                }
+            }
+            // Correcting an arrival to after the departure already recorded
+            // would leave the day with negative hours.
+            _ => {
+                if let Some(out_at) = at_of("out") {
+                    if p.punched_at > out_at {
+                        return Err(StoreError::PunchOutBeforeIn {
+                            out: local(out_at),
+                            in_at: local(p.punched_at),
+                        });
+                    }
+                }
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO attendance_punch
+               (employee_id, punched_on, punched_at, kind, source, note, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (employee_id, punched_on, kind) DO UPDATE
+                SET punched_at = EXCLUDED.punched_at,
+                    source     = EXCLUDED.source,
+                    note       = EXCLUDED.note,
+                    created_by = EXCLUDED.created_by,
+                    created_at = now()",
+        )
+        .bind(p.employee_id)
+        .bind(p.punched_on)
+        .bind(p.punched_at)
+        .bind(p.kind)
+        .bind(p.source)
+        .bind(p.note)
+        .bind(p.actor)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        let month = p.punched_on.format("%Y-%m").to_string();
+        self.punches(&month, Some(p.employee_id))
+            .await?
+            .into_iter()
+            .find(|row| row.punched_on == p.punched_on && row.kind == p.kind)
+            .ok_or(StoreError::PunchOutWithoutIn { date: p.punched_on.to_string() })
+    }
+
     pub async fn decide_leave_request(
         &self,
         leave_no: &str,
@@ -5579,6 +5855,10 @@ pub struct ApiToken {
     pub expiry_note: String,
     pub revoked_at: Option<DateTime<Utc>>,
     pub revoked_by: String,
+    /// Employee this token belongs to when it was issued through
+    /// self-service. `None` for tokens the owner issued on the
+    /// installation's behalf.
+    pub owner_employee_id: Option<i32>,
 }
 
 impl ApiToken {
@@ -5612,6 +5892,10 @@ pub struct IssueApiToken<'a> {
     pub created_by: &'a str,
     pub rotate_days: Option<i32>,
     pub expiry_note: &'a str,
+    /// Set only by self-service issuing. It is the key ownership is checked
+    /// against, because `actor` is a display name and two people can share
+    /// one.
+    pub owner_employee_id: Option<i32>,
 }
 
 /// A freshly issued token. `secret` is the plaintext and is visible only
@@ -5782,6 +6066,9 @@ pub struct SubmitExpenseClaim<'a> {
     pub title: &'a str,
     pub claimant: &'a str,
     pub claimant_role: &'a str,
+    /// Set only by self-service, where the claimant is the caller. `None`
+    /// means accounting filed it for somebody, leaving a name and no key.
+    pub employee_id: Option<i32>,
     pub dept_code: Option<&'a str>,
     pub spent_on: NaiveDate,
     pub amount: Money,
@@ -6083,6 +6370,38 @@ pub struct RecordMovement<'a> {
     pub from_value: &'a str,
     pub to_value: &'a str,
     pub reason: &'a str,
+    pub actor: &'a str,
+}
+
+/// One clock-in or clock-out.
+///
+/// `punched_at` is the instant; `punched_on` is the working day it belongs to
+/// in the business time zone. A CHECK keeps the two consistent, so nothing
+/// downstream has to guess which of them to trust.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttendancePunch {
+    pub id: i32,
+    pub employee_id: i32,
+    pub emp_no: String,
+    pub name: String,
+    pub dept_label: Option<String>,
+    pub punched_on: NaiveDate,
+    pub punched_at: DateTime<Utc>,
+    pub kind: String,
+    /// `self` when the employee pressed the button, `manual` when HR entered
+    /// it afterwards.
+    pub source: String,
+    pub note: String,
+    pub created_by: String,
+}
+
+pub struct NewPunch<'a> {
+    pub employee_id: i32,
+    pub punched_on: NaiveDate,
+    pub punched_at: DateTime<Utc>,
+    pub kind: &'a str,
+    pub source: &'a str,
+    pub note: &'a str,
     pub actor: &'a str,
 }
 
@@ -6633,6 +6952,22 @@ fn row_to_leave(r: &PgRow) -> LeaveRequest {
     }
 }
 
+fn punch_row(r: &PgRow) -> AttendancePunch {
+    AttendancePunch {
+        id: r.get("id"),
+        employee_id: r.get("employee_id"),
+        emp_no: r.get("emp_no"),
+        name: r.get("name"),
+        dept_label: r.get("dept_label"),
+        punched_on: r.get("punched_on"),
+        punched_at: r.get("punched_at"),
+        kind: r.get("kind"),
+        source: r.get("source"),
+        note: r.get("note"),
+        created_by: r.get("created_by"),
+    }
+}
+
 fn row_to_payroll_run(r: &PgRow) -> PayrollRun {
     PayrollRun {
         period: r.get("period"),
@@ -6826,6 +7161,7 @@ fn row_to_api_token(r: &PgRow) -> ApiToken {
         expiry_note: r.get("expiry_note"),
         revoked_at: r.get("revoked_at"),
         revoked_by: r.get("revoked_by"),
+        owner_employee_id: r.get("owner_employee_id"),
     }
 }
 
@@ -6923,6 +7259,7 @@ mod tests {
             expiry_note: String::new(),
             revoked_at: None,
             revoked_by: String::new(),
+            owner_employee_id: None,
         }
     }
 

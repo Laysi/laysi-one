@@ -203,7 +203,7 @@ impl Operation for GetHrCompliance {
                 "passed": minimum_failures.is_empty(),
                 "rulesets": [ruleset_json(minimum_rs)],
                 "failures": minimum_failures,
-                "scope_note": "以員工主檔的月薪逐人呼叫 minimum_wage_shortfall；中途到職的當期實發不拿來跟月最低工資比較。",
+                "scope_note": "逐人比對員工主檔的月薪與規則下限。中途到職當月的實發金額不列入比較。",
             }),
             json!({
                 "name": "勞保申報值與計費上限",
@@ -211,7 +211,7 @@ impl Operation for GetHrCompliance {
                 "passed": labor_cap_failures.is_empty(),
                 "rulesets": [ruleset_json(premium_rules.labor_rs)],
                 "failures": labor_cap_failures,
-                "scope_note": "僅檢查申報值是否已達規則上限而被截斷；完整投保薪資分級表尚未收錄，另列為未檢查。",
+                "scope_note": "只檢查申報的投保薪資有沒有超過計費上限。投保薪資分級表本身尚未收錄，另列為未檢查。",
             }),
             json!({
                 "name": "勞健保與勞退費額可依規則重算",
@@ -231,7 +231,7 @@ impl Operation for GetHrCompliance {
                     "health_employee": health_employee.to_string(),
                     "pension_employer": pension_employer.to_string(),
                 },
-                "scope_note": "每位員工都走 premiums_on 試算。這證明目前申報值能依這三版規則計費，不代表尚未收錄的完整級距也已核對。",
+                "scope_note": "逐人以現行費率重算保費。這代表目前的申報值都算得出金額，不代表投保級距本身已核對過。",
             }),
             json!({
                 "name": "特休額度與已核准天數",
@@ -239,7 +239,7 @@ impl Operation for GetHrCompliance {
                 "passed": annual_failures.is_empty(),
                 "rulesets": [ruleset_json(annual_rs)],
                 "failures": annual_failures,
-                "scope_note": "額度由 annual_leave_days 與完整年資月數現算，再跟本年度已核准的特休天數比較。超過額度會列為待確認，不直接認定公司違法。",
+                "scope_note": "依年資現算特休額度，再與本年度已核准的天數比較。超出額度只列為待確認，可能是公司加給。",
             }),
         ];
         let unchecked = vec![
@@ -286,7 +286,7 @@ impl Operation for GetHrCompliance {
                 "failure_count": failure_count,
                 "checks": checks,
                 "available_domains": laysi_regulation::DOMAINS,
-                "coverage_note": "checked_all_passed 僅代表可計算的項目目前無差異，不代表已涵蓋全部人資法規。coverage_complete 為 false 時，畫面要把未檢查的項目一起顯示。",
+                "coverage_note": "「無差異」只代表已檢查的項目沒有問題，不代表已涵蓋全部人資法規。未檢查的項目一併列在下方。",
             }),
             summary,
         ))
@@ -309,6 +309,7 @@ struct IncomeAccumulator {
     missing_withheld: bool,
     payment_count: usize,
     bases: BTreeSet<String>,
+    basis_labels: BTreeSet<String>,
     ruleset_versions: BTreeSet<String>,
     records: Vec<Value>,
 }
@@ -345,7 +346,7 @@ impl Operation for ListWithholdingStatements {
     }
 
     fn summary(&self) -> &'static str {
-        "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限老闆身分；rate 依規則計算，table 只採來源系統帶入的稅額，缺值不補算。"
+        "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限老闆身分；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。"
     }
 
     fn input_schema(&self) -> Value {
@@ -438,12 +439,14 @@ impl Operation for ListWithholdingStatements {
                     missing_withheld: false,
                     payment_count: usize::default(),
                     bases: BTreeSet::new(),
+                    basis_labels: BTreeSet::new(),
                     ruleset_versions: BTreeSet::new(),
                     records: Vec::new(),
                 });
             line.gross += record.gross_amount;
             line.payment_count += 1;
             line.bases.insert(record.basis.clone());
+            line.basis_labels.insert(basis_label.to_string());
             line.ruleset_versions.insert(rs.version.clone());
             match withheld {
                 Some(amount) => line.known_withheld += amount,
@@ -461,7 +464,7 @@ impl Operation for ListWithholdingStatements {
                 "voucher_no": record.voucher_no,
                 "ruleset_version": rs.version,
                 "warning": (record.basis == "table" && withheld.is_none())
-                    .then_some("來源系統未帶入扣繳稅額，本筆保持空白，不以比例補算。"),
+                    .then_some("來源系統沒有帶扣繳稅額，本筆留空，不以扣繳率回推。"),
             }));
         }
 
@@ -487,6 +490,7 @@ impl Operation for ListWithholdingStatements {
                             "withheld_complete": !line.missing_withheld,
                             "payment_count": line.payment_count,
                             "bases": line.bases,
+                            "basis_labels": line.basis_labels,
                             "ruleset_versions": line.ruleset_versions,
                             "records": line.records,
                         })
@@ -505,9 +509,9 @@ impl Operation for ListWithholdingStatements {
                     "payment_count": statement.payment_count,
                     "income_lines": income_lines,
                     "source_note": if person_specific {
-                        "來源有給付對象識別資料，可作為逐人憑單。"
+                        "來源有給付對象的識別資料，可作為個人憑單。"
                     } else {
-                        "來源無逐人識別資料，本筆可能為多人合併；本操作照實保留，不自行拆分為個人憑單。"
+                        "來源沒有識別資料，這筆可能是多人合併，不能直接當成個人憑單。"
                     },
                 })
             })
@@ -525,7 +529,7 @@ impl Operation for ListWithholdingStatements {
                     "gross_amount": row.gross.to_string(),
                     "withheld_amount": row.income_tax.to_string(),
                     "payroll_months": row.months,
-                    "source": "payroll_year_totals",
+                    "source": "薪資模組",
                 })
             })
             .collect::<Vec<_>>();
@@ -576,10 +580,10 @@ impl Operation for ListWithholdingStatements {
                         payroll_withheld_difference.map(|amount| amount.to_string()),
                     "table_withheld_complete": table_withheld_complete,
                     "reconciled": payroll_reconciled,
-                    "note": "employee_income 來自 payroll_year_totals，只拿來把薪資模組的逐人年度合計與 withholding_record 的 table 總額對帳；差異照實回報，不以任一方覆蓋另一方。",
+                    "note": "薪資模組與扣繳紀錄分開計算，這裡只作對帳。有差異照實列出，不以任一方覆蓋另一方。",
                 },
-                "table_note": "basis = table 的稅額只採 WithholdingRecord.withheld_amount。來源沒帶就是 null，不會改用 rate 補算。",
-                "source_note": "憑單逐人程度以 withholding_record 的 payee 與 payee_id 為準；來源僅提供合併總額時，標示 person_specific = false，不自行拆分為個人。",
+                "table_note": "依扣繳稅額表的項目，稅額一律採用來源系統帶入的金額。來源沒有帶，本頁就留空，不改用扣繳率回推。",
+                "source_note": "是否認得到個人，以來源紀錄帶的統一編號或身分證號為準。來源只給合併總額時照實保留，不自行拆分到個人。",
             }),
             summary,
         ))

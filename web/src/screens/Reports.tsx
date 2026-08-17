@@ -22,8 +22,6 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'cf', label: '現金流量表' },
 ];
 
-/** The body of one statement. All three share a row structure, so the layout
- *  is written once. */
 function Sheet({ title, period, rows }: { title: string; period: string; rows: ReportRow[] }) {
   return (
     <section className="card doc-card report-card">
@@ -112,8 +110,6 @@ export function Reports({ reloadKey }: Props) {
             <>
               <Sheet title="資產負債表" period={bs.period_label} rows={bs.rows} />
 
-              {/* Assets = liabilities + equity is a computed conclusion, not a
-                  layout, so this line is always present. */}
               <p className={`recon${bs.balanced ? '' : ' recon--off'}`}>
                 {bs.balanced ? (
                   <>
@@ -156,9 +152,6 @@ export function Reports({ reloadKey }: Props) {
             <>
               <Sheet title="現金流量表" period={cf.period_label} rows={cf.rows} />
 
-              {/* Closing cash has three fully independent derivations: the sum
-                  of the three activity sections, the cash accounts' own
-                  entries, and the bank account side. */}
               <p className={`recon${cf.reconciled ? '' : ' recon--off'}`}>
                 {cf.reconciled ? (
                   <>
@@ -179,14 +172,12 @@ export function Reports({ reloadKey }: Props) {
               </p>
 
               <p className="hint">
-                採間接法：自本期損益出發，逐項加回非現金科目的變動。每個科目僅屬於一種活動
-                （於科目表設定），故三段加總必等於現金的實際變動；此為複式簿記的恆等式，
-                不用任何分攤規則。
+                採間接法：自本期損益出發，逐項加回非現金科目的變動。每個科目在科目表上
+                只屬於一種活動，故三段加總等於現金的實際變動。
               </p>
               <p className="hint">
-                此法的限制：不涉及現金但跨活動別的分錄（例如期初將固定資產淨額還原為成本
-                與累計折舊）會同時出現在兩段，一正一負互相抵銷；合計仍然正確，但該兩段的
-                組成金額會被放大。
+                限制：不涉及現金但跨活動別的分錄會同時出現在兩段、一正一負相抵，
+                合計仍正確，但該兩段的組成金額會被放大。
               </p>
             </>
           )}

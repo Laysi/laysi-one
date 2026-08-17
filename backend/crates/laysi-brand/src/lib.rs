@@ -19,10 +19,6 @@ pub mod mark;
 pub use integrity::{verify, IntegrityError, Report};
 pub use mark::{monogram, wordmark, MarkOptions, BRAND_NAME};
 
-/// Attribution the frontend must display verbatim. Served by the backend
-/// rather than hard-coded in the frontend.
-pub const ATTRIBUTION: &str = "Laysi One · Business Source License 1.1";
-
 /// Standard comment banner for brand-critical source files.
 ///
 /// It addresses both people and AI agents: a licence notice for the former,

@@ -1,13 +1,28 @@
 //! Employee self-service: the caller's own home, payslips, leave and claims.
 //!
-//! "Own" can only come from `ctx.employee_id`. None of these five operations
-//! accepts an employee number, a name, an employee_id, an actor or a claimant
-//! — authorisation rests on the shape of the input, not on `Risk`. The account
-//! resolved from the UI session supplies `user_account.employee_id`, and every
-//! read and write uses that primary key. An account with no linked employee
-//! record gets an explicit error rather than an empty list that would hide the
-//! missing link. MCP tokens carry no employee link, and 0009 leaves all five
-//! self-service tools disabled for AI.
+//! "Own" can only come from `ctx.employee_id`. None of these twelve
+//! operations accepts an employee number, a name, an employee_id, an actor or
+//! a claimant — authorisation rests on the shape of the input, not on `Risk`.
+//! The account resolved from the UI session supplies
+//! `user_account.employee_id`, and every read and write uses that primary key.
+//! An account with no linked employee record gets an explicit error rather
+//! than an empty list that would hide the missing link.
+//!
+//! Over MCP the same primary key comes from `api_token.owner_employee_id`,
+//! which only `issue_my_api_token` sets and only from the issuer's own
+//! session. A token the owner issued for the installation carries no owner and
+//! stays unlinked, so these operations refuse it rather than guessing whose
+//! records to return from a display name.
+//!
+//! `submit_my_expense_claim` exists because `submit_expense_claim` carries a
+//! `claimant` field: granting that one to staff would also let them file in
+//! someone else's name. Two fields of the general operation are dropped here
+//! rather than renamed. The expense account is not asked for, because deciding
+//! it is what the accounting approval step is for. The receipt document number
+//! is not accepted either: staff hold no document permission, so any number
+//! they could pass would be someone else's, and the reply would disclose its
+//! name. `attach_my_expense_receipt` sends the bytes instead, which points at
+//! nothing that already exists.
 //!
 //! Leave entitlement still has one source: this module passes completed
 //! service months to `annual_leave_days`, and the database only sums approved
@@ -15,19 +30,29 @@
 //! employee, because the system has no weekend or public holiday rules and
 //! cannot derive it from a date range.
 
-use crate::ops::attendance::{leave_kind_label, leave_status_label, valid_leave_kind, LEAVE_KINDS};
+use crate::ops::attendance::{
+    leave_kind_label, leave_status_label, punch_days, punch_kind_label, reconciliation, summarise,
+    valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
+};
+use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
-use crate::ops::expenses::claim_json;
+use crate::ops::expenses::{checked_pay_method, claim_json, required_steps};
 use crate::ops::insurance::ruleset_json;
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::{Datelike, NaiveDate};
+use base64::Engine;
+use chrono::{Datelike, NaiveDate, Utc};
 use laysi_domain::Money;
 use laysi_regulation::Ruleset;
-use laysi_store::{AttendanceRow, Employee, LeaveRequest, NewLeaveRequest, Payslip};
+use laysi_store::storage::{self, MAX_OBJECT_BYTES};
+use laysi_store::{
+    AttendanceRow, DocumentRow, Employee, LeaveRequest, NewLeaveRequest, Payslip, ReserveDocument,
+    SubmitExpenseClaim,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 const BANK_ACCOUNT_VISIBLE_DIGITS: usize = 4;
 
@@ -39,7 +64,25 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListMyLeaveRequests),
         Box::new(RequestLeave),
         Box::new(ListMyExpenseClaims),
+        Box::new(SubmitMyExpenseClaim),
+        Box::new(AttachMyExpenseReceipt),
+        Box::new(PunchClock),
+        Box::new(ListMyPunches),
+        Box::new(IssueMyApiToken),
+        Box::new(ListMyApiTokens),
+        Box::new(RevokeMyApiToken),
     ]
+}
+
+/// The leave types the database accepts, with their labels.
+///
+/// The screen offers exactly these. Deriving the list from the caller's past
+/// requests instead would hide every type they have not used yet.
+fn leave_kinds_json() -> Vec<Value> {
+    LEAVE_KINDS
+        .iter()
+        .map(|kind| json!({ "kind": kind, "label": leave_kind_label(kind) }))
+        .collect()
 }
 
 async fn actor_employee(ctx: &OpCtx) -> Result<Employee, OpError> {
@@ -108,7 +151,7 @@ fn annual_leave_json(year: i32, rs: &Ruleset, balance: AnnualLeaveBalance) -> Va
         "remaining": balance.remaining().to_string(),
         "ruleset": ruleset_json(rs),
         "quota_stored": false,
-        "note": "額度依年資與 annual_leave 規則現算；已休只加總本年度已核准的特休。",
+        "note": "額度依年資與特休規則現算；已休只加總本年度已核准的特休。",
     })
 }
 
@@ -246,7 +289,7 @@ impl Operation for GetMyHome {
     }
 
     fn summary(&self) -> &'static str {
-        "讀目前呼叫者本人的員工首頁：基本資料（不含身分證字號，銀行帳戶僅留尾碼）、年資、本月出勤、特休餘額，以及本人送出的請假與報支的目前關卡。無任何參數可指定他人。"
+        "讀目前呼叫者本人的員工首頁：基本資料（不含身分證字號，銀行帳戶僅留尾碼）、年資、本月出勤、特休餘額，以及本人送出的休假與報支的目前關卡。無任何參數可指定他人。"
     }
 
     fn input_schema(&self) -> Value {
@@ -281,7 +324,7 @@ impl Operation for GetMyHome {
             .filter(|claim| claim.status == "submitted" || claim.status == "approving")
             .count();
         let summary = format!(
-            "讀 {} 的員工自助首頁 · 年資 {} · 本月出勤{} · {pending_leaves} 張請假、{pending_claims} 張報支進行中",
+            "讀 {} 的員工自助首頁 · 年資 {} · 本月出勤{} · {pending_leaves} 張休假、{pending_claims} 張報支進行中",
             employee.name,
             service_label(months),
             if attendance.is_some() { "已帶入" } else { "尚無資料" },
@@ -295,7 +338,7 @@ impl Operation for GetMyHome {
                 "attendance_note": if attendance.is_some() {
                     "本月差勤已有來源資料。"
                 } else {
-                    "本月尚無差勤資料，不代表請假與遲到皆為零。"
+                    "本月尚無差勤資料，不代表休假與遲到皆為零。"
                 },
                 "annual_leave": annual_leave_json(
                     ctx.today.year(),
@@ -338,7 +381,7 @@ impl Operation for ListMyPayslips {
     }
 
     fn summary(&self) -> &'static str {
-        "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由 ctx.employee_id 決定；與回傳全公司資料的 BossOnly 操作 list_payslips 不同。"
+        "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由登入身分決定，查不到他人的薪資單。"
     }
 
     fn input_schema(&self) -> Value {
@@ -396,7 +439,7 @@ impl Operation for ListMyLeaveRequests {
     }
 
     fn summary(&self) -> &'static str {
-        "讀目前呼叫者自己的全部請假單與本年度特休額度、已休、剩餘。額度由查詢日適用的 annual_leave ruleset 與年資現算，不存在資料庫。"
+        "讀目前呼叫者自己的全部休假單與本年度特休額度、已休、剩餘。額度由查詢日適用的特休規則與年資現算，不逐人設定。"
     }
 
     fn input_schema(&self) -> Value {
@@ -413,7 +456,7 @@ impl Operation for ListMyLeaveRequests {
             .filter(|request| request.status == "pending")
             .count();
         let summary = format!(
-            "讀 {} 的請假單 · {} 張（{pending} 張等簽）· 特休依 annual_leave {} 現算",
+            "讀 {} 的休假單 · {} 張（{pending} 張等簽）· 特休依特休規則 {} 現算",
             employee.name,
             requests.len(),
             annual_rs.version
@@ -429,6 +472,7 @@ impl Operation for ListMyLeaveRequests {
                     .iter()
                     .map(leave_request_json)
                     .collect::<Vec<_>>(),
+                "leave_kinds": leave_kinds_json(),
                 "pending_count": pending,
                 "annual_leave": annual_leave_json(
                     ctx.today.year(),
@@ -475,7 +519,7 @@ impl Operation for RequestLeave {
     }
 
     fn summary(&self) -> &'static str {
-        "替目前登入帳號所連結的員工送一張待簽核請假單。employee_id 由 ctx.employee_id 決定，created_by 來自同一個已驗證身分；輸入不能指定申請人。"
+        "替目前登入帳號所連結的員工送一張待簽核休假單。申請人與建立者都由登入身分決定，輸入不能指定他人。"
     }
 
     fn input_schema(&self) -> Value {
@@ -496,10 +540,10 @@ impl Operation for RequestLeave {
             )));
         }
         if i.to_on < i.from_on {
-            return Err(OpError::BadInput("請假結束日不能早於開始日".into()));
+            return Err(OpError::BadInput("休假結束日不能早於開始日".into()));
         }
         if i.days <= Money::ZERO {
-            return Err(OpError::BadInput("請假日數要大於零".into()));
+            return Err(OpError::BadInput("休假日數要大於零".into()));
         }
 
         let employee = actor_employee(ctx).await?;
@@ -552,7 +596,7 @@ impl Operation for ListMyExpenseClaims {
     }
 
     fn summary(&self) -> &'static str {
-        "讀目前呼叫者本人送出的費用報支單，包含各關卡的產生原因、已簽核人員、目前關卡與最終產生的傳票。輸入不含 claimant 或其他人員欄位。"
+        "讀目前呼叫者本人送出的費用報支單，包含各關卡的產生原因、已簽核人員、目前關卡與最終產生的傳票。輸入不含申請人或其他人員欄位。"
     }
 
     fn input_schema(&self) -> Value {
@@ -567,6 +611,15 @@ impl Operation for ListMyExpenseClaims {
             .store
             .expense_claims_by_claimant(&employee.name, i64::MAX)
             .await?;
+        let mut receipts_by_claim: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+        for claim in &claims {
+            let receipts = ctx
+                .store
+                .documents_linked_to("expense_claim", &claim.claim_no)
+                .await?;
+            receipts_by_claim
+                .insert(&claim.claim_no, receipts.iter().map(receipt_json).collect());
+        }
         let waiting: Money = claims
             .iter()
             .filter(|claim| claim.status == "submitted" || claim.status == "approving")
@@ -591,11 +644,725 @@ impl Operation for ListMyExpenseClaims {
                 },
                 "claims": claims
                     .iter()
-                    .map(|claim| claim_json(claim, &rules))
+                    .map(|claim| {
+                        let mut value = claim_json(claim, &rules);
+                        let receipts = receipts_by_claim
+                            .remove(claim.claim_no.as_str())
+                            .unwrap_or_default();
+                        value["receipt_count"] = json!(receipts.len());
+                        value["accepts_receipt"] =
+                            json!(OPEN_CLAIM_STATUSES.contains(&claim.status.as_str()));
+                        value["receipts"] = json!(receipts);
+                        value
+                    })
                     .collect::<Vec<_>>(),
                 "waiting_count": waiting_count,
                 "waiting_total": waiting.to_string(),
                 "scope_note": "先以 ctx.employee_id 取得已連結員工，再查詢該員工姓名送出的報支；輸入不含可指定他人的欄位。",
+            }),
+            summary,
+        ))
+    }
+}
+
+// Submitting an expense claim
+
+struct SubmitMyExpenseClaim;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SubmitMyExpenseClaimInput {
+    /// What the money was spent on.
+    pub title: String,
+    /// Amount paid, tax inclusive.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
+    pub amount: Money,
+    /// Spend date. Defaults to today and may not be in the future.
+    #[serde(default)]
+    pub spent_on: Option<NaiveDate>,
+    /// `reimburse` paid with the month-end run (default), or `petty_cash`
+    /// already taken from petty cash.
+    #[serde(default)]
+    pub pay_method: Option<String>,
+    /// Anything the approvers need to know.
+    #[serde(default)]
+    pub memo: Option<String>,
+}
+
+#[async_trait]
+impl Operation for SubmitMyExpenseClaim {
+    fn name(&self) -> &'static str {
+        "submit_my_expense_claim"
+    }
+
+    fn risk(&self) -> Risk {
+        // Submitting moves no money, but it puts a decision in front of a
+        // person, so it is not read-only.
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "以目前登入帳號所連結的員工身分送一張費用報支單。申請人姓名與部門取自該員工主檔，輸入不能指定申請人；費用科目留給會計那一關決定，本操作不接受科目與收據文件編號。不產生任何分錄。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<SubmitMyExpenseClaimInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: SubmitMyExpenseClaimInput = parse(input)?;
+        if i.title.trim().is_empty() {
+            return Err(OpError::BadInput("報支項目要填寫".into()));
+        }
+        if i.amount <= Money::ZERO {
+            return Err(OpError::BadInput("報支金額要大於零".into()));
+        }
+        let pay_method = checked_pay_method(i.pay_method.as_deref())?;
+        let spent_on = i.spent_on.unwrap_or(ctx.today);
+        if spent_on > ctx.today {
+            return Err(OpError::BadInput("消費日期不能晚於今天".into()));
+        }
+
+        let employee = actor_employee(ctx).await?;
+        let claim = ctx
+            .store
+            .submit_expense_claim(SubmitExpenseClaim {
+                title: i.title.trim(),
+                claimant: &employee.name,
+                claimant_role: &ctx.actor_role,
+                employee_id: Some(employee.id),
+                dept_code: employee.dept_code.as_deref(),
+                spent_on,
+                amount: i.amount,
+                suggested_account_code: None,
+                pay_method,
+                document_id: None,
+                memo: i.memo.as_deref().unwrap_or("").trim(),
+            })
+            .await?;
+
+        let rules = ctx.store.approval_rules().await?;
+        let steps = required_steps(&rules, claim.amount);
+        let summary = format!(
+            "{} · {} {} · {} 送出 · 要經過 {} 關（依公司簽核規則的金額門檻）",
+            claim.claim_no,
+            claim.title,
+            money(claim.amount),
+            employee.name,
+            steps.len()
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "claim": claim_json(&claim, &rules),
+                "account_note": "費用科目由會計在「會計確認科目」那一關決定。",
+                "scope_note": "claimant 取自已驗證 session 的 ctx.employee_id 所對應的員工姓名，部門取自同一筆員工主檔；輸入不含可指定他人的欄位。",
+            }),
+            summary,
+        ))
+    }
+}
+
+// Attaching a receipt to one's own claim
+
+/// What an employee needs to recognise a file they attached. The object key
+/// and the bucket stay out: staff hold no document permission, and neither is
+/// needed to tell one receipt from another.
+fn receipt_json(d: &DocumentRow) -> Value {
+    json!({
+        "doc_no": d.doc_no,
+        "file_name": d.file_name,
+        "byte_size": d.byte_size,
+        "size_label": human_size(d.byte_size),
+        "content_type": d.content_type,
+        "checksum_short": short_checksum(&d.checksum),
+        "uploaded_at": d.uploaded_at,
+    })
+}
+
+/// Display label for a claim status. Presentation only.
+fn claim_status_label(status: &str) -> &'static str {
+    match status {
+        "submitted" => "已送出",
+        "approving" => "簽核中",
+        "approved" => "已核准",
+        "rejected" => "已退回",
+        _ => "狀態不明",
+    }
+}
+
+struct AttachMyExpenseReceipt;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AttachMyExpenseReceiptInput {
+    /// The claim to attach to, e.g. `EX2608-004`. Only claims filed through
+    /// self-service by the caller can be found.
+    pub claim_no: String,
+    /// File name. Non-ASCII names are kept; the object key is transliterated.
+    pub file_name: String,
+    /// File contents, base64.
+    pub content_base64: String,
+}
+
+/// Claim states that still take a receipt. Once accounting has produced a
+/// voucher the paperwork behind it should not change underneath.
+const OPEN_CLAIM_STATUSES: [&str; 2] = ["submitted", "approving"];
+
+#[async_trait]
+impl Operation for AttachMyExpenseReceipt {
+    fn name(&self) -> &'static str {
+        "attach_my_expense_receipt"
+    }
+
+    fn risk(&self) -> Risk {
+        // Writes to object storage, and what lands there is never deleted.
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "為本人送出的費用報支單附上收據檔案。內容以 base64 傳入，存進物件儲存並記下內容雜湊；報支單號要屬於目前登入帳號所連結的員工，別人的單號一律查無此單。已核准或已產生傳票的單不再收件。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<AttachMyExpenseReceiptInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: AttachMyExpenseReceiptInput = parse(input)?;
+        let objects = ctx.objects()?;
+        let employee = actor_employee(ctx).await?;
+
+        let file_name = i.file_name.trim();
+        if file_name.is_empty() {
+            return Err(OpError::BadInput("檔名要填寫".into()));
+        }
+        let body = base64::engine::general_purpose::STANDARD
+            .decode(i.content_base64.trim())
+            .map_err(|e| OpError::BadInput(format!("檔案內容不是合法的 base64：{e}")))?;
+        if body.is_empty() {
+            return Err(OpError::BadInput("檔案是空的".into()));
+        }
+        if body.len() > MAX_OBJECT_BYTES {
+            return Err(OpError::BadInput(format!(
+                "檔案 {} 位元組，超過單檔上限 {} 位元組",
+                body.len(),
+                MAX_OBJECT_BYTES
+            )));
+        }
+
+        // The employee is in the WHERE clause, so somebody else's claim number
+        // comes back as not found rather than as a refusal that would confirm
+        // the number exists.
+        let claim = ctx
+            .store
+            .expense_claim_of_employee(i.claim_no.trim(), employee.id)
+            .await?;
+        if !OPEN_CLAIM_STATUSES.contains(&claim.status.as_str()) {
+            return Err(OpError::BadInput(format!(
+                "{} 目前是「{}」，已經不能再附收據，請洽會計",
+                claim.claim_no,
+                claim_status_label(&claim.status)
+            )));
+        }
+
+        let slot = ctx
+            .store
+            .reserve_document_slot(ReserveDocument {
+                doc_no: None,
+                name: file_name,
+                kind: "expense_receipt",
+                link_type: "expense_claim",
+                link_ref: &claim.claim_no,
+                note: format!("{} 的收據", claim.claim_no).as_str(),
+                today: ctx.today,
+                actor: &ctx.actor,
+            })
+            .await?;
+
+        let key = storage::object_key(
+            &ctx.today.format("%y%m").to_string(),
+            &slot.doc_no,
+            slot.version_no,
+            file_name,
+        );
+        let content_type = storage::guess_content_type(file_name);
+        let stored = objects.put(&key, &body, content_type, file_name).await?;
+        let ocr_status = if content_type.starts_with("application/pdf")
+            || content_type.starts_with("image/")
+        {
+            "pending"
+        } else {
+            "not_applicable"
+        };
+        let document = ctx
+            .store
+            .record_document_version(&slot, &stored, file_name, ocr_status, &ctx.actor)
+            .await?;
+        ctx.store
+            .set_claim_document_if_absent(&claim.claim_no, slot.document_id)
+            .await?;
+
+        let receipts = ctx
+            .store
+            .documents_linked_to("expense_claim", &claim.claim_no)
+            .await?;
+        let summary = format!(
+            "{} 附上收據 {} · {} · 目前共 {} 份",
+            claim.claim_no,
+            document.doc_no,
+            document.file_name,
+            receipts.len()
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "claim_no": claim.claim_no,
+                "receipt": receipt_json(&document),
+                "receipts": receipts.iter().map(receipt_json).collect::<Vec<_>>(),
+                "scope_note": "報支單以 ctx.employee_id 直接寫進 WHERE 條件取得，別人的單號查不到；檔案內容不經解讀，只計算 BLAKE3 供日後比對。",
+            }),
+            summary,
+        ))
+    }
+}
+
+// Clocking in and out
+
+struct PunchClock;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PunchClockInput {
+    /// `in` to start the day, `out` to end it.
+    pub kind: String,
+    /// Anything worth recording, such as why the arrival was late.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[async_trait]
+impl Operation for PunchClock {
+    fn name(&self) -> &'static str {
+        "punch_clock"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "替目前登入帳號所連結的員工打上班或下班卡。時間一律取伺服器當下的時刻並記錄到秒，輸入不能指定時間，也不能指定員工。一天只記一次上班與一次下班；漏打或打錯只能由人資以 correct_punch 補登。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<PunchClockInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: PunchClockInput = parse(input)?;
+        if !PUNCH_KINDS.contains(&i.kind.as_str()) {
+            return Err(OpError::BadInput(format!(
+                "打卡別只接受 in（上班）或 out（下班），收到「{}」",
+                i.kind
+            )));
+        }
+
+        // The real clock, not `ctx.today`. A punch records when something
+        // actually happened, so `LAYSI_TODAY` must not move it; the database
+        // also checks that the day and the timestamp agree.
+        let now = Utc::now();
+        let local = laysi_domain::business_time(now);
+        let employee = actor_employee(ctx).await?;
+        let punch = ctx
+            .store
+            .record_punch(
+                laysi_store::NewPunch {
+                    employee_id: employee.id,
+                    punched_on: local.date(),
+                    punched_at: now,
+                    kind: &i.kind,
+                    source: "self",
+                    note: i.note.as_deref().unwrap_or("").trim(),
+                    actor: &ctx.actor,
+                },
+                false,
+            )
+            .await?;
+
+        let schedule = WorkSchedule::load(ctx).await?;
+        let month = local.date().format("%Y-%m").to_string();
+        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?);
+        let today = days.iter().find(|d| d.date == local.date());
+        let late = today
+            .and_then(|d| d.arrived)
+            .and_then(|arrived| schedule.late(arrived));
+
+        let summary = format!(
+            "{} {} 打{}卡 {}{}",
+            employee.emp_no,
+            employee.name,
+            punch_kind_label(&i.kind),
+            local.format(PUNCH_TIME),
+            match late {
+                Some(true) => "（遲到）",
+                Some(false) => "",
+                None => "",
+            }
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "punch": {
+                    "punched_on": punch.punched_on,
+                    "at": local.format(PUNCH_TIME).to_string(),
+                    "kind": punch.kind,
+                    "kind_label": punch_kind_label(&punch.kind),
+                    "source": punch.source,
+                },
+                "today": today.map(|d| d.json(&schedule)),
+                "schedule": schedule.json(),
+                "scope_note": "員工由已驗證 session 的 ctx.employee_id 決定，時間取自伺服器時鐘；輸入不含員工欄位，也不含時間欄位。",
+            }),
+            summary,
+        ))
+    }
+}
+
+// My punches
+
+struct ListMyPunches;
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ListMyPunchesInput {
+    /// Month (YYYY-MM). Defaults to this month. This chooses a period, never
+    /// a person: the person is always ctx.employee_id.
+    #[serde(default)]
+    pub month: Option<String>,
+}
+
+#[async_trait]
+impl Operation for ListMyPunches {
+    fn name(&self) -> &'static str {
+        "list_my_punches"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+
+    fn summary(&self) -> &'static str {
+        "讀本人某個月的逐日打卡明細與統計，並與匯入的出勤月統計對帳。輸入只有月份，沒有任何可指定他人的欄位。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<ListMyPunchesInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: ListMyPunchesInput = parse(input)?;
+        let month = i
+            .month
+            .unwrap_or_else(|| ctx.today.format("%Y-%m").to_string());
+        if NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").is_err() {
+            return Err(OpError::BadInput(format!(
+                "月份要寫成 YYYY-MM，收到的是「{month}」"
+            )));
+        }
+
+        let employee = actor_employee(ctx).await?;
+        let schedule = WorkSchedule::load(ctx).await?;
+        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?);
+        let stats = summarise(&days, &schedule);
+        let imported = ctx
+            .store
+            .attendance(&month)
+            .await?
+            .into_iter()
+            .find(|row| row.employee_id == employee.id);
+
+        // What the button on screen should offer next. Derived here so the
+        // frontend does not have to reimplement the one-per-day rule.
+        let local_today = laysi_domain::business_time(Utc::now()).date();
+        let today = days.iter().find(|d| d.date == local_today);
+        let next_kind = match today {
+            None => Some("in"),
+            Some(day) if day.left.is_none() => Some("out"),
+            Some(_) => None,
+        };
+
+        let summary = format!(
+            "讀 {} 的 {month} 打卡 · 打滿 {} 天、共 {} 小時{}",
+            employee.name,
+            stats.complete_days,
+            stats.json()["worked_hours"].as_str().unwrap_or("0"),
+            match stats.late_days {
+                Some(late) => format!(" · 遲到 {late} 天"),
+                None => " · 未設定上班時間，不判定遲到".into(),
+            }
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "employee": { "emp_no": employee.emp_no, "name": employee.name },
+                "month": month,
+                "today": local_today,
+                "today_punches": today.map(|d| d.json(&schedule)),
+                "next_kind": next_kind,
+                "next_kind_label": next_kind.map(punch_kind_label),
+                "days": days.iter().map(|d| d.json(&schedule)).collect::<Vec<_>>(),
+                "summary": stats.json(),
+                "reconciliation": reconciliation(&stats, imported.as_ref()),
+                "schedule": schedule.json(),
+                "scope_note": "僅查詢已驗證 session 的 ctx.employee_id；輸入只有月份。",
+            }),
+            summary,
+        ))
+    }
+}
+
+// Connecting an assistant as yourself
+
+/// The MCP tools this role can actually reach, and why the others are out.
+///
+/// Two independent gates decide it and they fail for different reasons, so
+/// the reply names both rather than returning one merged list: a tool the
+/// role lacks permission for is a matter for the owner to change, and a tool
+/// switched off for AI is a matter for the MCP screen.
+async fn my_mcp_tools(ctx: &OpCtx) -> Result<Value, OpError> {
+    let permitted = ctx.store.permitted_ops(&ctx.actor_role).await?;
+    let grants = ctx.store.tool_grants().await?;
+    let mut usable = Vec::new();
+    let mut blocked = Vec::new();
+    for (tool, enabled) in grants {
+        if !permitted.contains(&tool) {
+            continue;
+        }
+        if enabled {
+            usable.push(tool);
+        } else {
+            blocked.push(tool);
+        }
+    }
+    usable.sort();
+    blocked.sort();
+    Ok(json!({
+        "usable": usable,
+        "blocked_for_ai": blocked,
+        "role": ctx.actor_role,
+        "note": "可用工具是你的角色權限與 MCP 工具開關的交集。權限缺少要找負責人調整角色；工具對 AI 關閉則要在「MCP 與 AI」開啟。",
+    }))
+}
+
+struct IssueMyApiToken;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct IssueMyApiTokenInput {
+    /// What to call this token, so it can be told apart in the list later.
+    /// Named `label` rather than `name` because in this module every field
+    /// called `name` has meant a person, and the test that forbids those
+    /// should not have to carry an exception.
+    pub label: String,
+    /// What it is for, kept as a label. It records intent and does not
+    /// restrict anything; the role does that.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Days until rotation is due. Omitted means no fixed cycle.
+    #[serde(default)]
+    pub rotate_days: Option<i32>,
+}
+
+#[async_trait]
+impl Operation for IssueMyApiToken {
+    fn name(&self) -> &'static str {
+        "issue_my_api_token"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "以目前登入者本人的身分核發一把 MCP Token。輸入只有名稱、用途與輪替天數，不能指定代表對象與角色，兩者都取自 session，因此這把 Token 能做的事與本人完全相同，不會更多。明文僅回傳一次。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<IssueMyApiTokenInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: IssueMyApiTokenInput = parse(input)?;
+        if i.label.trim().is_empty() {
+            return Err(OpError::BadInput("Token 要有名稱，否則清單上認不出是哪一把".into()));
+        }
+        if i.rotate_days.is_some_and(|d| d <= 0) {
+            return Err(OpError::BadInput("輪替天數要大於零".into()));
+        }
+
+        let employee = actor_employee(ctx).await?;
+        let expiry_note = match i.rotate_days {
+            Some(d) => format!("{d} 天後輪替"),
+            None => "未設定輪替週期".into(),
+        };
+        let issued = ctx
+            .store
+            .issue_api_token(laysi_store::IssueApiToken {
+                name: i.label.trim(),
+                kind: "mcp",
+                scope: i.scope.as_deref().unwrap_or("與本人相同").trim(),
+                actor: &ctx.actor,
+                actor_role: &ctx.actor_role,
+                created_by: &ctx.actor,
+                rotate_days: i.rotate_days,
+                expiry_note: &expiry_note,
+                owner_employee_id: Some(employee.id),
+            })
+            .await?;
+
+        let summary = format!(
+            "{} 自助核發 MCP Token · {}（{}…）· 權限與本人相同 · {expiry_note}",
+            employee.name, issued.token.name, issued.token.prefix
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "token": issued.token,
+                "secret": issued.secret,
+                "tools": my_mcp_tools(ctx).await?,
+                "secret_note": "明文僅顯示這一次，請立即複製保存；系統僅保留雜湊，無法回查。",
+                "scope_note": "代表對象與角色取自已驗證 session，輸入無法指定；這把 Token 的權限就是你的權限。",
+            }),
+            summary,
+        ))
+    }
+}
+
+struct ListMyApiTokens;
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ListMyApiTokensInput {
+    /// Include tokens already revoked.
+    #[serde(default)]
+    pub include_revoked: bool,
+}
+
+#[async_trait]
+impl Operation for ListMyApiTokens {
+    fn name(&self) -> &'static str {
+        "list_my_api_tokens"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+
+    fn summary(&self) -> &'static str {
+        "讀本人自助核發的 MCP Token，以及本人在 MCP 上實際能呼叫的工具清單。不含負責人代發的 Token，輸入不含可指定他人的欄位。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<ListMyApiTokensInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: ListMyApiTokensInput = parse(input)?;
+        let employee = actor_employee(ctx).await?;
+        let tokens = ctx
+            .store
+            .api_tokens_owned_by(employee.id, i.include_revoked)
+            .await?;
+        let now = chrono::Utc::now();
+        let live = tokens
+            .iter()
+            .filter(|t| t.revoked_at.is_none() && !t.is_expired(now))
+            .count();
+
+        let rows: Vec<Value> = tokens
+            .iter()
+            .map(|t| {
+                let expired = t.is_expired(now);
+                json!({
+                    "id": t.id,
+                    "name": t.name,
+                    "scope": t.scope,
+                    "prefix": t.prefix,
+                    "created_at": t.created_at,
+                    "last_used_at": t.last_used_at,
+                    "rotate_days": t.rotate_days,
+                    "expires_at": t.expires_at(),
+                    "expired": expired,
+                    "expiry_note": t.expiry_note,
+                    "revoked_at": t.revoked_at,
+                    "live": t.revoked_at.is_none() && !expired,
+                })
+            })
+            .collect();
+
+        let tools = my_mcp_tools(ctx).await?;
+        let summary = format!(
+            "讀 {} 自助核發的 MCP Token · {live} 把有效、共 {} 筆 · 可用工具 {} 項",
+            employee.name,
+            rows.len(),
+            tools["usable"].as_array().map_or(0, Vec::len)
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "employee": { "emp_no": employee.emp_no, "name": employee.name },
+                "tokens": rows,
+                "live_count": live,
+                "tools": tools,
+                "endpoint": "/mcp",
+                "storage_note": "系統只存不可還原的雜湊與前八碼，明文只在核發的那一次回傳。",
+                "scope_note": "只列出 owner_employee_id 等於 ctx.employee_id 的 Token；負責人代發的不在此列。",
+            }),
+            summary,
+        ))
+    }
+}
+
+struct RevokeMyApiToken;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RevokeMyApiTokenInput {
+    /// Token id from `list_my_api_tokens`.
+    pub id: i32,
+}
+
+#[async_trait]
+impl Operation for RevokeMyApiToken {
+    fn name(&self) -> &'static str {
+        "revoke_my_api_token"
+    }
+
+    fn risk(&self) -> Risk {
+        // Revoking moves in the safe direction, and a leaked token must not
+        // wait for anybody. It is still not read-only: the connection stops.
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "撤銷一把本人自助核發的 MCP Token。只能撤銷本人核發的 Token，別人的一律查無此筆。撤銷後不可復原。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<RevokeMyApiTokenInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: RevokeMyApiTokenInput = parse(input)?;
+        let employee = actor_employee(ctx).await?;
+        let token = ctx
+            .store
+            .revoke_own_api_token(i.id, employee.id, &ctx.actor)
+            .await?;
+        let summary = format!(
+            "{} 撤銷自己的 MCP Token · {}（{}…）· 下一次呼叫立即失效",
+            employee.name, token.name, token.prefix
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "token": { "id": token.id, "name": token.name, "prefix": token.prefix,
+                           "revoked_at": token.revoked_at },
+                "scope_note": "所屬員工由 ctx.employee_id 決定並直接寫進 WHERE 條件。",
             }),
             summary,
         ))
@@ -648,8 +1415,8 @@ mod tests {
     }
 
     /// The structural guarantee behind self-service authorisation: every read
-    /// operation takes empty input, and submitting leave accepts only the
-    /// type, dates, days and reason. Adding any field naming a person must
+    /// operation takes empty input, and the two write operations accept only
+    /// the facts of the request itself. Adding any field naming a person must
     /// make this test fail first.
     #[test]
     fn no_self_service_input_can_select_another_employee() {
@@ -662,7 +1429,40 @@ mod tests {
                 BTreeSet::from(["kind", "from_on", "to_on", "days", "reason"]),
             ),
             ("list_my_expense_claims", BTreeSet::new()),
+            (
+                "submit_my_expense_claim",
+                BTreeSet::from(["title", "amount", "spent_on", "pay_method", "memo"]),
+            ),
+            // `claim_no` names a claim, and claims belong to people, so it is
+            // the same shape of risk as revoking a token by id. The employee
+            // is therefore part of the SQL WHERE clause. `file_name` is the
+            // name of a file, not of a person; nothing in this input can point
+            // at an existing document, which is what kept the claim operation
+            // from taking a document number.
+            (
+                "attach_my_expense_receipt",
+                BTreeSet::from(["claim_no", "file_name", "content_base64"]),
+            ),
+            ("punch_clock", BTreeSet::from(["kind", "note"])),
+            // `month` picks a period, not a person. It is the only field in
+            // this map that narrows a query at all, and it cannot widen one:
+            // whichever month is asked for, the rows still come from
+            // ctx.employee_id.
+            ("list_my_punches", BTreeSet::from(["month"])),
+            (
+                "issue_my_api_token",
+                BTreeSet::from(["label", "scope", "rotate_days"]),
+            ),
+            ("list_my_api_tokens", BTreeSet::from(["include_revoked"])),
+            // `id` names a token, which is the one input in this group that
+            // could point at something belonging to somebody else. The
+            // employee is therefore part of the SQL WHERE clause rather than
+            // an `if` after the row is found.
+            ("revoke_my_api_token", BTreeSet::from(["id"])),
         ]);
+        // dept_code is here for the same reason as the names: the general
+        // expense operation takes one, and charging another department's cost
+        // centre is the same problem wearing a different word.
         let forbidden = [
             "employee_id",
             "emp_no",
@@ -670,6 +1470,7 @@ mod tests {
             "actor",
             "claimant",
             "user_id",
+            "dept_code",
         ];
         let operations = ops();
         assert_eq!(operations.len(), expected.len());
@@ -695,6 +1496,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A receipt is evidence for a decision that has not been made yet. Once
+    /// the claim is approved or rejected the paperwork behind it is fixed, so
+    /// the screen offers no attachment and the operation refuses one.
+    #[test]
+    fn a_settled_claim_takes_no_more_receipts() {
+        assert!(OPEN_CLAIM_STATUSES.contains(&"submitted"));
+        assert!(OPEN_CLAIM_STATUSES.contains(&"approving"));
+        assert!(!OPEN_CLAIM_STATUSES.contains(&"approved"));
+        assert!(!OPEN_CLAIM_STATUSES.contains(&"rejected"));
     }
 
     #[test]

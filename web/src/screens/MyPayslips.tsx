@@ -15,8 +15,6 @@ interface Props {
 export function MyPayslips({ reloadKey }: Props) {
   const [data, setData] = useState<MyPayslipList | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** Which period is expanded. null means none chosen yet, landing on the
-   *  latest. */
   const [period, setPeriod] = useState<string | null>(null);
 
   useEffect(() => {
@@ -39,9 +37,7 @@ export function MyPayslips({ reloadKey }: Props) {
         <h1 className="page-title">我的薪資單</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          本操作不含員工欄位，對象由登入帳號上的{' '}
-          <span className="num">employee_id</span> 決定。帳號未連結員工資料時回覆錯誤，
-          不回傳空白薪資單，以免被誤讀為當月無薪資。
+          這不是「本月無薪資」，是帳號還沒對應到員工編號。請管理員完成連結後再回到本頁。
         </p>
       </div>
     );
@@ -55,9 +51,6 @@ export function MyPayslips({ reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">我的薪資單</h1>
-      <p className="page-lede">
-        各期實發金額、代扣項目與公司負擔部分。
-      </p>
 
       <div className="card pay-bar">
         <div>
@@ -71,11 +64,6 @@ export function MyPayslips({ reloadKey }: Props) {
           {money(data.gross_total)}。
         </div>
       </div>
-
-      {/* The point of this module is not that this person has permission to
-          look, but that the operation has no field with which to ask about
-          anyone else. */}
-      <p className="recon">{data.scope_note}</p>
 
       {slips.length === 0 ? (
         <p className="state-note">
@@ -95,42 +83,44 @@ export function MyPayslips({ reloadKey }: Props) {
             ))}
           </div>
 
-          <table className="table">
-            <thead>
-              <tr>
-                <th>期別</th>
-                <th>給付日</th>
-                <th className="align-right">應發</th>
-                <th className="align-right">代扣</th>
-                <th className="align-right">實發</th>
-              </tr>
-            </thead>
-            <tbody>
-              {slips.map((s) => (
-                <tr
-                  key={s.period}
-                  className={`row--pickable${s.period === shown?.period ? ' row--pending' : ''}`}
-                  onClick={() => setPeriod(s.period)}
-                >
-                  <td className="num">
-                    {s.period}
-                    {s.prorated && (
-                      <span className="cell-hint cell-hint--block">
-                        {trimDecimal(s.paid_days)} / {trimDecimal(s.month_days)} 日，按日計算
-                      </span>
-                    )}
-                  </td>
-                  <td className="num">{s.pay_on}</td>
-                  <td className="num align-right">{money(s.gross)}</td>
-                  <td className="num align-right">{money(s.deductions.total)}</td>
-                  <td className="num align-right">{money(s.net)}</td>
+          <div className="table-scroll">
+            <table className="table table--inset">
+              <thead>
+                <tr>
+                  <th>期別</th>
+                  <th>給付日</th>
+                  <th className="align-right">應發</th>
+                  <th className="align-right">代扣</th>
+                  <th className="align-right">實發</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {slips.map((s) => (
+                  <tr
+                    key={s.period}
+                    className={`row--pickable${s.period === shown?.period ? ' row--pending' : ''}`}
+                    onClick={() => setPeriod(s.period)}
+                  >
+                    <td className="num">
+                      {s.period}
+                      {s.prorated && (
+                        <span className="cell-hint cell-hint--block">
+                          {trimDecimal(s.paid_days)} / {trimDecimal(s.month_days)} 日，按日計算
+                        </span>
+                      )}
+                    </td>
+                    <td className="num">{s.pay_on}</td>
+                    <td className="num align-right">{money(s.gross)}</td>
+                    <td className="num align-right">{money(s.deductions.total)}</td>
+                    <td className="num align-right">{money(s.net)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           {shown && (
-            <div className="split-columns">
+            <div className="split-columns split-columns--spaced">
               <section className="card doc-card">
                 <div className="doc-card__head">
                   <h3 className="section-title doc-card__title">{shown.period} 的明細</h3>
@@ -240,9 +230,9 @@ export function MyPayslips({ reloadKey }: Props) {
                     <span className="fact__value num">{shown.rulesets.withholding}</span>
                   </div>
                 </div>
+
                 <p className="hint">
-                  上列四個版本為<strong>本期計算當下適用的版本</strong>，保存於薪資單。
-                  法規日後修正不影響本期金額；查核當期扣繳依據時，即以此四項為準。
+                  這四個版本保存於本張薪資單，法規日後修正不影響本期金額。
                 </p>
               </section>
             </div>
@@ -250,17 +240,6 @@ export function MyPayslips({ reloadKey }: Props) {
         </>
       )}
 
-      <p className="hint">
-        全公司的逐人薪資明細是另一個操作（<span className="num">list_payslips</span>），
-        該操作標示為「限老闆」，並實際強制執行。
-        本畫面使用 <span className="num">list_my_payslips</span>，屬唯讀且輸入不含員工欄位，
-        任何呼叫者僅能取得本人資料。
-      </p>
-      <p className="hint">
-        身分來自 HttpOnly session cookie，<strong>請求標頭無法指定操作者</strong>；
-        查詢對象再由帳號上的 employee_id 決定。因此要看別人的薪資單，得先取得對方的登入身分，
-        變更請求標頭無效。
-      </p>
     </div>
   );
 }

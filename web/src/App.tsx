@@ -5,10 +5,13 @@ import { SetupWizard } from './components/SetupWizard';
 import { Attendance } from './screens/Attendance';
 import { Banking } from './screens/Banking';
 import { Budget } from './screens/Budget';
+import { Clock } from './screens/Clock';
 import { Documents } from './screens/Documents';
 import { Employees } from './screens/Employees';
+import { ExpenseRequest } from './screens/ExpenseRequest';
 import { Expenses } from './screens/Expenses';
 import { Imports } from './screens/Imports';
+import { LeaveRequest } from './screens/LeaveRequest';
 import { Dashboard } from './screens/Dashboard';
 import { FixedAssets } from './screens/FixedAssets';
 import { GeneralLedger } from './screens/GeneralLedger';
@@ -20,6 +23,7 @@ import { McpTools } from './screens/McpTools';
 import { Me } from './screens/Me';
 import { MyExpenses } from './screens/MyExpenses';
 import { MyLeave } from './screens/MyLeave';
+import { MyMcp } from './screens/MyMcp';
 import { MyPayslips } from './screens/MyPayslips';
 import { Onboarding } from './screens/Onboarding';
 import { Payables } from './screens/Payables';
@@ -31,47 +35,75 @@ import { Security } from './screens/Security';
 import { Setup } from './screens/Setup';
 import { Tax } from './screens/Tax';
 import { Withholding } from './screens/Withholding';
-import { FINANCE_NAV, HR_NAV, ME_NAV, ROADMAP, type NavEntry, type ScreenId } from './nav';
+import {
+  FINANCE_NAV,
+  firstScreen,
+  HR_NAV,
+  ME_NAV,
+  SCREEN_PATH,
+  screenForPath,
+  screenOp,
+  SYSTEM_NAV,
+  visibleEntries,
+  type NavEntry,
+  type ScreenId,
+} from './nav';
 import { AuthProvider, useAuth, useAuthSession } from './auth';
-import { callOp, getMeta, type Meta, type Voucher } from './api/client';
+import {
+  callOp,
+  getMeta,
+  OpFailed,
+  type Meta,
+  type MyPunchList,
+  type PunchResult,
+  type Voucher,
+} from './api/client';
 
-/**
- * Which tree the sidebar currently shows.
- *
- * Switching sections switches navigation, not identity. There is one
- * identity, it comes from the session, and it does not change during use;
- * the section only decides which screens the sidebar lists. The owner still
- * has to switch to HR to see payroll, and staff switching to finance see
- * those screens listed while the backend decides call by call what actually
- * works. Seeing an entry does not mean the action will succeed, which is
- * deliberate: hiding everything unavailable leaves people unable to learn
- * which permission they lack.
- */
-type Section = 'fin' | 'hr' | 'me';
+type Section = 'fin' | 'hr' | 'me' | 'sys';
 
-const NAV: Record<Section, NavEntry[]> = { fin: FINANCE_NAV, hr: HR_NAV, me: ME_NAV };
-const SECTION_LABEL: Record<Section, string> = { fin: '財務', hr: '人資', me: '我的' };
-/** Landing screen for each section, so switching shows something. */
-const SECTION_HOME: Record<Section, ScreenId> = { fin: 'dash', hr: 'hrdash', me: 'me' };
+const NAV: Record<Section, NavEntry[]> = {
+  fin: FINANCE_NAV,
+  hr: HR_NAV,
+  me: ME_NAV,
+  sys: SYSTEM_NAV,
+};
+const SECTION_LABEL: Record<Section, string> = {
+  fin: '財務',
+  hr: '人資',
+  me: '我的',
+  sys: '系統',
+};
+const SECTION_ORDER: Section[] = ['me', 'fin', 'hr', 'sys'];
+const TAB_SECTIONS: Section[] = ['me', 'fin', 'hr'];
 
-/** Which tree a screen belongs to. A to-do on the HR dashboard can point at
- *  the general ledger, and the sidebar follows. */
-function sectionOf(id: ScreenId): Section {
-  if (ME_NAV.some((e) => e.kind === 'item' && e.id === id)) return 'me';
-  return HR_NAV.some((e) => e.kind === 'item' && e.id === id) ? 'hr' : 'fin';
+function usableSections(
+  permissions: string[],
+  employeeId: number | null | undefined,
+): { section: Section; screen: ScreenId }[] {
+  return SECTION_ORDER.flatMap((section) => {
+    if (section === 'me' && employeeId == null) return [];
+    const screen = firstScreen(NAV[section], permissions);
+    return screen ? [{ section, screen }] : [];
+  });
 }
 
-/**
- * Root component.
- *
- * Signed out means only the login screen: the main screens are not rendered
- * behind an overlay but not rendered at all, because they call operations on
- * mount and every call would 401.
- *
- * Someone still on the initial password stops here too. The session exists,
- * but the password has to become one only they know before "who approved
- * this" has an answer.
- */
+function sectionOf(id: ScreenId): Section {
+  const found = SECTION_ORDER.find((section) =>
+    NAV[section].some((e) => e.kind === 'item' && e.id === id),
+  );
+  return found ?? 'fin';
+}
+
+function screenAllowed(
+  id: ScreenId,
+  permissions: string[],
+  employeeId: number | null | undefined,
+): boolean {
+  if (sectionOf(id) === 'me' && employeeId == null) return false;
+  const op = screenOp(id);
+  return op !== null && permissions.includes(op);
+}
+
 export function App() {
   const auth = useAuthSession();
   const signedIn = auth.status === 'signed-in' && auth.user !== null;
@@ -93,17 +125,29 @@ export function App() {
 
 function Workspace() {
   const { user, signOut } = useAuth();
-  const [section, setSection] = useState<Section>('fin');
-  const [screen, setScreen] = useState<ScreenId>('dash');
+  const permissions = user?.permissions ?? [];
+  const sections = usableSections(permissions, user?.employee_id);
+
+  const tabs = sections.filter((s) => TAB_SECTIONS.includes(s.section));
+  const admin = sections.find((s) => s.section === 'sys');
+  const start = tabs[0] ?? sections[0];
+  const landing = start?.screen ?? 'me';
+  const [screen, setScreen] = useState<ScreenId>(() => {
+    const asked = screenForPath(window.location.pathname);
+    return asked && screenAllowed(asked, permissions, user?.employee_id) ? asked : landing;
+  });
+  const section = sectionOf(screen);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [drawer, setDrawer] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
+  const [punch, setPunch] = useState<MyPunchList | null>(null);
+  const [punching, setPunching] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [showWizard, setShowWizard] = useState(false);
-  // Open the wizard automatically only the first time setup_required is seen.
-  // After the user dismisses it, a reload triggered by another screen must not
-  // bring it back; the sidebar reminder covers that instead.
+
+  const [navOpen, setNavOpen] = useState(false);
+
   const wizardPromptedRef = useRef(false);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
@@ -113,12 +157,35 @@ function Workspace() {
     window.setTimeout(() => setToast((t) => (t === msg ? null : t)), 3200);
   }, []);
 
-  /** Go to a screen and switch the sidebar to its tree. Identity is
-   *  unaffected. */
   const go = useCallback((id: ScreenId) => {
-    setSection(sectionOf(id));
     setScreen(id);
+    setNavOpen(false);
+    if (window.location.pathname !== SCREEN_PATH[id]) {
+      window.history.pushState({ screen: id }, '', SCREEN_PATH[id]);
+    }
   }, []);
+
+  const resolvePath = useRef<(path: string) => ScreenId>(() => landing);
+  resolvePath.current = (path: string) => {
+    const asked = screenForPath(path);
+    return asked && screenAllowed(asked, permissions, user?.employee_id) ? asked : landing;
+  };
+
+  useEffect(() => {
+    if (window.location.pathname !== SCREEN_PATH[screen]) {
+      window.history.replaceState({ screen }, '', SCREEN_PATH[screen]);
+    }
+    const onPop = () => setScreen(resolvePath.current(window.location.pathname));
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setNavOpen(false);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [navOpen]);
 
   useEffect(() => {
     getMeta()
@@ -132,12 +199,39 @@ function Workspace() {
       .catch(() => setMeta(null));
   }, [reloadKey]);
 
-  // Sidebar badges: counts of unposted and unconfirmed vouchers.
-  // Nothing in the self-service tree needs a badge, so those two operations
-  // are not called there: succeeding would be pointless and being blocked
-  // would leave two audit entries for nothing.
   useEffect(() => {
-    if (section === 'me') {
+    if (section !== 'me' || !permissions.includes('list_my_punches')) {
+      setPunch(null);
+      return;
+    }
+    let live = true;
+    callOp<MyPunchList>('list_my_punches')
+      .then((d) => live && setPunch(d))
+      .catch(() => live && setPunch(null));
+    return () => {
+      live = false;
+    };
+  }, [reloadKey, section]);
+
+  async function punchNow(kind: 'in' | 'out') {
+    setPunching(true);
+    try {
+      const d = await callOp<PunchResult>(
+        'punch_clock',
+        { kind },
+        kind === 'in' ? '打上班卡' : '打下班卡',
+      );
+      showToast(`${d.punch.kind_label}卡 ${d.punch.at} 已記錄`);
+      reload();
+    } catch (e) {
+      showToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setPunching(false);
+    }
+  }
+
+  useEffect(() => {
+    if (section === 'me' || !permissions.includes('search_vouchers')) {
       setPendingCount(0);
       return;
     }
@@ -149,38 +243,50 @@ function Workspace() {
       .catch(() => setPendingCount(0));
   }, [reloadKey, section]);
 
-  /** Switch tree and land on that section's first screen. */
   function switchSection(next: Section) {
     if (next === section) return;
-    go(SECTION_HOME[next]);
+    const target = sections.find((s) => s.section === next);
+    if (target) go(target.screen);
   }
+
+  const headerContext =
+    section === 'fin' ? (
+      <>
+        <div className="header__context">會計期間 {meta?.period ?? '—'}</div>
+        <div className="header__state">{meta?.period_state ?? '—'}</div>
+      </>
+    ) : section === 'me' ? (
+      <div className="header__context">{user?.display_name ?? '—'}</div>
+    ) : null;
 
   return (
     <div className="shell">
-      <aside className="sidebar">
+
+      {navOpen && <div className="scrim" onClick={() => setNavOpen(false)} />}
+
+      <aside id="laysi-nav" className={`sidebar${navOpen ? ' sidebar--open' : ''}`}>
         <div className="sidebar__brand">
-          {/* The wordmark is generated by the Rust backend; the frontend has
-              no logo file and must not have one. */}
+
           <BrandMark height={26} />
           <div className="sidebar__company">{meta?.company ?? '　'}</div>
 
-          {/* This switches the navigation tree, not the identity. There is
-              one identity, it comes from the session, and it cannot change. */}
-          <div className="sidebar__tabs">
-            {(['fin', 'hr', 'me'] as const).map((s) => (
-              <button
-                key={s}
-                className={`sidebar__tab${section === s ? ' sidebar__tab--on' : ''}`}
-                onClick={() => switchSection(s)}
-              >
-                {SECTION_LABEL[s]}
-              </button>
-            ))}
-          </div>
+          {tabs.length > 1 && (
+            <div className="sidebar__tabs">
+              {tabs.map(({ section: s }) => (
+                <button
+                  key={s}
+                  className={`sidebar__tab${section === s ? ' sidebar__tab--on' : ''}`}
+                  onClick={() => switchSection(s)}
+                >
+                  {SECTION_LABEL[s]}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <nav className="sidebar__nav">
-          {NAV[section].map((e, i) =>
+          {visibleEntries(NAV[section], permissions).map((e, i) =>
             e.kind === 'head' ? (
               <div className="nav-head" key={`h${i}`}>
                 {e.label}
@@ -189,7 +295,7 @@ function Workspace() {
               <button
                 key={e.id}
                 className={`nav-item${screen === e.id ? ' nav-item--on' : ''}`}
-                onClick={() => setScreen(e.id)}
+                onClick={() => go(e.id)}
               >
                 <span>{e.label}</span>
                 {e.badge === 'pending' && pendingCount > 0 && (
@@ -200,9 +306,6 @@ function Workspace() {
           )}
         </nav>
 
-        {/* The company name is still empty. Even if the wizard was dismissed,
-            there has to be a way back into it, so "not set up yet" does not
-            appear once and then vanish. */}
         {meta?.setup_required && !showWizard && (
           <div className="sidebar__setup">
             <p className="sidebar__setup-note">尚未完成首次設定：公司名稱為空。</p>
@@ -212,37 +315,89 @@ function Workspace() {
           </div>
         )}
 
-        {/* The signed-in user. Nothing here switches to another person; that
-            requires signing in again. */}
         <div className="sidebar__who">
           <div className="sidebar__who-name">{user?.display_name}</div>
-          <div>
-            {user?.username} · {user?.role_name}
+          <div>{user?.role_name}</div>
+          <div className="sidebar__account-actions">
+            {admin && (
+              <button
+                className={`sidebar__admin${section === 'sys' ? ' sidebar__admin--on' : ''}`}
+                onClick={() => switchSection(section === 'sys' ? (tabs[0]?.section ?? 'sys') : 'sys')}
+              >
+                系統
+              </button>
+            )}
+            <button className="sidebar__signout" onClick={() => void signOut()}>
+              登出
+            </button>
           </div>
-          <div>
-            操作權限由後端每次呼叫即時查詢角色權限決定。
-          </div>
-          <button className="sidebar__signout" onClick={() => void signOut()}>
-            登出
-          </button>
-          {meta && <div className="sidebar__attribution">{meta.attribution}</div>}
         </div>
       </aside>
 
       <main className="main">
         <header className="header">
-          <div className="header__period">會計期間 {meta?.period ?? '—'}</div>
-          <div className="header__state">{meta?.period_state ?? '—'}</div>
+
+          <button
+            className="header__menu"
+            aria-label="導覽"
+            aria-expanded={navOpen}
+            aria-controls="laysi-nav"
+            onClick={() => setNavOpen((v) => !v)}
+          >
+            ☰
+          </button>
+          <span className="header__brand">
+            <BrandMark height={18} />
+          </span>
+
+          <div className="header__section">{SECTION_LABEL[section]}</div>
+          {headerContext && <div className="header__meta">{headerContext}</div>}
+
           <span className="spacer" />
-          <div className="header__actions">
-            <button className="btn" onClick={() => setDrawer(true)}>
-              ＋ 建立傳票
-            </button>
-          </div>
+
+          {section === 'fin' && (
+            <div className="header__actions">
+              <button className="btn" onClick={() => setDrawer(true)}>
+                ＋ 建立傳票
+              </button>
+            </div>
+          )}
+
+          {section === 'me' && punch && (
+            <div className="header__actions">
+              {punch.today_punches?.in_at && (
+                <span className="header__state num">
+                  {punch.today_punches.in_at}
+                  {punch.today_punches.out_at ? ` – ${punch.today_punches.out_at}` : ' 上班中'}
+                </span>
+              )}
+              {punch.next_kind ? (
+                <button
+                  className="btn"
+                  disabled={punching}
+                  onClick={() => void punchNow(punch.next_kind as 'in' | 'out')}
+                >
+                  {punching ? '記錄中…' : `${punch.next_kind_label}打卡`}
+                </button>
+              ) : (
+                <button
+                  className="btn btn--secondary"
+                  onClick={() => go('meclock')}
+                >
+                  今日已完成
+                </button>
+              )}
+            </div>
+          )}
         </header>
 
         <div className="content">
-          {showWizard ? (
+          {sections.length === 0 ? (
+            <p className="state-note state-note--error">
+              角色「{user?.role_name}」目前沒有任何操作權限，因此沒有可開啟的畫面。
+              請負責人於「角色與核准」為這個角色開啟需要的權限。
+            </p>
+          ) : showWizard ? (
             <SetupWizard
               onToast={showToast}
               onProgress={reload}
@@ -301,22 +456,31 @@ function Workspace() {
               {screen === 'wht' && <Withholding onToast={showToast} reloadKey={reloadKey} />}
 
               {screen === 'me' && <Me onGo={go} reloadKey={reloadKey} />}
-              {screen === 'meexp' && <MyExpenses reloadKey={reloadKey} />}
+              {screen === 'meclock' && (
+                <Clock onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
+              )}
+              {screen === 'meleavenew' && (
+                <LeaveRequest
+                  onToast={showToast}
+                  onGo={go}
+                  reloadKey={reloadKey}
+                  onChanged={reload}
+                />
+              )}
+              {screen === 'meexpnew' && (
+                <ExpenseRequest
+                  onToast={showToast}
+                  onGo={go}
+                  reloadKey={reloadKey}
+                  onChanged={reload}
+                />
+              )}
+              {screen === 'meexp' && (
+                <MyExpenses onGo={go} onToast={showToast} reloadKey={reloadKey} />
+              )}
               {screen === 'mepay' && <MyPayslips reloadKey={reloadKey} />}
-              {screen === 'meleave' && (
-                <MyLeave onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
-              )}
-
-              {ROADMAP[screen] && (
-                <div className="placeholder">
-                  <div className="placeholder__title">{ROADMAP[screen]}</div>
-                  <p>
-                    本模組於後續里程碑實作。「傳票 · 總帳」、「收付」、「稅務 · 資產」與
-                    「報表 · 設定」四條路徑已完成全層級驗證，涵蓋資料庫不變量、法規引擎、
-                    操作註冊表、REST 與 MCP、品牌完整性；其餘畫面依同一模式接續實作。
-                  </p>
-                </div>
-              )}
+              {screen === 'meleave' && <MyLeave onGo={go} reloadKey={reloadKey} />}
+              {screen === 'memcp' && <MyMcp onToast={showToast} reloadKey={reloadKey} />}
             </>
           )}
         </div>

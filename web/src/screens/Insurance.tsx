@@ -45,9 +45,6 @@ export function Insurance({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">勞健保與勞退</h1>
-      <p className="page-lede">
-        每月公司負擔與員工自付金額。本頁所有費率均取自法規規則庫，非寫於程式碼。
-      </p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -82,8 +79,6 @@ export function Insurance({ onToast, reloadKey }: Props) {
             </div>
           </div>
 
-          {/* The employer share is not in the ledger yet. State it, so nobody
-              assumes it is already booked as an expense. */}
           {!data.posted_to_ledger && <p className="recon recon--off">{data.posting_note}</p>}
 
           <div className="card fact-card">
@@ -102,63 +97,65 @@ export function Insurance({ onToast, reloadKey }: Props) {
 
           <h3 className="section-title section-title--spaced">逐人投保級距與保費</h3>
           <p className="section-note">
-            投保級距是這家公司替員工<strong>申報</strong>的數字，屬於事實；上限住在規則裡。
-            級距未及時更新時，計費仍受規則上限約束；目前有 {data.capped_count} 位按上限計費。
+            投保級距是公司替員工<strong>申報</strong>的數字；高於規則上限時按上限計費，
+            目前有 {data.capped_count} 位。
           </p>
 
-          <table className="table">
-            <thead>
-              <tr>
-                <th>員工</th>
-                <th className="align-right">勞保級距</th>
-                <th className="align-right">勞保</th>
-                <th className="align-right">健保級距</th>
-                <th className="align-right">健保</th>
-                <th className="align-right">勞退</th>
-                <th className="align-right">公司合計</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.rows.map((r) => (
-                <tr key={r.emp_no} className={r.labor_capped ? 'row--pending' : undefined}>
-                  <td>
-                    {r.name}
-                    <span className="cell-hint cell-hint--block num">
-                      {r.emp_no} · {r.dept_label ?? '未指定'} · {r.title}
-                    </span>
-                  </td>
-                  <td className="num align-right">
-                    {money(r.labor_insured_salary)}
-                    {r.labor_capped && (
-                      <span className="cell-hint cell-hint--block num">
-                        按上限 {money(r.labor_charged_on)} 計費
-                      </span>
-                    )}
-                  </td>
-                  <td className="num align-right">
-                    {money(r.labor_employer)}
-                    <span className="cell-hint cell-hint--block num">
-                      自付 {money(r.labor_employee)}
-                    </span>
-                  </td>
-                  <td className="num align-right">{money(r.health_insured_salary)}</td>
-                  <td className="num align-right">
-                    {money(r.health_employer)}
-                    <span className="cell-hint cell-hint--block num">
-                      自付 {money(r.health_employee)}
-                    </span>
-                  </td>
-                  <td className="num align-right">
-                    {money(r.pension_employer)}
-                    <span className="cell-hint cell-hint--block num">
-                      提繳工資 {money(r.pension_wage)}
-                    </span>
-                  </td>
-                  <td className="num align-right">{money(r.employer_total)}</td>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>員工</th>
+                  <th className="align-right">勞保級距</th>
+                  <th className="align-right">勞保</th>
+                  <th className="align-right">健保級距</th>
+                  <th className="align-right">健保</th>
+                  <th className="align-right">勞退</th>
+                  <th className="align-right">公司合計</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data.rows.map((r) => (
+                  <tr key={r.emp_no} className={r.labor_capped ? 'row--pending' : undefined}>
+                    <td>
+                      {r.name}
+                      <span className="cell-hint cell-hint--block num">
+                        {r.emp_no} · {r.dept_label ?? '未指定'} · {r.title}
+                      </span>
+                    </td>
+                    <td className="num align-right">
+                      {money(r.labor_insured_salary)}
+                      {r.labor_capped && (
+                        <span className="cell-hint cell-hint--block num">
+                          按上限 {money(r.labor_charged_on)} 計費
+                        </span>
+                      )}
+                    </td>
+                    <td className="num align-right">
+                      {money(r.labor_employer)}
+                      <span className="cell-hint cell-hint--block num">
+                        自付 {money(r.labor_employee)}
+                      </span>
+                    </td>
+                    <td className="num align-right">{money(r.health_insured_salary)}</td>
+                    <td className="num align-right">
+                      {money(r.health_employer)}
+                      <span className="cell-hint cell-hint--block num">
+                        自付 {money(r.health_employee)}
+                      </span>
+                    </td>
+                    <td className="num align-right">
+                      {money(r.pension_employer)}
+                      <span className="cell-hint cell-hint--block num">
+                        提繳工資 {money(r.pension_wage)}
+                      </span>
+                    </td>
+                    <td className="num align-right">{money(r.employer_total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           <h3 className="section-title section-title--spaced">試算一個級距</h3>
           <div className="split-columns">
@@ -180,7 +177,6 @@ export function Insurance({ onToast, reloadKey }: Props) {
               </button>
               <p className="form-note">
                 健保投保金額與勞退提繳工資未填時，比照勞保投保薪資。
-                費率依日期解析：系統不存在「當前費率」，僅有「某日適用的費率」。
               </p>
             </div>
 
@@ -227,25 +223,21 @@ export function Insurance({ onToast, reloadKey }: Props) {
                 </div>
                 <p className="hint">
                   員工自付合計 <span className="num">{money(quote.employee_total)}</span>。
-                  依 labor_insurance {quote.labor.ruleset.version}、health_insurance{' '}
-                  {quote.health.ruleset.version}、pension {quote.pension.ruleset.version} 計算。
+                  費率取自勞保 {quote.labor.ruleset.version}、健保{' '}
+                  {quote.health.ruleset.version}、勞退 {quote.pension.ruleset.version} 規則。
                 </p>
               </div>
             )}
           </div>
 
           <p className="hint">
-            這一頁的費率、上限與平均眷口數全部來自{' '}
-            <span className="num">
-              labor_insurance {data.rulesets.labor.version}、health_insurance{' '}
-              {data.rulesets.health.version}、pension {data.rulesets.pension.version}
-            </span>
-            。法規修正時僅需新增一份生效日較晚的規則檔，畫面與計算都不用調整，
-            上方三段說明中的數字也會跟著更新。
+            這一頁的費率、上限與平均眷口數全部來自勞保{' '}
+            <span className="num">{data.rulesets.labor.version}</span>、健保{' '}
+            <span className="num">{data.rulesets.health.version}</span>、勞退{' '}
+            <span className="num">{data.rulesets.pension.version}</span> 規則。
           </p>
           <p className="hint">
-            投保級距開放檢視（供會計核對繳款單），個人月薪、加班與實發金額不在本頁；
-            該等資料位於「薪資作業」的逐人明細，並限負責人檢視。
+            本頁只有投保級距，供核對繳款單；個人月薪與實發金額在「薪資作業」，限負責人檢視。
           </p>
         </>
       )}

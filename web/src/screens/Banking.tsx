@@ -15,8 +15,6 @@ interface Props {
   onChanged: () => void;
 }
 
-/** Creating an account requires a GL account. Only active, postable asset
- *  accounts are listed, matching the backend's check. */
 interface GlAccount {
   code: string;
   name: string;
@@ -93,9 +91,6 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
     }
   }
 
-  // Candidates are ranked by the backend: the ordering rule (amount first,
-  // then date) should have one implementation, and what AI receives from
-  // suggest_bank_matches must match what the screen shows.
   useEffect(() => {
     if (selected === null) {
       setCandidates(null);
@@ -138,7 +133,7 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
     <div>
       <h1 className="page-title">銀行與現金</h1>
       <p className="page-lede">
-        左側為銀行流水，右側為系統帳。點選一筆銀行明細後，於右側選擇對應的傳票。
+        核銷只建立銀行明細與傳票的對應，不會另外產生分錄。
       </p>
 
       {error && <p className="state-note state-note--error">{error}</p>}

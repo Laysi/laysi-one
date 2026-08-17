@@ -14,8 +14,6 @@ interface Props {
   onChanged: () => void;
 }
 
-/** The credit side takes a revenue account: only active, postable revenue
- *  accounts are listed. */
 interface RevenueAccount {
   code: string;
   name: string;
@@ -24,8 +22,6 @@ interface RevenueAccount {
   is_active: boolean;
 }
 
-/** Days overdue in plain language. An invoice is not overdue on its due
- *  date. */
 function dueNote(i: ArInvoice): string {
   if (i.days_overdue > 0) return `逾期 ${i.days_overdue} 天`;
   if (i.days_overdue === 0) return '本日到期';
@@ -137,7 +133,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">應收帳款</h1>
-      <p className="page-lede">尚未收回的應收款項。到期日加註底線者已逾票期。</p>
+      <p className="page-lede">到期日加註底線者已逾票期。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!aging && !error && <p className="state-note">讀取中…</p>}
@@ -159,8 +155,6 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
             </div>
           </div>
 
-          {/* The subsidiary ledger and the general ledger are two independently
-              computed paths. Equality is a conclusion, not an assumption. */}
           <p className={`recon${aging.reconciled ? '' : ' recon--off'}`}>
             {aging.reconciled ? (
               <>
@@ -202,61 +196,63 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
             </button>
           </div>
 
-          <table className="table">
-            <thead>
-              <tr>
-                <th>客戶</th>
-                <th>發票號碼</th>
-                <th>到期日</th>
-                <th className="align-right">未收金額</th>
-                <th className="align-right">動作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((i) => (
-                <tr key={i.invoice_no} className={i.recognised ? undefined : 'row--waiting'}>
-                  <td>
-                    {i.customer}
-                    {!i.recognised && (
-                      <span className="tag tag--pale">開票傳票未過帳</span>
-                    )}
-                  </td>
-                  <td className="num cell-accounts">{i.invoice_no}</td>
-                  <td>
-                    <span className={i.days_overdue > 0 ? 'due due--over' : 'due'}>
-                      {i.due_on.slice(5).replace('-', '/')}
-                    </span>
-                    <span className="cell-hint">{dueNote(i)}</span>
-                  </td>
-                  <td className="num align-right">{money(i.outstanding)}</td>
-                  <td className="align-right">
-                    {i.state === 'settled' && <span className="cell-muted">已收款</span>}
-                    {i.state === 'receiving' && (
-                      <span className="tag tag--warn tag--static">
-                        {i.receipt_voucher_no} 待過帳
-                      </span>
-                    )}
-                    {i.state === 'open' && (
-                      <button
-                        className="btn btn--compact"
-                        disabled={busy === i.invoice_no || !i.recognised}
-                        onClick={() => void collect(i)}
-                      >
-                        {busy === i.invoice_no ? '處理中…' : '登記收款'}
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {rows.length === 0 && (
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
                 <tr>
-                  <td colSpan={5} className="cell-muted">
-                    沒有符合條件的未收帳款。請由上方「＋ 新增應收單」建立第一筆。
-                  </td>
+                  <th>客戶</th>
+                  <th>發票號碼</th>
+                  <th>到期日</th>
+                  <th className="align-right">未收金額</th>
+                  <th className="align-right">動作</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map((i) => (
+                  <tr key={i.invoice_no} className={i.recognised ? undefined : 'row--waiting'}>
+                    <td>
+                      {i.customer}
+                      {!i.recognised && (
+                        <span className="tag tag--pale">開票傳票未過帳</span>
+                      )}
+                    </td>
+                    <td className="num cell-accounts">{i.invoice_no}</td>
+                    <td>
+                      <span className={i.days_overdue > 0 ? 'due due--over' : 'due'}>
+                        {i.due_on.slice(5).replace('-', '/')}
+                      </span>
+                      <span className="cell-hint">{dueNote(i)}</span>
+                    </td>
+                    <td className="num align-right">{money(i.outstanding)}</td>
+                    <td className="align-right">
+                      {i.state === 'settled' && <span className="cell-muted">已收款</span>}
+                      {i.state === 'receiving' && (
+                        <span className="tag tag--warn tag--static">
+                          {i.receipt_voucher_no} 待過帳
+                        </span>
+                      )}
+                      {i.state === 'open' && (
+                        <button
+                          className="btn btn--compact"
+                          disabled={busy === i.invoice_no || !i.recognised}
+                          onClick={() => void collect(i)}
+                        >
+                          {busy === i.invoice_no ? '處理中…' : '登記收款'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="cell-muted">
+                      沒有符合條件的未收帳款。請由上方「＋ 新增應收單」建立第一筆。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
           <p className="hint">
             「登記收款」會開立一張借銀行存款、貸應收帳款的傳票，狀態為待過帳，

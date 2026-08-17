@@ -1,43 +1,76 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   callOp,
+  fileSizeLabel,
+  MAX_UPLOAD_BYTES,
   money,
   OpFailed,
+  readFileBase64,
+  type AttachReceiptResult,
   type ExpenseClaim,
   type MyExpenseClaimList,
 } from '../api/client';
+import type { ScreenId } from '../nav';
 
 interface Props {
+  onGo: (screen: ScreenId) => void;
+  onToast: (msg: string) => void;
   reloadKey: number;
 }
 
-/** Status label for a claim. In-progress ones stand out, rejected ones
- *  more so. */
 function statusTag(c: ExpenseClaim): string {
   if (c.status === 'rejected') return 'tag tag--bad tag--static';
   if (c.status === 'approved') return 'tag tag--static';
   return 'tag tag--warn tag--static';
 }
 
-export function MyExpenses({ reloadKey }: Props) {
+export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
   const [data, setData] = useState<MyExpenseClaimList | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** Which claim's steps are expanded. One at a time is enough. */
   const [open, setOpen] = useState<string | null>(null);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const attachTo = useRef<string | null>(null);
+  const filePicker = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    let live = true;
+  const load = useCallback(() => {
     setError(null);
     callOp<MyExpenseClaimList>('list_my_expense_claims')
-      .then((d) => live && setData(d))
-      .catch((e) => {
-        if (!live) return;
-        setError(e instanceof OpFailed ? e.error.message : String(e));
-      });
-    return () => {
-      live = false;
-    };
-  }, [reloadKey]);
+      .then(setData)
+      .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
+  }, []);
+
+  useEffect(load, [load, reloadKey]);
+
+  async function attach(picked: FileList | null) {
+    const claimNo = attachTo.current;
+    if (filePicker.current) filePicker.current.value = '';
+    if (!picked || picked.length === 0 || !claimNo) return;
+    const files = Array.from(picked).filter((f) => f.size <= MAX_UPLOAD_BYTES);
+    if (files.length < picked.length) {
+      onToast(`有檔案超過 ${fileSizeLabel(MAX_UPLOAD_BYTES)}，未上傳`);
+    }
+    setUploading(claimNo);
+    let done = 0;
+    for (const file of files) {
+      try {
+        await callOp<AttachReceiptResult>(
+          'attach_my_expense_receipt',
+          {
+            claim_no: claimNo,
+            file_name: file.name,
+            content_base64: await readFileBase64(file),
+          },
+          `為 ${claimNo} 附上收據 ${file.name}`,
+        );
+        done += 1;
+      } catch (e) {
+        onToast(e instanceof OpFailed ? e.error.message : String(e));
+      }
+    }
+    if (done > 0) onToast(`${claimNo} 已附上 ${done} 份收據`);
+    setUploading(null);
+    load();
+  }
 
   if (error) {
     return (
@@ -45,9 +78,7 @@ export function MyExpenses({ reloadKey }: Props) {
         <h1 className="page-title">我的請款</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          本清單先以登入帳號上的 <span className="num">employee_id</span> 取得員工資料，
-          再以該筆資料的姓名比對報支單申請人。帳號未連結員工時回覆錯誤，
-          不以空清單呈現。
+          這不是「查無資料」，是帳號還沒對應到員工編號。請管理員完成連結後再回到本頁。
         </p>
       </div>
     );
@@ -58,7 +89,6 @@ export function MyExpenses({ reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">我的請款</h1>
-      <p className="page-lede">應收款項現況與帳齡分析。</p>
 
       <div className="card pay-bar">
         <div>
@@ -73,113 +103,131 @@ export function MyExpenses({ reloadKey }: Props) {
         </div>
       </div>
 
-      <p className="recon">{data.scope_note}</p>
+      <div className="toolbar">
+        <button className="btn btn--compact" onClick={() => onGo('meexpnew')}>
+          請款申請 →
+        </button>
+      </div>
 
-      <table className="table">
-        <thead>
-          <tr>
-            <th>報支內容</th>
-            <th>科目</th>
-            <th className="align-right">金額</th>
-            <th>目前關卡</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.claims.map((c) => (
-            <tr key={c.claim_no}>
-              <td>
-                <button
-                  className="link-cell"
-                  onClick={() => setOpen(open === c.claim_no ? null : c.claim_no)}
-                >
-                  {c.title}
-                </button>
-                <span className="cell-hint cell-hint--block num">
-                  {c.claim_no} · {c.spent_on} · {c.pay_method_label}
-                </span>
-                {open === c.claim_no && (
-                  <>
-                    <span className="cell-hint cell-hint--block">
-                      {c.required_steps.map((s) => (
-                        <span key={s.step_no} className="step-chip">
-                          {s.done ? '✓' : '○'} {s.label}
-                          {s.reason && <span className="step-chip__why">（{s.reason}）</span>}
-                        </span>
-                      ))}
-                    </span>
-                    {c.history.length > 0 && (
+      <input
+        ref={filePicker}
+        className="file-input file-input--hidden"
+        type="file"
+        multiple
+        onChange={(e) => void attach(e.target.files)}
+      />
+
+      <div className="table-scroll">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>報支內容</th>
+              <th>科目</th>
+              <th className="align-right">金額</th>
+              <th>目前關卡</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.claims.map((c) => (
+              <tr key={c.claim_no}>
+                <td>
+                  <button
+                    className="link-cell"
+                    onClick={() => setOpen(open === c.claim_no ? null : c.claim_no)}
+                  >
+                    {c.title}
+                  </button>
+                  <span className="cell-hint cell-hint--block num">
+                    {c.claim_no} · {c.spent_on} · {c.pay_method_label}
+                    {c.receipt_count > 0 && ` · 收據 ${c.receipt_count} 份`}
+                  </span>
+                  {open === c.claim_no && (
+                    <>
                       <span className="cell-hint cell-hint--block">
-                        {c.history.map((h) => (
-                          <span key={`${h.step_no}-${h.decided_at}`} className="step-chip">
-                            {h.actor}（{h.actor_role}）
-                            {h.decision === 'approved' ? '已簽核' : '已退回'}
-                            {h.note && `：${h.note}`}
+                        {c.required_steps.map((s) => (
+                          <span key={s.step_no} className="step-chip">
+                            {s.done ? '✓' : '○'} {s.label}
+                            {s.reason && <span className="step-chip__why">（{s.reason}）</span>}
                           </span>
                         ))}
                       </span>
-                    )}
-                    {c.memo && <span className="cell-hint cell-hint--block">備註：{c.memo}</span>}
-                    {c.document_no && (
-                      <span className="cell-hint cell-hint--block num">
-                        附件 {c.document_no}
-                        {c.document_name && ` · ${c.document_name}`}
-                      </span>
-                    )}
-                  </>
-                )}
-              </td>
-              <td className="cell-accounts">
-                {c.account_label ?? '—'}
-                {/* The account AI guessed and the account a person decided
-                    must be distinguishable, for the claimant too. */}
-                {!c.account_confirmed && c.suggested_account_code && (
-                  <span className="cell-hint cell-hint--block">AI 建議，尚未確認</span>
-                )}
-              </td>
-              <td className="num align-right">{money(c.amount)}</td>
-              <td>
-                <span className={statusTag(c)}>{c.step_label}</span>
-                {c.next_step && (
-                  <span className="cell-hint cell-hint--block">
-                    待 {c.next_step.role_name ?? c.next_step.label}
-                    {c.next_step.reason && `：${c.next_step.reason}`}
-                  </span>
-                )}
-                {c.voucher_no && (
-                  <span className="cell-hint cell-hint--block num">
-                    {c.voucher_no}
-                    {c.voucher_status === 'posted' ? ' 已過帳' : ' 待過帳'}
-                  </span>
-                )}
-              </td>
-            </tr>
-          ))}
-          {data.claims.length === 0 && (
-            <tr>
-              <td colSpan={4} className="cell-muted">
-                尚無請款紀錄。
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+                      {c.history.length > 0 && (
+                        <span className="cell-hint cell-hint--block">
+                          {c.history.map((h) => (
+                            <span key={`${h.step_no}-${h.decided_at}`} className="step-chip">
+                              {h.actor}（{h.actor_role}）
+                              {h.decision === 'approved' ? '已簽核' : '已退回'}
+                              {h.note && `：${h.note}`}
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                      {c.memo && <span className="cell-hint cell-hint--block">備註：{c.memo}</span>}
+                      {c.receipts.map((r) => (
+                        <span className="cell-hint cell-hint--block num" key={r.doc_no}>
+                          收據 {r.doc_no} · {r.file_name} · {r.size_label}
+                        </span>
+                      ))}
+                      {c.accepts_receipt && (
+                        <span className="cell-hint cell-hint--block">
+                          <button
+                            className="link-cell"
+                            disabled={uploading !== null}
+                            onClick={() => {
+                              attachTo.current = c.claim_no;
+                              filePicker.current?.click();
+                            }}
+                          >
+                            {uploading === c.claim_no
+                              ? '上傳中…'
+                              : c.receipt_count > 0
+                                ? '再附一份收據'
+                                : '補上收據'}
+                          </button>
+                        </span>
+                      )}
+                    </>
+                  )}
+                </td>
+                <td className="cell-accounts">
+                  {c.account_label ?? '—'}
+
+                  {!c.account_confirmed && c.suggested_account_code && (
+                    <span className="cell-hint cell-hint--block">AI 建議，尚未確認</span>
+                  )}
+                </td>
+                <td className="num align-right">{money(c.amount)}</td>
+                <td>
+                  <span className={statusTag(c)}>{c.step_label}</span>
+                  {c.next_step && (
+                    <span className="cell-hint cell-hint--block">
+                      待 {c.next_step.role_name ?? c.next_step.label}
+                      {c.next_step.reason && `：${c.next_step.reason}`}
+                    </span>
+                  )}
+                  {c.voucher_no && (
+                    <span className="cell-hint cell-hint--block num">
+                      {c.voucher_no}
+                      {c.voucher_status === 'posted' ? ' 已過帳' : ' 待過帳'}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {data.claims.length === 0 && (
+              <tr>
+                <td colSpan={4} className="cell-muted">
+                  尚無請款紀錄。
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <p className="hint">
-        點選標題可展開單據的簽核關卡與已簽核人員。
-        <strong>簽核關卡依單據金額比對簽核規則產生</strong>，
-        非寫死於程式碼，因此金額較大的單據會多一道關卡。
-      </p>
-      <p className="hint">
-        本畫面僅顯示本人的單據，且由輸入形狀保證：
-        <span className="num">list_my_expense_claims</span> 的輸入{' '}
-        <strong>不含 claimant 或任何人員欄位</strong>，比對用的姓名由後端自已驗證的
-        session 解析。檢視全公司報支為另一操作，位於財務區。
-      </p>
-      <p className="hint">
-        身分來自 HttpOnly session cookie，<strong>請求標頭無法指定</strong>；
-        能否呼叫本操作由後端每次即時查詢角色權限決定。
-        「本人送出的單據不得由本人核准」屬報支流程的規則，
-        <strong>與權限矩陣分屬兩套機制</strong>：負責人具備全部權限，同樣不得核准本人送出的單據。
+        點選標題可展開簽核關卡、已簽核人員與收據。關卡依單據金額比對簽核規則產生，
+        金額較大的單據會多一道關卡。已核准或已退回的單不再收件。
       </p>
     </div>
   );

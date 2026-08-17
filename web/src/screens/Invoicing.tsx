@@ -15,8 +15,6 @@ interface Props {
   onChanged: () => void;
 }
 
-/** The upload status decides how the label looks. Only failures are
- *  clickable. */
 function tagClass(e: EInvoice): string {
   if (e.upload_status === 'failed') return 'tag tag--bad';
   if (e.upload_status === 'void') return 'tag tag--pale tag--static';
@@ -40,9 +38,6 @@ export function Invoicing({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(load, [load, reloadKey]);
 
-  // The rate comes from the backend's ruleset. The frontend must not write
-  // a 0.05 of its own, which would become a second source of regulation and
-  // would certainly be forgotten when the rate changes.
   const rate = data?.vat.rate ?? null;
   const tax = rate && amount.trim() ? multiplyToDollars(amount, rate) : null;
   const total = tax ? addDecimals(amount, tax) : null;
@@ -60,7 +55,7 @@ export function Invoicing({ onToast, reloadKey, onChanged }: Props) {
       }>('issue_einvoice', { buyer: buyer.trim() || '未填買方', item: item.trim(), net_amount: amount.trim() },
         `開立發票予${buyer.trim() || '客戶'}`);
       onToast(
-        `${d.invoice.invoice_no} 已開立，含稅 ${money(d.invoice.total_amount)}（營業稅 ${money(d.invoice.tax_amount)} 依 vat ${d.invoice.vat_version}）；傳票 ${d.voucher.no} 待過帳`,
+        `${d.invoice.invoice_no} 已開立，含稅 ${money(d.invoice.total_amount)}（營業稅 ${money(d.invoice.tax_amount)} 依營業稅規則 ${d.invoice.vat_version}）；傳票 ${d.voucher.no} 待過帳`,
       );
       setBuyer('');
       setItem('');
@@ -98,55 +93,57 @@ export function Invoicing({ onToast, reloadKey, onChanged }: Props) {
       {data && (
         <div className="split-columns split-columns--wide-left">
           <section>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>字軌號碼</th>
-                  <th>買方</th>
-                  <th className="align-right">含稅金額</th>
-                  <th className="align-right">上傳狀態</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.invoices.map((e) => (
-                  <tr key={e.invoice_no} className={e.recognised ? undefined : 'row--waiting'}>
-                    <td className="num cell-nowrap">
-                      {e.invoice_no}
-                      <span className="cell-hint">{e.issued_on.slice(5).replace('-', '/')}</span>
-                    </td>
-                    <td className="cell-accounts">
-                      {e.buyer}
-                      {!e.recognised && <span className="tag tag--pale">開票傳票未過帳</span>}
-                    </td>
-                    <td className="num align-right cell-nowrap">
-                      {money(e.total_amount)}
-                      <span className="cell-hint cell-hint--block">稅 {money(e.tax_amount)}</span>
-                    </td>
-                    <td className="align-right">
-                      {e.upload_status === 'failed' ? (
-                        <button
-                          className="tag tag--warn"
-                          disabled={busy === e.invoice_no}
-                          onClick={() => void retry(e)}
-                          title={e.last_error ?? undefined}
-                        >
-                          {busy === e.invoice_no ? '排隊中…' : '上傳失敗 · 重送'}
-                        </button>
-                      ) : (
-                        <span className={tagClass(e)}>{e.status_label}</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {data.invoices.length === 0 && (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
                   <tr>
-                    <td colSpan={4} className="cell-muted">
-                      本字軌尚未開立發票。
-                    </td>
+                    <th>字軌號碼</th>
+                    <th>買方</th>
+                    <th className="align-right">含稅金額</th>
+                    <th className="align-right">上傳狀態</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.invoices.map((e) => (
+                    <tr key={e.invoice_no} className={e.recognised ? undefined : 'row--waiting'}>
+                      <td className="num cell-nowrap">
+                        {e.invoice_no}
+                        <span className="cell-hint">{e.issued_on.slice(5).replace('-', '/')}</span>
+                      </td>
+                      <td className="cell-accounts">
+                        {e.buyer}
+                        {!e.recognised && <span className="tag tag--pale">開票傳票未過帳</span>}
+                      </td>
+                      <td className="num align-right cell-nowrap">
+                        {money(e.total_amount)}
+                        <span className="cell-hint cell-hint--block">稅 {money(e.tax_amount)}</span>
+                      </td>
+                      <td className="align-right">
+                        {e.upload_status === 'failed' ? (
+                          <button
+                            className="tag tag--warn"
+                            disabled={busy === e.invoice_no}
+                            onClick={() => void retry(e)}
+                            title={e.last_error ?? undefined}
+                          >
+                            {busy === e.invoice_no ? '排隊中…' : '上傳失敗 · 重送'}
+                          </button>
+                        ) : (
+                          <span className={tagClass(e)}>{e.status_label}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {data.invoices.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="cell-muted">
+                        本字軌尚未開立發票。
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
 
             <p className="hint">
               字軌 {data.track.track} {data.track_label}，剩{' '}
@@ -212,7 +209,7 @@ export function Invoicing({ onToast, reloadKey, onChanged }: Props) {
               並同時建立應收明細，不用另行登錄。
             </p>
             <p className="form-note">
-              稅額依開立日適用的營業稅規則計算（目前 <span className="num">vat {data.vat.version}</span>，
+              稅額依開立日適用的營業稅規則計算（目前 <span className="num">{data.vat.version}</span>，
               {data.vat.effective_from} 起），並隨發票一併保存；
               日後稅率改版不影響本張發票的稅額。
             </p>

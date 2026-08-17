@@ -13,17 +13,6 @@ interface Props {
   reloadKey: number;
 }
 
-// Account form: report group and cash flow activity
-//
-// These lookup tables mirror `group_label` and `section_label` in the
-// backend's `laysi-ops/src/ops/settings.rs`, and the
-// `account_report_group_matches_kind` and
-// `account_cash_flow_section_matches_kind` CHECK constraints in
-// `0006_reports_roles_security.sql`. The valid values themselves are decided
-// by the database CHECK; this is only the frontend copy of the same display
-// labels, used to draw the dropdowns, like `STATUS_LABEL` in `client.ts`. It
-// is not a second set of rules. If the two ever diverge, the user meets the
-// backend's error rather than having wrong data silently accepted.
 const ACCOUNT_KINDS: { value: string; label: string }[] = [
   { value: 'asset', label: '資產' },
   { value: 'liability', label: '負債' },
@@ -68,8 +57,6 @@ const SECTION_LABEL: Record<string, string> = {
   financing: '籌資活動',
 };
 
-/** The convention the backend applies per kind when normal_side is omitted,
- *  used to draw the contra-account toggle. */
 const DEFAULT_NORMAL_SIDE: Record<string, 'debit' | 'credit'> = {
   asset: 'debit',
   liability: 'credit',
@@ -78,10 +65,6 @@ const DEFAULT_NORMAL_SIDE: Record<string, 'debit' | 'credit'> = {
   expense: 'debit',
 };
 
-/** The full account fields returned by `list_accounts`, which editing needs
- *  rather than the report-oriented `ChartAccount`. The latter lacks
- *  `parent_code` and `sort_order`, and prefilling the edit form from it would
- *  silently reset both to their defaults on save. */
 interface FullAccount {
   code: string;
   name: string;
@@ -132,19 +115,6 @@ export function Setup({ onToast, reloadKey }: Props) {
   const [draft, setDraft] = useState('');
   const [onlyUsed, setOnlyUsed] = useState(false);
 
-  /*
-   * The edit button appears based on `s.editable` alone. That field comes
-   * from the backend and says whether an entry can be changed at all (the
-   * rows derived from regulation cannot be changed by anyone), not who you
-   * are.
-   *
-   * Whether you may change it is not decided here: the backend checks the
-   * role permission on click and returns not_permitted, whose message is
-   * shown as a toast. Hiding buttons by role would copy the permission rules
-   * a second time, and a hidden button tells nobody which permission they
-   * lack.
-   */
-
   const load = useCallback(() => {
     setError(null);
     Promise.all([
@@ -175,7 +145,6 @@ export function Setup({ onToast, reloadKey }: Props) {
 
   const shown = coa?.accounts.filter((a) => !onlyUsed || a.line_count > 0) ?? [];
 
-  // Create and edit accounts
   const [accountDrawer, setAccountDrawer] = useState<'create' | 'edit' | null>(null);
   const [accountForm, setAccountForm] = useState<AccountForm>(emptyAccountForm());
   const [savingAccount, setSavingAccount] = useState(false);
@@ -250,8 +219,7 @@ export function Setup({ onToast, reloadKey }: Props) {
         name: accountForm.name.trim(),
         kind: accountForm.kind,
         report_group: accountForm.report_group,
-        // P&L accounts must send null explicitly; omitting the field would
-        // leave the key absent.
+
         cash_flow_section: isPl ? null : accountForm.cash_flow_section || null,
         ...(accountForm.contra ? { normal_side: oppositeSide } : {}),
         is_postable: accountForm.is_postable,
@@ -276,7 +244,6 @@ export function Setup({ onToast, reloadKey }: Props) {
     }
   }
 
-  // Create a dimension value (departments and similar)
   const [dimCode, setDimCode] = useState('');
   const [valueCode, setValueCode] = useState('');
   const [valueLabel, setValueLabel] = useState('');
@@ -316,7 +283,7 @@ export function Setup({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">基礎設定</h1>
-      <p className="page-lede">開帳時設定一次，後續甚少異動。變更將影響全系統，僅負責人可異動。</p>
+      <p className="page-lede">變更會影響全系統，僅負責人可異動。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!settings && !error && <p className="state-note">讀取中…</p>}
@@ -376,19 +343,10 @@ export function Setup({ onToast, reloadKey }: Props) {
                 ))}
               </div>
 
-              {/* The most important sentence on this screen. Putting the tax
-                  rate in a settings table would be more convenient and would
-                  look identical until the law changed. */}
               <p className="recon">
-                營業稅該列並非設定值，而是依生效日自法規規則庫解析而得，負責人也無法變更。
-                設定值僅有單一當前值、無生效日；規則庫則具生效日，因此修法後既有期間的
-                申報書不受影響。
+                營業稅該列依生效日自法規規則庫解析而得，不是設定值，負責人也無法變更。
               </p>
-              <p className="hint">
-                標有編輯圖示的項目可修改，實際能否修改由後端判定。
-                <span className="num">update_company_setting</span> 標示為「限老闆」，
-                權限不足時會被拒絕並顯示後端訊息，該次呼叫同樣寫入稽核。
-              </p>
+              <p className="hint">標有編輯圖示的項目可修改，且限老闆。</p>
 
               <h3 className="section-title section-title--spaced">維度與條件</h3>
               <div className="card fact-card">
@@ -441,18 +399,14 @@ export function Setup({ onToast, reloadKey }: Props) {
               </div>
 
               {!dims.applied_to_entries && (
-                <p className="hint">
-                  維度尚未掛載至分錄，目前先建立資料模型，供部門損益與費用報支接上後使用。
-                  現階段填寫不影響任何報表。
-                </p>
+                <p className="hint">維度尚未掛載至分錄，現階段填寫不影響任何報表。</p>
               )}
             </section>
 
             <section>
               <h3 className="section-title">會計科目表</h3>
               <p className="section-note">
-                每個科目都要指定它在報表中的段落，以及在現金流量表中的活動別。缺少這兩欄
-                的科目不會出現在報表上，故兩者屬科目表的必要欄位。
+                每個科目都要指定它在報表中的段落，以及在現金流量表中的活動別。缺少這兩欄的科目不會出現在報表上。
               </p>
               <div className="toolbar">
                 <button
@@ -469,51 +423,53 @@ export function Setup({ onToast, reloadKey }: Props) {
                   ＋ 新增科目
                 </button>
               </div>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>代號</th>
-                    <th>科目</th>
-                    <th>報表位置</th>
-                    <th className="align-right">餘額</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {shown.map((a) => (
-                    <tr key={a.code} className={a.line_count === 0 ? 'row--waiting' : undefined}>
-                      <td className="num cell-nowrap">{a.code}</td>
-                      <td>
-                        {a.name}
-                        <span className="cell-hint">
-                          {a.kind_label} · {a.normal_side_label}
-                        </span>
-                      </td>
-                      <td className="cell-accounts">
-                        {a.report_group_label}
-                        <span className="cell-hint cell-hint--block">
-                          現金流量：{a.cash_flow_label}
-                        </span>
-                      </td>
-                      <td className="num align-right">
-                        {a.line_count === 0 ? (
-                          <span className="cell-muted">—</span>
-                        ) : (
-                          money(a.balance)
-                        )}
-                      </td>
-                      <td className="align-right">
-                        <button
-                          className="btn btn--compact btn--secondary"
-                          onClick={() => void openEditAccount(a.code)}
-                        >
-                          編輯
-                        </button>
-                      </td>
+              <div className="table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>代號</th>
+                      <th>科目</th>
+                      <th>報表位置</th>
+                      <th className="align-right">餘額</th>
+                      <th />
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {shown.map((a) => (
+                      <tr key={a.code} className={a.line_count === 0 ? 'row--waiting' : undefined}>
+                        <td className="num cell-nowrap">{a.code}</td>
+                        <td>
+                          {a.name}
+                          <span className="cell-hint">
+                            {a.kind_label} · {a.normal_side_label}
+                          </span>
+                        </td>
+                        <td className="cell-accounts">
+                          {a.report_group_label}
+                          <span className="cell-hint cell-hint--block">
+                            現金流量：{a.cash_flow_label}
+                          </span>
+                        </td>
+                        <td className="num align-right">
+                          {a.line_count === 0 ? (
+                            <span className="cell-muted">—</span>
+                          ) : (
+                            money(a.balance)
+                          )}
+                        </td>
+                        <td className="align-right">
+                          <button
+                            className="btn btn--compact btn--secondary"
+                            onClick={() => void openEditAccount(a.code)}
+                          >
+                            編輯
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
               <p className="hint">
                 本頁餘額與三張財務報表採用同一查詢計算，科目表所列數字即為報表數字。
               </p>
@@ -530,7 +486,7 @@ export function Setup({ onToast, reloadKey }: Props) {
                 <div className="drawer__title">
                   {accountDrawer === 'edit' ? `編輯科目 ${accountForm.code}` : '新增科目'}
                 </div>
-                <div className="drawer__subtitle">report_group 與 cash_flow_section 為必填，決定科目出現在報表的段落</div>
+                <div className="drawer__subtitle">報表分組與現金流量活動別為必填，決定科目出現在報表的哪一段</div>
               </div>
               <button className="btn btn--close" onClick={() => setAccountDrawer(null)} aria-label="關閉">
                 ×
@@ -592,8 +548,7 @@ export function Setup({ onToast, reloadKey }: Props) {
                   <div className="field field--full">
                     <span>現金流量活動別</span>
                     <p className="field__hint">
-                      損益科目一律併入本期損益，不出現在現金流量表的三段活動中；送出時明確
-                      帶入 null，非漏填。
+                      損益科目一律併入本期損益，不出現在現金流量表的三段活動中，本欄不需填寫。
                     </p>
                   </div>
                 ) : (

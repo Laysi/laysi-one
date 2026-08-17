@@ -81,7 +81,7 @@ fn plan_for(rs: &Ruleset, asset: &FixedAsset) -> Result<Plan, OpError> {
     let key = format!("useful_lives.{}", asset.category);
     let years = rs.decimal(&key).map_err(|_| {
         OpError::BadInput(format!(
-            "耐用年數表 {} 未收錄「{}」類別（{}）。請先於 backend/regulation/ 補齊，系統不會推測年數。",
+            "耐用年數表 {} 未收錄「{}」類別（{}）。請先補齊該類別的耐用年數，系統不會推測年數。",
             rs.version, asset.category, asset.name
         ))
     })?;
@@ -159,7 +159,7 @@ impl Operation for ListFixedAssets {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀固定資產：成本、累計折舊、帳面淨額與耐用年數（年數查自耐用年數表，不存在資料庫），並與 1601 辦公設備、1602 累計折舊的總帳餘額對帳"
+        "讀固定資產：成本、累計折舊、帳面淨額與耐用年數（年數查自耐用年數表，不逐筆設定），並與 1601 辦公設備、1602 累計折舊的總帳餘額對帳"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListFixedAssetsInput>()
@@ -356,7 +356,7 @@ impl Operation for PreviewDepreciation {
             .find(|r| r.period == period);
 
         let summary = format!(
-            "試算 {period} 折舊 · {} 項合計 {} · 依 depreciation {version}{}",
+            "試算 {period} 折舊 · {} 項合計 {} · 依耐用年數表 {version}{}",
             lines.len(),
             money(total),
             if done.is_some() { "（本期已提列）" } else { "" }
@@ -420,7 +420,7 @@ impl Operation for RunDepreciation {
         // The audit summary names the version: which life table a month was
         // charged under must be visible from the audit trail alone.
         let summary = format!(
-            "{period} 折舊提列 · {} 項合計 {} · 依 depreciation {version} · {} 待過帳",
+            "{period} 折舊提列 · {} 項合計 {} · 依耐用年數表 {version} · {} 待過帳",
             lines.len(),
             money(total),
             run.voucher_no

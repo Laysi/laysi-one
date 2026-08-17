@@ -82,7 +82,7 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
               ) : (
                 <>
                   {preview.count} 項待提列，年限查自耐用年數表（
-                  <span className="num">depreciation {preview.ruleset_version}</span>）
+                  <span className="num">{preview.ruleset_version}</span>）
                 </>
               )}
             </div>
@@ -95,8 +95,6 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
             </button>
           </div>
 
-          {/* Cost and accumulated depreciation on the register each reconcile
-              to one GL account, computed independently. */}
           <p className={`recon${data.reconciled ? '' : ' recon--off'}`}>
             {data.reconciled ? (
               <>
@@ -125,85 +123,89 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
             )}
           </p>
 
-          <table className="table">
-            <thead>
-              <tr>
-                <th>資產</th>
-                <th>取得日</th>
-                <th>年限</th>
-                <th className="align-right">成本</th>
-                <th className="align-right">已折舊</th>
-                <th className="align-right">帳面價值</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.assets.map((a) => (
-                <tr key={a.code} className={a.recognised ? undefined : 'row--waiting'}>
-                  <td>
-                    {a.name}
-                    {!a.recognised && (
-                      <span className="tag tag--pale">取得傳票未過帳</span>
-                    )}
-                    {a.fully_depreciated && a.recognised && (
-                      <span className="tag tag--pale">已提列完畢</span>
-                    )}
-                  </td>
-                  <td className="num cell-accounts cell-nowrap">{a.acquired_on.replace(/-/g, '/')}</td>
-                  <td className="cell-accounts">
-                    {a.life_label}
-                    <span className="cell-hint">{a.category_label}</span>
-                  </td>
-                  <td className="num align-right">{money(a.cost)}</td>
-                  <td className="num align-right cell-muted">
-                    {money(a.accumulated)}
-                    {!isZero(a.in_transit) && (
-                      <span className="cell-hint cell-hint--block">＋{money(a.in_transit)} 待過帳</span>
-                    )}
-                  </td>
-                  <td className="num align-right">{money(a.book_value)}</td>
-                </tr>
-              ))}
-              {data.assets.length === 0 && (
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
                 <tr>
-                  <td colSpan={6} className="cell-muted">
-                    尚未登記固定資產。
-                  </td>
+                  <th>資產</th>
+                  <th>取得日</th>
+                  <th>年限</th>
+                  <th className="align-right">成本</th>
+                  <th className="align-right">已折舊</th>
+                  <th className="align-right">帳面價值</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data.assets.map((a) => (
+                  <tr key={a.code} className={a.recognised ? undefined : 'row--waiting'}>
+                    <td>
+                      {a.name}
+                      {!a.recognised && (
+                        <span className="tag tag--pale">取得傳票未過帳</span>
+                      )}
+                      {a.fully_depreciated && a.recognised && (
+                        <span className="tag tag--pale">已提列完畢</span>
+                      )}
+                    </td>
+                    <td className="num cell-accounts cell-nowrap">{a.acquired_on.replace(/-/g, '/')}</td>
+                    <td className="cell-accounts">
+                      {a.life_label}
+                      <span className="cell-hint">{a.category_label}</span>
+                    </td>
+                    <td className="num align-right">{money(a.cost)}</td>
+                    <td className="num align-right cell-muted">
+                      {money(a.accumulated)}
+                      {!isZero(a.in_transit) && (
+                        <span className="cell-hint cell-hint--block">＋{money(a.in_transit)} 待過帳</span>
+                      )}
+                    </td>
+                    <td className="num align-right">{money(a.book_value)}</td>
+                  </tr>
+                ))}
+                {data.assets.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="cell-muted">
+                      尚未登記固定資產。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
           <h3 className="section-title section-title--spaced">本期應提列項目</h3>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>資產</th>
-                <th>年限</th>
-                <th className="align-right">本期折舊</th>
-                <th>依據</th>
-              </tr>
-            </thead>
-            <tbody>
-              {preview.assets.map((a) => (
-                <tr key={a.code} className={a.skip_reason ? 'row--waiting' : undefined}>
-                  <td>{a.name}</td>
-                  <td className="cell-accounts">{a.life_label}</td>
-                  <td className="num align-right">
-                    {a.skip_reason ? <span className="cell-muted">—</span> : money(a.amount)}
-                  </td>
-                  <td className="cell-accounts">
-                    {a.skip_reason ?? (
-                      <>
-                        成本 <span className="num">{money(a.cost)}</span> ÷{' '}
-                        <span className="num">{a.life_years}</span> 年 ÷ 12（依{' '}
-                        <span className="num">depreciation {a.life_ruleset_version}</span>）
-                      </>
-                    )}
-                  </td>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>資產</th>
+                  <th>年限</th>
+                  <th className="align-right">本期折舊</th>
+                  <th>依據</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {preview.assets.map((a) => (
+                  <tr key={a.code} className={a.skip_reason ? 'row--waiting' : undefined}>
+                    <td>{a.name}</td>
+                    <td className="cell-accounts">{a.life_label}</td>
+                    <td className="num align-right">
+                      {a.skip_reason ? <span className="cell-muted">—</span> : money(a.amount)}
+                    </td>
+                    <td className="cell-accounts">
+                      {a.skip_reason ?? (
+                        <>
+                          成本 <span className="num">{money(a.cost)}</span> ÷{' '}
+                          <span className="num">{a.life_years}</span> 年 ÷ 12（依耐用年數表{' '}
+                          <span className="num">{a.life_ruleset_version}</span>）
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           <p className="hint">
             「執行折舊」會開立一張借 <span className="num">6152 折舊費用</span>、貸{' '}
@@ -211,45 +213,46 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
             重複提列會使累計折舊多計一個月，該誤差通常要到資產提列完畢時才會顯現。
           </p>
           <p className="hint">
-            年限不儲存於資產資料，而是依類別查詢耐用年數表。每筆提列均保存當時查得的
-            年數與規則版本，供法規回溯修正時判定需重算的範圍。
+            年限依資產類別查耐用年數表，不逐筆設定。每筆提列均保存當時查得的年數與規則版本。
           </p>
 
           {data.runs.length > 0 && (
             <>
               <h3 className="section-title section-title--spaced">提列紀錄</h3>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>期別</th>
-                    <th>傳票</th>
-                    <th>規則版本</th>
-                    <th className="align-right">金額</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.runs.map((r) => (
-                    <tr key={r.period}>
-                      <td>
-                        {r.period}
-                        {r.kind === 'opening' && (
-                          <span className="tag tag--pale">期初還原</span>
-                        )}
-                      </td>
-                      <td className="num cell-accounts cell-nowrap">
-                        {r.voucher_no}
-                        <span className="cell-hint">
-                          {r.voucher_status === 'posted' ? '已過帳' : '待過帳'}
-                        </span>
-                      </td>
-                      <td className="cell-accounts">
-                        {r.ruleset_version ?? '—（由淨額反推，非依規則提列）'}
-                      </td>
-                      <td className="num align-right">{money(r.total)}</td>
+              <div className="table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>期別</th>
+                      <th>傳票</th>
+                      <th>規則版本</th>
+                      <th className="align-right">金額</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {data.runs.map((r) => (
+                      <tr key={r.period}>
+                        <td>
+                          {r.period}
+                          {r.kind === 'opening' && (
+                            <span className="tag tag--pale">期初還原</span>
+                          )}
+                        </td>
+                        <td className="num cell-accounts cell-nowrap">
+                          {r.voucher_no}
+                          <span className="cell-hint">
+                            {r.voucher_status === 'posted' ? '已過帳' : '待過帳'}
+                          </span>
+                        </td>
+                        <td className="cell-accounts">
+                          {r.ruleset_version ?? '—（由淨額反推，非依規則提列）'}
+                        </td>
+                        <td className="num align-right">{money(r.total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </>
           )}
         </>

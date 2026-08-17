@@ -27,19 +27,11 @@ const EMPTY: Row[] = [
   { account_code: '1102', debit: '', credit: '' },
 ];
 
-/**
- * Clean user input into a decimal string the backend accepts.
- *
- * Thousands separators are removed, and blank or unparseable input counts as
- * zero: rather than guessing, let the debit/credit difference show that
- * something is wrong.
- */
 function clean(v: string): string {
   const t = v.replace(/,/g, '').trim();
   return /^-?\d*(\.\d*)?$/.test(t) && t !== '' && t !== '-' && t !== '.' ? t : '0';
 }
 
-/** Sum as strings without going through float. This is money. */
 function sum(rows: Row[], key: 'debit' | 'credit'): string {
   return rows.reduce((acc, r) => addDecimals(acc, clean(r[key])) ?? acc, '0');
 }
@@ -48,13 +40,6 @@ function negate(v: string): string {
   return v.startsWith('-') ? v.slice(1) : `-${v}`;
 }
 
-/**
- * Formatting for the debit/credit difference.
- *
- * `money()` keeps whole units only (screen convention omits cents), but the
- * difference has to be shown with its decimals: fifty cents out is still out
- * of balance, and showing "0" would suggest it can be saved.
- */
 function fmt(v: string): string {
   const abs = v.startsWith('-') ? v.slice(1) : v;
   const [whole = '0', frac] = abs.split('.');
@@ -63,8 +48,6 @@ function fmt(v: string): string {
   return `${grouped}${rest}`;
 }
 
-/** Today. `toISOString()` is UTC and would read as yesterday before 08:00
- *  Taiwan time. */
 function today(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
@@ -115,8 +98,6 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
     setRows(rows.filter((_, j) => j !== i));
   }
 
-  /** Load the entry AI has drafted. A person still confirms the accounts
-   *  before it is saved. */
   function fillFromAi() {
     setMemo('支付 6 月電費');
     setRows([

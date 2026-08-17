@@ -439,7 +439,7 @@ impl Operation for PreviewImport {
             .ok_or_else(|| OpError::BadInput(format!("查無匯入來源「{}」", i.source_code)))?;
         if !source.supported {
             return Err(OpError::BadInput(format!(
-                "「{}」的解析器還沒寫（{}）。目前只有歷史傳票 CSV 匯得進來。",
+                "「{}」尚未支援匯入（{}）。目前只有歷史傳票 CSV 匯得進來。",
                 source.label, source.note
             )));
         }

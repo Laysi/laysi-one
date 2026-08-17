@@ -60,7 +60,7 @@ impl Operation for GetSecurityPolicy {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀控制規則：職責分離、金額門檻、雙因素、AI 禁止事項、稽核保留。逐條標示是否實際執行；AI 禁止事項由 mcp_tool_grant 即時計算，非固定文字。"
+        "讀控制規則：職責分離、金額門檻、雙因素、AI 禁止事項、稽核保留。逐條標示是否實際執行；AI 禁止事項依目前的工具開關即時計算，非固定文字。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -119,8 +119,8 @@ impl Operation for GetSecurityPolicy {
             "code": "amount_threshold",
             "label": "金額門檻",
             "value": if thresholds.is_empty() { "未設定門檻".into() } else { thresholds.join("　") },
-            "detail": "門檻是公司政策，存在 approval_rule；改資料表這一行就跟著改。費用報支模組在後續里程碑，所以還跑不起來。",
-            "enforced": false,
+            "detail": "門檻是公司政策，在「角色與簽核」改動後立即生效。費用報支送出時即依金額決定要經過幾關，簽核時逐關檢查身分。",
+            "enforced": true,
             "source": "approval_rule",
             "sort_order": 30,
         }));
@@ -233,11 +233,11 @@ impl Operation for ListApiTokens {
                 "tokens": rows,
                 "live_count": live,
                 "storage_note":
-                    "資料表只存 BLAKE3 雜湊與前八碼，明文只在發出來的那一次回傳。",
+                    "系統只存不可還原的雜湊與前八碼，明文只在發出來的那一次回傳。",
                 "wiring_note":
-                    "/mcp 已直接查這張表的 BLAKE3 雜湊；身分取自 Token 資料列，\
-                     每次成功驗證都會更新「最後使用」。rotate_days 有值時，\
-                     created_at + rotate_days 之後會被強制拒絕，不必等人手動撤銷。",
+                    "MCP 連線以雜湊比對驗證，身分取自該把 Token 的登記資料，\
+                     每次成功驗證都會更新「最後使用」。設定輪替天數後，\
+                     期限一到即強制拒絕，不必等人手動撤銷。",
             }),
             summary,
         ))
@@ -278,7 +278,7 @@ impl Operation for IssueApiToken {
         Risk::BossOnly
     }
     fn summary(&self) -> &'static str {
-        "核發一組新的 API 或 MCP Token。明文僅出現於本次回應，之後系統無法回查；資料表僅保存雜湊與前八碼。"
+        "核發一組新的 API 或 MCP Token。明文僅出現於本次回應，之後系統無法回查；系統僅保存雜湊與前八碼。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<IssueApiTokenInput>()
@@ -319,6 +319,10 @@ impl Operation for IssueApiToken {
                 created_by: &ctx.actor,
                 rotate_days: i.rotate_days,
                 expiry_note: &expiry_note,
+                // A token the owner issued on the installation's behalf
+                // belongs to no one person, even when it acts as one. Only
+                // `issue_my_api_token` sets an owner.
+                owner_employee_id: None,
             })
             .await?;
 
@@ -388,7 +392,7 @@ impl Operation for GetSystemHealth {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。品牌指紋與 RustFS 連線由 /healthz 回答。"
+        "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。品牌指紋與物件儲存連線由 /healthz 回答。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -430,8 +434,7 @@ impl Operation for GetSystemHealth {
                 "rulesets_missing": stale,
                 "as_of": ctx.today,
                 "note":
-                    "品牌完整性指紋與 RustFS 連線狀態不在此處；啟動時的驗證結果僅存在於\
-                     自己啟動時驗過什麼，那兩個由 GET /healthz 回答。",
+                    "品牌完整性指紋與物件儲存連線狀態不在此處，兩者由 GET /healthz 回答。",
             }),
             summary,
         ))

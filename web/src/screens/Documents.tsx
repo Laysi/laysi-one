@@ -6,12 +6,6 @@ interface Props {
   reloadKey: number;
 }
 
-/**
- * Read as base64.
- *
- * Via a `FileReader` data URL with the prefix stripped, rather than `btoa`,
- * which only accepts Latin-1 while receipts are PDFs and JPEGs.
- */
 function readAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -52,7 +46,7 @@ export function Documents({ onToast, reloadKey }: Props) {
         `上傳 ${file.name}`,
       );
       onToast(
-        `${d.document.doc_no} ${d.document.version_label} 已存進 RustFS，BLAKE3 ${d.document.checksum_short}`,
+        `${d.document.doc_no} ${d.document.version_label} 已上傳，檔案指紋 ${d.document.checksum_short}`,
       );
       load();
     } catch (e) {
@@ -63,8 +57,6 @@ export function Documents({ onToast, reloadKey }: Props) {
     }
   }
 
-  /** Fetch and recompute the hash. This is the live proof that the original
-   *  can still be produced. */
   async function verify(d: DocumentRow) {
     try {
       const r = await callOp<{ verified: boolean; checksum_recomputed: string; byte_size_actual: number }>(
@@ -87,7 +79,7 @@ export function Documents({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">文件管理</h1>
-      <p className="page-lede">收據、合約與對帳單。上傳後不可覆寫，修訂另存為新版本。</p>
+      <p className="page-lede">上傳後不可覆寫，要修訂請另存新版本。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -104,7 +96,7 @@ export function Documents({ onToast, reloadKey }: Props) {
               <div className="stat-card__kicker">佔用空間</div>
               <div className="stat-card__value num">{data.stats.size_label}</div>
               <div className="stat-card__note">
-                {data.bucket ? `儲存桶 ${data.bucket.bucket}` : '未接上物件儲存'}
+                {data.bucket ? `儲存區 ${data.bucket.bucket}` : '未接上物件儲存'}
               </div>
             </div>
             <div className="card stat-card">
@@ -119,17 +111,15 @@ export function Documents({ onToast, reloadKey }: Props) {
             </div>
           </div>
 
-          {/* What the database says and what the bucket holds are measured
-              separately, the same approach as reconciling AR to the ledger. */}
           <p className={`recon${data.bucket_reconciled === false ? ' recon--off' : ''}`}>
             {data.storage_error ? (
               <>無法讀取物件儲存：{data.storage_error}</>
             ) : data.bucket ? (
               <>
-                資料庫登記 <span className="num">{data.stats.versions}</span> 個版本／
+                系統登記 <span className="num">{data.stats.versions}</span> 個版本／
                 <span className="num">{data.stats.size_label}</span>，
-                RustFS <span className="num">{data.bucket.endpoint}</span> 的儲存桶實際有{' '}
-                <span className="num">{data.bucket.objects}</span> 個物件／
+                儲存區 <span className="num">{data.bucket.endpoint}</span> 實際有{' '}
+                <span className="num">{data.bucket.objects}</span> 個檔案／
                 <span className="num">{data.bucket.size_label}</span>
                 {data.bucket_reconciled
                   ? '，兩者分開計數，結果相符。'
@@ -166,71 +156,70 @@ export function Documents({ onToast, reloadKey }: Props) {
             </button>
           </div>
 
-          <table className="table">
-            <thead>
-              <tr>
-                <th>檔案</th>
-                <th>關聯</th>
-                <th>版次</th>
-                <th>內容雜湊</th>
-                <th className="align-right">大小</th>
-                <th className="align-right">驗證</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.documents.map((d) => (
-                <tr key={d.doc_no}>
-                  <td>
-                    {d.file_name}
-                    <span className="cell-hint cell-hint--block">
-                      <span className="num">{d.doc_no}</span> · {d.kind_label} · {d.uploaded_by}
-                      {' · OCR '}
-                      {d.ocr_label}
-                    </span>
-                  </td>
-                  <td className="cell-accounts num cell-nowrap">{d.link_ref || '—'}</td>
-                  <td className="cell-accounts num">
-                    {d.version_label}
-                    {d.versions > 1 && (
-                      <span className="cell-hint">共 {d.versions} 版</span>
-                    )}
-                  </td>
-                  <td className="cell-accounts num cell-nowrap" title={d.checksum}>
-                    {d.checksum_short}
-                  </td>
-                  <td className="num align-right">{d.size_label}</td>
-                  <td className="align-right">
-                    <button className="btn btn--compact btn--secondary" onClick={() => void verify(d)}>
-                      取回驗證
-                    </button>
-                    {verified[d.doc_no] && (
-                      <span className="cell-hint cell-hint--block">{verified[d.doc_no]}</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {data.documents.length === 0 && (
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
                 <tr>
-                  <td colSpan={6} className="cell-muted">
-                    尚無文件。請使用「上傳檔案」，檔案將實際寫入 RustFS。
-                  </td>
+                  <th>檔案</th>
+                  <th>關聯</th>
+                  <th>版次</th>
+                  <th>內容雜湊</th>
+                  <th className="align-right">大小</th>
+                  <th className="align-right">驗證</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data.documents.map((d) => (
+                  <tr key={d.doc_no}>
+                    <td>
+                      {d.file_name}
+                      <span className="cell-hint cell-hint--block">
+                        <span className="num">{d.doc_no}</span> · {d.kind_label} · {d.uploaded_by}
+                        {' · OCR '}
+                        {d.ocr_label}
+                      </span>
+                    </td>
+                    <td className="cell-accounts num cell-nowrap">{d.link_ref || '—'}</td>
+                    <td className="cell-accounts num">
+                      {d.version_label}
+                      {d.versions > 1 && (
+                        <span className="cell-hint">共 {d.versions} 版</span>
+                      )}
+                    </td>
+                    <td className="cell-accounts num cell-nowrap" title={d.checksum}>
+                      {d.checksum_short}
+                    </td>
+                    <td className="num align-right">{d.size_label}</td>
+                    <td className="align-right">
+                      <button className="btn btn--compact btn--secondary" onClick={() => void verify(d)}>
+                        取回驗證
+                      </button>
+                      {verified[d.doc_no] && (
+                        <span className="cell-hint cell-hint--block">{verified[d.doc_no]}</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {data.documents.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="cell-muted">
+                      尚無文件。請使用「上傳檔案」建立第一筆。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
-          {/* These two paragraphs come from the backend; they are not
-              frontend copy. */}
           <p className="hint">{data.ocr_note}</p>
           <p className="hint">{data.immutability_note}</p>
           <p className="hint">
-            「取回驗證」會自 RustFS 讀回檔案、重算 BLAKE3 並與登記值比對。不符時回覆錯誤且
+            「取回驗證」會讀回檔案、重算指紋並與登記值比對。不符時回覆錯誤且
             <strong>不交出內容</strong>；遭變更的憑證外觀與正本無異，風險高於沒有憑證。
           </p>
           <p className="hint">
-            上傳經由操作註冊表，因此 AI 也可以寫入檔案（「所有操作支援 MCP」無例外）。其代價為
-            內容要用 base64 傳輸，單檔上限 <span className="num">{mb}</span> MB；更大的檔案
-            需改為串流上傳，而非提高上限。
+            AI 也可以上傳檔案，權限與畫面上的人相同。單檔上限{' '}
+            <span className="num">{mb}</span> MB。
           </p>
         </>
       )}

@@ -2,8 +2,6 @@ import { useEffect, useState } from 'react';
 import { callOp, type Dashboard as DashboardData } from '../api/client';
 import type { ScreenId } from '../nav';
 
-/** Chart ticks are in millions; a column of seven-digit numbers would drown
- *  the chart itself. */
 function millions(v: string): string {
   return (Number(v) / 1_000_000).toFixed(2);
 }
@@ -30,7 +28,6 @@ export function Dashboard({ onGo, reloadKey }: Props) {
   if (error) return <p className="state-note state-note--error">{error}</p>;
   if (!data) return <p className="state-note">讀取中…</p>;
 
-  // Bar heights are scaled to the peak in the range so changes are visible.
   const values = data.cash_bars.map((b) => Number(b.value));
   const peak = Math.max(...values, 1);
 

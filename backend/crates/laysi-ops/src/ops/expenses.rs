@@ -35,12 +35,26 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
     ]
 }
 
+/// The two ways a claim gets paid back.
+///
+/// Self-service offers the same two, so the wording of the rejection lives
+/// here rather than in both callers.
+pub(crate) fn checked_pay_method(value: Option<&str>) -> Result<&str, OpError> {
+    let method = value.unwrap_or("reimburse");
+    if method != "reimburse" && method != "petty_cash" {
+        return Err(OpError::BadInput(format!(
+            "付款方式僅接受 reimburse（月底彙總匯款）或 petty_cash（零用金），收到「{method}」"
+        )));
+    }
+    Ok(method)
+}
+
 /// Which approval steps this claim must pass.
 ///
 /// Every rule comes from `approval_rule`: a NULL `min_amount` means always
 /// required, a value means "required above this amount". There is no amount
 /// in this function.
-fn required_steps(rules: &[ApprovalRule], amount: Money) -> Vec<&ApprovalRule> {
+pub(crate) fn required_steps(rules: &[ApprovalRule], amount: Money) -> Vec<&ApprovalRule> {
     let mut steps: Vec<&ApprovalRule> =
         rules.iter().filter(|r| r.min_amount.is_none_or(|min| amount >= min)).collect();
     steps.sort_by_key(|r| r.step_no);
@@ -179,7 +193,7 @@ impl Operation for ListExpenseClaims {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀費用報支單：各單目前關卡、應經關卡（門檻查自 approval_rule，非寫死於程式）、AI 建議科目與人員確認科目"
+        "讀費用報支單：各單目前關卡、應經關卡（門檻查自公司簽核規則，非寫死於程式）、AI 建議科目與人員確認科目"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListExpenseClaimsInput>()
@@ -198,7 +212,7 @@ impl Operation for ListExpenseClaims {
         let rows: Vec<Value> = claims.iter().map(|c| claim_json(c, &rules)).collect();
 
         let summary = format!(
-            "讀取費用報支 · {} 張待處理合計 {} · 門檻依 approval_rule",
+            "讀取費用報支 · {} 張待處理合計 {} · 門檻依公司簽核規則",
             claims.iter().filter(|c| c.status == "submitted" || c.status == "approving").count(),
             money(waiting)
         );
@@ -221,7 +235,7 @@ impl Operation for ListExpenseClaims {
                 })).collect::<Vec<_>>(),
                 // Thresholds are data, not code. The screen states where they
                 // come from.
-                "thresholds_source": "approval_rule（公司政策，非法規）",
+                "thresholds_source": "公司自訂的簽核規則，非法規",
                 "actor": ctx.actor,
                 "actor_role": ctx.actor_role,
             }),
@@ -288,12 +302,7 @@ impl Operation for SubmitExpenseClaimOp {
         if i.amount <= Money::ZERO {
             return Err(OpError::BadInput("報支金額要大於零".into()));
         }
-        let pay_method = i.pay_method.as_deref().unwrap_or("reimburse");
-        if pay_method != "reimburse" && pay_method != "petty_cash" {
-            return Err(OpError::BadInput(format!(
-                "付款方式僅接受 reimburse（月底彙總匯款）或 petty_cash（零用金），收到「{pay_method}」"
-            )));
-        }
+        let pay_method = checked_pay_method(i.pay_method.as_deref())?;
 
         // The suggested account must exist and be an expense account. AI
         // getting the account kind wrong is common, and catching it only when
@@ -324,6 +333,10 @@ impl Operation for SubmitExpenseClaimOp {
                 title: &i.title,
                 claimant: &claimant,
                 claimant_role: &ctx.actor_role,
+                // This operation takes a claimant name, so the person filing
+                // and the person named need not be the same. There is no key
+                // to record, only the name that was given.
+                employee_id: None,
                 dept_code: i.dept_code.as_deref(),
                 spent_on: i.spent_on.unwrap_or(ctx.today),
                 amount: i.amount,
@@ -337,7 +350,7 @@ impl Operation for SubmitExpenseClaimOp {
         let rules = ctx.store.approval_rules().await?;
         let steps = required_steps(&rules, claim.amount);
         let summary = format!(
-            "{} · {} {} · 要經過 {} 關（依 approval_rule 的金額門檻）",
+            "{} · {} {} · 要經過 {} 關（依公司簽核規則的金額門檻）",
             claim.claim_no,
             claim.title,
             money(claim.amount),

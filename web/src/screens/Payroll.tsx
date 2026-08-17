@@ -24,7 +24,6 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<PayrollRunResult | null>(null);
 
-  // Fields for running payroll.
   const [runPeriod, setRunPeriod] = useState('');
   const [payOn, setPayOn] = useState('');
 
@@ -34,11 +33,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
     callOp<PayrollSummary>('get_payroll_summary', period ? { period } : {})
       .then((s) => {
         setSummary(s);
-        // The pre-emptive block is based on `detail_visible` from the backend,
-        // not the signed-in role: the decision is still the backend's and the
-        // frontend only draws what it was told. This is not fear of being
-        // refused, it is avoiding an audit entry for a call certain to be
-        // blocked on every visit. To see that it really blocks, try it below.
+
         if (!s.detail_visible) {
           setSlips(null);
           return;
@@ -55,8 +50,6 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(load, [load, reloadKey]);
 
-  /** Deliberately hit the owner-only wall. That refusal is real and is
-   *  written to the audit trail. */
   async function tryDetail() {
     setSlipError(null);
     try {
@@ -99,9 +92,6 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">薪資作業</h1>
-      <p className="page-lede">
-        本月應發、代扣與公司負擔金額，以及與總帳的勾稽結果。
-      </p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!summary && !error && <p className="state-note">讀取中…</p>}
@@ -149,8 +139,6 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 </div>
               </div>
 
-              {/* The HR gross total and ledger account 6111 are two
-                  independently computed paths. */}
               <p className={`recon${summary.reconciled ? '' : ' recon--off'}`}>
                 {summary.reconciled ? (
                   <>
@@ -215,12 +203,9 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
 
           <h3 className="section-title section-title--spaced">逐人薪資明細</h3>
 
-          {/* This is one of the few rules in the system that genuinely stops a
-              person. Say so clearly rather than showing a red line. */}
           {!summary.detail_visible && (
             <>
-              {/* The backend states this itself; show it verbatim. The frontend
-                  neither rewrites it nor invents its own. */}
+
               <p className="recon recon--off">
                 <strong>本段限負責人檢視。</strong> {summary.detail_note}
                 {' '}也可以由下方實際呼叫驗證：後端將拒絕，該次拒絕寫入稽核。
@@ -237,55 +222,57 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
 
           {slips && (
             <>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>員工</th>
-                    <th className="align-right">本薪</th>
-                    <th className="align-right">加班</th>
-                    <th className="align-right">代扣</th>
-                    <th className="align-right">實發</th>
-                    <th className="align-right">公司另負擔</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {slips.rows.map((s) => (
-                    <tr key={s.emp_no} className={s.recompute_matches ? undefined : 'row--pending'}>
-                      <td>
-                        {s.name}
-                        <span className="cell-hint cell-hint--block num">
-                          {s.emp_no} · {s.dept_label ?? '未指定'} · {s.title}
-                        </span>
-                        {s.prorated && (
-                          <span className="cell-hint cell-hint--block">{s.note}</span>
-                        )}
-                        {!s.recompute_matches && (
-                          <span className="tag tag--bad tag--static">
-                            重算結果與儲存值不符
-                          </span>
-                        )}
-                      </td>
-                      <td className="num align-right">{money(s.base_salary)}</td>
-                      <td className="num align-right">{money(s.overtime)}</td>
-                      <td className="num align-right">
-                        {money(s.deduction)}
-                        <span className="cell-hint cell-hint--block num">
-                          勞保 {money(s.labor_employee)} · 健保 {money(s.health_employee)} · 稅{' '}
-                          {money(s.income_tax)}
-                        </span>
-                      </td>
-                      <td className="num align-right">{money(s.net)}</td>
-                      <td className="num align-right">
-                        {money(s.employer_total)}
-                        <span className="cell-hint cell-hint--block num">
-                          勞保 {money(s.labor_employer)} · 健保 {money(s.health_employer)} · 勞退{' '}
-                          {money(s.pension_employer)}
-                        </span>
-                      </td>
+              <div className="table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>員工</th>
+                      <th className="align-right">本薪</th>
+                      <th className="align-right">加班</th>
+                      <th className="align-right">代扣</th>
+                      <th className="align-right">實發</th>
+                      <th className="align-right">公司另負擔</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {slips.rows.map((s) => (
+                      <tr key={s.emp_no} className={s.recompute_matches ? undefined : 'row--pending'}>
+                        <td>
+                          {s.name}
+                          <span className="cell-hint cell-hint--block num">
+                            {s.emp_no} · {s.dept_label ?? '未指定'} · {s.title}
+                          </span>
+                          {s.prorated && (
+                            <span className="cell-hint cell-hint--block">{s.note}</span>
+                          )}
+                          {!s.recompute_matches && (
+                            <span className="tag tag--bad tag--static">
+                              重算結果與儲存值不符
+                            </span>
+                          )}
+                        </td>
+                        <td className="num align-right">{money(s.base_salary)}</td>
+                        <td className="num align-right">{money(s.overtime)}</td>
+                        <td className="num align-right">
+                          {money(s.deduction)}
+                          <span className="cell-hint cell-hint--block num">
+                            勞保 {money(s.labor_employee)} · 健保 {money(s.health_employee)} · 稅{' '}
+                            {money(s.income_tax)}
+                          </span>
+                        </td>
+                        <td className="num align-right">{money(s.net)}</td>
+                        <td className="num align-right">
+                          {money(s.employer_total)}
+                          <span className="cell-hint cell-hint--block num">
+                            勞保 {money(s.labor_employer)} · 健保 {money(s.health_employer)} · 勞退{' '}
+                            {money(s.pension_employer)}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
               <p className={`recon${slips.recompute_all_match ? '' : ' recon--off'}`}>
                 {slips.recompute_note}
                 {!slips.recompute_all_match &&
@@ -322,14 +309,12 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 {busy ? '計算中…' : '計算薪資並產生傳票'}
               </button>
               <p className="form-note">
-                保費依<strong>期末日</strong>解析規則（該期適用的版本），扣繳依
-                <strong>給付日</strong>解析（扣繳義務於給付時發生）。
-                兩者通常落在同一月份，差異僅出現於跨月發薪，跨月發薪時就要分清楚這兩個日期。
+                保費依<strong>期末日</strong>解析，扣繳依<strong>給付日</strong>解析。
+                兩者通常同月，跨月發薪時才會分開。
               </p>
               <p className="form-note">
-                本操作屬高風險：一次決定全公司當月薪資並產生傳票。
-                同一期僅能計算一次，更正請開立反向分錄。傳票狀態為<strong>待過帳</strong>，
-                薪資計算完成不代表已入總帳。
+                本操作一次決定全公司當月薪資並產生傳票，同一期僅能計算一次，
+                更正請開立反向分錄。傳票狀態為<strong>待過帳</strong>。
               </p>
             </div>
 
@@ -374,7 +359,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
 
                   {result.warnings.length > 0 && (
                     <p className="recon recon--off">
-                      低於法定最低工資，薪資仍照常發放。此情形應予揭露而非阻擋：
+                      下列人員低於法定最低工資，薪資仍照常發放：
                       {result.warnings.map((w) => (
                         <span className="step-chip" key={w.emp_no}>
                           {w.name}（{w.emp_no}）：{w.issue}
@@ -393,12 +378,8 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                     </p>
                   )}
                   <p className="hint">
-                    扣繳率依{' '}
-                    <span className="num">
-                      withholding {result.withholding.ruleset.version}
-                    </span>{' '}
-                    解析（{result.withholding.ruleset.effective_from} 起適用），
-                    非寫於程式碼。依據：{result.withholding.ruleset.source_note}
+                    扣繳率依 {result.withholding.ruleset.source_note}（
+                    {result.withholding.ruleset.effective_from} 起適用）。
                   </p>
                   <p className="hint">{result.employer_note}</p>
                 </div>

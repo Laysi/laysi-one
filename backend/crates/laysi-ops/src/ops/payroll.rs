@@ -338,9 +338,9 @@ impl Operation for GetPayrollSummary {
                 "detail_visible": detail_visible,
                 "detail_op": "list_payslips",
                 "detail_note": if detail_visible {
-                    "目前身分為負責人，可使用 list_payslips 查詢逐人明細。"
+                    "目前身分為負責人，可檢視逐人明細。"
                 } else {
-                    "逐人薪資明細為「限老闆」操作（list_payslips）。目前身分可檢視彙總，無法檢視個別金額；該限制由後端實際強制，非僅隱藏畫面元件。"
+                    "逐人薪資明細限負責人檢視。目前身分可檢視彙總，無法檢視個別金額。"
                 },
                 "actor_role": ctx.actor_role,
                 "employer_in_ledger": false,
@@ -454,7 +454,7 @@ impl Operation for ListPayslips {
                 "run": run_json(run),
                 "rows": rows,
                 "recompute_all_match": all_match,
-                "recompute_note": "各列均以 payroll_run 保存的規則版本重算一次。儲存值為當時的計算結果，重算為另一條獨立路徑；相符是驗證結論而非前提。",
+                "recompute_note": "各列均以當期薪資作業保存的規則版本重算一次。儲存值為當時的計算結果，重算為另一條獨立路徑；相符是驗證結論而非前提。",
                 "periods": runs.iter().map(|r| r.period.clone()).collect::<Vec<_>>(),
             }),
             summary,
@@ -576,7 +576,7 @@ impl Operation for RunPayroll {
 
         let note = i.note.clone().unwrap_or_else(|| {
             format!(
-                "依 labor_insurance {labor_v}、health_insurance {health_v}、pension {pension_v}、withholding {wht_v}"
+                "依勞保 {labor_v}、健保 {health_v}、勞退 {pension_v}、扣繳 {wht_v} 規則"
             )
         });
 
@@ -603,7 +603,7 @@ impl Operation for RunPayroll {
         // The audit summary names the versions: which rules a period was
         // computed under must be visible from the audit trail alone.
         let summary = format!(
-            "{period} 薪資作業 · {} 人應發 {} 代扣 {} 實發 {} · 公司另負擔 {} · 依 labor_insurance {labor_v}、health_insurance {health_v}、pension {pension_v}、withholding {wht_v} · {voucher_no} 待過帳",
+            "{period} 薪資作業 · {} 人應發 {} 代扣 {} 實發 {} · 公司另負擔 {} · 依勞保 {labor_v}、健保 {health_v}、勞退 {pension_v}、扣繳 {wht_v} 規則 · {voucher_no} 待過帳",
             run.headcount,
             money(run.gross_total),
             money(run.deduction_total),

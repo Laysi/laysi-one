@@ -7,13 +7,6 @@ interface Props {
   reloadKey: number;
 }
 
-/**
- * Map the backend's destination codes to screens.
- *
- * The backend names the business area (`hr_pay`); the frontend knows which
- * screen currently draws it (`pay`). Putting ScreenId in the backend would
- * mean touching the operation registry every time a frontend route changed.
- */
 const DESTINATION: Record<string, ScreenId> = {
   hr: 'hr',
   hr_mv: 'onb',
@@ -24,12 +17,6 @@ const DESTINATION: Record<string, ScreenId> = {
   budget: 'budget',
 };
 
-/**
- * Render the emphasis the backend marks with `**` as bold.
- *
- * Not a word is changed; emphasis is drawn as emphasis instead of printing
- * asterisks on screen.
- */
 function emphasise(text: string): ReactNode {
   return text.split('**').map((part, i) =>
     i % 2 === 1 ? <strong key={i}>{part}</strong> : <Fragment key={i}>{part}</Fragment>,
@@ -59,9 +46,6 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title page-title--hero">人資總覽</h1>
-      <p className="page-lede">
-        在職人數、待簽核事項、本月薪資作業進度，以及人資作業與帳務的銜接狀態。
-      </p>
 
       <div className="stat-grid">
         {data.stats.map((s) => (
@@ -163,14 +147,11 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
       </div>
 
       <p className="hint">
-        人資各畫面的權限規則一致：<strong>每一次呼叫均即時查詢角色權限，未獲授權即拒絕</strong>，
-        被拒絕的呼叫同樣寫入稽核。逐人薪資明細與年度扣繳憑單另標示為「限老闆」，
-        為角色權限之外的額外限制。
+        逐人薪資明細與年度扣繳憑單標示為「限老闆」，是角色權限之外的額外限制。
       </p>
       <p className="hint">
-        到職、離職、調薪、調部門各要走哪幾關，查自 <span className="num">hr_flow_step</span>
-        （目前收了 {new Set(data.flow_kinds).size} 種異動、共 {data.flow_kinds.length} 關），
-        非寫於程式碼；不同公司僅需調整該表。
+        到職、離職、調薪、調部門各走哪幾關可自行調整，目前收了{' '}
+        {new Set(data.flow_kinds).size} 種異動、共 {data.flow_kinds.length} 關。
       </p>
     </div>
   );

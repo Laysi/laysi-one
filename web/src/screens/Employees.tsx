@@ -89,8 +89,6 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(load, [load, reloadKey]);
 
-  // Departments and roles are fetched only when the form opens, rather than
-  // firing two more operations on every visit.
   useEffect(() => {
     if (!drawer) return;
     if (!dims) callOp<DimensionList>('list_dimensions').then(setDims).catch(() => setDims(null));
@@ -117,15 +115,12 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       hired_on: e.hired_on,
       left_on: e.left_on ?? '',
       status: e.status,
-      // The roster deliberately does not show these four (privacy), so they
-      // are intentionally blank rather than missing.
+
       base_salary: '',
       labor_insured_salary: '',
       health_insured_salary: '',
       pension_wage: '',
-      // id_no_masked is the value the database stores: the system only ever
-      // accepts a masked string and no full number can be recovered, so using
-      // it as the initial value is safe.
+
       id_no: e.id_no_masked,
       bank_account: e.bank_account,
       note: e.note,
@@ -182,7 +177,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         drawer === 'edit' ? `更新員工 ${form.emp_no}` : `新增員工 ${form.name}`,
       );
       onToast(
-        `${d.employee.emp_no} ${d.employee.name} 已儲存；未建立登入帳號，登入帳號由 laysi-admin 管理`,
+        `${d.employee.emp_no} ${d.employee.name} 已儲存；登入帳號需另行建立`,
       );
       setDrawer(null);
       onChanged();
@@ -199,19 +194,18 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">員工名冊</h1>
-      <p className="page-lede">
-        {data
-          ? `在職 ${data.active} 人，平均年資 ${data.avg_service_label}。`
-          : '在職人員、年資與特休餘額。'}
-      </p>
+      {data && (
+        <p className="page-lede">
+          在職 {data.active} 人，平均年資 {data.avg_service_label}。
+        </p>
+      )}
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
 
       {data && (
         <>
-          {/* This paragraph is the most important thing on this screen. A
-              blank column is more easily misread than a sentence. */}
+
           <p className="recon">{data.salary_note}</p>
 
           <div className="toolbar">
@@ -241,90 +235,86 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
               <div className="placeholder__title">名冊尚無資料</div>
               <p>
                 請由上方「＋ 新增員工」建立第一筆。建立主檔不會一併建立登入帳號，
-                登入帳號要另外在後端主機用 <span className="num">laysi-admin</span> 建立。
+                登入帳號由系統管理員另行建立。
               </p>
             </div>
           ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>員工</th>
-                  <th>部門與職稱</th>
-                  <th>到職</th>
-                  <th className="align-right">年資</th>
-                  <th className="align-right">特休</th>
-                  <th>狀態</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {data.employees.map((e) => (
-                  <tr key={e.emp_no} className={e.status === 'left' ? 'row--waiting' : undefined}>
-                    <td>
-                      <button className="link-cell" onClick={() => openEdit(e)}>
-                        {e.name}
-                      </button>
-                      <span className="cell-hint cell-hint--block num">
-                        {e.emp_no} · {e.id_no_masked || '未登錄身分證字號'}
-                      </span>
-                    </td>
-                    <td className="cell-accounts">
-                      {e.dept_label ?? '未指定'}
-                      <span className="cell-hint cell-hint--block">
-                        {e.title} · {e.employment_label}
-                        {e.role_name && ` · ${e.role_name}`}
-                      </span>
-                    </td>
-                    <td className="num cell-nowrap">
-                      {e.hired_on}
-                      {e.left_on && (
-                        <span className="cell-hint cell-hint--block num">
-                          離職 {e.left_on}
-                        </span>
-                      )}
-                    </td>
-                    <td className="num align-right">{e.service_label}</td>
-                    <td className="num align-right">
-                      {trimDecimal(e.annual_leave_left)} 日
-                      <span className="cell-hint cell-hint--block num">
-                        額度 {e.annual_leave_days} · 已休 {trimDecimal(e.annual_leave_taken)}
-                      </span>
-                    </td>
-                    <td>
-                      {e.status === 'active' ? (
-                        <span className="cell-muted">{e.status_label}</span>
-                      ) : (
-                        <span
-                          className={`tag tag--static${e.status === 'leaving' ? ' tag--warn' : ''}`}
-                        >
-                          {e.status_label}
-                        </span>
-                      )}
-                      {e.note && <span className="cell-hint cell-hint--block">{e.note}</span>}
-                    </td>
-                    <td className="align-right">
-                      <button className="btn btn--compact btn--secondary" onClick={() => openEdit(e)}>
-                        編輯
-                      </button>
-                    </td>
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>員工</th>
+                    <th>部門與職稱</th>
+                    <th>到職</th>
+                    <th className="align-right">年資</th>
+                    <th className="align-right">特休</th>
+                    <th>狀態</th>
+                    <th />
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.employees.map((e) => (
+                    <tr key={e.emp_no} className={e.status === 'left' ? 'row--waiting' : undefined}>
+                      <td>
+                        <button className="link-cell" onClick={() => openEdit(e)}>
+                          {e.name}
+                        </button>
+                        <span className="cell-hint cell-hint--block num">
+                          {e.emp_no} · {e.id_no_masked || '未登錄身分證字號'}
+                        </span>
+                      </td>
+                      <td className="cell-accounts">
+                        {e.dept_label ?? '未指定'}
+                        <span className="cell-hint cell-hint--block">
+                          {e.title} · {e.employment_label}
+                          {e.role_name && ` · ${e.role_name}`}
+                        </span>
+                      </td>
+                      <td className="num cell-nowrap">
+                        {e.hired_on}
+                        {e.left_on && (
+                          <span className="cell-hint cell-hint--block num">
+                            離職 {e.left_on}
+                          </span>
+                        )}
+                      </td>
+                      <td className="num align-right">{e.service_label}</td>
+                      <td className="num align-right">
+                        {trimDecimal(e.annual_leave_left)} 日
+                        <span className="cell-hint cell-hint--block num">
+                          額度 {e.annual_leave_days} · 已休 {trimDecimal(e.annual_leave_taken)}
+                        </span>
+                      </td>
+                      <td>
+                        {e.status === 'active' ? (
+                          <span className="cell-muted">{e.status_label}</span>
+                        ) : (
+                          <span
+                            className={`tag tag--static${e.status === 'leaving' ? ' tag--warn' : ''}`}
+                          >
+                            {e.status_label}
+                          </span>
+                        )}
+                        {e.note && <span className="cell-hint cell-hint--block">{e.note}</span>}
+                      </td>
+                      <td className="align-right">
+                        <button className="btn btn--compact btn--secondary" onClick={() => openEdit(e)}>
+                          編輯
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
 
           <p className="hint">
-            特休額度不儲存於資料庫，每一列均依年資查詢{' '}
-            <span className="num">annual_leave {data.annual_leave_ruleset.version}</span>{' '}
-            即時計算（{data.annual_leave_ruleset.effective_from} 起適用）。若另存一份額度，
-            法規異動後將產生與法令脫節的副本，並被用於薪資計算。已休天數為既成事實，僅此項儲存。
+            特休額度不逐人設定，每一列均依年資與特休規則{' '}
+            <span className="num">{data.annual_leave_ruleset.version}</span>{' '}
+            即時計算（{data.annual_leave_ruleset.effective_from} 起適用）。
           </p>
           <p className="hint">{data.id_note}</p>
-          <p className="hint">
-            本操作標示為唯讀，仍要有對應權限才看得到，
-            <strong>唯讀不等同全員可見</strong>。名冊不含薪資資料，
-            逐人薪資明細為另一操作，並另加「限老闆」限制。
-          </p>
         </>
       )}
 
@@ -334,7 +324,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
             <div className="drawer__head">
               <div>
                 <div className="drawer__title">{drawer === 'edit' ? `編輯 ${form.emp_no}` : '新增員工'}</div>
-                <div className="drawer__subtitle">不會建立登入帳號，登入帳號由 laysi-admin 管理</div>
+                <div className="drawer__subtitle">不會一併建立登入帳號</div>
               </div>
               <button className="btn btn--close" onClick={() => setDrawer(null)} aria-label="關閉">
                 ×
@@ -477,8 +467,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
               </div>
 
               <p className="form-warn">
-                本薪與三項投保級距為<strong>向主管機關申報的事實</strong>，非系統計算所得；
-                系統依填寫值原樣保存，不以勞健保規則校正。
+                本薪與三項投保級距依填寫值原樣保存，系統不以勞健保規則校正。
                 {drawer === 'edit' &&
                   '基於隱私，名冊不顯示這幾欄，系統也沒有別的管道讀回目前的值。請照實際薪資單與投保申報表重新填寫；留空無法儲存，填錯會直接蓋掉原本的數字。'}
               </p>
