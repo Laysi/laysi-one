@@ -106,8 +106,7 @@ export function Budget({ onToast, reloadKey }: Props) {
           </div>
 
           <p className="recon">
-            只有預算數是設定值；<strong>實際數為{status.actual_source}</strong>，
-            補開傳票或作廢後立即反映。
+            <strong>實際數為{status.actual_source}</strong>。
           </p>
 
           <div className="table-scroll">

@@ -344,7 +344,7 @@ impl Operation for GetPayrollSummary {
                 },
                 "actor_role": ctx.actor_role,
                 "employer_in_ledger": false,
-                "employer_note": "公司負擔的勞健保與勞退不在薪資傳票內，該部分屬公司費用而非員工代扣。",
+                "employer_note": "公司負擔的勞健保與勞退不在薪資傳票內。",
             }),
             summary,
         ))
@@ -635,7 +635,7 @@ impl Operation for RunPayroll {
                     "ruleset": ruleset_json(wht_rs),
                 },
                 "employer_in_ledger": false,
-                "employer_note": "公司負擔的勞健保與勞退未納入本張傳票，該部分屬公司費用而非員工代扣。",
+                "employer_note": "公司負擔的勞健保與勞退未納入本張傳票。",
             }),
             summary,
         )

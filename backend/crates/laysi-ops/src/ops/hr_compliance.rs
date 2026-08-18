@@ -286,7 +286,7 @@ impl Operation for GetHrCompliance {
                 "failure_count": failure_count,
                 "checks": checks,
                 "available_domains": laysi_regulation::DOMAINS,
-                "coverage_note": "「無差異」只代表已檢查的項目沒有問題，不代表已涵蓋全部人資法規。未檢查的項目一併列在下方。",
+                "coverage_note": "「無差異」的範圍是已檢查的項目；未檢查的項目列在下方。",
             }),
             summary,
         ))
@@ -580,10 +580,10 @@ impl Operation for ListWithholdingStatements {
                         payroll_withheld_difference.map(|amount| amount.to_string()),
                     "table_withheld_complete": table_withheld_complete,
                     "reconciled": payroll_reconciled,
-                    "note": "薪資模組與扣繳紀錄分開計算，這裡只作對帳。有差異照實列出，不以任一方覆蓋另一方。",
+                    "note": "薪資模組與扣繳紀錄分開計算，這裡只作對帳，差異照實列出。",
                 },
-                "table_note": "依扣繳稅額表的項目，稅額一律採用來源系統帶入的金額。來源沒有帶，本頁就留空，不改用扣繳率回推。",
-                "source_note": "是否認得到個人，以來源紀錄帶的統一編號或身分證號為準。來源只給合併總額時照實保留，不自行拆分到個人。",
+                "table_note": "依扣繳稅額表的項目，稅額採用來源系統帶入的金額；來源沒有帶就留空。",
+                "source_note": "是否認得到個人，以來源紀錄帶的統一編號或身分證號為準。來源只給合併總額時照實保留。",
             }),
             summary,
         ))

@@ -116,14 +116,7 @@ export function Withholding({ onToast, reloadKey }: Props) {
                   </span>
                   <span className="fact__value">
 
-                    {!c.checked && (
-                      <>
-                        <strong>{c.not_checked_reason}</strong>
-                        <span className="fact__note">
-                          這項規則收錄後，本表會自動開始檢查。
-                        </span>
-                      </>
-                    )}
+                    {!c.checked && <strong>{c.not_checked_reason}</strong>}
                     {c.checked && c.scope_note}
 
                     {c.failures.map((f) => (
@@ -244,7 +237,7 @@ export function Withholding({ onToast, reloadKey }: Props) {
                             <>
                               {money(s.known_withheld_amount)}
                               <span className="cell-hint cell-hint--block">
-                                來源未提供完整稅額，本頁不代為推算
+                                來源未提供完整稅額
                               </span>
                             </>
                           ) : (

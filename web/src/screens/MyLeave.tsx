@@ -37,7 +37,7 @@ export function MyLeave({ onGo, reloadKey }: Props) {
         <h1 className="page-title">我的休假</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          這不是「查無資料」，是帳號還沒對應到員工編號。請管理員完成連結後再回到本頁。
+          你的帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
         </p>
       </div>
     );

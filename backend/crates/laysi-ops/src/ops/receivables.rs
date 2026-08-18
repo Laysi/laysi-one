@@ -247,7 +247,7 @@ impl Operation for CreateArInvoice {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立不需電子發票的應收單據，並一併產生待過帳傳票（借應收帳款／貸指定收益科目），兩者不會只成功一半。適用 B2B 月結與國外客戶；傳票過帳後才列入未收合計。"
+        "建立不需電子發票的應收單據，並一併產生待過帳傳票（借應收帳款／貸指定收益科目）。適用 B2B 月結與國外客戶；傳票過帳後才列入未收合計。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateArInvoiceInput>()

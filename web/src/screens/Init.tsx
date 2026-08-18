@@ -53,8 +53,7 @@ export function Init() {
 
         <h1 className="login__title">建立系統管理員帳號</h1>
         <p className="login__lede">
-          此帳號管理帳號、權限與系統設定，看不到薪資。負責人與其他成員於登入後在
-          「角色與核准」建立。
+          負責人與其他成員的帳號，登入後在「角色與核准」建立。
         </p>
 
         <form onSubmit={(e) => void submit(e)}>
@@ -136,7 +135,6 @@ export function Init() {
           </div>
         </form>
 
-        <p className="login__note">此步驟只執行一次，完成後直接登入並繼續設定公司資料。</p>
       </div>
     </div>
   );

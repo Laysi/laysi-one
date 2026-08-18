@@ -184,7 +184,7 @@ impl Operation for UpdateCompanySetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "變更一項公司設定。僅標示為可編輯的項目可以修改；會計年度、期初餘額等項目涉及期初重跑，不是改一個字串就能完成。法規決定的值不在此處管理。"
+        "變更一項公司設定。僅標示為可編輯的項目可以修改；會計年度與期初餘額要重跑期初，法規決定的值由規則檔決定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateCompanySettingInput>()
@@ -295,8 +295,7 @@ impl Operation for ListDimensions {
                 "applied_to_entries": true,
                 "entry_dimension": "department",
                 "application_note":
-                    "voucher_line.dept_id 與 employee.dept_id 只接受 department 維度的值；\
-                     project、cost_center、payment_term 尚未掛到分錄。",
+                    "部門欄位只接受部門維度的值；專案、成本中心與付款條件尚未掛到分錄。",
             }),
             summary,
         ))

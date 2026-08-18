@@ -60,7 +60,6 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">固定資產與折舊</h1>
-      <p className="page-lede">每月折舊由系統計算並產生傳票。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -213,7 +212,7 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
             同一期僅能提列一次。
           </p>
           <p className="hint">
-            年限依資產類別查耐用年數表，不逐筆設定。每筆提列均保存當時查得的年數與規則版本。
+            年限依資產類別查耐用年數表。每筆提列保存當時查得的年數與規則版本。
           </p>
 
           {data.runs.length > 0 && (

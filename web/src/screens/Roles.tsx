@@ -276,22 +276,21 @@ export function Roles({ onToast, reloadKey }: Props) {
           <p className="hint">● 完整　○ 有限　— 無。點選欄位可切換，並記錄異動人員與時間。</p>
 
           <p className="hint">
-            關閉任一欄位，該角色下一次呼叫即遭拒絕，不需重新登入，
-            <strong>包含關閉本項授權本身</strong>。
+            關閉後立即生效，
+            <strong>包含關閉管理權限這一項本身</strong>。
           </p>
           <p className="hint">
-            本矩陣管<span className="num">人員</span>能做什麼，
-            「MCP 與 AI」那一頁管 <span className="num">AI</span> 能呼叫什麼，兩者互不影響。
+            本矩陣只管人員；
+            <span className="num">AI</span> 能呼叫哪些操作在「MCP 與 AI」設定。
           </p>
           <p className="hint">
-            負責人看得到薪資但改不了權限，系統管理員改得了權限但看不到薪資。
-            角色在建立帳號時決定，之後無法在系統內變更。
+            角色在建立帳號時決定，之後無法變更。
           </p>
 
           <h3 className="section-title section-title--spaced">登入帳號</h3>
           <div className="card form-card">
             <p className="section-note">
-              密碼由系統產生，只顯示一次，本人首次登入必須變更。角色建立後無法在系統內變更。
+              密碼由系統產生，只顯示一次，本人首次登入必須變更。
             </p>
             <div className="field-grid">
               <label className="field">

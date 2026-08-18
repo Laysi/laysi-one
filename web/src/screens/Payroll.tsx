@@ -135,7 +135,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 <div className="card stat-card stat-card--total">
                   <div className="stat-card__kicker">公司另負擔</div>
                   <div className="stat-card__value num">{money(run0.employer_total)}</div>
-                  <div className="stat-card__note">勞健保與勞退，公司負擔部分不自薪資扣除</div>
+                  <div className="stat-card__note">勞健保與勞退</div>
                 </div>
               </div>
 
@@ -387,7 +387,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                   傳票的三段是：借 <span className="num">6111 薪資支出</span>（逐部門一行，
                   部門損益才看得到人事成本）／貸 <span className="num">2117 代扣款</span>／貸{' '}
                   <span className="num">1102 銀行存款</span>。
-                  公司負擔的勞健保與勞退不在本張傳票內，該部分屬公司費用，非員工代扣。
+                  公司負擔的勞健保與勞退不在本張傳票內。
                 </p>
               )}
             </div>

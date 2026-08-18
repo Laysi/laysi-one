@@ -39,7 +39,7 @@ export function McpTools({ reloadKey }: { reloadKey: number }) {
     <div>
       <h1 className="page-title">MCP 與 AI</h1>
       <p className="page-lede">
-        在這裡決定 AI 可以呼叫哪些操作。關閉只影響 AI，不影響畫面上的人。
+        開關只作用於 AI；畫面上的操作不受影響。
       </p>
 
       <h2 className="section-title">工具與風險分級</h2>
@@ -75,9 +75,6 @@ export function McpTools({ reloadKey }: { reloadKey: number }) {
       )}
 
       <h2 className="section-title section-title--spaced">稽核軌跡</h2>
-      <p className="section-note">
-        唯讀操作同樣寫入稽核，AI 讀取帳務本身即為應留存的事實。被權限擋下的呼叫也留紀錄。
-      </p>
       <div className="table-scroll">
         <table className="table">
           <thead>

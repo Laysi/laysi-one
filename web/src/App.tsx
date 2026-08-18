@@ -397,7 +397,7 @@ function Workspace() {
         <div className="content">
           {sections.length === 0 ? (
             <p className="state-note state-note--error">
-              角色「{user?.role_name}」目前沒有任何操作權限，因此沒有可開啟的畫面。
+              角色「{user?.role_name}」目前沒有任何操作權限。
               請負責人於「角色與核准」為這個角色開啟需要的權限。
             </p>
           ) : showWizard ? (

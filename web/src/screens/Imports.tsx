@@ -95,7 +95,6 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">匯入與整合</h1>
-      <p className="page-lede">匯入一律先執行預覽，確認逐列問題後再決定是否寫入。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -179,7 +178,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
                     錯誤 {preview.batch.error_count}　警告 {preview.batch.warn_count}
                     <br />
                     {preview.can_commit
-                      ? '確認匯入將寫入本次解析結果，不會重新讀取檔案。'
+                      ? '確認匯入將寫入本次預覽的結果；檔案若已修改，請重新預覽。'
                       : preview.blocked_note}
                   </div>
                   <button
@@ -314,7 +313,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
               ))}
             </div>
             <p className="hint">
-              標為「未啟用」的整合尚未接上，不會有任何資料進出。
+              標為「未啟用」的整合尚未接上。
             </p>
           </section>
         </div>

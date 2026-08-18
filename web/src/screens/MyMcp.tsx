@@ -91,7 +91,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
         <h1 className="page-title">我的 MCP</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          這不是「查無資料」，是帳號還沒對應到員工編號；未連結前無法核發 Token。
+          你的帳號尚未對應員工編號，請管理員完成連結後再核發 Token。
         </p>
       </div>
     );
@@ -105,7 +105,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
     <div>
       <h1 className="page-title">我的 MCP</h1>
       <p className="page-lede">
-        核發一把代表你自己的 Token，讓 AI 助理以你的身分連進來。它能做的事與你相同，不會更多。
+        核發一把代表你自己的 Token，讓 AI 助理以你的身分連進來。
       </p>
 
       <div className="stat-grid stat-grid--two">
@@ -132,7 +132,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
           </div>
           <code className="secret-card__value num">{issued.secret}</code>
           <p className="form-note">
-            請立即複製保存。系統只留前八碼與不可還原的雜湊，無法回查；遺失時只能重新核發。
+            請立即複製保存，遺失時只能重新核發。
             連線位址為 <span className="num">{data.endpoint}</span>，以 Bearer 帶入。
           </p>
         </div>
@@ -179,7 +179,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
             </button>
             {formError && <p className="state-note state-note--error">{formError}</p>}
             <p className="form-note">
-              代表對象與角色取自你的登入身分，無法指定他人。撤銷後下一次呼叫立即失效。
+              代表對象與角色取自你的登入身分。撤銷後下一次呼叫立即失效。
             </p>
           </div>
 

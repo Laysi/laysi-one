@@ -354,7 +354,7 @@ impl Operation for ListImports {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀匯入來源、批次紀錄與對外整合現況。逐一標明各來源的解析器是否已實作，以及各條整合是否實際接上，而非僅標示「啟用」。"
+        "讀匯入來源、批次紀錄與對外整合現況。逐一標明各來源的解析器與各條整合是否已接上。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -498,8 +498,7 @@ impl Operation for PreviewImport {
                 "total": total.to_string(),
                 "can_commit": parsed.errors() == 0 && !parsed.drafts.is_empty(),
                 "blocked_note": (parsed.errors() > 0).then_some(
-                    "含錯誤的批次無法確認匯入。請修正檔案後重新預覽；\
-                     不會有「跳過壞的那幾列」這個選項，因為跳過的那幾筆錢還是花掉了。"
+                    "含錯誤的批次無法確認匯入，請修正檔案後重新預覽。"
                 ),
             }),
             summary,

@@ -139,7 +139,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         <h1 className="page-title">請款申請</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          這不是「查無資料」，是帳號還沒對應到員工編號；未連結前無法送出請款單。
+          你的帳號尚未對應員工編號，請管理員完成連結後再送出請款單。
         </p>
       </div>
     );
@@ -257,7 +257,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
             {formError && <p className="state-note state-note--error">{formError}</p>}
 
             <p className="form-note">
-              申請人為 {data.employee.name}（{data.employee.emp_no}），不可代他人送出；
+              申請人為 {data.employee.name}（{data.employee.emp_no}）；
               費用科目由會計確認，不在此填寫。收據單檔上限{' '}
               {fileSizeLabel(MAX_UPLOAD_BYTES)}，送出後仍可在「我的請款」補附。
             </p>
@@ -324,7 +324,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
 
       <p className="hint">
         關卡依單據金額比對簽核規則產生，金額較大的單據會多一道關卡。
-        完成最後一關才會開立傳票；簽核不等同撥款。
+        完成最後一關才會開立傳票。
       </p>
     </div>
   );

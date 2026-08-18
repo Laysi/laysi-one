@@ -104,20 +104,19 @@ pub struct AccountInput {
 fn require_account_report_fields(input: &Value) -> Result<(), OpError> {
     let Some(object) = input.as_object() else {
         return Err(OpError::BadInput(
-            "科目輸入必須是物件；報表分組與現金流量活動別都要明確提供，\
-             因其決定科目出現在三張財務報表的哪一段，系統不代為推定。"
+            "科目輸入必須是物件，並填報表分組與現金流量活動別。"
                 .into(),
         ));
     };
     if !object.contains_key("report_group") {
         return Err(OpError::BadInput(
-            "報表分組必填：其決定科目在資產負債表或損益表的分段，無法由科目名稱推定。"
+            "報表分組必填，請指定科目在資產負債表或損益表的分段。"
                 .into(),
         ));
     }
     if !object.contains_key("cash_flow_section") {
         return Err(OpError::BadInput(
-            "現金流量活動別必填：它決定科目在現金流量表的活動別；損益科目也要明確留空，不能省略。"
+            "現金流量活動別必填；損益科目請留空。"
                 .into(),
         ));
     }
@@ -175,7 +174,7 @@ fn validate_account(input: &AccountInput) -> Result<String, OpError> {
     };
     if !report_ok {
         return Err(OpError::BadInput(format!(
-            "報表分組「{}」與科目類別「{}」不相容；該分組決定科目落在資產負債表或損益表的哪一段，請改選該類別允許的分組。",
+            "報表分組「{}」不適用科目類別「{}」，請改選該類別允許的分組。",
             input.report_group, input.kind
         )));
     }
@@ -191,7 +190,7 @@ fn validate_account(input: &AccountInput) -> Result<String, OpError> {
     };
     if !section_value_ok || !section_kind_ok {
         return Err(OpError::BadInput(format!(
-            "現金流量活動別與科目類別「{}」不相容：資產、負債、權益要指定活動別，只有資產可用 cash；收益與費用必須留空，因為它們已併入本期損益。",
+            "現金流量活動別不適用科目類別「{}」：資產、負債、權益要指定活動別，只有資產可用 cash；收益與費用請留空。",
             input.kind
         )));
     }
@@ -232,7 +231,7 @@ impl Operation for CreateAccount {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立會計科目。報表分組與現金流量活動別為必填，因其決定科目出現在資產負債表、損益表與現金流量表的哪一段，系統不代為推定；借貸方向依類別帶入慣例值，備抵科目可覆寫。"
+        "建立會計科目。報表分組與現金流量活動別為必填，決定科目出現在資產負債表、損益表與現金流量表的哪一段；借貸方向依類別帶入慣例值，備抵科目可覆寫。"
     }
     fn input_schema(&self) -> Value {
         account_schema()
@@ -265,7 +264,7 @@ impl Operation for UpdateAccount {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "完整更新或停用會計科目，不提供刪除。報表分組與現金流量活動別仍必填，因為它們決定三張報表的分段；停用只阻止新分錄，歷史帳保留。"
+        "完整更新或停用會計科目。報表分組與現金流量活動別仍必填；停用只阻止新分錄，歷史帳保留。"
     }
     fn input_schema(&self) -> Value {
         account_schema()
@@ -358,7 +357,7 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
     }
     if looks_like_full_id_no(input.id_no.trim()) {
         return Err(OpError::BadInput(
-            "id_no 僅接受遮罩後的值；符合完整身分證字號格式（英文字母加九碼數字）者不予保存，系統無任何功能需要完整字號。"
+            "id_no 僅接受遮罩後的值；符合完整身分證字號格式（英文字母加九碼數字）者不予保存。"
                 .into(),
         ));
     }
@@ -387,7 +386,7 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
         || input.pension_wage < Money::ZERO
     {
         return Err(OpError::BadInput(
-            "三個投保申報級距不能是負數；系統只檢查資料形狀，會照申報事實保存，不會用 ruleset 修正級距。"
+            "三個投保申報級距不能是負數；級距照申報事實保存。"
                 .into(),
         ));
     }
@@ -430,7 +429,7 @@ impl Operation for CreateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立員工主檔，只保存遮罩身分證字號；三個投保級距是向主管機關申報的事實，照輸入保存而不套 ruleset 修正。這不會建立登入帳號，登入帳號由系統管理員另行建立。"
+        "建立員工主檔，只保存遮罩身分證字號；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號由系統管理員另行建立。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -450,7 +449,7 @@ impl Operation for CreateEmployee {
             json!({
                 "employee": employee,
                 "login_account_created": false,
-                "login_note": "建立員工不等於建立登入帳號；登入帳號由系統管理員另行建立。",
+                "login_note": "登入帳號由系統管理員另行建立。",
             }),
             summary,
         ))
@@ -468,7 +467,7 @@ impl Operation for UpdateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "完整更新員工主檔。完整身分證字號仍會被拒絕，投保級距照申報事實保存；狀態為待離職或已離職時必須填離職日。這不會建立或修改登入帳號。"
+        "完整更新員工主檔。完整身分證字號仍會被拒絕，投保級距照申報事實保存；狀態為待離職或已離職時必須填離職日。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -486,7 +485,7 @@ impl Operation for UpdateEmployee {
             json!({
                 "employee": employee,
                 "login_account_changed": false,
-                "login_note": "員工主檔與登入帳號分開；登入帳號由系統管理員另行建立。",
+                "login_note": "登入帳號由系統管理員另行建立。",
             }),
             summary,
         ))
@@ -594,7 +593,7 @@ impl Operation for CreateDimensionValue {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "在既有維度下新增一個值，不會建立新維度。department 維度的值可供員工與分錄部門欄位使用；部門欄位不接受其他維度的值。"
+        "在既有維度下新增一個值。department 維度的值可供員工與分錄部門欄位使用；部門欄位只接受 department 維度的值。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateDimensionValueInput>()
@@ -774,8 +773,8 @@ mod tests {
         let mut input = valid_account();
         input.report_group = "current_asset".into();
         let error = validate_account(&input).unwrap_err();
-        assert!(error.to_string().contains("不相容"));
-        assert!(UpdateAccount.summary().contains("不提供刪除"));
+        assert!(error.to_string().contains("不適用"));
+        assert!(UpdateAccount.summary().contains("停用只阻止新分錄"));
     }
 
     #[test]
@@ -784,7 +783,7 @@ mod tests {
         input.id_no = "A123456789".into();
         let error = validate_employee(&input).unwrap_err();
         assert!(error.to_string().contains("完整身分證字號"));
-        assert!(CreateEmployee.summary().contains("不會建立登入帳號"));
+        assert!(CreateEmployee.summary().contains("登入帳號由系統管理員另行建立"));
     }
 
     #[test]
@@ -793,7 +792,7 @@ mod tests {
         input.status = "leaving".into();
         let error = validate_employee(&input).unwrap_err();
         assert!(error.to_string().contains("離職日"));
-        assert!(UpdateEmployee.summary().contains("登入帳號"));
+        assert!(UpdateEmployee.summary().contains("離職日"));
     }
 
     #[test]
@@ -818,7 +817,7 @@ mod tests {
             sort_order: 0,
         };
         assert!(validate_dimension_value(&input).is_err());
-        assert!(CreateDimensionValue.summary().contains("不會建立新維度"));
+        assert!(CreateDimensionValue.summary().contains("在既有維度下新增一個值"));
     }
 
     #[test]

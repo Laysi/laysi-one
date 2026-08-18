@@ -35,7 +35,7 @@ export function Dashboard({ onGo, reloadKey }: Props) {
     <div>
       <h1 className="page-title page-title--hero">財務總覽</h1>
       <p className="page-lede">
-        所有數字均由已過帳傳票推導，未過帳傳票不計入。
+        未過帳傳票不計入。
       </p>
 
       <div className="stat-grid">
@@ -85,7 +85,6 @@ export function Dashboard({ onGo, reloadKey }: Props) {
 
         <section>
           <h2 className="section-title">AI 操作紀錄</h2>
-          <p className="section-note">包含被權限擋下的呼叫。</p>
           <div className="card">
             {data.ai_recent.map((a, i) => (
               <div className="ai-item" key={i}>

@@ -184,8 +184,8 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
             </div>
 
             <p className="hint">
-              開立離職單時，該員工在名冊與薪資作業即標示為「離職中」並記錄預定離職日，
-              不待最後一關才反映；完成最後一關後才會變成「已離職」。
+              開立離職單時，該員工在名冊與薪資作業即標示為「離職中」並記錄預定離職日；
+              完成最後一關後變成「已離職」。
             </p>
             <p className="hint">
               關卡所列名稱為<strong>承辦人</strong>；能否操作由角色權限決定。
@@ -269,7 +269,7 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
                 {busy === 'new' ? '開單中…' : '開單'}
               </button>
               <p className="form-note">
-                開立單據不等同生效，加保、退保與調薪都要完成全部關卡。
+                加保、退保與調薪都要完成全部關卡才生效。
               </p>
             </div>
 

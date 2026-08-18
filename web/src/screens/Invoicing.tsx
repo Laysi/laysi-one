@@ -209,8 +209,7 @@ export function Invoicing({ onToast, reloadKey, onChanged }: Props) {
             </p>
             <p className="form-note">
               稅額依開立日適用的營業稅規則計算（目前 <span className="num">{data.vat.version}</span>，
-              {data.vat.effective_from} 起），並隨發票一併保存；
-              日後稅率改版不影響本張發票的稅額。
+              {data.vat.effective_from} 起），並隨發票一併保存。
             </p>
           </section>
         </div>

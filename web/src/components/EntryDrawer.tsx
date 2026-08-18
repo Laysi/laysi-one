@@ -224,7 +224,6 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
             <div className="ai-note__title">AI 的權限範圍</div>
             <p className="ai-note__desc">
               AI 只能<strong>草擬</strong>分錄，存為待確認；科目與是否入帳一律由人員確認。
-              AI 無法直接過帳。
             </p>
             <button className="btn btn--ghost" onClick={fillFromAi}>
               帶入 AI 草擬分錄

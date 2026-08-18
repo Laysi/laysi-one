@@ -87,8 +87,7 @@ pub struct Ruleset {
 #[derive(Debug, thiserror::Error)]
 pub enum RegulationError {
     #[error(
-        "找不到「{domain}」在 {as_of} 適用的法規版本。\
-         系統不會推測法規數值，請於 backend/regulation/ 補上涵蓋該日期的規則檔。"
+        "找不到「{domain}」在 {as_of} 適用的法規版本，請補上涵蓋該日期的規則檔。"
     )]
     NotFound { domain: String, as_of: NaiveDate },
 
@@ -392,7 +391,7 @@ mod tests {
         // from a guess.
         let err = resolve("labor_insurance", d(2025, 12, 31)).unwrap_err();
         assert!(matches!(err, RegulationError::NotFound { .. }));
-        assert!(err.to_string().contains("不會推測"));
+        assert!(err.to_string().contains("補上涵蓋該日期的規則檔"));
     }
 
     #[test]

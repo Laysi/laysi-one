@@ -175,7 +175,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
             <div className="card stat-card">
               <div className="stat-card__kicker">加班費</div>
               <div className="stat-card__value num">{money(att.totals.overtime_pay)}</div>
-              <div className="stat-card__note">由差勤系統帶入，非本系統計算</div>
+              <div className="stat-card__note">由差勤系統帶入</div>
             </div>
           </div>
 
@@ -210,7 +210,6 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                     <td className="num align-right">{trimDecimal(r.overtime_hours)}</td>
                     <td className="num align-right">
                       {money(r.overtime_pay)}
-                      <span className="cell-hint cell-hint--block">來源系統帶入</span>
                     </td>
                     <td className="num align-right">{r.late_count}</td>
                   </tr>
@@ -304,7 +303,6 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
 
               <p className="recon">
                 打卡與匯入的月統計分開列出，兩邊不同時由人資決定更正哪一邊。
-                加班只算時數，不算金額。
               </p>
 
               {picked && punches.days && (
@@ -566,7 +564,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
           <p className="hint">
             額度依特休規則{' '}
             <span className="num">{leave.annual_leave_ruleset.version}</span>{' '}
-            與年資即時計算（{leave.annual_leave_ruleset.effective_from} 起適用），不逐人設定。
+            與年資計算（{leave.annual_leave_ruleset.effective_from} 起適用）。
             依據：{leave.annual_leave_ruleset.source_note}
           </p>
           <p className="hint">

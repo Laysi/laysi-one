@@ -107,7 +107,7 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
         <section>
           <h2 className="section-title">人資與財務銜接狀態</h2>
           <p className="section-note">
-            {data.links.length} 條銜接中已接上 {connected} 條。未接上者照實際狀態標示。
+            {data.links.length} 條銜接中已接上 {connected} 條。
           </p>
           <div className="card fact-card">
             {data.links.map((l) => (

@@ -82,7 +82,7 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         <h1 className="page-title">休假申請</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          這不是「查無資料」，是帳號還沒對應到員工編號；未連結前無法送出休假單。
+          你的帳號尚未對應員工編號，請管理員完成連結後再送出休假單。
         </p>
       </div>
     );
@@ -175,7 +175,7 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
             {formError && <p className="state-note state-note--error">{formError}</p>}
 
             <p className="form-note">
-              天數請自行填寫，系統不由日期區間推算；半日填 <span className="num">0.5</span>。
+              請填寫天數，半日填 <span className="num">0.5</span>。
             </p>
           </div>
         </section>

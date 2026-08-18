@@ -62,9 +62,6 @@ export function Login() {
         {mustChange ? (
           <>
             <h1 className="login__title">請先設定新密碼</h1>
-            <p className="login__lede">
-              目前使用的是管理員配發的初始密碼，變更後才能進入系統。
-            </p>
 
             <form onSubmit={(e) => void submitChange(e)}>
               <label className="login__field">
@@ -118,9 +115,6 @@ export function Login() {
         ) : (
           <>
             <h1 className="login__title">登入</h1>
-            <p className="login__lede">
-              帳務、薪資與簽核紀錄一律以登入身分記載。
-            </p>
 
             <form onSubmit={(e) => void submitLogin(e)}>
               <label className="login__field">
@@ -169,7 +163,7 @@ export function Login() {
                 <a className="btn btn--secondary login__oauth" href={OAUTH_START_URL}>
                   使用 Google 登入
                 </a>
-                <p className="login__note">帳號需由管理員預先連結，否則無法登入。</p>
+                <p className="login__note">Google 帳號需由管理員先連結。</p>
               </div>
             )}
           </>

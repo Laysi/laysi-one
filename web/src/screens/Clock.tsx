@@ -123,7 +123,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
         <h1 className="page-title">打卡</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          這不是「查無資料」，是帳號還沒對應到員工編號；未連結前無法打卡。
+          你的帳號尚未對應員工編號，請管理員完成連結後再打卡。
         </p>
       </div>
     );
@@ -212,11 +212,9 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
 
       {formError && <p className="state-note state-note--error">{formError}</p>}
 
-      <p className="hint">
-        {data.next_kind
-          ? '時間為打卡當下，不可自行填寫。'
-          : '今天的上下班都已記錄；如需更正請洽人資補登。'}
-      </p>
+      {!data.next_kind && (
+        <p className="hint">今天的上下班都已記錄；如需更正請洽人資補登。</p>
+      )}
 
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">

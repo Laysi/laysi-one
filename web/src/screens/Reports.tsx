@@ -82,10 +82,10 @@ export function Reports({ reloadKey }: Props) {
         {unposted && unposted.count > 0 ? (
           <>
             尚有 {unposted.count} 張傳票（{money(unposted.amount)}）未過帳，未計入本表。
-            報表僅採計總帳，如需完整數字請先過帳。
+            如需完整數字請先過帳。
           </>
         ) : (
-          '三張報表的每一格均由已過帳分錄彙總，系統未另存任何報表數字。'
+          '目前沒有未過帳的傳票。'
         )}
       </p>
 
@@ -172,8 +172,7 @@ export function Reports({ reloadKey }: Props) {
               </p>
 
               <p className="hint">
-                採間接法：自本期損益出發，逐項加回非現金科目的變動。每個科目在科目表上
-                只屬於一種活動，故三段加總等於現金的實際變動。
+                採間接法：自本期損益出發，逐項加回非現金科目的變動。
               </p>
               <p className="hint">
                 限制：不涉及現金但跨活動別的分錄會同時出現在兩段、一正一負相抵，

@@ -133,7 +133,7 @@ impl Operation for ListDocuments {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。OCR 一律回 pending；系統未配置辨識引擎，不提供推估的辨識率。"
+        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。OCR 狀態一律為 pending，尚未接上辨識引擎。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListDocumentsInput>()
@@ -168,7 +168,7 @@ impl Operation for ListDocuments {
         let gap = bucket_bytes.map(|b| b - stats.bytes);
 
         let summary = format!(
-            "讀取文件 · {} 份／{} 個版本／{} · 未 OCR {} 份（系統未配置辨識引擎）",
+            "讀取文件 · {} 份／{} 個版本／{} · 未 OCR {} 份",
             stats.documents,
             stats.versions,
             human_size(stats.bytes),
@@ -191,8 +191,8 @@ impl Operation for ListDocuments {
                 "bucket_reconciled": gap.map(|g| g == 0),
                 "storage_error": storage_error,
                 // Both of these must be shown on screen, not left in the code.
-                "ocr_note": "尚未接上 OCR 引擎，所有文件的辨識狀態都是「待處理」。全文搜尋只找得到檔名與關聯單據號。",
-                "immutability_note": "上傳後檔案不可覆寫，改版會存成新版本；稽核封存的文件連負責人也刪不掉。",
+                "ocr_note": "尚未接上 OCR 引擎，全文搜尋只找得到檔名與關聯單據號。",
+                "immutability_note": "上傳後檔案不可覆寫，改版會存成新版本；稽核封存的文件無法刪除。",
                 "max_object_bytes": MAX_OBJECT_BYTES,
             }),
             summary,
@@ -260,7 +260,7 @@ impl Operation for UploadDocument {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "上傳一份檔案到物件儲存，並掛到一張單據上。內容以 base64 傳入；系統存下內容雜湊，之後每次取回都會比對。同一個編號再上傳一次就是新版本，舊版不會被覆寫。"
+        "上傳一份檔案到物件儲存，並掛到一張單據上。內容以 base64 傳入。同一個編號再上傳一次會存成新版本。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UploadDocumentInput>()
@@ -298,7 +298,7 @@ impl Operation for UploadDocument {
         let link_ref = i.link_ref.as_deref().unwrap_or("");
         if link_type.is_empty() != link_ref.is_empty() {
             return Err(OpError::BadInput(
-                "關聯單據的種類與單號要嘛都填，要嘛都不填，僅提供其一將無法回查".into(),
+                "關聯單據的種類與單號請一起填，或一起留空".into(),
             ));
         }
         // Linking to a voucher requires that voucher to exist. A dangling
@@ -362,7 +362,7 @@ impl Operation for UploadDocument {
                 "document": document_json(&doc),
                 "bucket": objects.bucket(),
                 "new_version": doc.version_no > 1,
-                "ocr_note": "系統未配置 OCR 引擎，本文件的辨識狀態為「待處理」。",
+                "ocr_note": "尚未接上 OCR 引擎，本文件的辨識狀態為「待處理」。",
             }),
             summary,
         ))

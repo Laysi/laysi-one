@@ -133,8 +133,7 @@ impl OpCtx {
     pub fn objects(&self) -> Result<&laysi_store::ObjectStore, OpError> {
         self.objects.as_ref().ok_or_else(|| {
             OpError::BadInput(
-                "尚未接上物件儲存，文件功能無法使用；請洽系統管理員完成設定。\
-                 系統不會改以資料庫存放檔案。"
+                "尚未接上物件儲存，文件功能無法使用；請洽系統管理員完成設定。"
                     .into(),
             )
         })

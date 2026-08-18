@@ -169,7 +169,7 @@ impl Operation for CreateApBill {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立應付帳單，並一併產生待過帳傳票（借指定科目／貸應付帳款），兩者不會只成功一半。傳票過帳後才會列入未付合計；本操作不會直接匯款。"
+        "建立應付帳單，並一併產生待過帳傳票（借指定科目／貸應付帳款）。傳票過帳後才會列入未付合計；實際匯款另行執行。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateApBillInput>()
@@ -282,6 +282,6 @@ mod tests {
         };
         assert!(validate_ap_bill(&input, billed_on).unwrap_err().to_string().contains("到期日"));
         assert_eq!(CreateApBill.risk(), Risk::NeedsConfirm);
-        assert!(CreateApBill.summary().contains("不會只成功一半"));
+        assert!(CreateApBill.summary().contains("一併產生待過帳傳票"));
     }
 }

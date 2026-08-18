@@ -305,7 +305,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
           )}
 
           <p className="hint">
-            特休額度不逐人設定，依年資與特休規則{' '}
+            特休額度依年資與特休規則{' '}
             <span className="num">{data.annual_leave_ruleset.version}</span>{' '}
             計算（{data.annual_leave_ruleset.effective_from} 起適用）。
           </p>
@@ -319,7 +319,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
             <div className="drawer__head">
               <div>
                 <div className="drawer__title">{drawer === 'edit' ? `編輯 ${form.emp_no}` : '新增員工'}</div>
-                <div className="drawer__subtitle">不會一併建立登入帳號</div>
+                <div className="drawer__subtitle">登入帳號另在「角色與核准」建立</div>
               </div>
               <button className="btn btn--close" onClick={() => setDrawer(null)} aria-label="關閉">
                 ×
@@ -461,9 +461,9 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
               </div>
 
               <p className="form-warn">
-                本薪與三項投保級距依填寫值原樣保存，不以勞健保規則校正。
+                本薪與三項投保級距依填寫值保存。
                 {drawer === 'edit' &&
-                  '名冊不顯示這幾欄，也無法讀回目前的值。請照薪資單與投保申報表重新填寫；留空無法儲存，填錯會蓋掉原本的數字。'}
+                  '請照薪資單與投保申報表填寫；留空無法儲存，填錯會蓋掉原本的數字。'}
               </p>
 
               <div className="field-grid">

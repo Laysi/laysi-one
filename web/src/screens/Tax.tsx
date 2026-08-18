@@ -48,7 +48,7 @@ export function Tax({ reloadKey }: Props) {
       <h1 className="page-title">稅務</h1>
       {vat && (
         <p className="page-lede">
-          401 營業稅每 {vat.period_months} 個月一期。本頁數字只採計已過帳傳票。
+          401 營業稅每 {vat.period_months} 個月一期。未過帳傳票不計入。
         </p>
       )}
 
@@ -87,8 +87,7 @@ export function Tax({ reloadKey }: Props) {
                   <>
                     {' '}把那 <span className="num">{vat.pending_vouchers}</span> 張待過帳傳票過帳，
                     銷項 <span className="num">{money(vat.pending_sales)}</span> 與稅額{' '}
-                    <span className="num">{money(vat.pending_output_tax)}</span> 即會列入；
-                    申報書僅採計總帳，不採計傳票草稿。
+                    <span className="num">{money(vat.pending_output_tax)}</span> 即會列入。
                   </>
                 ) : (
                   ' 開立發票並將傳票過帳後即會產生數字。'
@@ -112,7 +111,7 @@ export function Tax({ reloadKey }: Props) {
               </button>
             </div>
             <p className="form-note">
-              媒體申報檔與會計師覆核尚未接上，按鈕暫時停用。
+              媒體申報檔與會計師覆核尚未接上。
             </p>
           </section>
 
@@ -161,7 +160,7 @@ export function Tax({ reloadKey }: Props) {
             )}
 
             <p className="hint">
-              上月扣繳稅款應於次月 10 日前繳納，系統將提醒。扣繳率與起扣點依給付日適用的
+              上月扣繳稅款應於次月 10 日前繳納。扣繳率與起扣點依給付日適用的
               扣繳規則計算（{wht.ruleset_versions.join('、') || '—'}）。
             </p>
           </section>

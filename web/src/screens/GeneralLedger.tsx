@@ -243,7 +243,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
                       <div className="choice__title">交易確實發生，僅金額或科目記錯</div>
                       <div className="choice__desc">
                         例如金額或科目誤植，但款項確實發生。系統將開立並過帳一張借貸相反的
-                        新傳票，此為會計上正確的更正方式，原傳票保留不動。
+                        新傳票，原傳票保留不動。
                       </div>
                     </button>
                   </div>

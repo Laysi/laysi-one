@@ -37,7 +37,7 @@ export function MyPayslips({ reloadKey }: Props) {
         <h1 className="page-title">我的薪資單</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          這不是「本月無薪資」，是帳號還沒對應到員工編號。請管理員完成連結後再回到本頁。
+          你的帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
         </p>
       </div>
     );
@@ -205,7 +205,7 @@ export function MyPayslips({ reloadKey }: Props) {
                     <span className="fact__value num">
                       {money(shown.employer_contributions.total)}
                       <span className="fact__note">
-                        上列三項<strong>不自薪資扣除</strong>，由公司另行負擔。
+                        上列三項由公司負擔。
                       </span>
                     </span>
                   </div>
@@ -232,7 +232,7 @@ export function MyPayslips({ reloadKey }: Props) {
                 </div>
 
                 <p className="hint">
-                  這四個版本保存於本張薪資單，法規日後修正不影響本期金額。
+                  這四個版本保存於本張薪資單。
                 </p>
               </section>
             </div>

@@ -102,7 +102,6 @@ export function Documents({ onToast, reloadKey }: Props) {
             <div className="card stat-card">
               <div className="stat-card__kicker">尚未辨識</div>
               <div className="stat-card__value num">{data.stats.ocr_pending}</div>
-              <div className="stat-card__note">系統沒有 OCR 引擎</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">缺附件的傳票</div>

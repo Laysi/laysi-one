@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 專案
 
-Laysi One 是台灣中小企業的財務＋人資正式產品，不預載任何特定公司的營運資料。
+Laysi One 是台灣中小企業的財務＋人資正式產品。
 評估用的示範資料只能由 `laysi-admin seed-demo` 手動種入（見 `docs/architecture.md`）。
 Rust（axum + sqlx）＋ React（Vite + TS）＋ PostgreSQL 17 ＋ RustFS ＋ Docker Compose。
 授權為 **BSL 1.1**（見 `LICENSE-BSL.txt`），不是開源授權。
@@ -47,9 +47,9 @@ cp .env.example .env && docker compose up -d --build   # 前端在 :8088
 `laysi-store/build.rs` 會 `rerun-if-changed=../../migrations`——**沒有它，新增一個
 migration 檔不會觸發重編**，伺服器會帶著舊的 migration 集合啟動且不報錯。
 
-## 架構：四個不明顯但關鍵的設計
+## 架構：四個關鍵設計
 
-### 1. 操作註冊表：「所有操作支援 MCP」是結構保證，不是紀律
+### 1. 操作註冊表：三個介面由同一份定義生成
 
 `laysi-ops` 的 `Registry` 是唯一的操作定義處。REST（`POST /v1/ops/{name}`）、
 MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生成。
@@ -83,7 +83,7 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 `laysi-regulation` 的測試把原型畫面上的實際數字（3527／2647／822／1008／3180）
 當基準；對不上就是計算子錯了。
 
-### 4. 品牌完整性採硬性策略：不通過就拒絕啟動
+### 4. 品牌完整性：不通過就拒絕啟動
 
 `laysi-brand` 在 `main()` 的第一步驗證品牌關鍵檔案的 BLAKE3 與 Ed25519 簽章，
 失敗即 `exit(78)`，連資料庫都不連。
@@ -95,7 +95,7 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 字標由 Rust 的參數化幾何即時算出，經 `GET /v1/brand/mark.svg` 提供。
 **前端不得自帶 logo 檔案，也不得用文字重繪品牌名稱。**
 
-## 資料層的三個不變量（由 SQL 強制，不只靠 Rust）
+## 資料層的三個不變量（由 SQL 強制）
 
 `migrations/0001_initial.sql`：
 
@@ -143,7 +143,7 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 
 ## 目前進度
 
-已完成並驗證：資料庫不變量、法規引擎、操作註冊表、REST + MCP、品牌完整性、
+已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、品牌完整性、
 RustFS 物件儲存，以及 **32 個畫面、97 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 

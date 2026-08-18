@@ -125,7 +125,7 @@ impl Operation for GetInsuranceSummary {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀勞健保與勞退：公司負擔、員工自付、逐人投保級距與三項保費。費率、上限與平均眷口數均取自 laysi-regulation，本操作不內含任何數值。"
+        "讀勞健保與勞退：公司負擔、員工自付、逐人投保級距與三項保費。費率、上限與平均眷口數依投保期間適用的規則解析。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::AsOfInput>()
@@ -485,6 +485,6 @@ mod tests {
     fn a_date_with_no_ruleset_is_refused_never_guessed() {
         let err = premiums_on(d(2025, 12, 31), n("45800"), n("53000"), n("53000")).unwrap_err();
         assert!(matches!(err, OpError::Regulation(_)));
-        assert!(err.to_string().contains("不會推測"));
+        assert!(err.to_string().contains("補上涵蓋該日期的規則檔"));
     }
 }

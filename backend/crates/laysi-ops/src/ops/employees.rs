@@ -311,7 +311,7 @@ impl Operation for ListEmployees {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由特休規則計算，不逐人設定）。**不含月薪與投保級距**；薪資明細見 list_payslips，該操作限負責人。"
+        "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由特休規則計算）。不含月薪與投保級距，薪資明細見 list_payslips，該操作限負責人。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListEmployeesInput>()
@@ -397,8 +397,8 @@ impl Operation for ListEmployees {
                 "annual_leave_ruleset": crate::ops::insurance::ruleset_json(rs),
                 // A blank column reads as "no data" more easily than a sentence
                 // explaining where the figure lives.
-                "salary_note": "名冊不含月薪與投保級距。個人薪資明細見「薪資作業」，限負責人檢視；投保級距見「勞健保與勞退」，該數字為向勞保局申報值，供會計核對繳款單。",
-                "id_note": "身分證字號只存遮罩後的形式，完整字號不在這套系統裡。",
+                "salary_note": "個人薪資明細見「薪資作業」，限負責人檢視；投保級距見「勞健保與勞退」，該數字為向勞保局申報值，供會計核對繳款單。",
+                "id_note": "身分證字號只存遮罩後的形式。",
             }),
             summary,
         ))

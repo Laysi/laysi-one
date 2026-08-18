@@ -81,7 +81,7 @@ fn plan_for(rs: &Ruleset, asset: &FixedAsset) -> Result<Plan, OpError> {
     let key = format!("useful_lives.{}", asset.category);
     let years = rs.decimal(&key).map_err(|_| {
         OpError::BadInput(format!(
-            "耐用年數表 {} 未收錄「{}」類別（{}）。請先補齊該類別的耐用年數，系統不會推測年數。",
+            "耐用年數表 {} 未收錄「{}」類別（{}）。請先補齊該類別的耐用年數。",
             rs.version, asset.category, asset.name
         ))
     })?;
@@ -610,7 +610,7 @@ mod tests {
         let a = asset("spaceship", d(2026, 1, 1), "1000000", "0");
         let err = plan_for(dep(d(2026, 7, 31)), &a).unwrap_err();
         assert!(matches!(err, OpError::BadInput(_)));
-        assert!(err.to_string().contains("不會推測年數"));
+        assert!(err.to_string().contains("請先補齊該類別的耐用年數"));
     }
 
     #[test]

@@ -162,7 +162,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
             <span className="spacer" />
 
             <div className="pay-bar__note">
-              付款單僅為付款指示，實際匯款由出納執行，於此送出不會產生資金流出。
+              實際匯款由出納執行。
             </div>
             <button
               className={`btn${chosen.length === 0 ? ' btn--off' : ''}`}
@@ -256,8 +256,8 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
           </div>
 
           <p className="hint">
-            送出付款單會開立一張借應付帳款、貸銀行存款的傳票，每張帳單一行；
-            銀行端僅有一筆匯出，故貸方合併為一行，以利對帳。
+            送出付款單會開立一張借應付帳款、貸銀行存款的傳票，每張帳單一行，
+            貸方合併為一行。
           </p>
         </>
       )}

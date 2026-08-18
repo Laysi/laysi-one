@@ -513,7 +513,7 @@ impl Operation for RejectExpenseClaim {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "退回一張報支單，由申請人補件。整張作廢重送，不提供「退回至第 N 關」；單據內容變更後，先前關卡的簽核即不再有效。"
+        "退回一張報支單，由申請人補件；整張作廢重送。單據內容變更後，先前關卡的簽核即不再有效。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RejectExpenseClaimInput>()

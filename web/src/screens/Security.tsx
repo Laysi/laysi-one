@@ -101,7 +101,7 @@ export function Security({ onToast, reloadKey }: Props) {
           </div>
           <code className="secret-card__value num">{issued.secret}</code>
           <p className="form-note">
-            請立即複製保存。系統只留前八碼與不可還原的雜湊，無法回查；遺失時只能重新核發。
+            請立即複製保存，遺失時只能重新核發。
           </p>
         </div>
       )}
@@ -128,7 +128,7 @@ export function Security({ onToast, reloadKey }: Props) {
             </div>
             <p className="recon">
               {policy.enforced_count} 條執行中，{policy.total - policy.enforced_count} 條尚未執行。
-              「AI 禁止事項」該列直接反映「MCP 與 AI」的開關現況，調整工具開關後即時更新。
+              「AI 禁止事項」該列在「MCP 與 AI」調整。
             </p>
 
             <h3 className="section-title section-title--spaced">系統健康</h3>
@@ -173,7 +173,6 @@ export function Security({ onToast, reloadKey }: Props) {
                   <span className="num">
                     {health.stats.audit_entries} 筆（{health.stats.audit_blocked} 筆被擋下）
                   </span>
-                  <span className="fact__note">唯讀操作與被擋下的呼叫均寫入稽核。</span>
                 </span>
               </div>
               <div className="fact">
@@ -187,7 +186,7 @@ export function Security({ onToast, reloadKey }: Props) {
                         .filter((r) => !r.applicable)
                         .map((r) => r.domain)
                         .join('、')}{' '}
-                      查無適用版本時，相關計算一律回覆錯誤，不以預設值代替。
+                      查無適用版本，相關計算會回覆錯誤。
                     </span>
                   )}
                 </span>
@@ -255,12 +254,11 @@ export function Security({ onToast, reloadKey }: Props) {
 
             <p className="hint">
               新發的 Token 代表 <span className="num">{me.display_name}</span>
-              （角色 <span className="num">{me.role}</span>），權限不會超出你本身，
-              呼叫也以此名義寫入稽核。
+              （角色 <span className="num">{me.role}</span>）。
             </p>
 
             <p className="hint">
-              核發限系統管理員，撤銷不限；Token 外洩時任何人都能立即撤銷。
+              Token 外洩時任何人都能立即撤銷。
             </p>
           </section>
         </div>

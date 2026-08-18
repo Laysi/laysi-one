@@ -171,7 +171,7 @@ impl Operation for ListApiTokens {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀 API 與 MCP Token 清單：名稱、用途範圍、代表對象、最後使用時間、輪替期限。僅保留前八碼與雜湊，不存明文，系統也無法回查。"
+        "讀 API 與 MCP Token 清單：名稱、用途範圍、代表對象、最後使用時間、輪替期限。只保留前八碼與雜湊。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListApiTokensInput>()
@@ -233,7 +233,7 @@ impl Operation for ListApiTokens {
                 "tokens": rows,
                 "live_count": live,
                 "storage_note":
-                    "系統只存不可還原的雜湊與前八碼，明文只在發出來的那一次回傳。",
+                    "只保留雜湊與前八碼，明文在核發時回傳一次。",
                 "wiring_note":
                     "Token 的身分取自核發時的登記資料，每次成功呼叫都會更新「最後使用」。\
                      設定輪替天數後，期限一到即強制拒絕，不必等人手動撤銷。",
@@ -277,7 +277,7 @@ impl Operation for IssueApiToken {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "核發一組新的 API 或 MCP Token。明文僅出現於本次回應，之後系統無法回查；系統僅保存雜湊與前八碼。"
+        "核發一組新的 API 或 MCP Token。明文僅出現於本次回應。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<IssueApiTokenInput>()
@@ -337,7 +337,7 @@ impl Operation for IssueApiToken {
                 "token": issued.token,
                 "secret": issued.secret,
                 "secret_note":
-                    "明文僅顯示這一次，請立即複製保存；系統僅保留雜湊，無法回查。",
+                    "明文僅顯示這一次，請立即複製保存。",
             }),
             summary,
         ))
@@ -433,7 +433,7 @@ impl Operation for GetSystemHealth {
                 "rulesets_missing": stale,
                 "as_of": ctx.today,
                 "note":
-                    "品牌完整性指紋與物件儲存連線狀態不在此處，兩者由 GET /healthz 回答。",
+                    "品牌完整性指紋與物件儲存連線狀態由服務健康檢查回報。",
             }),
             summary,
         ))
@@ -461,7 +461,7 @@ mod tests {
     fn listing_tokens_is_read_only_because_it_carries_no_secret() {
         let op = ops().into_iter().find(|o| o.name() == "list_api_tokens").unwrap();
         assert_eq!(op.risk(), Risk::ReadOnly);
-        assert!(op.summary().contains("不存明文"));
+        assert!(op.summary().contains("只保留前八碼與雜湊"));
     }
 
     #[test]

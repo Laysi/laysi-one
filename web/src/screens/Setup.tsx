@@ -344,7 +344,7 @@ export function Setup({ onToast, reloadKey }: Props) {
                 ))}
               </div>
 
-              <p className="recon">營業稅率依適用日自動帶入，不可變更。</p>
+              <p className="recon">營業稅率依適用日帶入，不可變更。</p>
               <p className="hint">標有編輯圖示的項目僅系統管理員可修改。</p>
 
               <h3 className="section-title section-title--spaced">維度與條件</h3>
@@ -398,7 +398,7 @@ export function Setup({ onToast, reloadKey }: Props) {
               </div>
 
               {!dims.applied_to_entries && (
-                <p className="hint">維度尚未掛載至分錄，現階段填寫不影響任何報表。</p>
+                <p className="hint">維度尚未掛載至分錄，填寫不影響報表。</p>
               )}
             </section>
 
@@ -470,7 +470,6 @@ export function Setup({ onToast, reloadKey }: Props) {
                     </tbody>
                   </table>
                 </div>
-                <p className="hint">此處餘額與財務報表為同一組數字。</p>
               </section>
             )}
           </div>
@@ -547,7 +546,7 @@ export function Setup({ onToast, reloadKey }: Props) {
                   <div className="field field--full">
                     <span>現金流量活動別</span>
                     <p className="field__hint">
-                      損益科目一律併入本期損益，不出現在現金流量表的三段活動中，本欄不需填寫。
+                      損益科目不需填寫本欄。
                     </p>
                   </div>
                 ) : (
@@ -619,7 +618,7 @@ export function Setup({ onToast, reloadKey }: Props) {
 
             <div className="drawer__foot">
               <span className="drawer__foot-note">
-                {accountDrawer === 'edit' ? '完整更新本科目，不提供刪除' : '建立會計科目'}
+                {accountDrawer === 'edit' ? '更新會計科目' : '建立會計科目'}
               </span>
               <button
                 className={`btn${savingAccount ? ' btn--off' : ''}`}

@@ -132,9 +132,6 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">銀行與現金</h1>
-      <p className="page-lede">
-        核銷只建立銀行明細與傳票的對應，不會另外產生分錄。
-      </p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!accounts && !error && <p className="state-note">讀取中…</p>}
@@ -169,7 +166,6 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
           <div className="card stat-card stat-card--total">
             <div className="stat-card__kicker">合計</div>
             <div className="stat-card__value num">{money(total)}</div>
-            <div className="stat-card__note">餘額由分錄推導，核銷不影響餘額</div>
           </div>
         </div>
       )}

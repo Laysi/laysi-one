@@ -122,7 +122,7 @@ pub enum StoreError {
     #[error("沒有「{code}」這項設定")]
     SettingNotFound { code: String },
 
-    #[error("沒有「{code}」這個維度；這個操作只新增維度值，不會建立維度")]
+    #[error("沒有「{code}」這個維度；這個操作只新增維度值")]
     DimensionNotFound { code: String },
 
     #[error("找不到簽核流程第 {step_no} 關")]
@@ -134,7 +134,7 @@ pub enum StoreError {
     #[error("沒有「{code}」這個角色")]
     RoleNotFound { code: String },
 
-    #[error("「{code}」不是改一個字串就算數的設定，要動它得重跑期初或改 schema")]
+    #[error("「{code}」不能在此處變更，要重跑期初")]
     SettingNotEditable { code: String },
 
     #[error("沒有這個角色或權限：{role} / {permission}")]
