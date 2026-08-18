@@ -214,7 +214,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
 
       <p className="hint">
         {data.next_kind
-          ? '時間取伺服器當下的時刻並記錄到秒，不可自行填寫。'
+          ? '時間為打卡當下，不可自行填寫。'
           : '今天的上下班都已記錄；如需更正請洽人資補登。'}
       </p>
 

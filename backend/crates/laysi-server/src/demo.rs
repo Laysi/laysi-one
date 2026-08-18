@@ -123,7 +123,10 @@ fn plus_days(date: NaiveDate, days: i64) -> NaiveDate {
 /// there so nobody turns a real ledger into a demo by mistyping a command.
 pub async fn seed(store: &Store, today: NaiveDate, force: bool) -> anyhow::Result<usize> {
     let registry = Registry::new();
-    let boss = ctx_for(store, "laysi-admin", "boss", None, today);
+    let boss = ctx_for(store, "laysi-admin", laysi_ops::ROLE_BOSS, None, today);
+    // Company settings sit behind the admin floor, the books behind the owner
+    // one. Seeding needs both, which is the same split a real install has.
+    let admin = ctx_for(store, "laysi-admin", laysi_ops::ROLE_ADMIN, None, today);
     let mut calls = 0usize;
 
     let existing = call(&registry, &boss, "search_vouchers", json!({ "limit": 1 }), &mut calls).await?;
@@ -139,7 +142,7 @@ pub async fn seed(store: &Store, today: NaiveDate, force: bool) -> anyhow::Resul
         );
     }
 
-    seed_company(&registry, &boss, &mut calls).await?;
+    seed_company(&registry, &admin, &mut calls).await?;
     seed_people(&registry, &boss, today, &mut calls).await?;
     seed_ledger(&registry, store, &boss, today, &mut calls).await?;
     seed_budget(&registry, store, &boss, today, &mut calls).await?;

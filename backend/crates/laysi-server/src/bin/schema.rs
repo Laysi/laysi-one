@@ -28,9 +28,11 @@ fn main() -> std::io::Result<()> {
     }
     ts.push_str(";\n\n");
 
-    ts.push_str(
-        "export type Risk = 'read_only' | 'needs_confirm' | 'high_risk' | 'boss_only';\n\n",
-    );
+    // Derived from the enum, not spelled out here: a hand-written union drifts
+    // the moment a tier is added.
+    let risks: Vec<String> =
+        laysi_ops::Risk::ALL.iter().map(|r| format!("'{}'", r.as_db())).collect();
+    ts.push_str(&format!("export type Risk = {};\n\n", risks.join(" | ")));
 
     ts.push_str(
         "export interface OpMeta {\n  name: OpName;\n  risk: Risk;\n  \

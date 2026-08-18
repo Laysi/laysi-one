@@ -17,6 +17,7 @@ use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+pub mod password;
 pub mod storage;
 
 pub use storage::{ObjectStore, StorageError};
@@ -2551,27 +2552,57 @@ impl Store {
     /// Create an account. With a password hash of `None` the account can only
     /// sign in through an external identity.
     pub async fn create_user(&self, req: CreateUser<'_>) -> Result<UserAccount> {
-        let row = sqlx::query(
-            "INSERT INTO user_account
-                    (username, display_name, email, password_hash, role_code, employee_id,
-                     status, must_change_password, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             RETURNING id, username, display_name, email, password_hash, role_code,
-                       employee_id, status, must_change_password, created_at, created_by,
-                       last_login_at",
+        let mut conn = self.pool.acquire().await?;
+        insert_user(&mut conn, req).await
+    }
+    /// Whether the web bootstrap endpoint may still create the first account.
+    ///
+    /// Both halves matter. An empty `install_bootstrap` with accounts present
+    /// is an installation set up from the CLI; a filled `install_bootstrap`
+    /// with no accounts is one whose accounts were deleted afterwards, and
+    /// that must not reopen an unauthenticated account-creating endpoint.
+    pub async fn bootstrap_open(&self) -> Result<bool> {
+        Ok(sqlx::query(
+            "SELECT NOT EXISTS (SELECT 1 FROM user_account)
+                AND NOT EXISTS (SELECT 1 FROM install_bootstrap) AS can_bootstrap",
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .get("can_bootstrap"))
+    }
+    /// Claim the installation and create its first account in one transaction.
+    /// `None` means the window was already closed and nothing was written.
+    ///
+    /// The claim and the account are inserted together so that no path can
+    /// produce one without the other. `WHERE NOT EXISTS` closes the window
+    /// against an account created meanwhile by the CLI; the primary key closes
+    /// it against a second web caller, which blocks on the conflicting row
+    /// until this transaction commits and then affects no rows.
+    pub async fn bootstrap_first_user(
+        &self,
+        req: CreateUser<'_>,
+        user_agent: &str,
+        token_required: bool,
+    ) -> Result<Option<UserAccount>> {
+        let mut tx = self.pool.begin().await?;
+        let claimed = sqlx::query(
+            "INSERT INTO install_bootstrap (id, username, user_agent, token_required)
+             SELECT 1, $1::text, $2::text, $3::boolean
+              WHERE NOT EXISTS (SELECT 1 FROM user_account)
+             ON CONFLICT (id) DO NOTHING",
         )
         .bind(req.username)
-        .bind(req.display_name)
-        .bind(req.email)
-        .bind(req.password_hash)
-        .bind(req.role_code)
-        .bind(req.employee_id)
-        .bind(req.status)
-        .bind(req.must_change_password)
-        .bind(req.created_by)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(row_to_user_account(&row))
+        .bind(user_agent)
+        .bind(token_required)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if claimed == 0 {
+            return Ok(None);
+        }
+        let user = insert_user(&mut tx, req).await?;
+        tx.commit().await?;
+        Ok(Some(user))
     }
     /// Set or clear the password hash. Once cleared the account accepts only
     /// its linked external identity.
@@ -7098,6 +7129,32 @@ fn row_to_movement(r: &PgRow) -> AccountMovement {
         credit,
         line_count,
     }
+}
+
+/// The account INSERT, taking a connection so that `create_user` and
+/// `bootstrap_first_user` cannot drift into two different sets of columns.
+async fn insert_user(conn: &mut sqlx::PgConnection, req: CreateUser<'_>) -> Result<UserAccount> {
+    let row = sqlx::query(
+        "INSERT INTO user_account
+                (username, display_name, email, password_hash, role_code, employee_id,
+                 status, must_change_password, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING id, username, display_name, email, password_hash, role_code,
+                   employee_id, status, must_change_password, created_at, created_by,
+                   last_login_at",
+    )
+    .bind(req.username)
+    .bind(req.display_name)
+    .bind(req.email)
+    .bind(req.password_hash)
+    .bind(req.role_code)
+    .bind(req.employee_id)
+    .bind(req.status)
+    .bind(req.must_change_password)
+    .bind(req.created_by)
+    .fetch_one(conn)
+    .await?;
+    Ok(row_to_user_account(&row))
 }
 
 fn row_to_user_account(r: &PgRow) -> UserAccount {

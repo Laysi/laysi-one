@@ -553,6 +553,7 @@ export interface PermissionRow {
   op_names: string[];
   missing_ops: string[];
   boss_only_ops: string[];
+  admin_only_ops: string[];
 }
 
 export interface GrantCell {
@@ -572,6 +573,20 @@ export interface RoleMatrix {
   enforced: boolean;
   enforcement_note: string;
   actor_role: string;
+}
+
+export interface NewUserAccount {
+  user: {
+    id: number;
+    username: string;
+    display_name: string;
+    email: string;
+    role_code: string;
+    role_name: string;
+    employee_no: string | null;
+  };
+  temporary_password: string;
+  must_change_password: boolean;
 }
 
 export interface ApprovalStep {

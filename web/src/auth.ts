@@ -22,15 +22,32 @@ export class AuthFailed extends Error {
 
 export const NO_USER_ACCOUNT = 'no_user_account';
 
+export interface SetupState {
+  bootstrap_available: boolean;
+  token_required: boolean;
+}
+
+export interface BootstrapInput {
+  username: string;
+  display_name: string;
+  email: string;
+  password: string;
+  setup_token: string;
+}
+
+const CLOSED_SETUP: SetupState = { bootstrap_available: false, token_required: false };
+
 export type AuthStatus = 'loading' | 'signed-out' | 'signed-in';
 
 export interface AuthValue {
   status: AuthStatus;
   user: SessionUser | null;
   oauthEnabled: boolean;
+  setup: SetupState;
   signIn: (username: string, password: string) => Promise<SessionUser>;
   signOut: () => Promise<void>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<SessionUser>;
+  bootstrap: (input: BootstrapInput) => Promise<SessionUser>;
 }
 
 export const OAUTH_START_URL = '/v1/auth/oauth/start';
@@ -56,6 +73,7 @@ interface Envelope<T> {
   error?: ApiError;
   user?: T;
   oauth?: { enabled: boolean };
+  setup?: SetupState;
 }
 
 async function readEnvelope(res: Response): Promise<Envelope<SessionUser>> {
@@ -72,19 +90,25 @@ function failure(res: Response, envelope: Envelope<SessionUser>): AuthFailed {
 
 const JSON_HEADERS: HeadersInit = { 'content-type': 'application/json' };
 
-async function fetchMe(): Promise<{ user: SessionUser | null; oauthEnabled: boolean }> {
+async function fetchMe(): Promise<{
+  user: SessionUser | null;
+  oauthEnabled: boolean;
+  setup: SetupState;
+}> {
   const res = await fetch('/v1/auth/me', { headers: JSON_HEADERS });
   const envelope = await readEnvelope(res);
   const oauthEnabled = envelope.oauth?.enabled ?? false;
-  if (res.status === 401) return { user: null, oauthEnabled };
+  const setup = envelope.setup ?? CLOSED_SETUP;
+  if (res.status === 401) return { user: null, oauthEnabled, setup };
   if (!res.ok || !envelope.user) throw failure(res, envelope);
-  return { user: envelope.user, oauthEnabled };
+  return { user: envelope.user, oauthEnabled, setup };
 }
 
 export function useAuthSession(): AuthValue {
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [user, setUser] = useState<SessionUser | null>(null);
   const [oauthEnabled, setOauthEnabled] = useState(false);
+  const [setup, setSetup] = useState<SetupState>(CLOSED_SETUP);
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
@@ -100,6 +124,7 @@ export function useAuthSession(): AuthValue {
       .then((session) => {
         if (!live) return;
         setOauthEnabled(session.oauthEnabled);
+        setSetup(session.setup);
         setUser(session.user);
         setStatus(session.user ? 'signed-in' : 'signed-out');
       })
@@ -148,5 +173,19 @@ export function useAuthSession(): AuthValue {
     return envelope.user;
   }, []);
 
-  return { status, user, oauthEnabled, signIn, signOut, changePassword };
+  const bootstrap = useCallback(async (input: BootstrapInput) => {
+    const res = await fetch('/v1/auth/bootstrap', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify(input),
+    });
+    const envelope = await readEnvelope(res);
+    if (!res.ok || !envelope.user) throw failure(res, envelope);
+    setSetup(CLOSED_SETUP);
+    setUser(envelope.user);
+    setStatus('signed-in');
+    return envelope.user;
+  }, []);
+
+  return { status, user, oauthEnabled, setup, signIn, signOut, changePassword, bootstrap };
 }

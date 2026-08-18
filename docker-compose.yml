@@ -78,6 +78,10 @@ services:
       SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-60}
       SESSION_ABSOLUTE_HOURS: ${SESSION_ABSOLUTE_HOURS:-168}
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:5173}
+      # Whether the first account may be created from the browser. Only the api
+      # service needs these: mcp mounts no /v1 routes at all.
+      SETUP_ALLOW_WEB: ${SETUP_ALLOW_WEB:-true}
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
       OIDC_ISSUER: ${OIDC_ISSUER:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}

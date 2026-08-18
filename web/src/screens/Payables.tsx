@@ -268,9 +268,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
             <div className="drawer__head">
               <div>
                 <div className="drawer__title">新增應付帳單</div>
-                <div className="drawer__subtitle">
-                  同時會產生一張待過帳傳票（借指定科目／貸應付帳款）；這不會直接匯款
-                </div>
+                <div className="drawer__subtitle">這不會直接匯款</div>
               </div>
               <button className="btn btn--close" onClick={() => setDrawer(false)} aria-label="關閉">
                 ×
@@ -325,7 +323,9 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
               </div>
             </div>
             <div className="drawer__foot">
-              <span className="drawer__foot-note">貸方固定是 2101 應付帳款</span>
+              <span className="drawer__foot-note">
+                同時產生待過帳傳票（借指定科目／貸 2101 應付帳款）
+              </span>
               <button
                 className={`btn${savingBill ? ' btn--off' : ''}`}
                 disabled={savingBill}

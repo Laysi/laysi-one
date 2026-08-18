@@ -257,7 +257,7 @@ impl Operation for GetHrCompliance {
                 "加班費倍數",
                 Vec::new(),
                 Some("overtime"),
-                "本項未檢查：規則庫尚未收錄該規則。出勤資料的加班費由來源差勤系統帶入，本系統不依時數自行重算。",
+                "本項未檢查。出勤資料的加班費由來源差勤系統帶入，本系統不依時數自行重算。",
             ),
         ];
         checks.extend(unchecked);
@@ -346,7 +346,7 @@ impl Operation for ListWithholdingStatements {
     }
 
     fn summary(&self) -> &'static str {
-        "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限老闆身分；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。"
+        "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限負責人；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。"
     }
 
     fn input_schema(&self) -> Value {
@@ -608,7 +608,7 @@ mod tests {
             "規則庫尚未收錄的項目",
             Vec::new(),
             Some("not_recorded"),
-            "規則庫未收錄該規則，故未檢查。",
+            "尚未收錄該規則，故未檢查。",
         );
 
         assert_eq!(missing["checked"], json!(false));

@@ -235,9 +235,8 @@ impl Operation for ListApiTokens {
                 "storage_note":
                     "系統只存不可還原的雜湊與前八碼，明文只在發出來的那一次回傳。",
                 "wiring_note":
-                    "MCP 連線以雜湊比對驗證，身分取自該把 Token 的登記資料，\
-                     每次成功驗證都會更新「最後使用」。設定輪替天數後，\
-                     期限一到即強制拒絕，不必等人手動撤銷。",
+                    "Token 的身分取自核發時的登記資料，每次成功呼叫都會更新「最後使用」。\
+                     設定輪替天數後，期限一到即強制拒絕，不必等人手動撤銷。",
             }),
             summary,
         ))
@@ -275,7 +274,7 @@ impl Operation for IssueApiToken {
     }
     fn risk(&self) -> Risk {
         // Issuing a token issues an identity. Owner only.
-        Risk::BossOnly
+        Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
         "核發一組新的 API 或 MCP Token。明文僅出現於本次回應，之後系統無法回查；系統僅保存雜湊與前八碼。"
@@ -445,13 +444,13 @@ impl Operation for GetSystemHealth {
 mod tests {
     use super::*;
 
-    /// Revoking must not require the owner: every minute spent waiting for a
-    /// person while a token is leaked is a loss. Issuing is the action that
-    /// needs their approval.
+    /// Revoking must not require the administrator: every minute spent waiting
+    /// for a person while a token is leaked is a loss. Issuing is the action
+    /// that needs their approval.
     #[test]
     fn revoking_is_easier_than_issuing_on_purpose() {
         let by = |name: &str| ops().into_iter().find(|o| o.name() == name).map(|o| o.risk());
-        assert_eq!(by("issue_api_token"), Some(Risk::BossOnly));
+        assert_eq!(by("issue_api_token"), Some(Risk::AdminOnly));
         assert_eq!(by("revoke_api_token"), Some(Risk::HighRisk));
         assert_ne!(by("revoke_api_token"), Some(Risk::ReadOnly), "撤銷會改狀態，不是唯讀");
     }

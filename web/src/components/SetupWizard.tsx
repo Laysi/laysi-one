@@ -44,7 +44,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
 
   async function saveCompany() {
     if (!companyName.trim()) {
-      onToast('公司名稱為必填，此欄為空即視為尚未完成設定');
+      onToast('請輸入公司名稱。');
       return;
     }
     setSavingCompany(true);
@@ -144,9 +144,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
       <div className="field-row" style={{ alignItems: 'baseline', justifyContent: 'space-between' }}>
         <div>
           <h1 className="page-title">首次設定</h1>
-          <p className="page-lede">
-            依序設定公司名稱、統一編號、第一個銀行帳戶與第一個部門，完成後即進入系統。
-          </p>
+          <p className="page-lede">可隨時略過，稍後從左側繼續。</p>
         </div>
         <button className="btn btn--ghost" onClick={onExit}>
           略過設定
@@ -173,7 +171,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
           {settings && (
             <>
               <label className="field field--full">
-                公司名稱（必填。未填寫時系統會持續提示尚未完成設定）
+                公司名稱（必填）
                 <input
                   className="input"
                   value={companyName}
@@ -198,7 +196,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                     .filter((s) => !s.editable)
                     .map((s) => s.label)
                     .join('、')}
-                  以上項目無法在此變更，因其涉及期初重跑或資料結構調整，詳細原因見「基礎設定」。
+                  以上項目無法在此變更，請至「基礎設定」處理。
                 </p>
               )}
 

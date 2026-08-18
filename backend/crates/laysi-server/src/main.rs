@@ -16,8 +16,11 @@
 //! Ordinary operations must pass the role permission check in the registry's
 //! dispatch, but signing in is how a trusted identity is obtained in the
 //! first place; making login an operation would require being logged in to
-//! log in. The auth endpoints are therefore listed explicitly here, and
-//! everything else still goes through the registry.
+//! log in. `/v1/auth/bootstrap` is the same argument one step earlier: it
+//! creates the identity there is nothing to check against yet, and is gated
+//! by the installation having no accounts instead. The auth endpoints are
+//! therefore listed explicitly here, and everything else still goes through
+//! the registry.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -34,6 +37,7 @@ mod auth;
 mod mcp;
 mod oidc;
 mod ratelimit;
+mod setup;
 
 /// MCP protocol version. Tied to the shape of `tools/list`; check both when
 /// bumping it.
@@ -94,6 +98,8 @@ pub struct AppState {
     pub registry: Registry,
     pub brand: laysi_brand::Report,
     pub auth: auth::AuthConfig,
+    /// Whether the browser may create the installation's first account.
+    pub setup: setup::SetupConfig,
     pub oidc: Option<oidc::OidcState>,
     /// RustFS client. `None` when the configuration is incomplete, which
     /// `/healthz` reports as such.
@@ -102,6 +108,9 @@ pub struct AppState {
     /// Per-token rate limit for `/mcp`, counted in process, with no redis
     /// dependency.
     pub mcp_rate_limiter: ratelimit::RateLimiter,
+    /// Attempt limit for `/v1/auth/bootstrap`, which has no token to key on
+    /// and so shares one bucket.
+    pub setup_rate_limiter: ratelimit::RateLimiter,
     /// Allowed `Origin` values for `/mcp`, guarding against DNS rebinding. A
     /// request that carries an Origin must match this list; one that does not
     /// (as most AI connectors do not) is allowed. Empty by default.
@@ -184,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
     let rustfs_endpoint =
         std::env::var("RUSTFS_ENDPOINT").unwrap_or_else(|_| "http://rustfs:9000".into());
     let auth = auth::AuthConfig::from_env()?;
+    let setup = setup::SetupConfig::from_env()?;
     let cors_origin = std::env::var("CORS_ALLOWED_ORIGIN")
         .unwrap_or_else(|_| "http://localhost:5173".into());
     let cors_origin = HeaderValue::from_str(&cors_origin)
@@ -251,10 +261,12 @@ async fn main() -> anyhow::Result<()> {
         registry,
         brand,
         auth,
+        setup,
         oidc,
         objects,
         rustfs_endpoint,
         mcp_rate_limiter: ratelimit::RateLimiter::new(mcp_rate_limit),
+        setup_rate_limiter: ratelimit::RateLimiter::new(setup::ATTEMPTS_PER_MINUTE),
         mcp_allowed_origins,
     });
 
@@ -268,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
             .route("/v1/auth/logout", post(auth::logout))
             .route("/v1/auth/me", get(auth::me))
             .route("/v1/auth/change-password", post(auth::change_password))
+            .route("/v1/auth/bootstrap", post(setup::bootstrap))
             .route("/v1/auth/oauth/start", get(oidc::start))
             .route("/v1/auth/oauth/callback", get(oidc::callback))
             .route("/v1/meta", get(meta))

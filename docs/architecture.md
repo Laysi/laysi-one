@@ -305,10 +305,56 @@ laysi-admin list-users
 連到既有員工主檔。`link-oauth` 不建立帳號，provider 應填 discovery issuer
 （尾端 `/` 會正規化），subject 填 IdP 的 `sub`。
 
-資料庫完全沒有 `user_account` 時，帳密登入回 503 與「請由管理員建立第一個帳號」；
-這是唯一會揭露「帳號總數為零」的 bootstrap 狀態。訊息本身不印指令——看到登入畫面
-的人未必有主機權限，指令在本文件與 `laysi-admin --help` 裡。只要已有任一帳號，
-所有一般登入失敗就恢復成同一個訊息。
+資料庫完全沒有 `user_account` 時，帳密登入回 503 與「請先完成初始化」；這是唯一會
+揭露「帳號總數為零」的 bootstrap 狀態。訊息本身不印指令——看到登入畫面的人未必有
+主機權限，指令在本文件與 `laysi-admin --help` 裡。只要已有任一帳號，所有一般登入
+失敗就恢復成同一個訊息。
+
+### 網頁初始化：`POST /v1/auth/bootstrap`
+
+第一個帳號可以在瀏覽器建立，不必有主機權限。這是 `/v1/auth/*` 例外的下一層：
+登入之所以不能是 Registry 操作，是因為要先有身分才有權限可查；初始化更早一步，
+連要被檢查的身分都還不存在，所以它的守門條件是**安裝本身的狀態**。
+
+`0021` 的 `install_bootstrap` 是單列表（`id int PRIMARY KEY CHECK (id = 1)`）。
+`Store::bootstrap_first_user` 在**同一個交易**裡先 `INSERT ... WHERE NOT EXISTS
+(SELECT 1 FROM user_account) ON CONFLICT (id) DO NOTHING`，再插入帳號：
+
+- `WHERE NOT EXISTS` 擋住同時被 `laysi-admin` 建好帳號的情況；
+- 主鍵擋住第二個網頁呼叫——後到者會卡在衝突列上等前者提交，然後影響 0 列；
+- 事後把 `user_account` 清空**不會**重新打開這個端點，因為 `install_bootstrap`
+  還留著那一列。
+
+Rust 那側的 `bootstrap_open()` 只是為了給出比違反約束更好的錯誤訊息，不是保證。
+判斷「還能不能初始化」是兩個條件的 AND：沒有任何帳號，**而且**沒有初始化紀錄。
+
+角色寫死 `admin`（`laysi_ops::ROLE_ADMIN`），呼叫端不能指定。第一個帳號如果沒有
+授權他人的權限，整套系統就沒有人能再開權限；未登入端點也不該提供一個只有唯一正確值
+的自由度。**它不是 `boss`**：裝機的人不該因此看得到全公司薪資，理由見〈兩道風險
+底線〉。同理不收 `employee_id`、不收 `status`、不收 `must_change_password`——密碼是
+本人當場設的，沒有暫時密碼要強迫更換，這點與 `laysi-admin create-user` 相反。
+
+兩個環境變數：`SETUP_ALLOW_WEB`（預設 `true`）為 `false` 時端點一律回 403；
+`SETUP_TOKEN` 非空時必須在畫面上輸入相同代碼。設定值在行程內只保存 BLAKE3
+雜湊（`SetupConfig.token_hash`），比對的是雜湊而不是明文，比較的時間差因此
+與代碼內容無關。整個端點另有每分鐘 5 次的行程內計數，順序是
+**停用檢查 → 安裝狀態 → 欄位驗證 → 速率 → 代碼 → Argon2id → 交易**：
+表單打錯字不消耗額度，只有進到代碼比對與雜湊計算的嘗試才算。
+
+`SETUP_TOKEN` 存在的理由是那段時間差：`docker compose up` 到負責人打開瀏覽器
+之間，先到的人就是負責人。內網無所謂，公開位址不是。錯誤的代碼寫 tracing
+警告而**不寫稽核**——此時安裝上一個帳號都沒有，任何連得到那個埠的人都能灌爆
+`ai_audit_log`。成功那一次會寫，`tool_name = 'bootstrap_install'`，
+`channel = 'ui'`，在交易提交**之後**寫：帳號已經存在了，因為留不下痕跡就讓整個
+初始化失敗，換來的是一台沒有人能登入的安裝。
+
+`/v1/auth/me` 在已登入與未登入兩種回應裡都帶 `setup:
+{ bootstrap_available, token_required }`。未登入畫面要據此決定畫初始化還是登入，
+而其他端點都需要 session，這裡是唯一問得到的地方。已登入那條不查資料庫——
+手上有 session 就證明帳號存在。查詢失敗時一律回報為關閉：端點本來就會拒絕，
+用猜的把初始化畫出來是反過來了。
+
+`LAYSI_SERVE=mcp` 的容器不掛任何 `/v1` 路由，初始化端點自然也不在上面。
 
 ## 角色權限：deny-by-default，dispatch 即時強制
 
@@ -319,11 +365,36 @@ laysi-admin list-users
 呼叫立即生效。
 
 `limited` 仍代表可以進入該組操作，部門或本人範圍由各操作的查詢條件繼續縮小。
-`Risk::BossOnly` 保留為額外的風險限制，權限資料列不會把非老闆提升成老闆。
+兩道風險底線保留為權限矩陣之外的額外限制，權限資料列不會把任何角色提升上去。
 0011 先涵蓋原有 76 個操作，0012 再加入 9 個主檔與應收應付建立操作，0014
-加入作廢與反向沖銷；目前 95 個 Registry 操作各恰好屬於一條 permission。
-純字串測試會依序重播 0006、0008、0009、0011、0012、0014 的 INSERT／UPDATE，
-缺漏與重複都不准通過。
+加入作廢與反向沖銷，0023 加入 `create_user_account`；目前 97 個 Registry 操作各恰好
+屬於一條 permission。純字串測試會依序重播 0006、0008、0009、0011、0012、0014、
+0015、0016、0017、0020、0023 的 INSERT／UPDATE，缺漏與重複都不准通過。
+
+### 兩道風險底線：負責人與系統管理員
+
+`Risk` 有兩個「限某角色」的層級，它們保護的是不同的東西：
+
+| 底線 | 常數 | 保護什麼 | 操作 |
+|---|---|---|---|
+| `BossOnly` | `ROLE_BOSS = "boss"` | 業務機密與權威 | `list_payslips`、`list_withholding_statements`、`set_budget`、`set_approval_rule` |
+| `AdminOnly` | `ROLE_ADMIN = "admin"` | 系統本身的控制項 | `update_company_setting`、`set_role_permission`、`issue_api_token`、`create_user_account` |
+
+0023 之前兩者是同一個：`boss` 既改權限也看薪資，於是**裝機的人自動看得到每個人的
+薪水**。分開之後，系統管理員管得了帳號、權限、Token 與公司設定，卻讀不到任何一張
+薪資單；負責人看得到薪資、定得了預算與簽核門檻，卻改不了權限矩陣。
+
+這條分離之所以成立而不只是慣例，靠的是兩件事：底線在權限矩陣之外，`set_role_permission`
+無法把 `admin` 提升到 `BossOnly`；而且**沒有任何操作會改動 `user_account.role_code`**，
+角色只在建立帳號時決定。系統管理員要變成負責人，只能拿到伺服器的 shell。
+
+系統管理員另外持有 `manage_masters`，因為首次設定要建銀行帳戶與部門；該組裡的
+`set_approval_rule` 仍擋在負責人底線之後。`revoke_api_token` 刻意只是 `HighRisk`：
+撤銷往安全的方向走。
+
+`create_user_account` 是唯一不需要 shell 就能建立登入的路徑。它不收密碼——密碼由
+系統產生、只在該次回應出現一次、`must_change_password = true`，所以建立帳號的人
+無法長期使用別人的帳號。連結員工用 `employee_no` 而非姓名，姓名會重複。
 
 `list_roles` 回傳 `enforced: true` 與即時查詢的 `enforcement_note`；
 `missing_ops` 正常應為空，只保留作部署後的契約診斷。
@@ -337,8 +408,8 @@ laysi-admin list-users
 明文的地方，`ApiToken` 型別沒有明文欄位，也不提供取回的方法。稽核摘要同樣不得
 包含明文，因為稽核紀錄是給人翻閱的。
 
-`issue_api_token` 是 `BossOnly`，`revoke_api_token` 刻意只是 `HighRisk`：撤銷是往
-安全的方向走，Token 外洩時不該還要等老闆到場。
+`issue_api_token` 是 `AdminOnly`，`revoke_api_token` 刻意只是 `HighRisk`：撤銷是往
+安全的方向走，Token 外洩時不該還要等系統管理員到場。
 
 `/mcp` 的 Bearer 明文先以與簽發端相同的 `token_hash()` 算 BLAKE3，再由
 `token_by_hash` 查回資料列（`token_by_hash` 刻意不在 SQL 篩掉撤銷或過期的
@@ -482,8 +553,8 @@ REST、MCP 與 TypeScript 產生器。
 ```rust
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
 #[serde(rename_all = "snake_case")]
-pub enum Risk { ReadOnly, NeedsConfirm, HighRisk, BossOnly }
-// 對應原型：唯讀 / 需人確認 / 高風險 / 限老闆
+pub enum Risk { ReadOnly, NeedsConfirm, HighRisk, BossOnly, AdminOnly }
+// 對應原型：唯讀 / 需人確認 / 高風險 / 限負責人
 
 impl Risk { pub fn label_zh(&self) -> &'static str; }
 
@@ -515,7 +586,8 @@ impl Registry {
 
 1. MCP channel 查 `mcp_tool_grant`：未啟用 → 回 `OpError::ToolDisabled`，並以
    `outcome = 'blocked'` 寫入 `ai_audit_log`。
-2. 風險檢查：`BossOnly` 需 `actor_role = "boss"`。
+2. 風險底線：`BossOnly` 需 `actor_role = "boss"`，`AdminOnly` 需
+   `actor_role = "admin"`；擋下來一樣寫 `outcome = 'blocked'` 的稽核。
 3. 即時查 `role_permission` → `permission.op_names`：操作不在角色集合裡 →
    回 `OpError::NotPermitted`，並以 `outcome = 'blocked'` 寫入稽核。
 4. 執行 `call`。
@@ -559,15 +631,16 @@ impl Registry {
 | `get_income_statement` | ReadOnly | `{ from?, to? }` | `rows[]`、`revenue`、`cogs`、`gross_profit`、`operating_profit`、`profit` |
 | `get_cash_flow` | ReadOnly | `{ from?, to? }` | `rows[]`、`opening`、三段合計、`closing`、`ledger_closing`、`cash_accounts[]`、`reconciled` |
 | `get_company_settings` | ReadOnly | `{}` | `settings[]`，含 `source: setting \| regulation` |
-| `update_company_setting` | BossOnly | `{ code, value }` | `{ setting }`；`editable = false` 的擋下 |
+| `update_company_setting` | AdminOnly | `{ code, value }` | `{ setting }`；`editable = false` 的擋下 |
 | `list_chart_of_accounts` | ReadOnly | `{ only_used? }` | 科目＋報表分組＋活動別＋餘額 |
 | `list_dimensions` | ReadOnly | `{}` | `dimensions[]`、`entry_dimension: department`、`applied_to_entries: true` |
 | `list_roles` | ReadOnly | `{}` | `roles[]`、`permissions[]`、`grants[]`、**`enforced: true`** |
-| `set_role_permission` | BossOnly | `{ role_code, permission_code, level: full\|limited\|none }` | `{ cell, enforced: true }`；下次呼叫立即生效 |
+| `set_role_permission` | AdminOnly | `{ role_code, permission_code, level: full\|limited\|none }` | `{ cell, enforced: true }`；下次呼叫立即生效 |
+| `create_user_account` | AdminOnly | `{ username, display_name, email?, role_code, employee_no? }` | `{ user, temporary_password }`；密碼只顯示這一次，`must_change_password = true` |
 | `list_approval_rules` | ReadOnly | `{}` | `steps[]`、`enforced: true` |
 | `get_security_policy` | ReadOnly | `{}` | `rules[]`，每條帶 `enforced` 與 `source` |
 | `list_api_tokens` | ReadOnly | `{ include_revoked? }` | `tokens[]`（**無明文**）、`storage_note`、`wiring_note` |
-| `issue_api_token` | BossOnly | `{ name, kind, scope, actor, actor_role, rotate_days?, expiry_note? }` | `{ token, secret }`，`secret` 只顯示這一次 |
+| `issue_api_token` | AdminOnly | `{ name, kind, scope, actor, actor_role, rotate_days?, expiry_note? }` | `{ token, secret }`，`secret` 只顯示這一次 |
 | `revoke_api_token` | HighRisk | `{ id }` | `{ token }` |
 | `get_system_health` | ReadOnly | `{}` | `migration`、`stats`、`rulesets[]` |
 
@@ -663,7 +736,7 @@ impl Registry {
 | `list_my_api_tokens` | ReadOnly | `{ include_revoked? }` | 本人核發的 Token＋本人在 MCP 上可用的工具 |
 | `revoke_my_api_token` | NeedsConfirm | `{ id }` | 所屬員工寫在 WHERE 條件裡 |
 
-**「用 MCP」不是主管的特權。** `issue_api_token` 是 `BossOnly`，而且輸入帶
+**「用 MCP」不是主管的特權。** `issue_api_token` 是 `AdminOnly`，而且輸入帶
 `actor` 與 `actor_role`——就算給了職員權限，那個形狀也允許他指定 Token 代表誰。
 自助版本兩個欄位都沒有，代表對象與角色一律取自 session，因此**這把 Token 能做的
 事與本人完全相同，不會更多**：職員的 Token 就是職員。
@@ -849,6 +922,7 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 | POST | `/v1/auth/logout` | 撤銷目前 session 並清除 cookie |
 | GET | `/v1/auth/me` | 目前登入帳號；未登入回 401 |
 | POST | `/v1/auth/change-password` | 驗證目前密碼後更新 Argon2id 雜湊並清除 `must_change_password` |
+| POST | `/v1/auth/bootstrap` | 安裝完全沒有帳號時建立第一個帳號（角色固定 `admin`）並直接簽發 session |
 | GET | `/v1/auth/oauth/start` | 啟用時建立 PKCE 流程並以 302 前往 discovery 的 authorization endpoint |
 | GET | `/v1/auth/oauth/callback` | 後端交換授權碼、驗證 id_token、建立 session，再以 302 回 `/` |
 | GET | `/v1/meta` | 公司、會計期間、身分、版本、授權、品牌出處字串 |
@@ -861,6 +935,8 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 `/healthz` 與 `/v1/brand/*.svg` 是公開端點。`/v1/meta`、`/v1/ops*` 必須有
 有效 session；`/mcp` 必須有自己的 Bearer 憑證。認證路由是操作註冊表唯一例外：
 登入若經過 dispatch，就會先被角色權限步驟要求一個尚未取得的身分，形成循環。
+`/v1/auth/bootstrap` 同樣未登入即可呼叫，但守門的是「安裝目前沒有任何帳號」，
+由資料庫的單列表保證，見上文〈網頁初始化〉。
 
 `/v1/meta` 回傳：
 

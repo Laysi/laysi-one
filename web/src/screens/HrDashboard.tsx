@@ -146,9 +146,7 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
         </section>
       </div>
 
-      <p className="hint">
-        逐人薪資明細與年度扣繳憑單標示為「限老闆」，是角色權限之外的額外限制。
-      </p>
+      <p className="hint">逐人薪資明細與年度扣繳憑單限負責人檢視。</p>
       <p className="hint">
         到職、離職、調薪、調部門各走哪幾關可自行調整，目前收了{' '}
         {new Set(data.flow_kinds).size} 種異動、共 {data.flow_kinds.length} 關。

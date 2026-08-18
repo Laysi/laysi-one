@@ -79,7 +79,7 @@ export function Login() {
                 />
               </label>
               <label className="login__field">
-                <span className="login__label">新密碼</span>
+                <span className="login__label">新密碼（至少 12 個字元）</span>
                 <input
                   className="entry-input"
                   type="password"
@@ -114,10 +114,6 @@ export function Login() {
                 </button>
               </div>
             </form>
-
-            <p className="login__note">
-              密碼規則由伺服器驗證，不符時會回覆具體要求。本畫面不另行判斷。
-            </p>
           </>
         ) : (
           <>
@@ -154,7 +150,7 @@ export function Login() {
                   {failure.message}
                   {failure.error.code === NO_USER_ACCOUNT && (
                     <span className="login__hint">
-                      系統不提供預設帳號，請由管理員在伺服器上建立第一個帳號。
+                      請重新整理頁面建立第一個帳號，或洽管理員。
                     </span>
                   )}
                 </p>
@@ -173,19 +169,12 @@ export function Login() {
                 <a className="btn btn--secondary login__oauth" href={OAUTH_START_URL}>
                   使用 Google 登入
                 </a>
-                <p className="login__note">
-                  將轉向本站設定的登入服務。帳號要先由管理員連結；系統不以 email 比對，
-                  也不會自動建立帳號。
-                </p>
+                <p className="login__note">帳號需由管理員預先連結，否則無法登入。</p>
               </div>
             )}
           </>
         )}
       </div>
-
-      <p className="login__foot">
-        身分僅來自本頁登入，操作權限由後端逐次檢查。
-      </p>
     </div>
   );
 }

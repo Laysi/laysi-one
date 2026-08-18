@@ -178,9 +178,7 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
         <div className="recon-columns">
           <section>
             <h2 className="section-title">銀行流水（未核銷 {unmatched}）</h2>
-            <p className="section-note">
-              灰色為已核銷項目。核銷不產生分錄，僅標示銀行明細與帳上傳票的對應關係。
-            </p>
+            <p className="section-note">灰色為已核銷項目。</p>
             <div className="bank-list">
               {rows.map((t) => {
                 const done = Boolean(t.matched_voucher_no);
@@ -304,7 +302,7 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
               )}
             </div>
             <div className="drawer__foot">
-              <span className="drawer__foot-note">建立後即可於「登記收款」「送出付款單」中選用</span>
+              <span className="drawer__foot-note">建立資金帳戶</span>
               <button
                 className={`btn${saving ? ' btn--off' : ''}`}
                 disabled={saving || !glAccounts || glAccounts.length === 0}

@@ -305,7 +305,7 @@ impl Operation for GetPayrollSummary {
         let gl = ctx.store.balance_of(&["6111"], true).await?;
         let gap = posted - gl;
 
-        let detail_visible = ctx.actor_role == "boss";
+        let detail_visible = ctx.actor_role == crate::ROLE_BOSS;
         let period_label = picked.map(|r| r.period.clone()).unwrap_or_else(|| "—".into());
 
         let summary = match picked {
@@ -344,7 +344,7 @@ impl Operation for GetPayrollSummary {
                 },
                 "actor_role": ctx.actor_role,
                 "employer_in_ledger": false,
-                "employer_note": "公司負擔的勞健保與勞退不在薪資傳票內，該部分屬公司費用而非員工代扣；入帳需另設保險費科目並開立另一張傳票，該銜接尚未實作。",
+                "employer_note": "公司負擔的勞健保與勞退不在薪資傳票內，該部分屬公司費用而非員工代扣。",
             }),
             summary,
         ))
@@ -366,7 +366,7 @@ impl Operation for ListPayslips {
         Risk::BossOnly
     }
     fn summary(&self) -> &'static str {
-        "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司替他負擔的勞健保與勞退。限老闆身分。會用同一份規則重算一次跟存下來的數字比對。"
+        "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司替他負擔的勞健保與勞退。限負責人。會用同一份規則重算一次跟存下來的數字比對。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<PayrollPeriodInput>()
@@ -454,7 +454,7 @@ impl Operation for ListPayslips {
                 "run": run_json(run),
                 "rows": rows,
                 "recompute_all_match": all_match,
-                "recompute_note": "各列均以當期薪資作業保存的規則版本重算一次。儲存值為當時的計算結果，重算為另一條獨立路徑；相符是驗證結論而非前提。",
+                "recompute_note": "各列均以當期薪資作業保存的規則版本重算一次，並與儲存值比對。",
                 "periods": runs.iter().map(|r| r.period.clone()).collect::<Vec<_>>(),
             }),
             summary,

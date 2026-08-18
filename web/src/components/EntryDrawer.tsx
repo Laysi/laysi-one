@@ -223,9 +223,8 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
           <div className="ai-note">
             <div className="ai-note__title">AI 的權限範圍</div>
             <p className="ai-note__desc">
-              AI 只能把分錄<strong>草擬</strong>出來（<code className="ai-note__code">draft_voucher</code>
-              ），存為待確認狀態；科目是否正確、是否入帳一律由人員確認。直接過帳的
-              <code className="ai-note__code">post_voucher</code> 對 AI 預設是關閉的。
+              AI 只能<strong>草擬</strong>分錄，存為待確認；科目與是否入帳一律由人員確認。
+              AI 無法直接過帳。
             </p>
             <button className="btn btn--ghost" onClick={fillFromAi}>
               帶入 AI 草擬分錄

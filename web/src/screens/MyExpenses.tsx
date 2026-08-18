@@ -226,7 +226,6 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
       </div>
 
       <p className="hint">
-        點選標題可展開簽核關卡、已簽核人員與收據。關卡依單據金額比對簽核規則產生，
         金額較大的單據會多一道關卡。已核准或已退回的單不再收件。
       </p>
     </div>

@@ -29,16 +29,24 @@ cp .env.example .env        # 先改掉密碼與金鑰
 docker compose up -d --build
 ```
 
-前端在 http://localhost:8088。系統不提供預設帳號，第一個帳號用 `laysi-admin`
-建立：
+前端在 http://localhost:8088。系統不提供預設帳號，第一次開啟時會出現「建立系統管理員
+帳號」畫面，在上面建立第一個帳號並自訂密碼，接著直接進入公司資料設定。這個畫面只在
+資料庫完全沒有帳號時出現，成功一次之後永久關閉。
+
+第一個帳號是**系統管理員**，不是負責人：管帳號、權限與系統設定，但看不到薪資、
+不能簽核、不能設預算。負責人與其他成員的帳號由系統管理員在「角色與核准」建立。
+
+初始化是未登入即可呼叫的端點，所以先有先得。部署在公開位址時，請在 `.env` 設
+`SETUP_TOKEN` 為一段長亂數，初始化畫面會要求輸入；不想用網頁初始化就設
+`SETUP_ALLOW_WEB=false`，改用指令：
 
 ```bash
 docker compose exec api laysi-admin create-user \
-  --username admin --role boss --display-name 負責人
+  --username admin --role admin --display-name 系統管理員
 ```
 
 指令會把一次性的暫時密碼印在 stdout，首次登入必須更換。角色代碼有
-`boss`、`acct`、`cashier`、`manager`、`accountant`、`staff`。
+`admin`、`boss`、`acct`、`cashier`、`manager`、`accountant`、`staff`。
 
 ## 專案結構
 
@@ -58,14 +66,11 @@ docs/architecture.md 跨層契約，動型別或端點前先讀
 
 ## 開發
 
-編譯一律在容器內進行，本機不需要 Rust toolchain，也不需要 `sqlx-cli`。以下用
-一次性容器跑 cargo，快取與 `target/` 放在具名 volume，不會污染工作目錄：
+工具鏈由 proto 管理，版本釘在倉庫根目錄的 `.prototools`，不需要 `sqlx-cli`：
 
 ```bash
-cargo() {
-  docker run --rm -v "$PWD:/src" -v laysi-cargo:/usr/local/cargo/registry \
-    -v laysi-target:/src/backend/target -w /src/backend rust:1-slim-bookworm cargo "$@"
-}
+proto install              # rust、zig、node
+cd backend
 
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
@@ -76,6 +81,17 @@ cargo run -p laysi-server --bin laysi-schema -- ../web/src/api/generated.ts
 # 改過品牌檔後重簽（否則伺服器拒絕啟動）
 cargo run -p laysi-brand --bin laysi-brandhash -- --update
 ```
+
+Rust 在 Linux 透過 `cc` 連結，`ring` 之類的相依還會編 C 原始碼。本機沒有系統 C
+編譯器時，把 `scripts/toolchain` 放進 PATH，裡面的 `cc` 與 `ar` 會轉呼叫 proto
+裝的 zig，不必另外裝 gcc：
+
+```fish
+set -x PATH (pwd)/scripts/toolchain $PATH
+```
+
+那個目錄不會進映像——Dockerfile 只複製 `LICENSE-BSL.txt` 與 `backend/`，容器建置
+仍用 rust 映像自己的工具鏈。
 
 管理指令直接在跑著的 api 容器裡執行：
 

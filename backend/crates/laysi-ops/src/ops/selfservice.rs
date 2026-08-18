@@ -214,7 +214,7 @@ fn attendance_json(row: &AttendanceRow) -> Value {
         "late_count": row.late_count,
         "note": row.note,
         "overtime_recomputed": false,
-        "overtime_note": "加班費倍數尚未收錄至規則庫，金額由差勤來源帶入，本系統不自行重算。",
+        "overtime_note": "加班費金額由差勤來源帶入，本系統不自行重算。",
     })
 }
 

@@ -209,8 +209,8 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
 
           <p className="hint">
             「執行折舊」會開立一張借 <span className="num">6152 折舊費用</span>、貸{' '}
-            <span className="num">1602 累計折舊</span> 的傳票，狀態為待過帳。同一期僅能提列一次；
-            重複提列會使累計折舊多計一個月，該誤差通常要到資產提列完畢時才會顯現。
+            <span className="num">1602 累計折舊</span> 的傳票，狀態為待過帳。
+            同一期僅能提列一次。
           </p>
           <p className="hint">
             年限依資產類別查耐用年數表，不逐筆設定。每筆提列均保存當時查得的年數與規則版本。
@@ -245,7 +245,7 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
                           </span>
                         </td>
                         <td className="cell-accounts">
-                          {r.ruleset_version ?? '—（由淨額反推，非依規則提列）'}
+                          {r.ruleset_version ?? '—（未依規則版本提列）'}
                         </td>
                         <td className="num align-right">{money(r.total)}</td>
                       </tr>

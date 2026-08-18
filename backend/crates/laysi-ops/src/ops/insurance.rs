@@ -273,7 +273,7 @@ impl Operation for GetInsuranceSummary {
                 // The employer share is not in the ledger yet. State that rather
                 // than letting it look like a booked expense.
                 "posted_to_ledger": false,
-                "posting_note": "公司負擔的勞保、健保與勞退尚未產生分錄，薪資傳票僅含應發、代扣與實發三段。入帳需另設保險費科目並開立新傳票，該項為人資與財務的第四條銜接，目前尚未接上。",
+                "posting_note": "公司負擔的勞保、健保與勞退尚未產生分錄，薪資傳票僅含應發、代扣與實發三段。",
             }),
             summary,
         ))

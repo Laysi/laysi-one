@@ -80,7 +80,7 @@ fn may_decide(step: &ApprovalRule, claim: &ExpenseClaim, actor: &str, role: &str
         )));
     }
     let wanted = step.role_code.as_deref().unwrap_or("");
-    if role == wanted || role == "boss" {
+    if role == wanted || role == crate::ROLE_BOSS {
         return Ok(());
     }
     Err(OpError::BadInput(format!(

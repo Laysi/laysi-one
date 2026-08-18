@@ -19,10 +19,14 @@
 //! operation outside the set, means denial.
 //!
 //! That lookup is deliberately not cached so [`SetRolePermission`] takes
-//! effect on the next call. `Risk::BossOnly` remains an additional hard floor;
-//! a permission row cannot promote a non-owner. `missing_ops` on
-//! [`ListRoles`] is post-deployment diagnostics — a correct build keeps it
-//! empty, which the migration coverage test enforces.
+//! effect on the next call. The two risk floors remain additional hard limits
+//! that a permission row cannot lift: `Risk::BossOnly` for payroll and other
+//! business confidentiality, `Risk::AdminOnly` for the system's own controls.
+//! [`CreateUserAccount`] is on the admin floor, and it is the only way to
+//! create a login without shell access; nothing anywhere changes an existing
+//! account's role, so an administrator cannot promote themselves to owner.
+//! `missing_ops` on [`ListRoles`] is post-deployment diagnostics — a correct
+//! build keeps it empty, which the migration coverage test enforces.
 
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -40,6 +44,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListDimensions),
         Box::new(ListRoles),
         Box::new(SetRolePermission),
+        Box::new(CreateUserAccount),
         Box::new(ListApprovalRules),
     ]
 }
@@ -176,7 +181,7 @@ impl Operation for UpdateCompanySetting {
     }
     fn risk(&self) -> Risk {
         // Changing this affects the whole system, so it is owner only.
-        Risk::BossOnly
+        Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
         "變更一項公司設定。僅標示為可編輯的項目可以修改；會計年度、期初餘額等項目涉及期初重跑，不是改一個字串就能完成。法規決定的值不在此處管理。"
@@ -326,21 +331,24 @@ impl Operation for ListRoles {
         // at a missing operation means the migration and the code have drifted;
         // the coverage test blocks such a build, but the API still reports it.
         let known: HashSet<&'static str> = crate::ops::all().iter().map(|o| o.name()).collect();
-        // BossOnly is a risk floor outside the permission matrix; the list is
-        // kept so the screen can label it clearly.
-        let boss_only: HashSet<&'static str> = crate::ops::all()
-            .iter()
-            .filter(|o| o.risk() == Risk::BossOnly)
-            .map(|o| o.name())
-            .collect();
+        // The two risk floors sit outside the permission matrix; both lists are
+        // kept so the screen can label them separately. Granting a permission
+        // does not lift either floor.
+        let with_risk = |want: Risk| -> HashSet<&'static str> {
+            crate::ops::all().iter().filter(|o| o.risk() == want).map(|o| o.name()).collect()
+        };
+        let boss_only = with_risk(Risk::BossOnly);
+        let admin_only = with_risk(Risk::AdminOnly);
 
         let perms: Vec<Value> = permissions
             .iter()
             .map(|p| {
                 let missing: Vec<&String> =
                     p.op_names.iter().filter(|n| !known.contains(n.as_str())).collect();
-                let enforced: Vec<&String> =
+                let boss_ops: Vec<&String> =
                     p.op_names.iter().filter(|n| boss_only.contains(n.as_str())).collect();
+                let admin_ops: Vec<&String> =
+                    p.op_names.iter().filter(|n| admin_only.contains(n.as_str())).collect();
                 json!({
                     "code": p.code,
                     "label": p.label,
@@ -348,9 +356,10 @@ impl Operation for ListRoles {
                     "op_names": p.op_names,
                     // A migration pointing at a missing operation is listed as found.
                     "missing_ops": missing,
-                    // These operations have a Risk::BossOnly floor on top of the
-                    // role permission.
-                    "boss_only_ops": enforced,
+                    // These operations carry a risk floor on top of the role
+                    // permission; granting the row does not open them.
+                    "boss_only_ops": boss_ops,
+                    "admin_only_ops": admin_ops,
                 })
             })
             .collect();
@@ -371,7 +380,7 @@ impl Operation for ListRoles {
             .collect();
 
         let summary = format!(
-            "讀取權限矩陣 · {} 個角色 × {} 條權限 · {} 格有授權（已由 dispatch 強制執行）",
+            "讀取權限矩陣 · {} 個角色 × {} 條權限 · {} 格有授權",
             roles.len(),
             permissions.len(),
             cells.len()
@@ -385,8 +394,8 @@ impl Operation for ListRoles {
                 // and must be shown on screen.
                 "enforced": true,
                 "enforcement_note":
-                    "每次呼叫都即時查詢該角色被授予的權限；未獲授權、或操作不在授權\
-                     範圍內即拒絕，並留下一筆被擋下的紀錄。「限老闆」為額外的風險限制。",
+                    "每次呼叫都即時檢查該角色的權限，未獲授權即拒絕並留下紀錄。\
+                     「限負責人」為額外限制。",
                 "actor_role": ctx.actor_role,
             }),
             summary,
@@ -413,7 +422,7 @@ impl Operation for SetRolePermission {
     }
     fn risk(&self) -> Risk {
         // Changing permissions and MCP settings is owner only.
-        Risk::BossOnly
+        Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
         "設定或收回權限矩陣的一格。權限層級用 full／limited／none；改動會從下一次操作呼叫起立即生效。"
@@ -449,6 +458,154 @@ impl Operation for SetRolePermission {
             i.role_code, i.permission_code, what
         );
         Ok(OpOutcome::new(json!({ "cell": cell, "enforced": true }), summary))
+    }
+}
+
+/// Login name rules, shared with the web bootstrap endpoint so the two
+/// entry points cannot drift.
+const USERNAME_MIN_CHARS: usize = 3;
+const USERNAME_MAX_CHARS: usize = 64;
+const DISPLAY_NAME_MAX_CHARS: usize = 64;
+const EMAIL_MAX_CHARS: usize = 254;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateUserAccountInput {
+    /// Login name: letters, digits and `.` `_` `-`, 3 to 64 characters.
+    pub username: String,
+    /// Name shown on screen and in the audit trail.
+    pub display_name: String,
+    /// Optional; may be empty.
+    #[serde(default)]
+    pub email: String,
+    /// Role code from the role table, e.g. `acct`.
+    pub role_code: String,
+    /// Optional employee number to link, so the account can use self-service.
+    #[serde(default)]
+    pub employee_no: String,
+}
+
+struct CreateUserAccount;
+
+#[async_trait]
+impl Operation for CreateUserAccount {
+    fn name(&self) -> &'static str {
+        "create_user_account"
+    }
+    fn risk(&self) -> Risk {
+        // Creating a login is a system control, not a business decision.
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；角色建立後無法在系統內變更。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<CreateUserAccountInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: CreateUserAccountInput = parse(input)?;
+
+        let username = i.username.trim();
+        let count = username.chars().count();
+        if !(USERNAME_MIN_CHARS..=USERNAME_MAX_CHARS).contains(&count) {
+            return Err(OpError::BadInput("登入名稱需要 3 到 64 個字元".into()));
+        }
+        if !username.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+            return Err(OpError::BadInput(
+                "登入名稱只能使用英文字母、數字與 . _ - 三種符號".into(),
+            ));
+        }
+
+        let display_name = i.display_name.trim();
+        if display_name.is_empty() {
+            return Err(OpError::BadInput("顯示名稱為必填".into()));
+        }
+        if display_name.chars().count() > DISPLAY_NAME_MAX_CHARS {
+            return Err(OpError::BadInput("顯示名稱不可超過 64 個字元".into()));
+        }
+
+        let email = i.email.trim();
+        if !email.is_empty()
+            && (email.chars().count() > EMAIL_MAX_CHARS
+                || !email.contains('@')
+                || email.chars().any(char::is_whitespace))
+        {
+            return Err(OpError::BadInput("電子郵件格式不正確；此欄可以留空".into()));
+        }
+
+        let role_code = i.role_code.trim();
+        let roles = ctx.store.roles().await?;
+        let Some(role) = roles.iter().find(|r| r.code == role_code) else {
+            let known: Vec<&str> = roles.iter().map(|r| r.code.as_str()).collect();
+            return Err(OpError::BadInput(format!(
+                "查無角色「{role_code}」；可用的角色是 {}",
+                known.join("、")
+            )));
+        };
+
+        if ctx.store.user_by_username(username).await?.is_some() {
+            return Err(OpError::BadInput(format!("登入名稱「{username}」已被使用")));
+        }
+
+        // Linking is by employee number, not by name: names repeat.
+        let employee_no = i.employee_no.trim();
+        let employee = if employee_no.is_empty() {
+            None
+        } else {
+            Some(ctx.store.employee(employee_no).await.map_err(|_| {
+                OpError::BadInput(format!("查無員工編號「{employee_no}」"))
+            })?)
+        };
+
+        // The administrator never sets a lasting password. A generated one is
+        // returned once and must be changed at first login, so the person who
+        // creates the account cannot keep using it.
+        let temporary = laysi_store::password::temporary_password();
+        let password_hash = laysi_store::password::hash_password(&temporary)
+            .map_err(|e| OpError::BadInput(format!("無法建立密碼雜湊：{e}")))?;
+
+        let user = ctx
+            .store
+            .create_user(laysi_store::CreateUser {
+                username,
+                display_name,
+                email,
+                password_hash: Some(&password_hash),
+                role_code,
+                employee_id: employee.as_ref().map(|e| e.id),
+                status: "active",
+                must_change_password: true,
+                created_by: &ctx.actor,
+            })
+            .await?;
+
+        let summary = format!(
+            "建立帳號 · {}（{}）角色{}{}",
+            user.username,
+            user.display_name,
+            role.name,
+            match &employee {
+                Some(e) => format!("，連結員工 {}", e.emp_no),
+                None => String::new(),
+            }
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "display_name": user.display_name,
+                    "email": user.email,
+                    "role_code": user.role_code,
+                    "role_name": role.name,
+                    "employee_no": employee.as_ref().map(|e| e.emp_no.clone()),
+                },
+                // Shown once and never retrievable: only the hash is stored.
+                "temporary_password": temporary,
+                "must_change_password": true,
+            }),
+            summary,
+        ))
     }
 }
 
@@ -542,14 +699,18 @@ mod tests {
         }
     }
 
-    /// Changing permissions and changing settings are both owner only. Drop
-    /// either to a lower tier and the permission system stops meaning
-    /// anything, since anyone could grant themselves anything.
+    /// Changing permissions, changing settings and creating logins are the
+    /// system's own controls, so they sit on the admin floor rather than the
+    /// owner one. Drop any of them to a lower tier and the permission system
+    /// stops meaning anything, since anyone could grant themselves anything.
     #[test]
-    fn changing_access_and_settings_is_boss_only() {
+    fn system_controls_are_admin_only() {
         for op in ops() {
-            if matches!(op.name(), "set_role_permission" | "update_company_setting") {
-                assert_eq!(op.risk(), Risk::BossOnly, "{} 不該低於限老闆", op.name());
+            if matches!(
+                op.name(),
+                "set_role_permission" | "update_company_setting" | "create_user_account"
+            ) {
+                assert_eq!(op.risk(), Risk::AdminOnly, "{} 不該低於限系統管理員", op.name());
             }
         }
     }

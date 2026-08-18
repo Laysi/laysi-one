@@ -255,8 +255,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
           </div>
 
           <p className="hint">
-            「登記收款」會開立一張借銀行存款、貸應收帳款的傳票，狀態為待過帳，
-            而非僅將該列標記為已收。若狀態可改而總帳不動，帳務即產生分歧。
+            「登記收款」會開立一張借銀行存款、貸應收帳款的傳票，狀態為待過帳。
           </p>
         </>
       )}
@@ -268,8 +267,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
               <div>
                 <div className="drawer__title">新增應收單</div>
                 <div className="drawer__subtitle">
-                  同時會產生一張待過帳傳票（借應收帳款／貸指定收益科目）；適用不需電子發票的
-                  B2B 月結與國外客戶
+                  適用不需電子發票的 B2B 月結與國外客戶
                 </div>
               </div>
               <button className="btn btn--close" onClick={() => setDrawer(false)} aria-label="關閉">
@@ -325,7 +323,9 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
               </div>
             </div>
             <div className="drawer__foot">
-              <span className="drawer__foot-note">借方固定是 1131 應收帳款</span>
+              <span className="drawer__foot-note">
+                同時產生待過帳傳票（借 1131 應收帳款／貸指定收益科目）
+              </span>
               <button
                 className={`btn${savingInvoice ? ' btn--off' : ''}`}
                 disabled={savingInvoice}

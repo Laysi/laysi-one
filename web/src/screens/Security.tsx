@@ -158,9 +158,6 @@ export function Security({ onToast, reloadKey }: Props) {
                   ) : (
                     '無法讀取'
                   )}
-                  <span className="fact__note">
-                    驗證未通過時伺服器會拒絕啟動，因此本行可見即代表驗證通過。
-                  </span>
                 </span>
               </div>
               <div className="fact">
@@ -190,7 +187,7 @@ export function Security({ onToast, reloadKey }: Props) {
                         .filter((r) => !r.applicable)
                         .map((r) => r.domain)
                         .join('、')}{' '}
-                      查無適用版本時，相關計算一律回覆錯誤，不採用預設值。
+                      查無適用版本時，相關計算一律回覆錯誤，不以預設值代替。
                     </span>
                   )}
                 </span>
@@ -263,7 +260,7 @@ export function Security({ onToast, reloadKey }: Props) {
             </p>
 
             <p className="hint">
-              核發限老闆，撤銷不限——Token 外洩時任何人都能立即撤銷，不必等負責人到場。
+              核發限系統管理員，撤銷不限；Token 外洩時任何人都能立即撤銷。
             </p>
           </section>
         </div>

@@ -208,11 +208,10 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
 
               <p className="recon recon--off">
                 <strong>本段限負責人檢視。</strong> {summary.detail_note}
-                {' '}也可以由下方實際呼叫驗證：後端將拒絕，該次拒絕寫入稽核。
               </p>
               <div className="toolbar">
                 <button className="btn btn--compact btn--secondary" onClick={() => void tryDetail()}>
-                  仍要嘗試（將被拒絕，並留下稽核紀錄）
+                  仍要嘗試
                 </button>
               </div>
             </>
@@ -309,7 +308,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 {busy ? '計算中…' : '計算薪資並產生傳票'}
               </button>
               <p className="form-note">
-                保費依<strong>期末日</strong>解析，扣繳依<strong>給付日</strong>解析。
+                保費依<strong>期末日</strong>、扣繳依<strong>給付日</strong>認定。
                 兩者通常同月，跨月發薪時才會分開。
               </p>
               <p className="form-note">

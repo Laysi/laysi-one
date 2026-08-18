@@ -311,7 +311,7 @@ impl Operation for ListEmployees {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由特休規則計算，不逐人設定）。**不含月薪與投保級距**；薪資明細見 list_payslips，該操作限老闆。"
+        "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由特休規則計算，不逐人設定）。**不含月薪與投保級距**；薪資明細見 list_payslips，該操作限負責人。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListEmployeesInput>()

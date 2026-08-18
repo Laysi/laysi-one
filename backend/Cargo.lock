@@ -1840,13 +1840,16 @@ name = "laysi-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "aws-sdk-s3",
  "aws-smithy-http-client",
  "aws-smithy-types",
  "blake3",
  "chrono",
+ "hex",
  "laysi-domain",
  "laysi-regulation",
+ "rand 0.8.7",
  "rust_decimal",
  "serde",
  "serde_json",

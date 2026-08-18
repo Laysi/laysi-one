@@ -120,7 +120,7 @@ export function Withholding({ onToast, reloadKey }: Props) {
                       <>
                         <strong>{c.not_checked_reason}</strong>
                         <span className="fact__note">
-                          規則庫收錄這項規則後，本表會自動開始檢查。
+                          這項規則收錄後，本表會自動開始檢查。
                         </span>
                       </>
                     )}

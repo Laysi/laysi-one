@@ -303,7 +303,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
               </div>
 
               <p className="recon">
-                打卡推導的天數與匯入的出勤月統計互不覆蓋；兩邊不同時照實列出，由人資決定要更正哪一邊。
+                打卡與匯入的月統計分開列出，兩邊不同時由人資決定更正哪一邊。
                 加班只算時數，不算金額。
               </p>
 
@@ -415,8 +415,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       </button>
 
                       <p className="form-note">
-                        補登會覆蓋同一天同一格已有的時間，來源記為補登並留下操作者姓名。
-                        時間可填到秒，只填到分則記為秒零。
+                        補登會覆蓋同一天同一格已有的時間，並記錄操作者。時間可填到秒。
                       </p>
                     </div>
                   </section>
@@ -571,8 +570,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
             依據：{leave.annual_leave_ruleset.source_note}
           </p>
           <p className="hint">
-            只有具備簽核權限的角色能核准或駁回，且僅限狀態為「待簽核」的單據；
-            <strong>權限不足時會被拒絕，並留下一筆紀錄</strong>。
+            僅具簽核權限的角色可核准或駁回，且僅限狀態為「待簽核」的單據。
           </p>
         </>
       )}

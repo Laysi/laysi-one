@@ -77,7 +77,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
   async function submitVoid() {
     if (!correction) return;
     if (!voidReason.trim()) {
-      onToast('作廢理由必填，會寫進稽核摘要');
+      onToast('請填寫作廢理由');
       return;
     }
     setSubmitting(true);
@@ -235,8 +235,8 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
                     <button className="choice" onClick={() => setCorrection({ ...correction, kind: 'void' })}>
                       <div className="choice__title">該傳票不應存在</div>
                       <div className="choice__desc">
-                        例如重複過帳，或交易對象完全錯誤。傳票將標記為「已作廢」，理由必填
-                        並寫入稽核摘要，且無法復原。
+                        例如重複過帳，或交易對象完全錯誤。傳票將標記為「已作廢」，
+                        理由必填，且無法復原。
                       </div>
                     </button>
                     <button className="choice" onClick={() => setCorrection({ ...correction, kind: 'reverse' })}>

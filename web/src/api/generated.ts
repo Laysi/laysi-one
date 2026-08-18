@@ -92,6 +92,7 @@ export type OpName =
   | 'list_dimensions'
   | 'list_roles'
   | 'set_role_permission'
+  | 'create_user_account'
   | 'list_approval_rules'
   | 'get_security_policy'
   | 'list_api_tokens'
@@ -100,7 +101,7 @@ export type OpName =
   | 'get_system_health'
 ;
 
-export type Risk = 'read_only' | 'needs_confirm' | 'high_risk' | 'boss_only';
+export type Risk = 'read_only' | 'needs_confirm' | 'high_risk' | 'boss_only' | 'admin_only';
 
 export interface OpMeta {
   name: OpName;
@@ -147,7 +148,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'reject_expense_claim', risk: 'needs_confirm', riskLabel: '需人確認', summary: "退回一張報支單，由申請人補件。整張作廢重送，不提供「退回至第 N 關」；單據內容變更後，先前關卡的簽核即不再有效。" },
   { name: 'get_budget_status', risk: 'read_only', riskLabel: '唯讀', summary: "讀預算執行率：預算數為設定值，實際數一律由已過帳分錄即時計算，系統不儲存任何實際數。提醒門檻取自公司設定。" },
   { name: 'get_department_pl', risk: 'read_only', riskLabel: '唯讀', summary: "讀部門損益：依分錄所屬部門區分的收入與成本費用。未指定部門者列為「未指定」且不分攤，因此各列加總必等於損益表的本期損益。" },
-  { name: 'set_budget', risk: 'boss_only', riskLabel: '限老闆', summary: "設定某個科目（或某部門）的年度預算金額。僅變更預算數；實際數一律來自總帳，無法於此變更。" },
+  { name: 'set_budget', risk: 'boss_only', riskLabel: '限負責人', summary: "設定某個科目（或某部門）的年度預算金額。僅變更預算數；實際數一律來自總帳，無法於此變更。" },
   { name: 'list_documents', risk: 'read_only', riskLabel: '唯讀', summary: "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。OCR 一律回 pending；系統未配置辨識引擎，不提供推估的辨識率。" },
   { name: 'upload_document', risk: 'needs_confirm', riskLabel: '需人確認', summary: "上傳一份檔案到物件儲存，並掛到一張單據上。內容以 base64 傳入；系統存下內容雜湊，之後每次取回都會比對。同一個編號再上傳一次就是新版本，舊版不會被覆寫。" },
   { name: 'get_document', risk: 'read_only', riskLabel: '唯讀', summary: "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才把內容以 base64 帶回來。雜湊對不上就回錯誤，不交出內容。" },
@@ -164,9 +165,9 @@ export const OPS: readonly OpMeta[] = [
   { name: 'update_employee', risk: 'needs_confirm', riskLabel: '需人確認', summary: "完整更新員工主檔。完整身分證字號仍會被拒絕，投保級距照申報事實保存；狀態為待離職或已離職時必須填離職日。這不會建立或修改登入帳號。" },
   { name: 'create_bank_account', risk: 'needs_confirm', riskLabel: '需人確認', summary: "建立銀行帳戶，必須綁定一個啟用中的可入帳資產科目；未綁定總帳科目時，銀行收付款與核銷無法入帳。" },
   { name: 'create_dimension_value', risk: 'needs_confirm', riskLabel: '需人確認', summary: "在既有維度下新增一個值，不會建立新維度。department 維度的值可供員工與分錄部門欄位使用；部門欄位不接受其他維度的值。" },
-  { name: 'set_approval_rule', risk: 'boss_only', riskLabel: '限老闆', summary: "新增、覆寫或刪除一關費用簽核規則；相同關卡編號會覆蓋，未設金額門檻代表一律需要。金額是公司政策而非法規，可隨時調整；整套流程至少保留一關。" },
+  { name: 'set_approval_rule', risk: 'boss_only', riskLabel: '限負責人', summary: "新增、覆寫或刪除一關費用簽核規則；相同關卡編號會覆蓋，未設金額門檻代表一律需要。金額是公司政策而非法規，可隨時調整；整套流程至少保留一關。" },
   { name: 'get_hr_dashboard', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資總覽：在職人數、本月到離職、待簽核的休假單與異動單，以及人資與財務各條銜接的接上狀態" },
-  { name: 'list_employees', risk: 'read_only', riskLabel: '唯讀', summary: "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由特休規則計算，不逐人設定）。**不含月薪與投保級距**；薪資明細見 list_payslips，該操作限老闆。" },
+  { name: 'list_employees', risk: 'read_only', riskLabel: '唯讀', summary: "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由特休規則計算，不逐人設定）。**不含月薪與投保級距**；薪資明細見 list_payslips，該操作限負責人。" },
   { name: 'list_employee_movements', risk: 'read_only', riskLabel: '唯讀', summary: "讀到離職與異動單：每一張走到哪一關、還差哪幾關。流程本身（到職四步、離職四步…）為公司設定，不寫死在程式裡。" },
   { name: 'record_employee_movement', risk: 'needs_confirm', riskLabel: '需人確認', summary: "開立到職／離職／調薪／調部門的異動單。開立離職單時，員工即標示為「離職中」並記錄預定離職日，名冊與薪資作業立即反映，不待最後一關完成。" },
   { name: 'complete_movement_step', risk: 'needs_confirm', riskLabel: '需人確認', summary: "將異動單的某一關標記為完成。全部關卡完成時異動單自動結案；離職流程完成後，員工才會變成「已離職」。" },
@@ -178,10 +179,10 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_insurance_summary', risk: 'read_only', riskLabel: '唯讀', summary: "讀勞健保與勞退：公司負擔、員工自付、逐人投保級距與三項保費。費率、上限與平均眷口數均取自 laysi-regulation，本操作不內含任何數值。" },
   { name: 'compute_insurance', risk: 'read_only', riskLabel: '唯讀', summary: "試算一個投保級距的勞保、健保與勞退各要出多少，並回報依哪一版規則、公司與員工各分攤多少比例。換一個適用日期就換一套費率。" },
   { name: 'get_payroll_summary', risk: 'read_only', riskLabel: '唯讀', summary: "讀某一期的薪資彙總：應發、代扣、實發、公司負擔，以及它跟總帳 6111 薪資支出對不對得起來。不含任何個人金額。" },
-  { name: 'list_payslips', risk: 'boss_only', riskLabel: '限老闆', summary: "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司替他負擔的勞健保與勞退。限老闆身分。會用同一份規則重算一次跟存下來的數字比對。" },
+  { name: 'list_payslips', risk: 'boss_only', riskLabel: '限負責人', summary: "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司替他負擔的勞健保與勞退。限負責人。會用同一份規則重算一次跟存下來的數字比對。" },
   { name: 'run_payroll', risk: 'high_risk', riskLabel: '高風險', summary: "算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。同一期只能算一次。" },
   { name: 'get_hr_compliance', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資法遵檢核表：逐人檢查最低工資、勞保計費上限、保費試算與特休餘額。完整投保級距與加班費倍數的規則不足時，明確標示為未檢查，不視為通過。" },
-  { name: 'list_withholding_statements', risk: 'boss_only', riskLabel: '限老闆', summary: "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限老闆身分；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。" },
+  { name: 'list_withholding_statements', risk: 'boss_only', riskLabel: '限負責人', summary: "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限負責人；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。" },
   { name: 'get_my_home', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前呼叫者本人的員工首頁：基本資料（不含身分證字號，銀行帳戶僅留尾碼）、年資、本月出勤、特休餘額，以及本人送出的休假與報支的目前關卡。無任何參數可指定他人。" },
   { name: 'list_my_payslips', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由登入身分決定，查不到他人的薪資單。" },
   { name: 'list_my_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前呼叫者自己的全部休假單與本年度特休額度、已休、剩餘。額度由查詢日適用的特休規則與年資現算，不逐人設定。" },
@@ -195,15 +196,16 @@ export const OPS: readonly OpMeta[] = [
   { name: 'list_my_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人自助核發的 MCP Token，以及本人在 MCP 上實際能呼叫的工具清單。不含負責人代發的 Token，輸入不含可指定他人的欄位。" },
   { name: 'revoke_my_api_token', risk: 'needs_confirm', riskLabel: '需人確認', summary: "撤銷一把本人自助核發的 MCP Token。只能撤銷本人核發的 Token，別人的一律查無此筆。撤銷後不可復原。" },
   { name: 'get_company_settings', risk: 'read_only', riskLabel: '唯讀', summary: "讀公司與帳務設定：公司名稱、統編、會計年度、本位幣、單據編號規則。營業稅那一列不是設定值，是從法規規則庫依生效日算出來的。" },
-  { name: 'update_company_setting', risk: 'boss_only', riskLabel: '限老闆', summary: "變更一項公司設定。僅標示為可編輯的項目可以修改；會計年度、期初餘額等項目涉及期初重跑，不是改一個字串就能完成。法規決定的值不在此處管理。" },
+  { name: 'update_company_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "變更一項公司設定。僅標示為可編輯的項目可以修改；會計年度、期初餘額等項目涉及期初重跑，不是改一個字串就能完成。法規決定的值不在此處管理。" },
   { name: 'list_chart_of_accounts', risk: 'read_only', riskLabel: '唯讀', summary: "讀會計科目表：代號、名稱、類別、正常餘額方向，以及它在資產負債表哪一段、在現金流量表屬於哪一種活動，還有目前的餘額" },
   { name: 'list_dimensions', risk: 'read_only', riskLabel: '唯讀', summary: "讀既有維度與其值：部門、專案、成本中心、付款條件。這個操作只讀設定；department 維度已掛到分錄與員工的部門欄位。" },
   { name: 'list_roles', risk: 'read_only', riskLabel: '唯讀', summary: "讀角色權限矩陣：哪個角色有哪些權限、完整還是有限。每次呼叫都會即時強制檢查。" },
-  { name: 'set_role_permission', risk: 'boss_only', riskLabel: '限老闆', summary: "設定或收回權限矩陣的一格。權限層級用 full／limited／none；改動會從下一次操作呼叫起立即生效。" },
+  { name: 'set_role_permission', risk: 'admin_only', riskLabel: '限系統管理員', summary: "設定或收回權限矩陣的一格。權限層級用 full／limited／none；改動會從下一次操作呼叫起立即生效。" },
+  { name: 'create_user_account', risk: 'admin_only', riskLabel: '限系統管理員', summary: "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；角色建立後無法在系統內變更。" },
   { name: 'list_approval_rules', risk: 'read_only', riskLabel: '唯讀', summary: "讀費用報支的簽核流程：幾關、每一關是誰、超過多少錢才需要。金額門檻是公司政策，可隨時調整，不是寫死在程式碼中。" },
   { name: 'get_security_policy', risk: 'read_only', riskLabel: '唯讀', summary: "讀控制規則：職責分離、金額門檻、雙因素、AI 禁止事項、稽核保留。逐條標示是否實際執行；AI 禁止事項依目前的工具開關即時計算，非固定文字。" },
   { name: 'list_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀 API 與 MCP Token 清單：名稱、用途範圍、代表對象、最後使用時間、輪替期限。僅保留前八碼與雜湊，不存明文，系統也無法回查。" },
-  { name: 'issue_api_token', risk: 'boss_only', riskLabel: '限老闆', summary: "核發一組新的 API 或 MCP Token。明文僅出現於本次回應，之後系統無法回查；系統僅保存雜湊與前八碼。" },
+  { name: 'issue_api_token', risk: 'admin_only', riskLabel: '限系統管理員', summary: "核發一組新的 API 或 MCP Token。明文僅出現於本次回應，之後系統無法回查；系統僅保存雜湊與前八碼。" },
   { name: 'revoke_api_token', risk: 'high_risk', riskLabel: '高風險', summary: "撤銷一把 Token。撤銷之後不能復原，要用就重發一把。" },
   { name: 'get_system_health', risk: 'read_only', riskLabel: '唯讀', summary: "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。品牌指紋與物件儲存連線由 /healthz 回答。" },
 ] as const;
@@ -300,6 +302,7 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'list_dimensions': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_roles': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'set_role_permission': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"level":{"description":"`full`, `limited`, or `none` to revoke this cell.","type":"string"},"permission_code":{"description":"Permission code, e.g. `post_voucher`.","type":"string"},"role_code":{"description":"Role code, e.g. `acct`.","type":"string"}},"required":["level","permission_code","role_code"],"title":"SetRolePermissionInput","type":"object"},
+  'create_user_account': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"display_name":{"description":"Name shown on screen and in the audit trail.","type":"string"},"email":{"default":"","description":"Optional; may be empty.","type":"string"},"employee_no":{"default":"","description":"Optional employee number to link, so the account can use self-service.","type":"string"},"role_code":{"description":"Role code from the role table, e.g. `acct`.","type":"string"},"username":{"description":"Login name: letters, digits and `.` `_` `-`, 3 to 64 characters.","type":"string"}},"required":["display_name","role_code","username"],"title":"CreateUserAccountInput","type":"object"},
   'list_approval_rules': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'get_security_policy': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_api_tokens': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_revoked":{"default":false,"description":"Include revoked tokens; excluded by default.","type":"boolean"}},"title":"ListApiTokensInput","type":"object"},

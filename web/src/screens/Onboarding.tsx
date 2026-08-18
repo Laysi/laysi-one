@@ -188,7 +188,7 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
               不待最後一關才反映；完成最後一關後才會變成「已離職」。
             </p>
             <p className="hint">
-              關卡所列名稱為<strong>承辦人</strong>；實際阻擋來自角色權限，兩者是不同機制。
+              關卡所列名稱為<strong>承辦人</strong>；能否操作由角色權限決定。
             </p>
           </section>
 

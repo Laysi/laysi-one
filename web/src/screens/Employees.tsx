@@ -143,7 +143,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       !form.health_insured_salary.trim() ||
       !form.pension_wage.trim()
     ) {
-      onToast('本薪與三項投保級距皆為必填，屬申報事實，系統不代為填補');
+      onToast('本薪與三項投保級距為必填');
       return;
     }
     if ((form.status === 'leaving' || form.status === 'left') && !form.left_on) {
@@ -176,9 +176,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         input,
         drawer === 'edit' ? `更新員工 ${form.emp_no}` : `新增員工 ${form.name}`,
       );
-      onToast(
-        `${d.employee.emp_no} ${d.employee.name} 已儲存；登入帳號需另行建立`,
-      );
+      onToast(`${d.employee.emp_no} ${d.employee.name} 已儲存`);
       setDrawer(null);
       onChanged();
       load();
@@ -233,10 +231,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
           {data.employees.length === 0 ? (
             <div className="placeholder">
               <div className="placeholder__title">名冊尚無資料</div>
-              <p>
-                請由上方「＋ 新增員工」建立第一筆。建立主檔不會一併建立登入帳號，
-                登入帳號由系統管理員另行建立。
-              </p>
+              <p>請由上方「＋ 新增員工」建立第一筆。</p>
             </div>
           ) : (
             <div className="table-scroll">
@@ -310,9 +305,9 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
           )}
 
           <p className="hint">
-            特休額度不逐人設定，每一列均依年資與特休規則{' '}
+            特休額度不逐人設定，依年資與特休規則{' '}
             <span className="num">{data.annual_leave_ruleset.version}</span>{' '}
-            即時計算（{data.annual_leave_ruleset.effective_from} 起適用）。
+            計算（{data.annual_leave_ruleset.effective_from} 起適用）。
           </p>
           <p className="hint">{data.id_note}</p>
         </>
@@ -451,8 +446,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     onChange={(e) => setField('id_no', e.target.value)}
                   />
                   <span className="field__hint">
-                    可留空。如果要填，請先遮罩；符合完整字號格式者（一個英文字母加九碼數字，例如
-                    A123456789）將被後端拒絕，系統無任何功能需要完整字號。
+                    可留空。如果要填，請先遮罩；完整字號（一個英文字母加九碼數字）不予接受。
                   </span>
                 </label>
 
@@ -467,9 +461,9 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
               </div>
 
               <p className="form-warn">
-                本薪與三項投保級距依填寫值原樣保存，系統不以勞健保規則校正。
+                本薪與三項投保級距依填寫值原樣保存，不以勞健保規則校正。
                 {drawer === 'edit' &&
-                  '基於隱私，名冊不顯示這幾欄，系統也沒有別的管道讀回目前的值。請照實際薪資單與投保申報表重新填寫；留空無法儲存，填錯會直接蓋掉原本的數字。'}
+                  '名冊不顯示這幾欄，也無法讀回目前的值。請照薪資單與投保申報表重新填寫；留空無法儲存，填錯會蓋掉原本的數字。'}
               </p>
 
               <div className="field-grid">
@@ -528,7 +522,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
 
             <div className="drawer__foot">
               <span className="drawer__foot-note">
-                {drawer === 'edit' ? '完整更新本筆員工主檔' : '建立員工主檔，不建立登入帳號'}
+                {drawer === 'edit' ? '完整更新本筆員工主檔' : '建立員工主檔'}
               </span>
               <button className={`btn${saving ? ' btn--off' : ''}`} disabled={saving} onClick={() => void save()}>
                 {saving ? '存檔中…' : '存檔'}

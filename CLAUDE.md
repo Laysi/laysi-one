@@ -115,7 +115,18 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
   `##` 修辭小標、不用 `**粗體**`、不用 `── ─────` 橫幅、不寫開發過程與第一人稱。
 - **UI 文案一律繁體中文，語氣為清晰簡潔的商務風格**。不使用原型的口語腔
   （「今天的帳，還好嗎？」「別人還沒付我」已全數改為「財務總覽」「應收帳款」）。
-  畫面文字包含後端 ops 產出的 `kicker`／`label`／`note`，兩邊同一套語氣。
+  畫面文字包含後端 ops 產出的 `kicker`／`label`／`note`、`OpError` 訊息，
+  以及 migration 種下的 `role.name`／`security_policy.detail` 這類會被畫面讀出
+  的欄位——**只要看得到就是 UI 文案**，四處同一套語氣。六條判準：
+  1. 講使用者要做什麼，不講系統處在什麼狀態；
+  2. 只留下做決定需要、而畫面上看不到的資訊；
+  3. 不寫理由（理由寫在 `docs/architecture.md`）；
+  4. 不可逆的事要講，可逆的不必；
+  5. 錯誤訊息寫「哪裡不對、怎麼修」，不寫「系統拒絕了，因為……」；
+  6. 一句話講得完就不寫兩句。
+  推論：內部識別字（操作名、資料表欄位、環境變數、`dispatch`／`Registry`
+  這類函式與型別名）不出現在畫面上；`boss` 角色一律稱**負責人**，不稱「老闆」
+  （0022 把種子資料一起改了），`admin` 稱**系統管理員**。
 - **`page-lede` 只寫使用者需要知道、而畫面上看不到的事**，不寫「這頁有什麼」——
   標題已經說過了。純複述內容或解釋設計決策的一律刪掉。
 - **數字用 `.num`，它有自己的 `--font-numeric`**（Source Serif 4，lining +
@@ -133,7 +144,7 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 ## 目前進度
 
 已完成並驗證：資料庫不變量、法規引擎、操作註冊表、REST + MCP、品牌完整性、
-RustFS 物件儲存，以及 **32 個畫面、96 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **32 個畫面、97 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 13 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、電子發票／稅務／
@@ -166,12 +177,32 @@ RustFS 物件儲存，以及 **32 個畫面、96 個操作**，分成三個分�
 `ocr_status` 的 CHECK 只收 `pending` 與 `not_applicable`。
 
 **角色權限由 `dispatch` 即時強制 deny-by-default**：每次都查
-`role_permission → permission.op_names`，不快取；`Risk::BossOnly` 仍是額外的風險限制。
+`role_permission → permission.op_names`，不快取。矩陣之外還有**兩道風險底線**
+（0023）：`Risk::BossOnly` 綁 `boss`，管業務機密與權威（薪資明細、扣繳憑單、預算、
+簽核門檻）；`Risk::AdminOnly` 綁 `admin`，管系統本身（權限矩陣、API Token、公司設定、
+建立帳號）。**裝機的人不該因此看得到全公司薪資**，所以這兩件事是兩個角色。分離之所以
+成立：底線在矩陣之外，`set_role_permission` 拉不動它；而且**沒有任何操作會改
+`user_account.role_code`**，角色只在建帳號時決定，系統管理員要變負責人只能拿到 shell。
+系統管理員另持 `manage_masters`（首次設定要建銀行帳戶與部門），該組裡的
+`set_approval_rule` 仍擋在負責人底線後。
 REST 身分只由 HttpOnly session cookie 查回 `user_account`，請求標頭不能指定
 actor 或 role。MCP 身分由 Bearer token 所對應的 `api_token` 資料列決定，
 請求標頭同樣無法覆寫 actor 或 role；撤銷後下一次呼叫立刻失效。
 OIDC 四項設定齊全時採 discovery + Authorization Code + PKCE，且只接受管理員
 預先連結的 issuer／subject，不依 email 比對也不自動建立帳號。
+
+**第一個帳號可以在網頁上建立（`POST /v1/auth/bootstrap`，畫面 `screens/Init.tsx`）**，
+它是 `/v1/auth/*` 例外的下一層：連要被檢查的身分都還不存在，所以守門條件是安裝
+本身的狀態。保證來自 SQL 不是 Rust——0021 的 `install_bootstrap` 是單列表，
+`bootstrap_first_user` 在同一個交易裡先 `INSERT ... WHERE NOT EXISTS (帳號)
+ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事後清空
+`user_account` 也不會重新打開。角色寫死 `admin`（`laysi_ops::ROLE_ADMIN`）**不是
+`boss`**、密碼由本人設定（沒有 `must_change_password`），呼叫端不能指定任何其他欄位。
+負責人與其他成員的帳號之後由系統管理員用 `create_user_account` 在「角色與核准」建立；
+那個操作不收密碼，密碼由系統產生、只回一次、強制首次登入變更。`SETUP_ALLOW_WEB=false`
+關掉整條路，`SETUP_TOKEN` 非空時要求輸入代碼（行程內只留 BLAKE3 雜湊）。
+未登入的判斷資料來自 `/v1/auth/me` 的 `setup` 欄位。**這不是 Registry 操作，
+也不是導覽畫面**，所以不計入 97 個操作與 32 個畫面。
 
 **人資模組不含任何費率**：勞健保勞退由 `laysi-regulation` 以**期末日**解析、
 扣繳以**給付日**解析（扣繳義務發生在給付當下）。薪資過帳產生待過帳傳票

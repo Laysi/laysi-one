@@ -379,7 +379,7 @@ impl PunchSummary {
             "overtime_hours": self.overtime_seconds.map(|s| hours(s).to_string()),
             "manual_days": self.manual_days,
             "overtime_pay_computed": false,
-            "overtime_note": "只算加班時數，不算金額：加班費倍數是法規數字且尚未收錄至規則庫。",
+            "overtime_note": "只算加班時數，不算金額；加班費請依公司規定另行計算。",
         })
     }
 }
@@ -605,7 +605,7 @@ impl Operation for GetAttendance {
                     "late_count": late_count,
                 },
                 "overtime_recomputed": false,
-                "overtime_note": "加班費倍數尚未收錄至規則庫，金額由差勤系統帶入，本系統不依時數自行計算。",
+                "overtime_note": "加班費金額由差勤系統帶入，本系統不依時數自行計算。",
             }),
             summary,
         ))

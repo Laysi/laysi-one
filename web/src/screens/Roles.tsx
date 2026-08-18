@@ -6,6 +6,7 @@ import {
   type ApprovalRules,
   type ApprovalStep,
   type GrantCell,
+  type NewUserAccount,
   type RoleMatrix,
 } from '../api/client';
 
@@ -36,6 +37,22 @@ function emptyStepForm(nextStepNo: number): StepForm {
   return { step_no: String(nextStepNo), role_code: '', label: '', condition_note: '', min_amount: '' };
 }
 
+interface AccountForm {
+  username: string;
+  display_name: string;
+  email: string;
+  role_code: string;
+  employee_no: string;
+}
+
+const EMPTY_ACCOUNT: AccountForm = {
+  username: '',
+  display_name: '',
+  email: '',
+  role_code: '',
+  employee_no: '',
+};
+
 export function Roles({ onToast, reloadKey }: Props) {
   const [matrix, setMatrix] = useState<RoleMatrix | null>(null);
   const [flow, setFlow] = useState<ApprovalRules | null>(null);
@@ -45,17 +62,18 @@ export function Roles({ onToast, reloadKey }: Props) {
   const [stepForm, setStepForm] = useState<StepForm>(emptyStepForm(1));
   const [savingStep, setSavingStep] = useState(false);
 
+  const [accountForm, setAccountForm] = useState<AccountForm>(EMPTY_ACCOUNT);
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [created, setCreated] = useState<NewUserAccount | null>(null);
+
   const load = useCallback(() => {
     setError(null);
-    Promise.all([
-      callOp<RoleMatrix>('list_roles'),
-      callOp<ApprovalRules>('list_approval_rules'),
-    ])
-      .then(([m, f]) => {
-        setMatrix(m);
-        setFlow(f);
-      })
+    callOp<RoleMatrix>('list_roles')
+      .then(setMatrix)
       .catch((e: Error) => setError(e.message));
+    callOp<ApprovalRules>('list_approval_rules')
+      .then(setFlow)
+      .catch(() => setFlow(null));
   }, []);
 
   useEffect(load, [load, reloadKey]);
@@ -149,15 +167,43 @@ export function Roles({ onToast, reloadKey }: Props) {
     }
   }
 
+  async function createAccount() {
+    if (!accountForm.role_code) {
+      onToast('請選擇角色');
+      return;
+    }
+    setSavingAccount(true);
+    try {
+      const d = await callOp<NewUserAccount>(
+        'create_user_account',
+        {
+          username: accountForm.username.trim(),
+          display_name: accountForm.display_name.trim(),
+          email: accountForm.email.trim(),
+          role_code: accountForm.role_code,
+          employee_no: accountForm.employee_no.trim(),
+        },
+        `建立帳號 ${accountForm.username.trim()}`,
+      );
+      setCreated(d);
+      setAccountForm(EMPTY_ACCOUNT);
+      onToast(`已建立 ${d.user.username}；初始密碼只顯示一次`);
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingAccount(false);
+    }
+  }
+
   return (
     <div>
       <h1 className="page-title">角色與核准</h1>
-      <p className="page-lede">僅負責人可異動。</p>
+      <p className="page-lede">僅系統管理員可異動。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!matrix && !error && <p className="state-note">讀取中…</p>}
 
-      {matrix && flow && (
+      {matrix && (
         <>
 
           <p className={`recon${matrix.enforced ? '' : ' recon--off'}`}>
@@ -194,8 +240,12 @@ export function Roles({ onToast, reloadKey }: Props) {
                       </span>
                       {p.boss_only_ops.length > 0 && (
                         <span className="cell-hint cell-hint--block">
-                          其中 {p.boss_only_ops.join('、')} 另標示為「限老闆」，為本列之外的
-                          額外限制；即使本列權限給滿，非負責人仍無法通過。
+                          其中 {p.boss_only_ops.join('、')} 限負責人，本列權限給滿仍無法通過。
+                        </span>
+                      )}
+                      {p.admin_only_ops.length > 0 && (
+                        <span className="cell-hint cell-hint--block">
+                          其中 {p.admin_only_ops.join('、')} 限系統管理員，本列權限給滿仍無法通過。
                         </span>
                       )}
                     </td>
@@ -230,84 +280,46 @@ export function Roles({ onToast, reloadKey }: Props) {
             <strong>包含關閉本項授權本身</strong>。
           </p>
           <p className="hint">
-            本矩陣管的是<span className="num">人員</span>能做什麼；
-            「MCP 與 AI」那一頁管的是 <span className="num">AI</span> 能呼叫什麼，兩者互不影響。
+            本矩陣管<span className="num">人員</span>能做什麼，
+            「MCP 與 AI」那一頁管 <span className="num">AI</span> 能呼叫什麼，兩者互不影響。
+          </p>
+          <p className="hint">
+            負責人看得到薪資但改不了權限，系統管理員改得了權限但看不到薪資。
+            角色在建立帳號時決定，之後無法在系統內變更。
           </p>
 
-          <h3 className="section-title section-title--spaced">簽核流程</h3>
-          <div className="flow">
-            {flow.steps.map((s, i) => (
-              <div className="flow__step-wrap" key={s.step_no}>
-                <div className="card flow__step">
-                  <div className="flow__role">
-                    第 {s.step_no} 關 · {s.label}
-                  </div>
-                  <div className="flow__cond">
-                    {s.role_name ?? '申請人'}
-                    {s.min_amount && (
-                      <>
-                        {' '}· <span className="num">{money(s.min_amount)}</span>{' '}
-                        {s.condition_note}
-                      </>
-                    )}
-                    {!s.min_amount && s.condition_note && <> · {s.condition_note}</>}
-                  </div>
-                  <div className="flow__actions">
-                    <button className="btn btn--compact btn--secondary" onClick={() => openEditStep(s)}>
-                      編輯
-                    </button>
-                    <button
-                      className="btn btn--compact btn--secondary"
-                      disabled={savingStep}
-                      onClick={() => void deleteStep(s)}
-                    >
-                      刪除
-                    </button>
-                  </div>
-                </div>
-                {i < flow.steps.length - 1 && <span className="flow__arrow">→</span>}
-              </div>
-            ))}
-          </div>
-          <p className="hint">金額門檻屬公司政策，可隨時調整。{flow.enforcement_note}</p>
-
+          <h3 className="section-title section-title--spaced">登入帳號</h3>
           <div className="card form-card">
-            <h3 className="section-title">
-              {flow.steps.some((s) => s.step_no === parseInt(stepForm.step_no, 10))
-                ? `編輯第 ${stepForm.step_no} 關`
-                : '新增一關'}
-            </h3>
             <p className="section-note">
-              關卡編號相同時直接覆寫：沿用既有編號即為編輯，填入新編號即為新增。
-              異動簽核關卡限負責人。
+              密碼由系統產生，只顯示一次，本人首次登入必須變更。角色建立後無法在系統內變更。
             </p>
             <div className="field-grid">
               <label className="field">
-                關卡編號
-                <input
-                  className="input num"
-                  inputMode="numeric"
-                  value={stepForm.step_no}
-                  onChange={(e) => setStepForm((f) => ({ ...f, step_no: e.target.value }))}
-                />
-              </label>
-              <label className="field">
-                關卡名稱
+                登入名稱（英文字母、數字與 . _ -）
                 <input
                   className="input"
-                  value={stepForm.label}
-                  placeholder="會計確認科目"
-                  onChange={(e) => setStepForm((f) => ({ ...f, label: e.target.value }))}
+                  value={accountForm.username}
+                  placeholder="chen.mei"
+                  onChange={(e) => setAccountForm((f) => ({ ...f, username: e.target.value }))}
                 />
               </label>
               <label className="field">
-                負責角色
+                顯示名稱
+                <input
+                  className="input"
+                  value={accountForm.display_name}
+                  placeholder="陳美玲"
+                  onChange={(e) => setAccountForm((f) => ({ ...f, display_name: e.target.value }))}
+                />
+              </label>
+              <label className="field">
+                角色
                 <select
                   className="input"
-                  value={stepForm.role_code}
-                  onChange={(e) => setStepForm((f) => ({ ...f, role_code: e.target.value }))}
+                  value={accountForm.role_code}
+                  onChange={(e) => setAccountForm((f) => ({ ...f, role_code: e.target.value }))}
                 >
-                  <option value="">申請人本人</option>
+                  <option value="">請選擇</option>
                   {matrix.roles.map((r) => (
                     <option key={r.code} value={r.code}>
                       {r.name}
@@ -316,34 +328,160 @@ export function Roles({ onToast, reloadKey }: Props) {
                 </select>
               </label>
               <label className="field">
-                金額門檻（留空表示一律需經本關）
+                員工編號（選填，填了才能使用員工自助）
                 <input
                   className="input num"
-                  inputMode="decimal"
-                  value={stepForm.min_amount}
-                  placeholder="10000"
-                  onChange={(e) => setStepForm((f) => ({ ...f, min_amount: e.target.value }))}
+                  value={accountForm.employee_no}
+                  placeholder="E001"
+                  onChange={(e) => setAccountForm((f) => ({ ...f, employee_no: e.target.value }))}
                 />
               </label>
               <label className="field field--full">
-                條件說明
+                電子郵件（選填）
                 <input
                   className="input"
-                  value={stepForm.condition_note}
-                  placeholder="超過此金額才需經本關"
-                  onChange={(e) => setStepForm((f) => ({ ...f, condition_note: e.target.value }))}
+                  type="email"
+                  value={accountForm.email}
+                  onChange={(e) => setAccountForm((f) => ({ ...f, email: e.target.value }))}
                 />
               </label>
             </div>
             <div className="wizard-actions">
-              <button className="btn btn--ghost" onClick={openNewStep}>
-                清空並新增另一關
-              </button>
-              <button className="btn" disabled={savingStep} onClick={() => void saveStep()}>
-                {savingStep ? '存檔中…' : '儲存本關'}
+              <span className="section-note" />
+              <button
+                className={`btn${savingAccount ? ' btn--off' : ''}`}
+                disabled={savingAccount}
+                onClick={() => void createAccount()}
+              >
+                {savingAccount ? '建立中…' : '建立帳號'}
               </button>
             </div>
+            {created && (
+              <p className="recon">
+                已建立 <span className="num">{created.user.username}</span>（
+                {created.user.display_name} · {created.user.role_name}）。
+                <strong>
+                  初始密碼 <span className="num">{created.temporary_password}</span>
+                </strong>
+                ，離開本頁後無法再查看，請立即交付本人。
+              </p>
+            )}
           </div>
+
+          {flow && (
+            <>
+            <h3 className="section-title section-title--spaced">簽核流程</h3>
+            <div className="flow">
+              {flow.steps.map((s, i) => (
+                <div className="flow__step-wrap" key={s.step_no}>
+                  <div className="card flow__step">
+                    <div className="flow__role">
+                      第 {s.step_no} 關 · {s.label}
+                    </div>
+                    <div className="flow__cond">
+                      {s.role_name ?? '申請人'}
+                      {s.min_amount && (
+                        <>
+                          {' '}· <span className="num">{money(s.min_amount)}</span>{' '}
+                          {s.condition_note}
+                        </>
+                      )}
+                      {!s.min_amount && s.condition_note && <> · {s.condition_note}</>}
+                    </div>
+                    <div className="flow__actions">
+                      <button className="btn btn--compact btn--secondary" onClick={() => openEditStep(s)}>
+                        編輯
+                      </button>
+                      <button
+                        className="btn btn--compact btn--secondary"
+                        disabled={savingStep}
+                        onClick={() => void deleteStep(s)}
+                      >
+                        刪除
+                      </button>
+                    </div>
+                  </div>
+                  {i < flow.steps.length - 1 && <span className="flow__arrow">→</span>}
+                </div>
+              ))}
+            </div>
+            <p className="hint">金額門檻屬公司政策，可隨時調整。{flow.enforcement_note}</p>
+
+            <div className="card form-card">
+              <h3 className="section-title">
+                {flow.steps.some((s) => s.step_no === parseInt(stepForm.step_no, 10))
+                  ? `編輯第 ${stepForm.step_no} 關`
+                  : '新增一關'}
+              </h3>
+              <p className="section-note">
+                關卡編號相同時直接覆寫：沿用既有編號即為編輯，填入新編號即為新增。
+                異動簽核關卡限負責人。
+              </p>
+              <div className="field-grid">
+                <label className="field">
+                  關卡編號
+                  <input
+                    className="input num"
+                    inputMode="numeric"
+                    value={stepForm.step_no}
+                    onChange={(e) => setStepForm((f) => ({ ...f, step_no: e.target.value }))}
+                  />
+                </label>
+                <label className="field">
+                  關卡名稱
+                  <input
+                    className="input"
+                    value={stepForm.label}
+                    placeholder="會計確認科目"
+                    onChange={(e) => setStepForm((f) => ({ ...f, label: e.target.value }))}
+                  />
+                </label>
+                <label className="field">
+                  負責角色
+                  <select
+                    className="input"
+                    value={stepForm.role_code}
+                    onChange={(e) => setStepForm((f) => ({ ...f, role_code: e.target.value }))}
+                  >
+                    <option value="">申請人本人</option>
+                    {matrix.roles.map((r) => (
+                      <option key={r.code} value={r.code}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  金額門檻（留空表示一律需經本關）
+                  <input
+                    className="input num"
+                    inputMode="decimal"
+                    value={stepForm.min_amount}
+                    placeholder="10000"
+                    onChange={(e) => setStepForm((f) => ({ ...f, min_amount: e.target.value }))}
+                  />
+                </label>
+                <label className="field field--full">
+                  條件說明
+                  <input
+                    className="input"
+                    value={stepForm.condition_note}
+                    placeholder="超過此金額才需經本關"
+                    onChange={(e) => setStepForm((f) => ({ ...f, condition_note: e.target.value }))}
+                  />
+                </label>
+              </div>
+              <div className="wizard-actions">
+                <button className="btn btn--ghost" onClick={openNewStep}>
+                  清空並新增另一關
+                </button>
+                <button className="btn" disabled={savingStep} onClick={() => void saveStep()}>
+                  {savingStep ? '存檔中…' : '儲存本關'}
+                </button>
+              </div>
+            </div>
+            </>
+          )}
         </>
       )}
     </div>

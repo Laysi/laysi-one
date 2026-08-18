@@ -119,15 +119,16 @@ export function Setup({ onToast, reloadKey }: Props) {
     setError(null);
     Promise.all([
       callOp<{ settings: CompanySettingRow[] }>('get_company_settings'),
-      callOp<ChartOfAccounts>('list_chart_of_accounts'),
       callOp<DimensionList>('list_dimensions'),
     ])
-      .then(([s, c, d]) => {
+      .then(([s, d]) => {
         setSettings(s.settings);
-        setCoa(c);
         setDims(d);
       })
       .catch((e: Error) => setError(e.message));
+    callOp<ChartOfAccounts>('list_chart_of_accounts')
+      .then(setCoa)
+      .catch(() => setCoa(null));
   }, []);
 
   useEffect(load, [load, reloadKey]);
@@ -283,12 +284,12 @@ export function Setup({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">基礎設定</h1>
-      <p className="page-lede">變更會影響全系統，僅負責人可異動。</p>
+      <p className="page-lede">變更會影響全系統，僅系統管理員可異動。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!settings && !error && <p className="state-note">讀取中…</p>}
 
-      {settings && coa && dims && (
+      {settings && dims && (
         <>
           <div className="split-columns">
             <section>
@@ -343,10 +344,8 @@ export function Setup({ onToast, reloadKey }: Props) {
                 ))}
               </div>
 
-              <p className="recon">
-                營業稅該列依生效日自法規規則庫解析而得，不是設定值，負責人也無法變更。
-              </p>
-              <p className="hint">標有編輯圖示的項目可修改，且限老闆。</p>
+              <p className="recon">營業稅率依適用日自動帶入，不可變更。</p>
+              <p className="hint">標有編輯圖示的項目僅系統管理員可修改。</p>
 
               <h3 className="section-title section-title--spaced">維度與條件</h3>
               <div className="card fact-card">
@@ -403,77 +402,77 @@ export function Setup({ onToast, reloadKey }: Props) {
               )}
             </section>
 
-            <section>
-              <h3 className="section-title">會計科目表</h3>
-              <p className="section-note">
-                每個科目都要指定它在報表中的段落，以及在現金流量表中的活動別。缺少這兩欄的科目不會出現在報表上。
-              </p>
-              <div className="toolbar">
-                <button
-                  className={`chip${onlyUsed ? ' chip--on' : ''}`}
-                  onClick={() => setOnlyUsed((v) => !v)}
-                >
-                  僅顯示有分錄者
-                </button>
-                <span className="spacer" />
-                <span className="section-note">
-                  {coa.total} 個科目，{coa.used} 個有分錄
-                </span>
-                <button className="btn btn--compact" onClick={openCreateAccount}>
-                  ＋ 新增科目
-                </button>
-              </div>
-              <div className="table-scroll">
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>代號</th>
-                      <th>科目</th>
-                      <th>報表位置</th>
-                      <th className="align-right">餘額</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {shown.map((a) => (
-                      <tr key={a.code} className={a.line_count === 0 ? 'row--waiting' : undefined}>
-                        <td className="num cell-nowrap">{a.code}</td>
-                        <td>
-                          {a.name}
-                          <span className="cell-hint">
-                            {a.kind_label} · {a.normal_side_label}
-                          </span>
-                        </td>
-                        <td className="cell-accounts">
-                          {a.report_group_label}
-                          <span className="cell-hint cell-hint--block">
-                            現金流量：{a.cash_flow_label}
-                          </span>
-                        </td>
-                        <td className="num align-right">
-                          {a.line_count === 0 ? (
-                            <span className="cell-muted">—</span>
-                          ) : (
-                            money(a.balance)
-                          )}
-                        </td>
-                        <td className="align-right">
-                          <button
-                            className="btn btn--compact btn--secondary"
-                            onClick={() => void openEditAccount(a.code)}
-                          >
-                            編輯
-                          </button>
-                        </td>
+            {coa && (
+              <section>
+                <h3 className="section-title">會計科目表</h3>
+                <p className="section-note">
+                  每個科目都要指定它在報表中的段落，以及在現金流量表中的活動別。缺少這兩欄的科目不會出現在報表上。
+                </p>
+                <div className="toolbar">
+                  <button
+                    className={`chip${onlyUsed ? ' chip--on' : ''}`}
+                    onClick={() => setOnlyUsed((v) => !v)}
+                  >
+                    僅顯示有分錄者
+                  </button>
+                  <span className="spacer" />
+                  <span className="section-note">
+                    {coa.total} 個科目，{coa.used} 個有分錄
+                  </span>
+                  <button className="btn btn--compact" onClick={openCreateAccount}>
+                    ＋ 新增科目
+                  </button>
+                </div>
+                <div className="table-scroll">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>代號</th>
+                        <th>科目</th>
+                        <th>報表位置</th>
+                        <th className="align-right">餘額</th>
+                        <th />
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <p className="hint">
-                本頁餘額與三張財務報表採用同一查詢計算，科目表所列數字即為報表數字。
-              </p>
-            </section>
+                    </thead>
+                    <tbody>
+                      {shown.map((a) => (
+                        <tr key={a.code} className={a.line_count === 0 ? 'row--waiting' : undefined}>
+                          <td className="num cell-nowrap">{a.code}</td>
+                          <td>
+                            {a.name}
+                            <span className="cell-hint">
+                              {a.kind_label} · {a.normal_side_label}
+                            </span>
+                          </td>
+                          <td className="cell-accounts">
+                            {a.report_group_label}
+                            <span className="cell-hint cell-hint--block">
+                              現金流量：{a.cash_flow_label}
+                            </span>
+                          </td>
+                          <td className="num align-right">
+                            {a.line_count === 0 ? (
+                              <span className="cell-muted">—</span>
+                            ) : (
+                              money(a.balance)
+                            )}
+                          </td>
+                          <td className="align-right">
+                            <button
+                              className="btn btn--compact btn--secondary"
+                              onClick={() => void openEditAccount(a.code)}
+                            >
+                              編輯
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="hint">此處餘額與財務報表為同一組數字。</p>
+              </section>
+            )}
           </div>
         </>
       )}

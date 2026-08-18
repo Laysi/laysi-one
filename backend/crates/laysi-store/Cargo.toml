@@ -11,6 +11,9 @@ laysi-domain.workspace = true
 laysi-regulation.workspace = true
 
 anyhow.workspace = true
+# Password hashing lives here because this crate owns `user_account`; every
+# entry point that creates or verifies a login goes through src/password.rs.
+argon2.workspace = true
 # RustFS (S3 compatible) object storage. Document files really live there and
 # the database keeps only the key, size, MIME type and BLAKE3 hash; see
 # src/storage.rs.
@@ -22,6 +25,8 @@ aws-smithy-types.workspace = true
 # uploaded file was not swapped.
 blake3.workspace = true
 chrono.workspace = true
+hex.workspace = true
+rand.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

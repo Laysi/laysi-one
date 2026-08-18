@@ -214,12 +214,10 @@ export function Documents({ onToast, reloadKey }: Props) {
           <p className="hint">{data.ocr_note}</p>
           <p className="hint">{data.immutability_note}</p>
           <p className="hint">
-            「取回驗證」會讀回檔案、重算指紋並與登記值比對。不符時回覆錯誤且
-            <strong>不交出內容</strong>；遭變更的憑證外觀與正本無異，風險高於沒有憑證。
+            「取回驗證」會比對檔案與登記的指紋，不符時<strong>不交出內容</strong>。
           </p>
           <p className="hint">
-            AI 也可以上傳檔案，權限與畫面上的人相同。單檔上限{' '}
-            <span className="num">{mb}</span> MB。
+            單檔上限 <span className="num">{mb}</span> MB。
           </p>
         </>
       )}

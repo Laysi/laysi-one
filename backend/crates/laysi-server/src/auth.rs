@@ -22,7 +22,7 @@ use std::sync::Arc;
 const SESSION_COOKIE_NAME: &str = "laysi_session";
 const DEFAULT_SESSION_IDLE_MINUTES: i64 = 60;
 const DEFAULT_SESSION_ABSOLUTE_HOURS: i64 = 168;
-const MIN_PASSWORD_CHARS: usize = 12;
+pub(crate) const MIN_PASSWORD_CHARS: usize = 12;
 const LOGIN_FAILED_MESSAGE: &str = "登入名稱或密碼不正確";
 
 /// Tunable settings for REST sessions.
@@ -85,7 +85,7 @@ fn env_positive_i64(name: &str, default: i64) -> anyhow::Result<i64> {
     Ok(value)
 }
 
-fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
+pub(crate) fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
     let Some(raw) = std::env::var(name).ok().filter(|value| !value.trim().is_empty()) else {
         return Ok(default);
     };
@@ -322,7 +322,7 @@ pub async fn login(
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "no_user_account",
-                "系統尚未建立任何使用者帳號，請由管理員在伺服器上建立第一個帳號",
+                "系統尚未建立任何使用者帳號，請先完成初始化",
             );
         }
         Ok(_) => {}
@@ -401,25 +401,51 @@ pub async fn me(State(state): State<Shared>, headers: HeaderMap) -> Response {
             "ok": true,
             "user": user_json_with_role(&state, &verified.session.user).await,
             "oauth": { "enabled": state.oidc.is_some() },
+            "setup": setup_json(&state, true).await,
         }))
         .into_response(),
-        // `oauth` is returned even when signed out. The login screen needs to
-        // know whether to render "sign in with OAuth", and this is the only
+        // `oauth` and `setup` are returned even when signed out. The signed-out
+        // screen needs to know whether to render "sign in with OAuth" and
+        // whether this installation still has no accounts, and this is the only
         // place it can ask, since every other endpoint requires a session.
-        // Without this field the frontend would probe `/v1/auth/oauth/start`
-        // and leave an orphan PKCE entry behind. Whether this site has OAuth
-        // configured is not a secret; it is visible on the login screen.
+        // Without these fields the frontend would probe
+        // `/v1/auth/oauth/start` and leave an orphan PKCE entry behind.
+        // Neither fact is a secret: OAuth is visible on the login screen, and
+        // an empty installation already says so through login's 503.
         Err(AuthError::Unauthorized) => (
             StatusCode::UNAUTHORIZED,
             Json(json!({
                 "ok": false,
                 "error": { "code": "unauthorized", "message": "請先登入再繼續" },
                 "oauth": { "enabled": state.oidc.is_some() },
+                "setup": setup_json(&state, false).await,
             })),
         )
             .into_response(),
         Err(error) => error.into_response(),
     }
+}
+
+/// Whether the browser may still initialise this installation.
+///
+/// Holding a session proves an account exists, so the signed-in path answers
+/// without asking the database. A store error reports the window as closed:
+/// the endpoint would refuse anyway, and offering initialisation on a
+/// guess is the wrong way round.
+async fn setup_json(state: &Shared, signed_in: bool) -> Value {
+    let available = !signed_in
+        && state.setup.allow_web()
+        && match state.store.bootstrap_open().await {
+            Ok(open) => open,
+            Err(error) => {
+                tracing::error!(%error, "查詢初始化狀態失敗");
+                false
+            }
+        };
+    json!({
+        "bootstrap_available": available,
+        "token_required": state.setup.token_required(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -522,7 +548,7 @@ fn user_json(user: &UserAccount) -> Value {
 ///
 /// An unknown name falls back to the code: the sidebar showing `acct` is
 /// better than the whole login response failing because a role was renamed.
-async fn user_json_with_role(state: &Shared, user: &UserAccount) -> Value {
+pub(crate) async fn user_json_with_role(state: &Shared, user: &UserAccount) -> Value {
     let name = match state.store.role_name(&user.role_code).await {
         Ok(name) => name,
         Err(error) => {
@@ -585,8 +611,12 @@ mod tests {
             objects: None,
             rustfs_endpoint: String::new(),
             auth: AuthConfig::for_tests(),
+            setup: crate::setup::SetupConfig::for_tests(),
             oidc: None,
             mcp_rate_limiter: crate::ratelimit::RateLimiter::new(60),
+            setup_rate_limiter: crate::ratelimit::RateLimiter::new(
+                crate::setup::ATTEMPTS_PER_MINUTE,
+            ),
             mcp_allowed_origins: Vec::new(),
         })
     }

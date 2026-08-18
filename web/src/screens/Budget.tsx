@@ -43,7 +43,7 @@ export function Budget({ onToast, reloadKey }: Props) {
         amount: draft.trim(),
         ...(status ? { version: status.version } : {}),
       });
-      onToast(`已更新 ${code} 的預算；實際數不受影響，一律由總帳即時計算`);
+      onToast(`已更新 ${code} 的預算`);
       setEditing(null);
       load();
     } catch (e) {
@@ -106,8 +106,8 @@ export function Budget({ onToast, reloadKey }: Props) {
           </div>
 
           <p className="recon">
-            只有預算數是設定值，<strong>實際數一律不另存</strong>，
-            每一格皆為{status.actual_source}，因此補開傳票或作廢後會立即反映。
+            只有預算數是設定值；<strong>實際數為{status.actual_source}</strong>，
+            補開傳票或作廢後立即反映。
           </p>
 
           <div className="table-scroll">
@@ -189,9 +189,7 @@ export function Budget({ onToast, reloadKey }: Props) {
             </table>
           </div>
 
-          <p className="hint">
-            每一列均可編輯，但異動預算限負責人；權限不足時會被拒絕並留下紀錄。
-          </p>
+          <p className="hint">異動預算限負責人。</p>
 
           <h3 className="section-title section-title--spaced">部門損益</h3>
           <p className="section-note">

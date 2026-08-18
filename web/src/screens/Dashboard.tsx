@@ -85,9 +85,7 @@ export function Dashboard({ onGo, reloadKey }: Props) {
 
         <section>
           <h2 className="section-title">AI 操作紀錄</h2>
-          <p className="section-note">
-            透過 MCP 連線的操作皆留存紀錄，包含被權限擋下的呼叫。
-          </p>
+          <p className="section-note">包含被權限擋下的呼叫。</p>
           <div className="card">
             {data.ai_recent.map((a, i) => (
               <div className="ai-item" key={i}>

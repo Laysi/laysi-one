@@ -147,8 +147,7 @@ export function Invoicing({ onToast, reloadKey, onChanged }: Props) {
 
             <p className="hint">
               字軌 {data.track.track} {data.track_label}，剩{' '}
-              <span className="num">{data.track.remaining}</span> 號可用。作廢號碼也計入已使用，
-              下一號取自配號表，而非最大號加一。
+              <span className="num">{data.track.remaining}</span> 號可用。作廢號碼也計入已使用。
             </p>
 
             {data.invoices.some((e) => e.last_error) && (

@@ -11,6 +11,7 @@ import { Employees } from './screens/Employees';
 import { ExpenseRequest } from './screens/ExpenseRequest';
 import { Expenses } from './screens/Expenses';
 import { Imports } from './screens/Imports';
+import { Init } from './screens/Init';
 import { LeaveRequest } from './screens/LeaveRequest';
 import { Dashboard } from './screens/Dashboard';
 import { FixedAssets } from './screens/FixedAssets';
@@ -116,6 +117,8 @@ export function App() {
         </div>
       ) : signedIn && !auth.user?.must_change_password ? (
         <Workspace />
+      ) : !signedIn && auth.setup.bootstrap_available ? (
+        <Init />
       ) : (
         <Login />
       )}
@@ -308,7 +311,7 @@ function Workspace() {
 
         {meta?.setup_required && !showWizard && (
           <div className="sidebar__setup">
-            <p className="sidebar__setup-note">尚未完成首次設定：公司名稱為空。</p>
+            <p className="sidebar__setup-note">尚未完成首次設定。</p>
             <button className="btn btn--compact" onClick={() => setShowWizard(true)}>
               繼續設定
             </button>

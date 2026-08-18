@@ -27,6 +27,11 @@ pub mod ops;
 // Risk levels
 
 /// Risk level of an operation, shown as four tiers on the MCP screen.
+/// The role that owns the business: payroll, budget, approval thresholds.
+pub const ROLE_BOSS: &str = "boss";
+/// The role that owns the system: permissions, tokens, settings, logins.
+pub const ROLE_ADMIN: &str = "admin";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Risk {
@@ -38,15 +43,29 @@ pub enum Risk {
     HighRisk,
     /// Touches payroll or similar sensitive data; owner only.
     BossOnly,
+    /// Controls the system itself: role permissions, API tokens, company
+    /// settings and logins. Separate from `BossOnly` so that whoever runs the
+    /// installation does not thereby read everyone's salary.
+    AdminOnly,
 }
 
 impl Risk {
+    /// Every tier, so generators and migrations cannot drift from the enum.
+    pub const ALL: [Risk; 5] = [
+        Risk::ReadOnly,
+        Risk::NeedsConfirm,
+        Risk::HighRisk,
+        Risk::BossOnly,
+        Risk::AdminOnly,
+    ];
+
     pub fn label_zh(&self) -> &'static str {
         match self {
             Risk::ReadOnly => "唯讀",
             Risk::NeedsConfirm => "需人確認",
             Risk::HighRisk => "高風險",
-            Risk::BossOnly => "限老闆",
+            Risk::BossOnly => "限負責人",
+            Risk::AdminOnly => "限系統管理員",
         }
     }
 
@@ -56,6 +75,7 @@ impl Risk {
             Risk::NeedsConfirm => "needs_confirm",
             Risk::HighRisk => "high_risk",
             Risk::BossOnly => "boss_only",
+            Risk::AdminOnly => "admin_only",
         }
     }
 }
@@ -129,10 +149,13 @@ pub enum OpError {
     #[error("工具「{tool}」目前為關閉狀態，請先至「MCP 與 AI」啟用。")]
     ToolDisabled { tool: String },
 
-    #[error("工具「{tool}」需負責人身分，目前身分為「{role}」")]
+    #[error("「{tool}」限負責人執行，目前身分為「{role}」")]
     NeedsBoss { tool: String, role: String },
 
-    #[error("角色「{role}」沒有操作「{tool}」的權限")]
+    #[error("「{tool}」限系統管理員執行，目前身分為「{role}」")]
+    NeedsAdmin { tool: String, role: String },
+
+    #[error("角色「{role}」未獲授權執行「{tool}」，請洽負責人於「角色與核准」開啟")]
     NotPermitted { tool: String, role: String },
 
     #[error("參數不正確：{0}")]
@@ -155,6 +178,7 @@ impl OpError {
             OpError::UnknownTool(_) => "unknown_tool",
             OpError::ToolDisabled { .. } => "tool_disabled",
             OpError::NeedsBoss { .. } => "needs_boss",
+            OpError::NeedsAdmin { .. } => "needs_admin",
             OpError::NotPermitted { .. } => "not_permitted",
             OpError::BadInput(_) => "bad_input",
             OpError::Store(_) => "store_error",
@@ -326,10 +350,28 @@ impl Registry {
             return Err(OpError::ToolDisabled { tool: name.to_string() });
         }
 
-        // 2. Risk: owner-only operations check the identity.
-        if op.risk() == Risk::BossOnly && ctx.actor_role != "boss" {
-            self.audit(ctx, op, &input, "被拒絕：需負責人身分", "blocked").await;
-            return Err(OpError::NeedsBoss { tool: name.to_string(), role: ctx.actor_role.clone() });
+        // 2. Risk floor: two operations are pinned to one role each, outside
+        //    the permission matrix. BossOnly guards business confidentiality
+        //    (payroll, withholding, budget); AdminOnly guards the system's own
+        //    controls (permissions, tokens, settings, logins). Neither role can
+        //    be given the other's floor through `set_role_permission`, and no
+        //    operation changes `user_account.role_code`, so the split holds.
+        match op.risk() {
+            Risk::BossOnly if ctx.actor_role != ROLE_BOSS => {
+                self.audit(ctx, op, &input, "被拒絕：需負責人身分", "blocked").await;
+                return Err(OpError::NeedsBoss {
+                    tool: name.to_string(),
+                    role: ctx.actor_role.clone(),
+                });
+            }
+            Risk::AdminOnly if ctx.actor_role != ROLE_ADMIN => {
+                self.audit(ctx, op, &input, "被拒絕：需系統管理員身分", "blocked").await;
+                return Err(OpError::NeedsAdmin {
+                    tool: name.to_string(),
+                    role: ctx.actor_role.clone(),
+                });
+            }
+            _ => {}
         }
 
         // 3. Role permission, deny by default: not in the set means refused.
@@ -340,7 +382,7 @@ impl Registry {
         let permitted = ctx.store.permitted_ops(&ctx.actor_role).await?;
         if !permitted.contains(name) {
             let summary = format!(
-                "被拒絕：角色「{}」沒有操作「{name}」的權限",
+                "被拒絕：角色「{}」未獲授權執行「{name}」",
                 ctx.actor_role
             );
             self.audit(ctx, op, &input, &summary, "blocked").await;
@@ -670,6 +712,7 @@ mod tests {
             include_str!("../../../migrations/0016_attendance_punch.sql"),
             include_str!("../../../migrations/0017_self_service_mcp.sql"),
             include_str!("../../../migrations/0020_expense_claim_receipt.sql"),
+            include_str!("../../../migrations/0023_system_administrator.sql"),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {
@@ -729,7 +772,83 @@ mod tests {
             role: "cashier".into(),
         };
         assert_eq!(error.code(), "not_permitted");
-        assert_eq!(error.to_string(), "角色「cashier」沒有操作「post_voucher」的權限");
+        assert_eq!(
+            error.to_string(),
+            "角色「cashier」未獲授權執行「post_voucher」，請洽負責人於「角色與核准」開啟"
+        );
+    }
+
+    /// Running the system and owning the business are different jobs, so the
+    /// two floors hold different operations. Moving anything across this line
+    /// either hands the installer everyone's salary or hands the owner the
+    /// permission matrix; both undo the point of 0023.
+    #[test]
+    fn business_confidentiality_and_system_control_are_different_floors() {
+        use std::collections::BTreeSet;
+
+        let names = |want: Risk| -> BTreeSet<&'static str> {
+            Registry::new().iter().filter(|o| o.risk() == want).map(|o| o.name()).collect()
+        };
+        let boss = names(Risk::BossOnly);
+        let admin = names(Risk::AdminOnly);
+
+        assert_eq!(
+            boss,
+            BTreeSet::from([
+                "list_payslips",
+                "list_withholding_statements",
+                "set_approval_rule",
+                "set_budget",
+            ]),
+            "限負責人的操作集合變了"
+        );
+        assert_eq!(
+            admin,
+            BTreeSet::from([
+                "create_user_account",
+                "issue_api_token",
+                "set_role_permission",
+                "update_company_setting",
+            ]),
+            "限系統管理員的操作集合變了"
+        );
+        assert!(boss.is_disjoint(&admin), "一個操作不能同時掛在兩道底線上");
+        assert_ne!(ROLE_BOSS, ROLE_ADMIN);
+    }
+
+    #[test]
+    fn needs_admin_error_names_the_role_and_operation() {
+        let error = OpError::NeedsAdmin {
+            tool: "set_role_permission".into(),
+            role: "boss".into(),
+        };
+        assert_eq!(error.code(), "needs_admin");
+        assert_eq!(
+            error.to_string(),
+            "「set_role_permission」限系統管理員執行，目前身分為「boss」"
+        );
+    }
+
+    /// The owner must not keep the permission matrix after 0023: holding both
+    /// would make the split cosmetic.
+    #[test]
+    fn the_owner_no_longer_holds_manage_access() {
+        let migration = include_str!("../../../migrations/0023_system_administrator.sql");
+        assert!(
+            migration.contains("DELETE FROM role_permission")
+                && migration.contains("permission_code = 'manage_access'"),
+            "0023 必須收回 boss 的 manage_access"
+        );
+        assert!(
+            migration.contains("('admin', 'manage_access', 'full'"),
+            "0023 必須把 manage_access 給 admin"
+        );
+        // Balances are business information. The administrator reads the
+        // chart's structure through list_accounts and nothing more.
+        assert!(
+            !migration.contains("'{list_accounts,get_company_settings,list_chart_of_accounts"),
+            "list_chart_of_accounts 帶餘額，不能留在 view_masters"
+        );
     }
 
     #[test]

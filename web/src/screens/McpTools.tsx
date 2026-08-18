@@ -43,10 +43,6 @@ export function McpTools({ reloadKey }: { reloadKey: number }) {
       </p>
 
       <h2 className="section-title">工具與風險分級</h2>
-      <p className="section-note">
-        此處的開關僅作用於 AI。關閉 <span className="num">post_voucher</span> 後，AI
-        無法過帳，人員仍可於「傳票 · 總帳」執行。
-      </p>
 
       {!ops && <p className="state-note">讀取中…</p>}
       {ops && (
