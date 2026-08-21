@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  businessDate,
   callOp,
   OpFailed,
+  type MyPunchCorrectionList,
   type MyPunchList,
+  type PunchCorrectionResult,
   type PunchDay,
   type PunchReconciliation,
   type PunchResult,
   type WorkSchedule,
 } from '../api/client';
+import { DateField } from '../components/DateField';
+import { TimeField } from '../components/TimeField';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -40,7 +45,7 @@ function Reconciliation({ recon }: { recon: PunchReconciliation }) {
 
 function ScheduleNote({ schedule }: { schedule: WorkSchedule }) {
   if (!schedule.judges_lateness || !schedule.counts_overtime) {
-    return <p className="hint">{schedule.note}請負責人於「基礎設定」填寫上下班時間。</p>;
+    return <p className="hint">{schedule.note}請系統管理員於「基礎設定」填寫上下班時間。</p>;
   }
   return (
     <p className="hint">
@@ -91,6 +96,55 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
       .then(setData)
       .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
   }, []);
+
+  const [fixes, setFixes] = useState<MyPunchCorrectionList | null>(null);
+  const [fixOn, setFixOn] = useState('');
+  const [fixKind, setFixKind] = useState<'in' | 'out'>('in');
+  const [fixAt, setFixAt] = useState('');
+  const [fixReason, setFixReason] = useState('');
+  const [fixBusy, setFixBusy] = useState(false);
+
+  const loadFixes = useCallback(() => {
+    callOp<MyPunchCorrectionList>('list_my_punch_corrections')
+      .then(setFixes)
+      .catch(() => setFixes(null));
+  }, []);
+
+  useEffect(loadFixes, [loadFixes, reloadKey]);
+
+  async function submitFix() {
+    setFixBusy(true);
+    setFormError(null);
+    try {
+      const d = await callOp<PunchCorrectionResult>(
+        'submit_my_punch_correction',
+        {
+          punched_on: fixOn,
+          kind: fixKind,
+          at: fixAt,
+          ...(fixReason.trim() ? { reason: fixReason.trim() } : {}),
+        },
+        '送出補登申請',
+      );
+      onToast(
+        d.punch_written
+          ? `${d.correction.punched_on} 的${d.correction.kind_label}卡已補上 ${d.correction.at}`
+          : `${d.correction.punched_on} 的${d.correction.kind_label}卡補登申請已送出，等人資決定`,
+      );
+      setFixOn('');
+      setFixAt('');
+      setFixReason('');
+      onChanged();
+      load();
+      loadFixes();
+    } catch (e) {
+      const msg = e instanceof OpFailed ? e.error.message : String(e);
+      setFormError(msg);
+      onToast(msg);
+    } finally {
+      setFixBusy(false);
+    }
+  }
 
   useEffect(load, [load, reloadKey]);
 
@@ -212,9 +266,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
 
       {formError && <p className="state-note state-note--error">{formError}</p>}
 
-      {!data.next_kind && (
-        <p className="hint">今天的上下班都已記錄；如需更正請洽人資補登。</p>
-      )}
+      {!data.next_kind && <p className="hint">今天的上下班都已記錄。</p>}
 
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">
@@ -225,7 +277,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
         <div className="card stat-card">
           <div className="stat-card__kicker">遲到</div>
           <div className="stat-card__value num">{s.late_days ?? '—'}</div>
-          <div className="stat-card__note">
+          <div className="stat-card__note num">
             {s.late_days == null ? '未設定上班時間' : `日 · 未打下班 ${s.open_days} 日`}
           </div>
         </div>
@@ -285,6 +337,107 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
           </p>
         )}
       </section>
+
+      {fixes && (
+        <section>
+          <h3 className="section-title section-title--spaced">補登申請</h3>
+          <p className="section-note">
+            漏打或打錯的那一格，填上時間送出。
+            {fixes.auto_approve ? '送出即寫進紀錄。' : '由人資決定後才寫進紀錄。'}
+          </p>
+
+          <div className="card form-card">
+            <div className="field-row">
+              <label className="field field--date">
+                日期
+                <DateField
+                  className="input input--date"
+                  value={fixOn}
+                  onChange={setFixOn}
+                  max={data.today}
+                />
+              </label>
+              <label className="field field--date">
+                時間
+                <TimeField label="補登時間" value={fixAt} onChange={setFixAt} />
+              </label>
+            </div>
+            <label className="field">
+              上班或下班
+              <select
+                className="input"
+                value={fixKind}
+                onChange={(e) => setFixKind(e.target.value as 'in' | 'out')}
+              >
+                <option value="in">上班</option>
+                <option value="out">下班</option>
+              </select>
+            </label>
+            <label className="field">
+              事由
+              <input
+                className="input"
+                placeholder="選填，例如忘記打卡"
+                value={fixReason}
+                onChange={(e) => setFixReason(e.target.value)}
+              />
+            </label>
+            <button
+              className="btn"
+              disabled={fixBusy || fixOn === '' || fixAt === ''}
+              onClick={() => void submitFix()}
+            >
+              {fixBusy ? '送出中…' : '送出申請'}
+            </button>
+          </div>
+
+          {fixes.corrections.length > 0 && (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>格</th>
+                    <th className="align-right">時間</th>
+                    <th>狀態</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fixes.corrections.map((c) => (
+                    <tr key={c.id} className={c.status === 'submitted' ? 'row--pending' : undefined}>
+                      <td className="num cell-nowrap">{c.punched_on.slice(5)}</td>
+                      <td>{c.kind_label}</td>
+                      <td className="num align-right">{c.at}</td>
+                      <td>
+                        <span
+                          className={
+                            c.status === 'rejected'
+                              ? 'tag tag--bad tag--static'
+                              : c.status === 'approved'
+                                ? 'tag tag--static'
+                                : 'tag tag--warn tag--static'
+                          }
+                        >
+                          {c.status_label}
+                        </span>
+                        {c.decided_at && (
+                          <span className="cell-hint cell-hint--block num">
+                            {businessDate(c.decided_at)}
+                            {c.decided_by ? ` · ${c.decided_by}` : ' · 自動通過'}
+                          </span>
+                        )}
+                        {c.decision_note && (
+                          <span className="cell-hint cell-hint--block">{c.decision_note}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

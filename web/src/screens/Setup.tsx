@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useCurrentUser } from '../auth';
+import { TimeField } from '../components/TimeField';
 import {
   callOp,
   money,
   OpFailed,
+  type ChartAccount,
   type ChartOfAccounts,
   type CompanySettingRow,
   type DimensionList,
+  type UserAccountRow,
 } from '../api/client';
+import type { ScreenId } from '../nav';
 
 interface Props {
+  onGo: (screen: ScreenId) => void;
   onToast: (msg: string) => void;
   reloadKey: number;
 }
+
+const CLOCK_SETTINGS = new Set(['work_start', 'work_end']);
 
 const ACCOUNT_KINDS: { value: string; label: string }[] = [
   { value: 'asset', label: '資產' },
@@ -49,6 +57,8 @@ const GROUP_LABEL: Record<string, string> = {
   other_income: '營業外收入',
   other_expense: '營業外支出',
 };
+
+const SIDE_LABEL: Record<string, string> = { debit: '借方', credit: '貸方' };
 
 const SECTION_LABEL: Record<string, string> = {
   cash: '現金本身',
@@ -91,6 +101,26 @@ interface AccountForm {
   sort_order: string;
 }
 
+function structureOnly(a: FullAccount): ChartAccount {
+  return {
+    code: a.code,
+    name: a.name,
+    kind: a.kind,
+    kind_label: ACCOUNT_KINDS.find((k) => k.value === a.kind)?.label ?? a.kind,
+    normal_side: a.normal_side,
+    normal_side_label: SIDE_LABEL[a.normal_side] ?? a.normal_side,
+    is_postable: a.is_postable,
+    report_group: a.report_group,
+    report_group_label: GROUP_LABEL[a.report_group] ?? a.report_group,
+    cash_flow_section: a.cash_flow_section,
+    cash_flow_label: a.cash_flow_section
+      ? (SECTION_LABEL[a.cash_flow_section] ?? '')
+      : '併入本期損益',
+    balance: '0',
+    line_count: 0,
+  };
+}
+
 function emptyAccountForm(): AccountForm {
   return {
     code: '',
@@ -106,7 +136,10 @@ function emptyAccountForm(): AccountForm {
   };
 }
 
-export function Setup({ onToast, reloadKey }: Props) {
+export function Setup({ onGo, onToast, reloadKey }: Props) {
+  const me = useCurrentUser();
+  const canEditSettings = me.permissions.includes('update_company_setting');
+  const showBalances = me.permissions.includes('list_chart_of_accounts');
   const [settings, setSettings] = useState<CompanySettingRow[] | null>(null);
   const [coa, setCoa] = useState<ChartOfAccounts | null>(null);
   const [dims, setDims] = useState<DimensionList | null>(null);
@@ -114,6 +147,7 @@ export function Setup({ onToast, reloadKey }: Props) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [onlyUsed, setOnlyUsed] = useState(false);
+  const [ownerMissing, setOwnerMissing] = useState(false);
 
   const load = useCallback(() => {
     setError(null);
@@ -126,10 +160,33 @@ export function Setup({ onToast, reloadKey }: Props) {
         setDims(d);
       })
       .catch((e: Error) => setError(e.message));
-    callOp<ChartOfAccounts>('list_chart_of_accounts')
-      .then(setCoa)
+    if (me.permissions.includes('list_user_accounts')) {
+      callOp<{ accounts: UserAccountRow[] }>('list_user_accounts')
+        .then((d) =>
+          setOwnerMissing(
+            !d.accounts.some((a) => a.role_code === 'boss' && a.status === 'active'),
+          ),
+        )
+        .catch(() => setOwnerMissing(false));
+    }
+    if (showBalances) {
+      callOp<ChartOfAccounts>('list_chart_of_accounts')
+        .then(setCoa)
+        .catch(() => setCoa(null));
+      return;
+    }
+    callOp<{ accounts: FullAccount[] }>('list_accounts')
+      .then((d) => {
+        setFullAccounts(d.accounts);
+        setCoa({
+          accounts: d.accounts.map(structureOnly),
+          total: d.accounts.length,
+          used: 0,
+          as_of: '',
+        });
+      })
       .catch(() => setCoa(null));
-  }, []);
+  }, [showBalances, me.permissions]);
 
   useEffect(load, [load, reloadKey]);
 
@@ -258,7 +315,7 @@ export function Setup({ onToast, reloadKey }: Props) {
 
   async function saveDimensionValue() {
     if (!dimCode || !valueCode.trim() || !valueLabel.trim()) {
-      onToast('維度、代號與名稱都要填寫');
+      onToast('類別、代號與名稱都要填寫');
       return;
     }
     setSavingDim(true);
@@ -266,7 +323,7 @@ export function Setup({ onToast, reloadKey }: Props) {
       await callOp<unknown>(
         'create_dimension_value',
         { dimension_code: dimCode, code: valueCode.trim(), label: valueLabel.trim() },
-        `於 ${dimCode} 新增維度值`,
+        '新增分類項目',
       );
       onToast(`已新增「${valueLabel.trim()}」`);
       setValueCode('');
@@ -284,14 +341,21 @@ export function Setup({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">基礎設定</h1>
-      <p className="page-lede">變更會影響全系統，僅系統管理員可異動。</p>
-
+      {ownerMissing && (
+        <div className="placeholder placeholder--inline">
+          <div className="placeholder__title">下一步：建立負責人帳號</div>
+          <p>帳務、薪資與簽核門檻歸負責人，這個帳號看不到，也不能把自己改成負責人。</p>
+          <button className="btn" onClick={() => onGo('acc')}>
+            前往帳號管理
+          </button>
+        </div>
+      )}
       {error && <p className="state-note state-note--error">{error}</p>}
       {!settings && !error && <p className="state-note">讀取中…</p>}
 
       {settings && dims && (
         <>
-          <div className="split-columns">
+          <div className="split-columns split-columns--wide-right">
             <section>
               <h3 className="section-title">公司與帳務</h3>
               <div className="card fact-card">
@@ -300,16 +364,20 @@ export function Setup({ onToast, reloadKey }: Props) {
                     <span className="fact__key">{s.label}</span>
                     {editing === s.code ? (
                       <span className="fact__edit">
-                        <input
-                          className="entry-input"
-                          value={draft}
-                          autoFocus
-                          onChange={(e) => setDraft(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') void save(s.code);
-                            if (e.key === 'Escape') setEditing(null);
-                          }}
-                        />
+                        {CLOCK_SETTINGS.has(s.code) ? (
+                          <TimeField label={s.label} value={draft} onChange={setDraft} />
+                        ) : (
+                          <input
+                            className="entry-input"
+                            value={draft}
+                            autoFocus
+                            onChange={(e) => setDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void save(s.code);
+                              if (e.key === 'Escape') setEditing(null);
+                            }}
+                          />
+                        )}
                         <button className="btn btn--compact" onClick={() => void save(s.code)}>
                           儲存
                         </button>
@@ -325,7 +393,7 @@ export function Setup({ onToast, reloadKey }: Props) {
                             來自法規 {s.ruleset?.version}
                           </span>
                         )}
-                        {s.editable && (
+                        {s.editable && canEditSettings && (
                           <button
                             className="btn--icon fact__pencil"
                             title="編輯此項"
@@ -344,27 +412,30 @@ export function Setup({ onToast, reloadKey }: Props) {
                 ))}
               </div>
 
-              <p className="recon">營業稅率依適用日帶入，不可變更。</p>
-              <p className="hint">標有編輯圖示的項目僅系統管理員可修改。</p>
+              <p className="hint">
+                {canEditSettings
+                  ? '標有編輯圖示的項目可修改，變更立即套用到全系統。'
+                  : '公司設定由系統管理員維護。'}
+              </p>
 
-              <h3 className="section-title section-title--spaced">維度與條件</h3>
+              <h3 className="section-title section-title--spaced">分類與條件</h3>
               <div className="card fact-card">
                 {dims.dimensions.map((d) => (
                   <div className="fact fact--stacked" key={d.code}>
                     <span className="fact__key">{d.label}</span>
                     <span className="fact__value">
-                      {d.values.length > 0 ? d.values.map((v) => v.label).join('　') : '（尚無值）'}
+                      {d.values.length > 0 ? d.values.map((v) => v.label).join('　') : '（尚未建立）'}
                       {d.note && <span className="fact__note">{d.note}</span>}
                     </span>
                   </div>
                 ))}
               </div>
 
-              <h3 className="section-title section-title--spaced">新增維度值</h3>
+              <h3 className="section-title section-title--spaced">新增項目</h3>
               <div className="card form-card">
                 <div className="field-grid">
                   <label className="field">
-                    維度
+                    類別
                     <select className="input" value={dimCode} onChange={(e) => setDimCode(e.target.value)}>
                       {dims.dimensions.map((d) => (
                         <option key={d.code} value={d.code}>
@@ -396,10 +467,6 @@ export function Setup({ onToast, reloadKey }: Props) {
                   {savingDim ? '存檔中…' : '＋ 新增'}
                 </button>
               </div>
-
-              {!dims.applied_to_entries && (
-                <p className="hint">維度尚未掛載至分錄，填寫不影響報表。</p>
-              )}
             </section>
 
             {coa && (
@@ -409,15 +476,17 @@ export function Setup({ onToast, reloadKey }: Props) {
                   每個科目都要指定它在報表中的段落，以及在現金流量表中的活動別。缺少這兩欄的科目不會出現在報表上。
                 </p>
                 <div className="toolbar">
-                  <button
-                    className={`chip${onlyUsed ? ' chip--on' : ''}`}
-                    onClick={() => setOnlyUsed((v) => !v)}
-                  >
-                    僅顯示有分錄者
-                  </button>
+                  {showBalances && (
+                    <button
+                      className={`chip${onlyUsed ? ' chip--on' : ''}`}
+                      onClick={() => setOnlyUsed((v) => !v)}
+                    >
+                      僅顯示有分錄者
+                    </button>
+                  )}
                   <span className="spacer" />
                   <span className="section-note">
-                    {coa.total} 個科目，{coa.used} 個有分錄
+                    {coa.total} 個科目{showBalances && `，${coa.used} 個有分錄`}
                   </span>
                   <button className="btn btn--compact" onClick={openCreateAccount}>
                     ＋ 新增科目
@@ -430,13 +499,18 @@ export function Setup({ onToast, reloadKey }: Props) {
                         <th>代號</th>
                         <th>科目</th>
                         <th>報表位置</th>
-                        <th className="align-right">餘額</th>
+                        {showBalances && <th className="align-right">餘額</th>}
                         <th />
                       </tr>
                     </thead>
                     <tbody>
                       {shown.map((a) => (
-                        <tr key={a.code} className={a.line_count === 0 ? 'row--waiting' : undefined}>
+                        <tr
+                          key={a.code}
+                          className={
+                            showBalances && a.line_count === 0 ? 'row--waiting' : undefined
+                          }
+                        >
                           <td className="num cell-nowrap">{a.code}</td>
                           <td>
                             {a.name}
@@ -450,13 +524,15 @@ export function Setup({ onToast, reloadKey }: Props) {
                               現金流量：{a.cash_flow_label}
                             </span>
                           </td>
-                          <td className="num align-right">
-                            {a.line_count === 0 ? (
-                              <span className="cell-muted">—</span>
-                            ) : (
-                              money(a.balance)
-                            )}
-                          </td>
+                          {showBalances && (
+                            <td className="num align-right">
+                              {a.line_count === 0 ? (
+                                <span className="cell-muted">—</span>
+                              ) : (
+                                money(a.balance)
+                              )}
+                            </td>
+                          )}
                           <td className="align-right">
                             <button
                               className="btn btn--compact btn--secondary"

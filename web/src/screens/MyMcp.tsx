@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { OPS } from '../api/generated';
 import {
+  businessTime,
   callOp,
   OpFailed,
   type MyApiTokenIssued,
@@ -10,14 +11,6 @@ import {
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
-}
-
-function when(v: string | null): string {
-  if (!v) return '尚未使用';
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return v;
-  const two = (n: number) => String(n).padStart(2, '0');
-  return `${two(d.getMonth() + 1)}/${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }
 
 function summaryOf(name: string): string {
@@ -43,6 +36,15 @@ export function MyMcp({ onToast, reloadKey }: Props) {
   }, []);
 
   useEffect(load, [load, reloadKey]);
+
+  async function copyEndpoint(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      onToast('已複製連線位址');
+    } catch {
+      onToast('這個瀏覽器不允許代為複製，請手動選取位址');
+    }
+  }
 
   async function issue() {
     setBusy('issue');
@@ -100,6 +102,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
   if (!data) return <p className="state-note">讀取中…</p>;
 
   const tools = data.tools;
+  const mcpUrl = `${window.location.origin}${data.endpoint}`;
 
   return (
     <div>
@@ -112,12 +115,12 @@ export function MyMcp({ onToast, reloadKey }: Props) {
         <div className="card stat-card">
           <div className="stat-card__kicker">有效 Token</div>
           <div className="stat-card__value num">{data.live_count}</div>
-          <div className="stat-card__note">把 · 累計核發 {data.tokens.length} 把</div>
+          <div className="stat-card__note num">把 · 累計核發 {data.tokens.length} 把</div>
         </div>
         <div className="card stat-card">
           <div className="stat-card__kicker">可用工具</div>
           <div className="stat-card__value num">{tools.usable.length}</div>
-          <div className="stat-card__note">項 · 你的角色為 {tools.role}</div>
+          <div className="stat-card__note num">項 · 你的角色為{tools.role_name}</div>
         </div>
       </div>
 
@@ -132,8 +135,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
           </div>
           <code className="secret-card__value num">{issued.secret}</code>
           <p className="form-note">
-            請立即複製保存，遺失時只能重新核發。
-            連線位址為 <span className="num">{data.endpoint}</span>，以 Bearer 帶入。
+            請立即複製保存，遺失時只能重新核發。連線設定見下方「連線方式」。
           </p>
         </div>
       )}
@@ -183,6 +185,33 @@ export function MyMcp({ onToast, reloadKey }: Props) {
             </p>
           </div>
 
+          <h3 className="section-title section-title--spaced">連線方式</h3>
+          <div className="card fact-card">
+            <div className="fact">
+              <span className="fact__key">位址</span>
+              <span className="fact__value">
+                <span className="num">{mcpUrl}</span>
+                <button
+                  className="btn btn--compact btn--secondary"
+                  onClick={() => void copyEndpoint(mcpUrl)}
+                >
+                  複製
+                </button>
+              </span>
+            </div>
+            <div className="fact">
+              <span className="fact__key">傳輸方式</span>
+              <span className="fact__value">Streamable HTTP</span>
+            </div>
+            <div className="fact">
+              <span className="fact__key">認證標頭</span>
+              <span className="fact__value num">Authorization: Bearer 你的 Token</span>
+            </div>
+          </div>
+          <p className="hint">
+            在 AI 助理的 MCP 設定裡新增一台 HTTP 伺服器，填入上面的位址與標頭。
+          </p>
+
           <h3 className="section-title section-title--spaced">我核發的 Token</h3>
           <div className="card fact-card">
             {data.tokens.map((t) => (
@@ -197,7 +226,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
                 <span className="fact__value">
                   <span className="num">{t.prefix}…</span>　{t.scope}
                   <span className="fact__note">
-                    最後使用 <span className="num">{when(t.last_used_at)}</span> · {t.expiry_note}
+                    最後使用 <span className="num">{businessTime(t.last_used_at, '尚未使用')}</span> · {t.expiry_note}
                   </span>
                 </span>
                 {t.live && (

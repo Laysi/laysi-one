@@ -7,6 +7,7 @@ import {
   type MyLeaveResult,
 } from '../api/client';
 import type { ScreenId } from '../nav';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -108,11 +109,11 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         <div className="card stat-card">
           <div className="stat-card__kicker">待簽核</div>
           <div className="stat-card__value num">{data.pending_count}</div>
-          <div className="stat-card__note">張</div>
+          <div className="stat-card__note num">張</div>
         </div>
       </div>
 
-      <div className="split-columns">
+      <div className={result ? 'split-columns' : undefined}>
         <section>
           <h3 className="section-title">申請內容</h3>
           <div className="card form-card">
@@ -131,20 +132,18 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
             <div className="field-row">
               <label className="field field--date">
                 從
-                <input
+                <DateField
                   className="input input--date"
-                  type="date"
                   value={fromOn}
-                  onChange={(e) => setFromOn(e.target.value)}
+                  onChange={(v) => setFromOn(v)}
                 />
               </label>
               <label className="field field--date">
                 到
-                <input
+                <DateField
                   className="input input--date"
-                  type="date"
                   value={toOn}
-                  onChange={(e) => setToOn(e.target.value)}
+                  onChange={(v) => setToOn(v)}
                 />
               </label>
               <label className="field field--grow">
@@ -180,9 +179,9 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
           </div>
         </section>
 
-        <section>
-          <h3 className="section-title">送出結果</h3>
-          {result ? (
+        {result && (
+          <section>
+            <h3 className="section-title">送出結果</h3>
             <>
               <div className="card doc-card">
                 <div className="doc-card__head">
@@ -213,10 +212,8 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
                 查看我的休假 →
               </button>
             </>
-          ) : (
-            <p className="state-note">送出後，單號與目前狀態會顯示在這裡。</p>
-          )}
-        </section>
+          </section>
+        )}
       </div>
 
       <p className="hint">

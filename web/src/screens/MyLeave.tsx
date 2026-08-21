@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { callOp, OpFailed, trimDecimal, type MyLeaveList } from '../api/client';
+import { businessDate, callOp, OpFailed, trimDecimal, type MyLeaveList } from '../api/client';
 import type { ScreenId } from '../nav';
 
 interface Props {
@@ -55,22 +55,22 @@ export function MyLeave({ onGo, reloadKey }: Props) {
         <div className="card stat-card">
           <div className="stat-card__kicker">{al.year} 年特休額度</div>
           <div className="stat-card__value num">{trimDecimal(al.entitlement)}</div>
-          <div className="stat-card__note">日 · 依年資即時計算</div>
+          <div className="stat-card__note num">日 · 依年資即時計算</div>
         </div>
         <div className="card stat-card">
           <div className="stat-card__kicker">已休</div>
           <div className="stat-card__value num">{trimDecimal(al.taken)}</div>
-          <div className="stat-card__note">日 · 僅計已核准</div>
+          <div className="stat-card__note num">日 · 僅計已核准</div>
         </div>
         <div className="card stat-card">
           <div className="stat-card__kicker">餘額</div>
           <div className="stat-card__value num">{trimDecimal(al.remaining)}</div>
-          <div className="stat-card__note">日</div>
+          <div className="stat-card__note num">日</div>
         </div>
         <div className="card stat-card">
           <div className="stat-card__kicker">待簽核</div>
           <div className="stat-card__value num">{data.pending_count}</div>
-          <div className="stat-card__note">張 · 累計送出 {data.requests.length} 張</div>
+          <div className="stat-card__note num">張 · 累計送出 {data.requests.length} 張</div>
         </div>
       </div>
 
@@ -101,7 +101,7 @@ export function MyLeave({ onGo, reloadKey }: Props) {
                 >
                   <td className="num">
                     {r.leave_no}
-                    <span className="cell-hint cell-hint--block">{r.created_at.slice(0, 10)} 送出</span>
+                    <span className="cell-hint cell-hint--block">{businessDate(r.created_at)} 送出</span>
                   </td>
                   <td>
                     {r.kind_label}

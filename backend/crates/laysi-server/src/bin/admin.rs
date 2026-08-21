@@ -333,7 +333,7 @@ async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
         eprintln!("帳號 {username} 已存在，未重新建立；需要新密碼請用 reset-password。");
     }
 
-    eprintln!("已種入示範資料：{calls} 次操作，全部經由 Registry::dispatch，稽核軌跡完整。");
+    eprintln!("已種入示範資料：{calls} 次操作，全部經由 Registry::dispatch，稽核紀錄完整。");
     eprintln!("這是拋棄式安裝用的評估資料，不要種在正式帳務上。");
     Ok(())
 }

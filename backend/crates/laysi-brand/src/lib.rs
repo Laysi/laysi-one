@@ -2,10 +2,10 @@
 //!
 //! The crate has two jobs, both anti-rebranding mechanisms under the BSL:
 //!
-//! 1. The wordmark is generated in code: [`mark::wordmark`] computes the SVG
-//!    from the parameterised geometry in [`glyphs`]. The frontend stores no
-//!    logo file and always fetches `GET /v1/brand/mark.svg`, so stripping the
-//!    brand means editing Rust source and rebuilding, not deleting an image.
+//! 1. The logo is generated in code: [`mark::wordmark`] assembles the SVG
+//!    from the outlines in [`glyphs`]. The frontend stores no logo file and
+//!    always fetches `GET /v1/brand/mark.svg`, so stripping the brand means
+//!    editing Rust source and rebuilding, not deleting an image.
 //! 2. Integrity verification: [`integrity::verify`] confirms at startup that
 //!    the brand sources and the licence text have not been tampered with, and
 //!    by product decision refuses to boot when they have.

@@ -80,6 +80,8 @@ fn token_identity(token: &laysi_store::ApiToken) -> crate::auth::VerifiedIdentit
     crate::auth::VerifiedIdentity {
         actor: token.actor.clone(),
         actor_role: token.actor_role.clone(),
+        // A token is not an account, so there is no login name to act as.
+        username: None,
         // Only from the column an employee set on their own token through
         // `issue_my_api_token`. A token the owner issued on the
         // installation's behalf leaves it NULL and stays unlinked: the
@@ -233,7 +235,7 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
 
     // Per-token rate limiting: a leaked token cannot be used without bound,
     // even while it remains valid.
-    if !s.mcp_rate_limiter.allow(auth.token_id) {
+    if !s.mcp_rate_limiter.allow(&auth.token_id.to_string()) {
         let summary = format!(
             "MCP 呼叫被擋下 · {}（token 編號 {}）超過每分鐘速率限制",
             auth.identity.actor, auth.token_id

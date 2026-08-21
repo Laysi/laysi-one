@@ -12,8 +12,15 @@
 // file is licence-protected under BSL 1.1.
 
 //! SVG generator for the brand mark.
+//!
+//! Two deliverables come out of the geometry in [`crate::glyphs`]: the
+//! wordmark for the interface, and the square app mark for the favicon and
+//! for layouts with no room for the wordmark.
 
-use crate::glyphs::{lay_out, Metrics};
+use crate::glyphs::{
+    LETTER_L_HEIGHT, LETTER_L_PATH, LETTER_L_WIDTH, LOGO_HEIGHT, LOGO_WIDTH, LOGO_X, LOGO_Y,
+    ONE_PATH, ONE_STROKE, WORDMARK_PATH,
+};
 use std::fmt::Write as _;
 
 /// Full brand name. The only legitimate content of the wordmark.
@@ -51,74 +58,63 @@ impl Default for MarkOptions {
     }
 }
 
-/// Render the horizontal "LAYSI ONE" wordmark.
-pub fn wordmark(opts: &MarkOptions) -> String {
-    let m = Metrics::default();
-    let pad = m.stroke; // 讓線寬不被 viewBox 裁掉
-    let w = m.measure(BRAND_NAME) + pad * 2.0;
-    let h = m.cap + pad * 2.0;
-    let scale = opts.height / h;
-
-    let mut svg = String::with_capacity(2048);
+/// Open the SVG element and write the notice and title every deliverable
+/// carries.
+fn open_svg(
+    svg: &mut String,
+    opts: &MarkOptions,
+    vb: (f64, f64, f64, f64),
+    w: f64,
+    h: f64,
+) {
+    let (vb_x, vb_y, vb_w, vb_h) = vb;
     let _ = write!(
         svg,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:.2} {h:.2}" width="{dw:.2}" height="{dh:.2}" role="img" aria-label="Laysi One" data-laysi-build="{build}">"#,
-        w = w,
-        h = h,
-        dw = w * scale,
-        dh = opts.height,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vb_x:.2} {vb_y:.2} {vb_w:.2} {vb_h:.2}" width="{w:.2}" height="{h:.2}" role="img" aria-label="Laysi One" data-laysi-build="{build}">"#,
         build = escape_attr(&opts.build),
     );
     svg.push_str(SVG_NOTICE);
     let _ = write!(svg, "<title>Laysi One</title>");
+}
+
+/// Render the wordmark: "LAYSI ONE".
+pub fn wordmark(opts: &MarkOptions) -> String {
+    let scale = opts.height / LOGO_HEIGHT;
+    let mut svg = String::with_capacity(2048);
+    open_svg(
+        &mut svg,
+        opts,
+        (LOGO_X, LOGO_Y, LOGO_WIDTH, LOGO_HEIGHT),
+        LOGO_WIDTH * scale,
+        opts.height,
+    );
+    let color = escape_attr(&opts.color);
+    let _ = write!(svg, r#"<path fill="{color}" d="{WORDMARK_PATH}"/>"#);
     let _ = write!(
         svg,
-        r#"<g transform="translate({pad:.2} {pad:.2})" fill="none" stroke="{color}" stroke-width="{sw}" stroke-linecap="round" stroke-linejoin="round">"#,
-        pad = pad,
-        color = escape_attr(&opts.color),
-        sw = m.stroke,
+        r#"<path fill="none" stroke="{color}" stroke-width="{ONE_STROKE}" stroke-linecap="butt" stroke-linejoin="round" d="{ONE_PATH}"/>"#,
     );
-    for (x, g) in lay_out(BRAND_NAME, &m) {
-        let _ = write!(svg, r#"<path transform="translate({x:.2} 0)" d="{d}"/>"#, x = x, d = g.d);
-    }
-    svg.push_str("</g></svg>");
+    svg.push_str("</svg>");
     svg
 }
 
-/// Render the square monogram: an "L" inside a hairline circle, for the
-/// favicon and narrow layouts.
+/// Render the square app mark: the `L` of the wordmark, for the favicon and
+/// for layouts too narrow for the wordmark.
 pub fn monogram(opts: &MarkOptions) -> String {
-    let m = Metrics::default();
-    let box_size = 100.0;
-    let ring_r = 46.0;
-    let inner_cap = 44.0;
-    let s = inner_cap / m.cap;
-    let l = crate::glyphs::glyph('L').expect("L 必須存在於字標字形集");
-    let tx = (box_size - l.advance * s) / 2.0;
-    let ty = (box_size - inner_cap) / 2.0;
+    const BOX: f64 = 100.0;
+    const INSET: f64 = 12.0;
+    let s = (BOX - INSET * 2.0) / LETTER_L_HEIGHT;
 
     let mut svg = String::with_capacity(1024);
+    open_svg(&mut svg, opts, (0.0, 0.0, BOX, BOX), opts.height, opts.height);
     let _ = write!(
         svg,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="{d:.2}" height="{d:.2}" role="img" aria-label="Laysi One" data-laysi-build="{build}">"#,
-        d = opts.height,
-        build = escape_attr(&opts.build),
-    );
-    svg.push_str(SVG_NOTICE);
-    let _ = write!(svg, "<title>Laysi One</title>");
-    let _ = write!(
-        svg,
-        r#"<g fill="none" stroke="{color}" stroke-width="{sw}" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path fill="{color}" transform="translate({tx:.2} {ty:.2}) scale({s:.4})" d="{LETTER_L_PATH}"/>"#,
         color = escape_attr(&opts.color),
-        sw = m.stroke * 0.8,
+        tx = (BOX - LETTER_L_WIDTH * s) / 2.0,
+        ty = (BOX - LETTER_L_HEIGHT * s) / 2.0,
     );
-    let _ = write!(svg, r#"<circle cx="50" cy="50" r="{ring_r}"/>"#);
-    let _ = write!(
-        svg,
-        r#"<path transform="translate({tx:.2} {ty:.2}) scale({s:.4})" d="{d}"/>"#,
-        d = l.d,
-    );
-    svg.push_str("</g></svg>");
+    svg.push_str("</svg>");
     svg
 }
 
@@ -131,12 +127,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wordmark_is_wellformed_and_carries_every_letter() {
+    fn the_wordmark_carries_the_artwork_and_one() {
         let svg = wordmark(&MarkOptions::default());
         assert!(svg.starts_with("<svg"));
         assert!(svg.ends_with("</svg>"));
-        // 8 letters means 8 paths.
-        assert_eq!(svg.matches("<path").count(), 8);
+        assert_eq!(svg.matches("<path").count(), 2);
+        assert!(svg.contains(WORDMARK_PATH));
+        assert!(svg.contains(ONE_PATH));
     }
 
     #[test]
@@ -155,9 +152,10 @@ mod tests {
     }
 
     #[test]
-    fn monogram_is_square() {
+    fn monogram_is_square_and_is_the_letter_alone() {
         let svg = monogram(&MarkOptions { height: 64.0, ..Default::default() });
         assert!(svg.contains(r#"width="64.00" height="64.00""#));
-        assert!(svg.contains("<circle"));
+        assert!(svg.contains(LETTER_L_PATH));
+        assert!(!svg.contains(WORDMARK_PATH));
     }
 }

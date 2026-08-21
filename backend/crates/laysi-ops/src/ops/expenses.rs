@@ -15,6 +15,12 @@
 //! posting it to the ledger are two decisions, matching the pattern used for
 //! receipts, payments and depreciation. The expense line carries the
 //! claimant's department so departmental P&L sees the cost.
+//!
+//! A claim repaid at month end credits 2101 and therefore also becomes an
+//! `ap_bill` in that same transaction. Payables reconciles its detail against
+//! the 2101 balance, so a credit with no bill puts the two permanently apart,
+//! and the payment batch — the only path by which the money leaves — reads
+//! that same table.
 
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -72,10 +78,24 @@ fn next_step<'a>(claim: &ExpenseClaim, steps: &[&'a ApprovalRule]) -> Option<&'a
 /// a claim should not stall while a manager travels. But a claimant may
 /// never approve their own claim, which is the one separation-of-duties rule
 /// enforceable today: comparing names is enough, no permission matrix needed.
-fn may_decide(step: &ApprovalRule, claim: &ExpenseClaim, actor: &str, role: &str) -> Result<(), OpError> {
+///
+/// A company whose only accounts are the administrator and the owner has no
+/// second signatory, so the refusal says where one comes from. Creating an
+/// account is `AdminOnly`, which is why it names the administrator rather
+/// than telling the reader to go and do it.
+///
+/// `role_label` is the role as the screens name it; the role code never
+/// reaches the message.
+fn may_decide(
+    step: &ApprovalRule,
+    claim: &ExpenseClaim,
+    actor: &str,
+    role: &str,
+    role_label: &str,
+) -> Result<(), OpError> {
     if actor == claim.claimant {
         return Err(OpError::BadInput(format!(
-            "{} 為 {} 本人送出的單據，不得自行核准。",
+            "{} 由 {} 本人送出，要由另一個帳號簽核。公司還沒有其他可簽核的帳號時，請系統管理員在「帳號管理」建立。",
             claim.claim_no, claim.claimant
         )));
     }
@@ -84,11 +104,11 @@ fn may_decide(step: &ApprovalRule, claim: &ExpenseClaim, actor: &str, role: &str
         return Ok(());
     }
     Err(OpError::BadInput(format!(
-        "第 {} 關「{}」應由{}簽核，目前身分為「{}」。",
+        "第 {} 關「{}」應由{}簽核，目前身分為{}。",
         step.step_no,
         step.label,
         step.role_name.as_deref().unwrap_or(wanted),
-        role
+        role_label
     )))
 }
 
@@ -193,7 +213,7 @@ impl Operation for ListExpenseClaims {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀費用報支單：各單目前關卡、應經關卡（門檻查自公司簽核規則，非寫死於程式）、AI 建議科目與人員確認科目"
+        "讀費用報支單：各單目前關卡、應經關卡（門檻查自公司簽核規則）、AI 建議科目與人員確認科目"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListExpenseClaimsInput>()
@@ -209,7 +229,27 @@ impl Operation for ListExpenseClaims {
             .filter(|c| c.status == "submitted" || c.status == "approving")
             .map(|c| c.amount)
             .sum();
-        let rows: Vec<Value> = claims.iter().map(|c| claim_json(c, &rules)).collect();
+        // Whether this identity can take the next step is decided here rather
+        // than on the screen: the rule stays in one place, and the button can
+        // be drawn dead with the reason beside it instead of being live and
+        // answering with a refusal.
+        let role_label = crate::role_name(ctx).await;
+        let rows: Vec<Value> = claims
+            .iter()
+            .map(|c| {
+                let mut row = claim_json(c, &rules);
+                let steps = required_steps(&rules, c.amount);
+                let next = next_step(c, &steps);
+                let blocked = next.and_then(|step| {
+                    may_decide(step, c, &ctx.actor, &ctx.actor_role, &role_label)
+                        .err()
+                        .map(|e| e.to_string())
+                });
+                row["can_approve"] = json!(next.is_some() && blocked.is_none());
+                row["approve_blocked_reason"] = json!(blocked);
+                row
+            })
+            .collect();
 
         let summary = format!(
             "讀取費用報支 · {} 張待處理合計 {} · 門檻依公司簽核規則",
@@ -235,7 +275,7 @@ impl Operation for ListExpenseClaims {
                 })).collect::<Vec<_>>(),
                 // Thresholds are data, not code. The screen states where they
                 // come from.
-                "thresholds_source": "公司自訂的簽核規則，非法規",
+                "thresholds_source": "公司自訂的簽核規則",
                 "actor": ctx.actor,
                 "actor_role": ctx.actor_role,
             }),
@@ -388,7 +428,7 @@ impl Operation for ApproveExpenseClaim {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "簽核費用報支單目前所在的關卡。會計關卡要帶入費用科目；最後一關會產生待過帳的費用傳票（借費用科目／貸應付帳款或零用金）。申請人不得核准本人送出的單據。"
+        "簽核費用報支單目前所在的關卡。會計關卡要帶入費用科目；最後一關會產生待過帳的費用傳票（借費用科目／貸應付帳款或零用金）。付款方式為月底彙總匯款時，同時列入應付帳款，由付款單匯出。申請人不得核准本人送出的單據。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ApproveExpenseClaimInput>()
@@ -403,7 +443,7 @@ impl Operation for ApproveExpenseClaim {
         let step = next_step(&claim, &steps).ok_or_else(|| {
             OpError::BadInput(format!("{} 已完成全部簽核", claim.claim_no))
         })?;
-        may_decide(step, &claim, &ctx.actor, &ctx.actor_role)?;
+        may_decide(step, &claim, &ctx.actor, &ctx.actor_role, &crate::role_name(ctx).await)?;
 
         // Confirming the account is what the accounting step is for, so that
         // step cannot be approved without one.
@@ -455,12 +495,13 @@ impl Operation for ApproveExpenseClaim {
 
         let summary = match &updated.voucher_no {
             Some(no) => format!(
-                "{} {} {} 核准完成（第 {} 關）· 產生 {} 待過帳",
+                "{} {} {} 核准完成（第 {} 關）· 產生 {} 待過帳{}",
                 updated.claim_no,
                 updated.title,
                 money(updated.amount),
                 step.step_no,
-                no
+                no,
+                if updated.pay_method == "petty_cash" { "" } else { "，並列入應付帳款" }
             ),
             None => format!(
                 "{} {} {} 通過第 {} 關「{}」· 下一關 {}",
@@ -527,7 +568,7 @@ impl Operation for RejectExpenseClaim {
         let step = next_step(&claim, &steps).ok_or_else(|| {
             OpError::BadInput(format!("{} 已完成全部簽核，如需更正請開立反向分錄", claim.claim_no))
         })?;
-        may_decide(step, &claim, &ctx.actor, &ctx.actor_role)?;
+        may_decide(step, &claim, &ctx.actor, &ctx.actor_role, &crate::role_name(ctx).await)?;
 
         let note = i.note.as_deref().unwrap_or("請補資料");
         let updated = ctx
@@ -681,25 +722,33 @@ mod tests {
         let steps = required_steps(&rules, c.amount);
         let step = next_step(&c, &steps).unwrap();
 
-        let err = may_decide(step, &c, "申請人甲", "boss").unwrap_err();
+        let err = may_decide(step, &c, "申請人甲", "boss", "負責人").unwrap_err();
         assert!(
-            err.to_string().contains("不得自行核准"),
-            "連老闆都不能簽自己的單"
+            err.to_string().contains("要由另一個帳號簽核"),
+            "連負責人都不能簽自己的單"
+        );
+        assert!(
+            err.to_string().contains("帳號管理"),
+            "只有一個帳號的公司要看得到出路在哪：{err}"
         );
 
         assert!(
-            may_decide(step, &c, "會計人員", "acct").is_ok(),
+            may_decide(step, &c, "會計人員", "acct", "會計").is_ok(),
             "會計簽會計那一關"
         );
         assert!(
-            may_decide(step, &c, "負責人", "boss").is_ok(),
-            "老闆可以代任何一關"
+            may_decide(step, &c, "負責人", "boss", "負責人").is_ok(),
+            "負責人可以代任何一關"
         );
 
-        let err = may_decide(step, &c, "出納人員", "cashier").unwrap_err();
+        let err = may_decide(step, &c, "出納人員", "cashier", "出納").unwrap_err();
         assert!(
             err.to_string().contains("會計確認科目"),
             "擋下來時要說清楚該誰簽：{err}"
+        );
+        assert!(
+            !err.to_string().contains("cashier"),
+            "錯誤訊息不出現角色代號：{err}"
         );
     }
 

@@ -66,12 +66,12 @@ export function Me({ onGo, reloadKey }: Props) {
         <div className="card stat-card">
           <div className="stat-card__kicker">休假待簽核</div>
           <div className="stat-card__value num">{data.pending.leave_requests}</div>
-          <div className="stat-card__note">張 · 累計送出 {leaves.length} 張</div>
+          <div className="stat-card__note num">張 · 累計送出 {leaves.length} 張</div>
         </div>
         <div className="card stat-card">
           <div className="stat-card__kicker">請款進行中</div>
           <div className="stat-card__value num">{data.pending.expense_claims}</div>
-          <div className="stat-card__note">張 · 累計送出 {claims.length} 張</div>
+          <div className="stat-card__note num">張 · 累計送出 {claims.length} 張</div>
         </div>
       </div>
 
@@ -98,16 +98,16 @@ export function Me({ onGo, reloadKey }: Props) {
             <div className="fact">
               <span className="fact__key">部門與職稱</span>
               <span className="fact__value">
-                {p.dept_label ?? '未指定'} · {p.title}
-                {p.role_name && <span className="fact__note">系統角色：{p.role_name}</span>}
+                {p.dept_label ?? '未指定'}
+                {p.title ? ` · ${p.title}` : ''}
               </span>
             </div>
             <div className="fact">
               <span className="fact__key">在職狀態</span>
               <span className="fact__value">
-                {p.status === 'active' ? '在職' : p.status}
+                {p.status_label}
                 <span className="fact__note num">
-                  {p.employment_type} · {p.hired_on} 起
+                  {p.employment_label} · {p.hired_on} 起
                   {p.left_on ? ` · ${p.left_on} 離職` : ''}
                 </span>
               </span>
@@ -121,7 +121,7 @@ export function Me({ onGo, reloadKey }: Props) {
         </section>
 
         <section>
-          <h3 className="section-title">{data.attendance_month} 的出勤</h3>
+          <h3 className="section-title">{data.attendance_month} 的差勤彙總</h3>
           {data.attendance ? (
             <>
               <div className="card fact-card">

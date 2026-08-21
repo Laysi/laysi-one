@@ -256,6 +256,18 @@ pub fn vat(rs: &Ruleset, net_amount: Money) -> Result<Money, RegulationError> {
     Ok(to_dollars(net_amount * rs.decimal("rate")?))
 }
 
+/// The tax contained in a tax-inclusive amount; the inverse of [`vat`].
+///
+/// Quoted prices in Taiwan are usually tax inclusive, so a receivable often
+/// starts from the total rather than the net. Rounding is applied once, to
+/// the tax, and the net is whatever is left, so net plus tax always equals
+/// the total the customer was quoted.
+pub fn vat_from_total(rs: &Ruleset, total_amount: Money) -> Result<Money, RegulationError> {
+    rs.expect_domain("vat")?;
+    let rate = rs.decimal("rate")?;
+    Ok(to_dollars(total_amount - total_amount / (Decimal::ONE + rate)))
+}
+
 /// Minimum wage check. `None` means compliant, `Some(floor)` means below the
 /// statutory minimum.
 pub fn minimum_wage_shortfall(
@@ -358,6 +370,10 @@ mod tests {
     fn vat_is_five_percent() {
         let rs = resolve("vat", d(2026, 7, 25)).unwrap();
         assert_eq!(vat(rs, dec!(2486300)).unwrap(), dec!(124315));
+
+        // A quoted tax-inclusive price splits back to the same pair.
+        assert_eq!(vat_from_total(rs, dec!(2610615)).unwrap(), dec!(124315));
+        assert_eq!(vat_from_total(rs, dec!(47250)).unwrap(), dec!(2250));
     }
 
     #[test]

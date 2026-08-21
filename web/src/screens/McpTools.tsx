@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { callOp } from '../api/client';
+import { businessTime, callOp } from '../api/client';
 import type { Risk } from '../api/generated';
 
 interface OpInfo {
@@ -13,6 +13,7 @@ interface OpInfo {
 interface AuditEntry {
   at: string;
   actor: string;
+  actor_role_name: string;
   tool_name: string;
   risk: string;
   prompt: string | null;
@@ -24,6 +25,7 @@ interface AuditEntry {
 export function McpTools({ reloadKey }: { reloadKey: number }) {
   const [ops, setOps] = useState<OpInfo[] | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [tab, setTab] = useState<'tools' | 'audit'>('tools');
 
   useEffect(() => {
     fetch('/v1/ops')
@@ -39,27 +41,39 @@ export function McpTools({ reloadKey }: { reloadKey: number }) {
     <div>
       <h1 className="page-title">MCP 與 AI</h1>
       <p className="page-lede">
-        開關只作用於 AI；畫面上的操作不受影響。
+        這裡的開關只管 AI 能呼叫哪些工具。
       </p>
 
-      <h2 className="section-title">工具與風險分級</h2>
+      <div className="toolbar toolbar--spaced">
+        <button
+          className={`chip${tab === 'tools' ? ' chip--on' : ''}`}
+          onClick={() => setTab('tools')}
+        >
+          工具與風險分級
+        </button>
+        <button
+          className={`chip${tab === 'audit' ? ' chip--on' : ''}`}
+          onClick={() => setTab('audit')}
+        >
+          稽核紀錄
+        </button>
+      </div>
 
-      {!ops && <p className="state-note">讀取中…</p>}
-      {ops && (
+      {tab === 'tools' && !ops && <p className="state-note">讀取中…</p>}
+      {tab === 'tools' && ops && (
         <div className="table-scroll">
           <table className="table">
             <thead>
               <tr>
                 <th>工具</th>
-                <th>說明</th>
                 <th>風險</th>
                 <th>AI 可用</th>
+                <th>工具名稱</th>
               </tr>
             </thead>
             <tbody>
               {ops.map((o) => (
                 <tr key={o.name}>
-                  <td className="num">{o.name}</td>
                   <td>{o.summary}</td>
                   <td>
                     <span className={`tag${o.risk === 'read_only' ? '' : ' tag--warn'}`}>
@@ -67,6 +81,7 @@ export function McpTools({ reloadKey }: { reloadKey: number }) {
                     </span>
                   </td>
                   <td>{o.enabled ? '開啟' : <span className="cell-muted">關閉</span>}</td>
+                  <td className="num cell-muted">{o.name}</td>
                 </tr>
               ))}
             </tbody>
@@ -74,7 +89,7 @@ export function McpTools({ reloadKey }: { reloadKey: number }) {
         </div>
       )}
 
-      <h2 className="section-title section-title--spaced">稽核軌跡</h2>
+      {tab === 'audit' && (
       <div className="table-scroll">
         <table className="table">
           <thead>
@@ -82,32 +97,36 @@ export function McpTools({ reloadKey }: { reloadKey: number }) {
               <th>時間</th>
               <th>來源</th>
               <th>身分</th>
-              <th>工具</th>
               <th>原始提問</th>
               <th>結果</th>
+              <th>工具名稱</th>
             </tr>
           </thead>
           <tbody>
             {audit.map((a, i) => (
               <tr key={i}>
-                <td className="num cell-muted">{a.at.slice(5, 16).replace('T', ' ')}</td>
+                <td className="num cell-muted">{businessTime(a.at)}</td>
                 <td>
                   <span className={`tag${a.channel === 'mcp' ? ' tag--warn' : ''}`}>
                     {a.channel === 'mcp' ? 'AI' : '人員'}
                   </span>
                 </td>
-                <td>{a.actor}</td>
-                <td className="num">{a.tool_name}</td>
+                <td>
+                  {a.actor}
+                  <span className="cell-hint cell-hint--block">{a.actor_role_name}</span>
+                </td>
                 <td className="cell-muted">{a.prompt ?? '—'}</td>
                 <td>
                   {a.outcome === 'blocked' && <span className="tag tag--bad">已擋下</span>}{' '}
                   {a.result_summary}
                 </td>
+                <td className="num cell-muted">{a.tool_name}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }

@@ -135,6 +135,12 @@ pub struct LineInput {
     /// cash position is derived from this field.
     #[serde(default)]
     pub bank_account_id: Option<i32>,
+    /// Which department carries this line, matching a department code in
+    /// `dimension_value`. Department profit and loss is derived from this
+    /// field, so a line left empty is reported as unattributed rather than
+    /// spread over the others.
+    #[serde(default)]
+    pub dept_code: Option<String>,
 }
 
 /// Error raised when a journal breaks the rules of double entry.
@@ -275,6 +281,7 @@ mod tests {
             credit,
             memo: None,
             bank_account_id: None,
+            dept_code: None,
         }
     }
 

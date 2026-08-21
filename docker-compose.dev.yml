@@ -1,0 +1,23 @@
+# Development overlay: publish the two stateful services so the server and the
+# frontend can run on the host. A code change is then an incremental cargo
+# build, not a release build inside an image.
+#
+#   podman compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres rustfs
+#   cd backend && cargo run -p laysi-server
+#   cd web && npm run dev            # 5173, proxies /v1 and /mcp to localhost:8080
+#
+# api, mcp and web stay defined in the base file and are simply not started.
+# DATABASE_URL for the host process points at localhost rather than the compose
+# network:
+#
+#   postgres://laysi:<POSTGRES_PASSWORD>@localhost:5432/laysi
+
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+  rustfs:
+    ports:
+      - "${RUSTFS_PORT:-9000}:9000"
+      - "${RUSTFS_CONSOLE_PORT:-9001}:9001"

@@ -58,6 +58,12 @@ docs/architecture.md 跨層契約，動型別或端點前先讀
 
 ```bash
 proto install              # rust、zig、node
+cargo install cargo-watch  # scripts/dev 用它自動重建重啟伺服器
+
+# 資料庫與物件儲存在容器裡，伺服器與前端跑在本機
+scripts/dev                # Ctrl-C 只停腳本起的那些，容器留著
+scripts/dev stop           # 連容器一起停
+
 cd backend
 
 cargo test --workspace

@@ -6,8 +6,10 @@ import {
   money,
   OpFailed,
   trimDecimal,
+  type DimensionList,
   type Voucher,
 } from '../api/client';
+import { DateField } from './DateField';
 
 interface Account {
   code: string;
@@ -20,11 +22,12 @@ interface Row {
   account_code: string;
   debit: string;
   credit: string;
+  dept_code: string;
 }
 
 const EMPTY: Row[] = [
-  { account_code: '6115', debit: '', credit: '' },
-  { account_code: '1102', debit: '', credit: '' },
+  { account_code: '6115', debit: '', credit: '', dept_code: '' },
+  { account_code: '1102', debit: '', credit: '', dept_code: '' },
 ];
 
 function clean(v: string): string {
@@ -63,6 +66,7 @@ interface Props {
 
 export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [depts, setDepts] = useState<{ code: string; label: string }[]>([]);
   const [date, setDate] = useState(today);
   const [memo, setMemo] = useState('');
   const [rows, setRows] = useState<Row[]>(EMPTY);
@@ -73,6 +77,17 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
     callOp<{ accounts: Account[] }>('list_accounts')
       .then((d) => setAccounts(d.accounts.filter((a) => a.is_postable)))
       .catch(() => onToast('無法讀取會計科目表'));
+    callOp<DimensionList>('list_dimensions')
+      .then((d) =>
+        setDepts(
+          d.dimensions
+            .filter((x) => x.code === 'department')
+            .flatMap((x) => x.values)
+            .filter((v) => v.active)
+            .map((v) => ({ code: v.code, label: v.label })),
+        ),
+      )
+      .catch(() => setDepts([]));
   }, [open, accounts.length, onToast]);
 
   const debit = sum(rows, 'debit');
@@ -101,8 +116,8 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
   function fillFromAi() {
     setMemo('支付 6 月電費');
     setRows([
-      { account_code: '6118', debit: '8420', credit: '' },
-      { account_code: '1102', debit: '', credit: '8420' },
+      { account_code: '6118', debit: '8420', credit: '', dept_code: '' },
+      { account_code: '1102', debit: '', credit: '8420', dept_code: '' },
     ]);
     onToast('已帶入 AI 草稿 2 行，請確認會計科目');
   }
@@ -117,6 +132,7 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
           account_code: r.account_code,
           debit: clean(r.debit),
           credit: clean(r.credit),
+          ...(r.dept_code ? { dept_code: r.dept_code } : {}),
         })),
       });
       onToast(`${d.voucher.no} 已儲存，狀態為待過帳`);
@@ -150,11 +166,10 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
           <div className="field-row">
             <label className="field field--date">
               <span>日期</span>
-              <input
+              <DateField
                 className="input input--date"
-                type="date"
                 value={date}
-                onChange={(e) => setDate(e.target.value)}
+                onChange={(v) => setDate(v)}
               />
             </label>
             <label className="field field--grow">
@@ -170,6 +185,7 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
 
           <div className="entry-grid entry-head">
             <div>科目</div>
+            <div>部門</div>
             <div style={{ textAlign: 'right' }}>借方</div>
             <div style={{ textAlign: 'right' }}>貸方</div>
             <div />
@@ -185,6 +201,18 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
                 {accounts.map((a) => (
                   <option key={a.code} value={a.code}>
                     {a.code} {a.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="input"
+                value={r.dept_code}
+                onChange={(e) => setRow(i, 'dept_code', e.target.value)}
+              >
+                <option value="">未指定</option>
+                {depts.map((d) => (
+                  <option key={d.code} value={d.code}>
+                    {d.label}
                   </option>
                 ))}
               </select>
@@ -209,10 +237,13 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
           <div className="entry-grid entry-total">
             <button
               className="btn btn--dashed"
-              onClick={() => setRows([...rows, { account_code: '1102', debit: '', credit: '' }])}
+              onClick={() =>
+                setRows([...rows, { account_code: '1102', debit: '', credit: '', dept_code: '' }])
+              }
             >
               ＋ 新增分錄
             </button>
+            <div />
             <div className="entry-total__label num">{fmt(debit)}</div>
             <div className="entry-total__label num">{fmt(credit)}</div>
             <div />

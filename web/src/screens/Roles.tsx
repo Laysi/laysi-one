@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useCurrentUser } from '../auth';
 import {
   callOp,
   money,
@@ -6,9 +7,9 @@ import {
   type ApprovalRules,
   type ApprovalStep,
   type GrantCell,
-  type NewUserAccount,
   type RoleMatrix,
 } from '../api/client';
+import { ConfirmModal } from '../components/ConfirmModal';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -37,44 +38,44 @@ function emptyStepForm(nextStepNo: number): StepForm {
   return { step_no: String(nextStepNo), role_code: '', label: '', condition_note: '', min_amount: '' };
 }
 
-interface AccountForm {
-  username: string;
-  display_name: string;
-  email: string;
-  role_code: string;
-  employee_no: string;
+interface PendingGrant {
+  roleCode: string;
+  roleName: string;
+  permCode: string;
+  permLabel: string;
+  from: Level;
+  to: Level;
 }
 
-const EMPTY_ACCOUNT: AccountForm = {
-  username: '',
-  display_name: '',
-  email: '',
-  role_code: '',
-  employee_no: '',
-};
-
 export function Roles({ onToast, reloadKey }: Props) {
+  const me = useCurrentUser();
+  const [pending, setPending] = useState<PendingGrant | null>(null);
   const [matrix, setMatrix] = useState<RoleMatrix | null>(null);
   const [flow, setFlow] = useState<ApprovalRules | null>(null);
+  const [flowError, setFlowError] = useState<string | null>(null);
+  const canReadFlow = me.permissions.includes('list_approval_rules');
+  const canEditFlow = me.permissions.includes('set_approval_rule');
+  const canEditMatrix = me.permissions.includes('set_role_permission');
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<'matrix' | 'flow'>('matrix');
   const [busy, setBusy] = useState<string | null>(null);
 
   const [stepForm, setStepForm] = useState<StepForm>(emptyStepForm(1));
   const [savingStep, setSavingStep] = useState(false);
-
-  const [accountForm, setAccountForm] = useState<AccountForm>(EMPTY_ACCOUNT);
-  const [savingAccount, setSavingAccount] = useState(false);
-  const [created, setCreated] = useState<NewUserAccount | null>(null);
 
   const load = useCallback(() => {
     setError(null);
     callOp<RoleMatrix>('list_roles')
       .then(setMatrix)
       .catch((e: Error) => setError(e.message));
+    if (!canReadFlow) {
+      setFlow(null);
+      return;
+    }
     callOp<ApprovalRules>('list_approval_rules')
       .then(setFlow)
-      .catch(() => setFlow(null));
-  }, []);
+      .catch((e: Error) => setFlowError(e.message));
+  }, [canReadFlow]);
 
   useEffect(load, [load, reloadKey]);
 
@@ -148,17 +149,17 @@ export function Roles({ onToast, reloadKey }: Props) {
     return grants.find((g) => g.role_code === role && g.permission_code === perm)?.level ?? 'none';
   }
 
-  async function toggle(role: string, perm: string, current: Level) {
-    const next = CYCLE[(CYCLE.indexOf(current) + 1) % CYCLE.length] as Level;
-    const key = `${role}/${perm}`;
+  async function applyGrant(g: PendingGrant) {
+    const key = `${g.roleCode}/${g.permCode}`;
     setBusy(key);
     try {
       await callOp<unknown>('set_role_permission', {
-        role_code: role,
-        permission_code: perm,
-        level: next,
+        role_code: g.roleCode,
+        permission_code: g.permCode,
+        level: g.to,
       });
-      onToast(`已將${role}的該項權限設為「${LEVEL_NOTE[next]}」，下一次呼叫即適用`);
+      setPending(null);
+      onToast(`${g.roleName}的「${g.permLabel}」已設為「${LEVEL_NOTE[g.to]}」，下一次呼叫即適用`);
       load();
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
@@ -167,51 +168,61 @@ export function Roles({ onToast, reloadKey }: Props) {
     }
   }
 
-  async function createAccount() {
-    if (!accountForm.role_code) {
-      onToast('請選擇角色');
-      return;
-    }
-    setSavingAccount(true);
-    try {
-      const d = await callOp<NewUserAccount>(
-        'create_user_account',
-        {
-          username: accountForm.username.trim(),
-          display_name: accountForm.display_name.trim(),
-          email: accountForm.email.trim(),
-          role_code: accountForm.role_code,
-          employee_no: accountForm.employee_no.trim(),
-        },
-        `建立帳號 ${accountForm.username.trim()}`,
-      );
-      setCreated(d);
-      setAccountForm(EMPTY_ACCOUNT);
-      onToast(`已建立 ${d.user.username}；初始密碼只顯示一次`);
-    } catch (e) {
-      onToast(e instanceof OpFailed ? e.error.message : String(e));
-    } finally {
-      setSavingAccount(false);
-    }
-  }
-
   return (
     <div>
       <h1 className="page-title">角色與核准</h1>
-      <p className="page-lede">僅系統管理員可異動。</p>
+      <p className="page-lede">權限矩陣由系統管理員維護，簽核流程由負責人維護。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!matrix && !error && <p className="state-note">讀取中…</p>}
 
+      {pending && (
+        <ConfirmModal
+          title={`${pending.roleName}　${pending.permLabel}`}
+          subtitle={`${LEVEL_NOTE[pending.from]} → ${LEVEL_NOTE[pending.to]}`}
+          body={
+            <>
+              <p className="form-warn">下一次呼叫起適用，已登入的人不必重新登入。</p>
+              {pending.roleCode === me.role &&
+                pending.permCode === 'manage_access' &&
+                pending.to !== 'full' && (
+                  <p className="form-warn">
+                    這是你自己的角色。改完之後你就進不了這一頁，也不能改回來，
+                    要另找一位系統管理員或用 <span className="num">laysi-admin</span> 還原。
+                  </p>
+                )}
+            </>
+          }
+          confirmLabel={`確認設為「${LEVEL_NOTE[pending.to]}」`}
+          busyLabel="設定中…"
+          busy={busy === `${pending.roleCode}/${pending.permCode}`}
+          onConfirm={() => void applyGrant(pending)}
+          onCancel={() => setPending(null)}
+        />
+      )}
+
       {matrix && (
         <>
+          <div className="toolbar toolbar--spaced">
+            <button
+              className={`chip${tab === 'matrix' ? ' chip--on' : ''}`}
+              onClick={() => setTab('matrix')}
+            >
+              權限矩陣
+            </button>
+            <button
+              className={`chip${tab === 'flow' ? ' chip--on' : ''}`}
+              onClick={() => setTab('flow')}
+            >
+              簽核流程
+            </button>
+          </div>
 
-          <p className={`recon${matrix.enforced ? '' : ' recon--off'}`}>
-            <strong>{matrix.enforced ? '本矩陣執行中。' : '本矩陣目前未執行。'}</strong>{' '}
-            {matrix.enforcement_note}
-          </p>
+          {tab === 'matrix' && (
+          <>
+          <p className="hint">● 完整　○ 有限　— 無。點選欄位可切換，並記錄異動人員與時間。</p>
 
-          <div className="table-scroll">
+          <div className="table-scroll table-scroll--sticky">
             <table className="table table--matrix">
               <thead>
                 <tr>
@@ -229,23 +240,17 @@ export function Roles({ onToast, reloadKey }: Props) {
                     <td>
                       {p.label}
                       {p.missing_ops.length > 0 && p.op_names.length === 0 && (
-                        <span className="tag tag--pale tag--static">對應操作尚未實作</span>
+                        <span className="tag tag--pale tag--static">無對應操作</span>
                       )}
-                      <span className="cell-hint cell-hint--block">
-                        {p.op_names.length > 0 ? (
-                          <>對應 {p.op_names.join('、')}</>
-                        ) : (
-                          p.note
-                        )}
-                      </span>
+                      <span className="cell-hint cell-hint--block">{p.note}</span>
                       {p.boss_only_ops.length > 0 && (
                         <span className="cell-hint cell-hint--block">
-                          其中 {p.boss_only_ops.join('、')} 限負責人，本列權限給滿仍無法通過。
+                          其中 {p.boss_only_ops.length} 項限負責人，本列給滿仍無法通過。
                         </span>
                       )}
                       {p.admin_only_ops.length > 0 && (
                         <span className="cell-hint cell-hint--block">
-                          其中 {p.admin_only_ops.join('、')} 限系統管理員，本列權限給滿仍無法通過。
+                          其中 {p.admin_only_ops.length} 項限系統管理員，本列給滿仍無法通過。
                         </span>
                       )}
                     </td>
@@ -256,11 +261,26 @@ export function Roles({ onToast, reloadKey }: Props) {
                         <td key={r.code} className="align-center">
                           <button
                             className={`perm perm--${level}`}
-                            title={`點選以切換：${LEVEL_NOTE[level]} → ${
-                              LEVEL_NOTE[CYCLE[(CYCLE.indexOf(level) + 1) % CYCLE.length] as Level]
-                            }`}
-                            disabled={busy === key}
-                            onClick={() => void toggle(r.code, p.code, level)}
+                            title={
+                              canEditMatrix
+                                ? `點選以切換：${LEVEL_NOTE[level]} → ${
+                                    LEVEL_NOTE[
+                                      CYCLE[(CYCLE.indexOf(level) + 1) % CYCLE.length] as Level
+                                    ]
+                                  }`
+                                : LEVEL_NOTE[level]
+                            }
+                            disabled={!canEditMatrix || busy === key}
+                            onClick={() =>
+                              setPending({
+                                roleCode: r.code,
+                                roleName: r.name,
+                                permCode: p.code,
+                                permLabel: p.label,
+                                from: level,
+                                to: CYCLE[(CYCLE.indexOf(level) + 1) % CYCLE.length] as Level,
+                              })
+                            }
                           >
                             {MARK[level]}
                           </button>
@@ -273,8 +293,6 @@ export function Roles({ onToast, reloadKey }: Props) {
             </table>
           </div>
 
-          <p className="hint">● 完整　○ 有限　— 無。點選欄位可切換，並記錄異動人員與時間。</p>
-
           <p className="hint">
             關閉後立即生效，
             <strong>包含關閉管理權限這一項本身</strong>。
@@ -283,93 +301,19 @@ export function Roles({ onToast, reloadKey }: Props) {
             本矩陣只管人員；
             <span className="num">AI</span> 能呼叫哪些操作在「MCP 與 AI」設定。
           </p>
-          <p className="hint">
-            角色在建立帳號時決定，之後無法變更。
-          </p>
+          <p className="hint">帳號與角色在「帳號管理」建立。</p>
+          </>
+          )}
 
-          <h3 className="section-title section-title--spaced">登入帳號</h3>
-          <div className="card form-card">
-            <p className="section-note">
-              密碼由系統產生，只顯示一次，本人首次登入必須變更。
-            </p>
-            <div className="field-grid">
-              <label className="field">
-                登入名稱（英文字母、數字與 . _ -）
-                <input
-                  className="input"
-                  value={accountForm.username}
-                  placeholder="chen.mei"
-                  onChange={(e) => setAccountForm((f) => ({ ...f, username: e.target.value }))}
-                />
-              </label>
-              <label className="field">
-                顯示名稱
-                <input
-                  className="input"
-                  value={accountForm.display_name}
-                  placeholder="陳美玲"
-                  onChange={(e) => setAccountForm((f) => ({ ...f, display_name: e.target.value }))}
-                />
-              </label>
-              <label className="field">
-                角色
-                <select
-                  className="input"
-                  value={accountForm.role_code}
-                  onChange={(e) => setAccountForm((f) => ({ ...f, role_code: e.target.value }))}
-                >
-                  <option value="">請選擇</option>
-                  {matrix.roles.map((r) => (
-                    <option key={r.code} value={r.code}>
-                      {r.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                員工編號（選填，填了才能使用員工自助）
-                <input
-                  className="input num"
-                  value={accountForm.employee_no}
-                  placeholder="E001"
-                  onChange={(e) => setAccountForm((f) => ({ ...f, employee_no: e.target.value }))}
-                />
-              </label>
-              <label className="field field--full">
-                電子郵件（選填）
-                <input
-                  className="input"
-                  type="email"
-                  value={accountForm.email}
-                  onChange={(e) => setAccountForm((f) => ({ ...f, email: e.target.value }))}
-                />
-              </label>
-            </div>
-            <div className="wizard-actions">
-              <span className="section-note" />
-              <button
-                className={`btn${savingAccount ? ' btn--off' : ''}`}
-                disabled={savingAccount}
-                onClick={() => void createAccount()}
-              >
-                {savingAccount ? '建立中…' : '建立帳號'}
-              </button>
-            </div>
-            {created && (
-              <p className="recon">
-                已建立 <span className="num">{created.user.username}</span>（
-                {created.user.display_name} · {created.user.role_name}）。
-                <strong>
-                  初始密碼 <span className="num">{created.temporary_password}</span>
-                </strong>
-                ，離開本頁後無法再查看，請立即交付本人。
-              </p>
-            )}
-          </div>
+          {tab === 'flow' && (
+          <>
+          {!canReadFlow && (
+            <p className="state-note">費用報支的簽核關卡由負責人維護。</p>
+          )}
+          {flowError && <p className="state-note state-note--error">{flowError}</p>}
 
           {flow && (
             <>
-            <h3 className="section-title section-title--spaced">簽核流程</h3>
             <div className="flow">
               {flow.steps.map((s, i) => (
                 <div className="flow__step-wrap" key={s.step_no}>
@@ -387,25 +331,31 @@ export function Roles({ onToast, reloadKey }: Props) {
                       )}
                       {!s.min_amount && s.condition_note && <> · {s.condition_note}</>}
                     </div>
-                    <div className="flow__actions">
-                      <button className="btn btn--compact btn--secondary" onClick={() => openEditStep(s)}>
-                        編輯
-                      </button>
-                      <button
-                        className="btn btn--compact btn--secondary"
-                        disabled={savingStep}
-                        onClick={() => void deleteStep(s)}
-                      >
-                        刪除
-                      </button>
-                    </div>
+                    {canEditFlow && (
+                      <div className="flow__actions">
+                        <button
+                          className="btn btn--compact btn--secondary"
+                          onClick={() => openEditStep(s)}
+                        >
+                          編輯
+                        </button>
+                        <button
+                          className="btn btn--compact btn--secondary"
+                          disabled={savingStep}
+                          onClick={() => void deleteStep(s)}
+                        >
+                          刪除
+                        </button>
+                      </div>
+                    )}
                   </div>
                   {i < flow.steps.length - 1 && <span className="flow__arrow">→</span>}
                 </div>
               ))}
             </div>
-            <p className="hint">金額門檻屬公司政策，可隨時調整。{flow.enforcement_note}</p>
+            <p className="hint">金額門檻可隨時調整。{flow.enforcement_note}</p>
 
+            {canEditFlow && (
             <div className="card form-card">
               <h3 className="section-title">
                 {flow.steps.some((s) => s.step_no === parseInt(stepForm.step_no, 10))
@@ -413,8 +363,7 @@ export function Roles({ onToast, reloadKey }: Props) {
                   : '新增一關'}
               </h3>
               <p className="section-note">
-                關卡編號相同時直接覆寫：沿用既有編號即為編輯，填入新編號即為新增。
-                異動簽核關卡限負責人。
+                沿用既有編號即為編輯，填入新編號即為新增。
               </p>
               <div className="field-grid">
                 <label className="field">
@@ -479,7 +428,10 @@ export function Roles({ onToast, reloadKey }: Props) {
                 </button>
               </div>
             </div>
+            )}
             </>
+          )}
+          </>
           )}
         </>
       )}

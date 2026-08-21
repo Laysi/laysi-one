@@ -55,27 +55,27 @@ export function Insurance({ onToast, reloadKey }: Props) {
             <div className="card stat-card">
               <div className="stat-card__kicker">勞保</div>
               <div className="stat-card__value num">{money(data.labor_employer)}</div>
-              <div className="stat-card__note">員工自付 {money(data.labor_employee)}</div>
+              <div className="stat-card__note num">員工自付 {money(data.labor_employee)}</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">健保</div>
               <div className="stat-card__value num">{money(data.health_employer)}</div>
-              <div className="stat-card__note">員工自付 {money(data.health_employee)}</div>
+              <div className="stat-card__note num">員工自付 {money(data.health_employee)}</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">勞退</div>
               <div className="stat-card__value num">{money(data.pension_employer)}</div>
-              <div className="stat-card__note">全額由雇主提繳，員工不負擔</div>
+              <div className="stat-card__note num">全額由雇主提繳，員工不負擔</div>
             </div>
             <div className="card stat-card stat-card--total">
               <div className="stat-card__kicker">公司負擔合計</div>
               <div className="stat-card__value num">{money(data.employer_total)}</div>
-              <div className="stat-card__note">{data.headcount} 人 · {data.as_of} 適用</div>
+              <div className="stat-card__note num">{data.headcount} 人 · {data.as_of} 適用</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">員工自付合計</div>
               <div className="stat-card__value num">{money(data.employee_total)}</div>
-              <div className="stat-card__note">自薪資扣除的兩項</div>
+              <div className="stat-card__note num">自薪資扣除的兩項</div>
             </div>
           </div>
 
@@ -184,14 +184,14 @@ export function Insurance({ onToast, reloadKey }: Props) {
               <div className="card doc-card">
                 <div className="doc-card__head">
                   <h3 className="section-title doc-card__title">
-                    級距 {money(quote.insured_salary)}
+                    級距 <span className="num">{money(quote.insured_salary)}</span>
                   </h3>
                   <span className="doc-card__badge num">{quote.as_of} 適用</span>
                 </div>
                 <div className="doc-row">
                   <span>
-                    勞保（率 {quote.labor.rate_percent}%，計費基礎{' '}
-                    {money(quote.labor_charged_on)}
+                    勞保（率 <span className="num">{quote.labor.rate_percent}%</span>，計費基礎{' '}
+                    <span className="num">{money(quote.labor_charged_on)}</span>
                     {quote.labor_capped && '，已達上限'}）
                   </span>
                   <span className="num">{money(quote.labor.employer)}</span>

@@ -27,7 +27,12 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(GetBudgetStatus), Box::new(GetDepartmentPl), Box::new(SetBudget)]
+    vec![
+        Box::new(GetBudgetStatus),
+        Box::new(GetDepartmentPl),
+        Box::new(CreateBudgetVersion),
+        Box::new(SetBudget),
+    ]
 }
 
 /// Denominator of a percentage. Arithmetic, not a policy number.
@@ -211,7 +216,7 @@ impl Operation for GetBudgetStatus {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀預算執行率：預算數為設定值，實際數一律由已過帳分錄即時計算，系統不儲存任何實際數。提醒門檻取自公司設定。"
+        "讀預算執行率：預算數為設定值，實際數一律由已過帳分錄現算。提醒門檻取自公司設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<BudgetStatusInput>()
@@ -226,13 +231,36 @@ impl Operation for GetBudgetStatus {
             Some(code) => versions.iter().find(|v| &v.code == code).ok_or_else(|| {
                 OpError::BadInput(format!("查無預算版本「{code}」"))
             })?,
-            None => versions
+            None => match versions
                 .iter()
                 .find(|v| v.is_current && v.fiscal_year == to.year())
                 .or_else(|| versions.iter().find(|v| v.is_current))
-                .ok_or_else(|| {
-                    OpError::BadInput("尚無現行的預算版本，請先建立一版再查詢執行率".into())
-                })?,
+            {
+                Some(version) => version,
+                // Having no budget yet is a state, not a failure. Returning an
+                // error here left the screen showing one sentence and no way
+                // to act on it.
+                None => {
+                    return Ok(OpOutcome::new(
+                        json!({
+                            "version": Value::Null,
+                            "version_label": "",
+                            "fiscal_year": to.year(),
+                            "versions": versions,
+                            "from": from,
+                            "to": to,
+                            "rows": [],
+                            "budget_total": "0",
+                            "actual_total": "0",
+                            "remaining_total": "0",
+                            "alert_percent": alert_percent(ctx).await?.map(|p| p.to_string()),
+                            "alert_count": 0,
+                            "actual_source": "已過帳分錄的即時計算結果",
+                        }),
+                        "讀取預算執行 · 尚未建立任何預算版本".to_string(),
+                    ))
+                }
+            },
         };
 
         let budgets = ctx.store.budget_rows(&version.code).await?;
@@ -241,13 +269,14 @@ impl Operation for GetBudgetStatus {
 
         // The alert threshold is a company setting, not a number in this file.
         let alert = alert_percent(ctx).await?;
+        let over_alert = |rate: Option<Money>| match (rate, alert) {
+            (Some(rate), Some(alert)) => rate >= alert,
+            _ => false,
+        };
 
         let budget_total: Money = lines.iter().map(|l| l.budget).sum();
         let actual_total: Money = lines.iter().map(|l| l.actual).sum();
-        let over = lines
-            .iter()
-            .filter(|l| l.rate().is_some_and(|r| r >= alert))
-            .count();
+        let over = lines.iter().filter(|l| over_alert(l.rate())).count();
 
         let rows: Vec<Value> = lines
             .iter()
@@ -261,7 +290,7 @@ impl Operation for GetBudgetStatus {
                     "remaining": l.remaining().to_string(),
                     "rate": rate.map(|r| r.to_string()),
                     "rate_label": rate.map(|r| format!("{r}%")).unwrap_or_else(|| "—".into()),
-                    "alert": rate.is_some_and(|r| r >= alert),
+                    "alert": over_alert(rate),
                     "over_budget": l.actual > l.budget,
                     "line_count": l.line_count,
                     "note": l.note,
@@ -269,13 +298,20 @@ impl Operation for GetBudgetStatus {
             })
             .collect();
 
-        let summary = format!(
-            "讀取預算執行（{} · {from} 至 {to}）· 預算 {} 實際 {} · {} 個科目超過 {alert}%",
-            version.label,
-            money(budget_total),
-            money(actual_total),
-            over
-        );
+        let summary = match alert {
+            Some(alert) => format!(
+                "讀取預算執行（{} · {from} 至 {to}）· 預算 {} 實際 {} · {over} 個科目超過 {alert}%",
+                version.label,
+                money(budget_total),
+                money(actual_total),
+            ),
+            None => format!(
+                "讀取預算執行（{} · {from} 至 {to}）· 預算 {} 實際 {} · 尚未設定提醒門檻",
+                version.label,
+                money(budget_total),
+                money(actual_total),
+            ),
+        };
         Ok(OpOutcome::new(
             json!({
                 "version": version.code,
@@ -288,7 +324,7 @@ impl Operation for GetBudgetStatus {
                 "budget_total": budget_total.to_string(),
                 "actual_total": actual_total.to_string(),
                 "remaining_total": (budget_total - actual_total).to_string(),
-                "alert_percent": alert.to_string(),
+                "alert_percent": alert.map(|p| p.to_string()),
                 "alert_count": over,
                 // This has to appear on screen: the only question anyone asks
                 // about the "actual" column is where it came from.
@@ -301,19 +337,25 @@ impl Operation for GetBudgetStatus {
 
 /// Budget alert threshold. A company setting, neither regulation nor a
 /// constant in this file.
-async fn alert_percent(ctx: &OpCtx) -> Result<Money, OpError> {
+///
+/// `None` when nobody has set one, which is the state of every new
+/// installation. No threshold means no alert, not a broken screen: the
+/// budget still has to be readable before anyone can decide what percentage
+/// deserves a warning, and on a fresh install the person reading the budget
+/// is not the one who can edit company settings.
+async fn alert_percent(ctx: &OpCtx) -> Result<Option<Money>, OpError> {
     let settings = ctx.store.company_settings().await?;
-    let raw = settings
-        .iter()
-        .find(|s| s.code == "budget_alert_percent")
-        .ok_or_else(|| {
-            OpError::BadInput(
-                "公司設定未提供預算提醒門檻；該門檻屬設定值，系統不代為推定".into(),
-            )
-        })?;
-    raw.value.trim().parse::<Money>().map_err(|_| {
-        OpError::BadInput(format!("預算提醒門檻「{}」不是一個百分比數字", raw.value))
-    })
+    let Some(raw) = settings.iter().find(|s| s.code == "budget_alert_percent") else {
+        return Ok(None);
+    };
+    let value = raw.value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<Money>()
+        .map(Some)
+        .map_err(|_| OpError::BadInput(format!("預算提醒門檻「{value}」不是一個百分比數字")))
 }
 
 // Departmental profit and loss
@@ -391,7 +433,7 @@ impl Operation for GetDepartmentPl {
                 "reconciled": gap.is_zero(),
                 "unallocated_cost": unallocated.map(|r| r.cost.to_string()),
                 "unallocated_note":
-                    "折舊等共用支出未指定部門：分攤要先設定比例，本系統不代為決定。",
+                    "折舊等共用支出沒有指定部門。要讓它進到某個部門，請在傳票的分錄上填部門。",
             }),
             summary,
         ))
@@ -481,6 +523,90 @@ impl Operation for SetBudget {
             row.dept_label.as_ref().map(|d| format!("（{d}）")).unwrap_or_default()
         );
         Ok(OpOutcome::new(json!({ "budget": row, "version": version }), summary))
+    }
+}
+
+// Creating a version
+
+struct CreateBudgetVersion;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateBudgetVersionInput {
+    /// Short code, e.g. `V1`. Unique across every year.
+    pub code: String,
+    /// Name shown on screen, e.g. 「2026 年度預算」.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Fiscal year. Defaults to the year of today.
+    #[serde(default)]
+    pub fiscal_year: Option<i32>,
+    /// Make this the version utilisation is measured against. Only one
+    /// version per year can be current; the previous one is stood down.
+    #[serde(default = "default_true")]
+    pub is_current: bool,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[async_trait]
+impl Operation for CreateBudgetVersion {
+    fn name(&self) -> &'static str {
+        "create_budget_version"
+    }
+    fn risk(&self) -> Risk {
+        // Same floor as set_budget: a version is the denominator every
+        // utilisation figure is measured against.
+        Risk::BossOnly
+    }
+    fn summary(&self) -> &'static str {
+        "建立一版年度預算。每個年度只能有一版是現行版，指定新的現行版會把原本那版改為非現行。金額另以 set_budget 逐科目設定。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<CreateBudgetVersionInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: CreateBudgetVersionInput = parse(input)?;
+        let code = i.code.trim();
+        if code.is_empty() {
+            return Err(OpError::BadInput("預算版本代號要填寫".into()));
+        }
+        let fiscal_year = i.fiscal_year.unwrap_or_else(|| ctx.today.year());
+        let label = i
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{fiscal_year} 年度預算"));
+
+        if ctx.store.budget_versions().await?.iter().any(|v| v.code == code) {
+            return Err(OpError::BadInput(format!("預算版本代號「{code}」已經有人用了")));
+        }
+
+        let version = ctx
+            .store
+            .create_budget_version(
+                code,
+                &label,
+                fiscal_year,
+                i.is_current,
+                i.note.as_deref().unwrap_or(""),
+                &ctx.actor,
+            )
+            .await?;
+
+        let summary = format!(
+            "建立預算版本 {} {}（{fiscal_year} 年度{}）",
+            version.code,
+            version.label,
+            if version.is_current { "，現行版" } else { "" }
+        );
+        Ok(OpOutcome::new(json!({ "version": version }), summary))
     }
 }
 

@@ -52,10 +52,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_staff_role() -> String {
-    "staff".into()
-}
-
 fn default_full_time() -> String {
     "full_time".into()
 }
@@ -289,7 +285,9 @@ impl Operation for UpdateAccount {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct EmployeeInput {
-    /// Employee number.
+    /// Employee number, e.g. `E001`. Leave blank when creating and the next
+    /// `E###` is assigned; required when updating, because it is the key.
+    #[serde(default)]
     pub emp_no: String,
     /// Name.
     pub name: String,
@@ -300,9 +298,6 @@ pub struct EmployeeInput {
     /// Job title.
     #[serde(default)]
     pub title: String,
-    /// System role, default staff. This does not create a login.
-    #[serde(default = "default_staff_role")]
-    pub role_code: String,
     /// One of `full_time`, `part_time`, `contract`.
     #[serde(default = "default_full_time")]
     pub employment_type: String,
@@ -314,26 +309,30 @@ pub struct EmployeeInput {
     /// One of `active`, `leaving`, `left`.
     #[serde(default = "default_active_status")]
     pub status: String,
-    /// Base salary. Amounts are strings in JSON.
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schemars(with = "String")]
-    pub base_salary: Money,
+    /// Base salary. Amounts are strings in JSON. Three states on update: omit
+    /// to leave it alone, send `"0"` to clear it back to not-agreed-yet, send
+    /// a number to change it. On create, omitting it means not agreed yet and
+    /// payroll refuses this employee by name instead of paying nothing.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub base_salary: Option<Money>,
     /// Labour insurance salary as filed with the authorities; kept as given,
-    /// never corrected against a ruleset.
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schemars(with = "String")]
-    pub labor_insured_salary: Money,
+    /// never corrected against a ruleset. Three states, as `base_salary`.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub labor_insured_salary: Option<Money>,
     /// Health insurance salary as filed with the authorities; kept as given,
-    /// never corrected against a ruleset.
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schemars(with = "String")]
-    pub health_insured_salary: Money,
+    /// never corrected against a ruleset. Three states, as `base_salary`.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub health_insured_salary: Option<Money>,
     /// Pension contribution wage as filed with the authorities; kept as given,
-    /// never corrected against a ruleset.
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schemars(with = "String")]
-    pub pension_wage: Money,
-    /// Masked national ID only; a full number is rejected.
+    /// never corrected against a ruleset. Three states, as `base_salary`.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub pension_wage: Option<Money>,
+    /// National ID, one letter followed by nine digits, checksum included.
+    /// May be blank while it has not been collected.
     #[serde(default)]
     pub id_no: String,
     /// Payroll bank account.
@@ -344,30 +343,61 @@ pub struct EmployeeInput {
     pub note: String,
 }
 
-fn looks_like_full_id_no(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 10
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1..].iter().all(u8::is_ascii_digit)
+/// Positional value of the leading letter of a national ID.
+///
+/// Not a regulation value in the sense of `backend/regulation/`: this is the
+/// check digit algorithm published with the identifier format, not a rate,
+/// bracket or ceiling that changes with the law.
+fn id_letter_code(letter: char) -> Option<u32> {
+    const ORDER: [char; 26] = [
+        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T',
+        'U', 'V', 'X', 'Y', 'W', 'Z', 'I', 'O',
+    ];
+    ORDER.iter().position(|c| *c == letter).map(|i| i as u32 + 10)
+}
+
+/// Whether a national ID is well formed: one letter, nine digits, and a
+/// trailing check digit that agrees with the rest.
+///
+/// A typo in this number reaches the labour insurance filing and the
+/// withholding statement, where it is the tax authority that finds it. The
+/// check digit catches most of them here instead.
+fn is_valid_id_no(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(letter) = chars.next().map(|c| c.to_ascii_uppercase()) else {
+        return false;
+    };
+    let digits: Vec<u32> = chars.filter_map(|c| c.to_digit(10)).collect();
+    if value.chars().count() != 10 || digits.len() != 9 {
+        return false;
+    }
+    let Some(code) = id_letter_code(letter) else {
+        return false;
+    };
+    let mut sum = code / 10 + (code % 10) * 9;
+    for (i, d) in digits.iter().take(8).enumerate() {
+        sum += d * (8 - i as u32);
+    }
+    (sum + digits[8]) % 10 == 0
 }
 
 fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
     if input.emp_no.trim().is_empty() || input.name.trim().is_empty() {
         return Err(OpError::BadInput("員工編號與姓名都要填寫".into()));
     }
-    if looks_like_full_id_no(input.id_no.trim()) {
+    let id_no = input.id_no.trim();
+    if !id_no.is_empty() && !is_valid_id_no(id_no) {
         return Err(OpError::BadInput(
-            "id_no 僅接受遮罩後的值；符合完整身分證字號格式（英文字母加九碼數字）者不予保存。"
-                .into(),
+            "身分證字號要一個英文字母加九碼數字，且檢查碼相符；還沒收到可以留空".into(),
         ));
     }
     if !matches!(input.employment_type.as_str(), "full_time" | "part_time" | "contract") {
         return Err(OpError::BadInput(
-            "employment_type 只能是 full_time、part_time 或 contract".into(),
+            "僱用型態只能是正職、兼職或約聘".into(),
         ));
     }
     if !matches!(input.status.as_str(), "active" | "leaving" | "left") {
-        return Err(OpError::BadInput("status 只能是 active、leaving 或 left".into()));
+        return Err(OpError::BadInput("狀態只能是在職、離職中或已離職".into()));
     }
     if matches!(input.status.as_str(), "leaving" | "left") && input.left_on.is_none() {
         let label = if input.status == "leaving" { "待離職" } else { "已離職" };
@@ -378,20 +408,20 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
             "離職日必須在到職日當天或之後".into(),
         ));
     }
-    if input.base_salary <= Money::ZERO {
-        return Err(OpError::BadInput("base_salary 必須大於零".into()));
+    // Zero means the amount has not been agreed yet. Payroll refuses such an
+    // employee rather than paying nothing, so the roster does not have to hold
+    // a number before there is one.
+    if input.base_salary.is_some_and(|value| value < Money::ZERO) {
+        return Err(OpError::BadInput("底薪不能是負數；尚未談定時留空即可".into()));
     }
-    if input.labor_insured_salary < Money::ZERO
-        || input.health_insured_salary < Money::ZERO
-        || input.pension_wage < Money::ZERO
+    if [input.labor_insured_salary, input.health_insured_salary, input.pension_wage]
+        .iter()
+        .any(|value| value.is_some_and(|value| value < Money::ZERO))
     {
         return Err(OpError::BadInput(
             "三個投保申報級距不能是負數；級距照申報事實保存。"
                 .into(),
         ));
-    }
-    if input.role_code.trim().is_empty() {
-        return Err(OpError::BadInput("role_code 不得為空字串；省略時採用 staff".into()));
     }
     Ok(())
 }
@@ -402,7 +432,6 @@ fn employee_write<'a>(input: &'a EmployeeInput, actor: &'a str) -> WriteEmployee
         name: input.name.trim(),
         dept_code: input.dept_code.as_deref().map(str::trim).filter(|value| !value.is_empty()),
         title: input.title.trim(),
-        role_code: input.role_code.trim(),
         employment_type: input.employment_type.as_str(),
         hired_on: input.hired_on,
         left_on: input.left_on,
@@ -429,22 +458,24 @@ impl Operation for CreateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立員工主檔，只保存遮罩身分證字號；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號由系統管理員另行建立。"
+        "建立員工主檔。員工編號留空就自動配號；身分證字號會驗檢查碼，勞保申報與扣繳憑單都要用到；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號由系統管理員另行建立。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
     }
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let input: EmployeeInput = parse(input)?;
+        let mut input: EmployeeInput = parse(input)?;
+        // Blank means "give me the next one", the same as `create_user_account`.
+        // Two screens asking for the same field and only one of them numbering
+        // it is a difference the user has to learn for no reason.
+        if input.emp_no.trim().is_empty() {
+            input.emp_no = ctx.store.next_employee_no().await?;
+        }
         validate_employee(&input)?;
         let employee = ctx.store.create_employee(employee_write(&input, &ctx.actor)).await?;
-        let summary = format!(
-            "建立員工 {} {} · 角色 {} · 未建立登入帳號",
-            employee.emp_no,
-            employee.name,
-            employee.role_code.as_deref().unwrap_or("staff")
-        );
+        let summary =
+            format!("建立員工 {} {} · 未建立登入帳號", employee.emp_no, employee.name);
         Ok(OpOutcome::new(
             json!({
                 "employee": employee,
@@ -467,7 +498,7 @@ impl Operation for UpdateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "完整更新員工主檔。完整身分證字號仍會被拒絕，投保級距照申報事實保存；狀態為待離職或已離職時必須填離職日。"
+        "更新員工主檔。本薪與三項投保級距不帶就不動、帶 0 表示尚未設定；身分證字號會驗檢查碼；狀態為待離職或已離職時必須填離職日。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -577,7 +608,7 @@ fn validate_dimension_value(input: &CreateDimensionValueInput) -> Result<(), OpE
         || input.code.trim().is_empty()
         || input.label.trim().is_empty()
     {
-        return Err(OpError::BadInput("維度代號、值代號與名稱都要填寫".into()));
+        return Err(OpError::BadInput("類別、代號與名稱都要填寫".into()));
     }
     Ok(())
 }
@@ -593,7 +624,7 @@ impl Operation for CreateDimensionValue {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "在既有維度下新增一個值。department 維度的值可供員工與分錄部門欄位使用；部門欄位只接受 department 維度的值。"
+        "在既有分類下新增一個項目。部門分類的項目可用於員工與分錄的部門欄位。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateDimensionValueInput>()
@@ -613,7 +644,7 @@ impl Operation for CreateDimensionValue {
             })
             .await?;
         let summary = format!(
-            "新增維度值 {} / {} {}",
+            "新增分類項目 {} / {} {}",
             value.dimension_code, value.code, value.label
         );
         Ok(OpOutcome::new(json!({ "value": value }), summary))
@@ -647,13 +678,13 @@ pub struct SetApprovalRuleInput {
 
 fn validate_approval_rule(input: &SetApprovalRuleInput) -> Result<(), OpError> {
     if input.step_no <= 0 {
-        return Err(OpError::BadInput("step_no 必須大於零".into()));
+        return Err(OpError::BadInput("簽核關卡的順序要大於零".into()));
     }
     if input.min_amount.is_some_and(|amount| amount < Money::ZERO) {
-        return Err(OpError::BadInput("min_amount 不能是負數；null 代表一律要經過".into()));
+        return Err(OpError::BadInput("金額門檻不能是負數；不填代表一律要經過這一關".into()));
     }
     if !input.delete && input.label.as_deref().is_none_or(|label| label.trim().is_empty()) {
-        return Err(OpError::BadInput("新增或覆寫簽核關卡時 label 必填".into()));
+        return Err(OpError::BadInput("這一關要有名稱，簽核流程上才認得出是哪一關".into()));
     }
     Ok(())
 }
@@ -669,7 +700,7 @@ impl Operation for SetApprovalRule {
         Risk::BossOnly
     }
     fn summary(&self) -> &'static str {
-        "新增、覆寫或刪除一關費用簽核規則；相同關卡編號會覆蓋，未設金額門檻代表一律需要。金額是公司政策而非法規，可隨時調整；整套流程至少保留一關。"
+        "新增、覆寫或刪除一關費用簽核規則；相同關卡編號會覆蓋，未設金額門檻代表一律需要。金額門檻可隨時調整；整套流程至少保留一關。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<SetApprovalRuleInput>()
@@ -739,16 +770,15 @@ mod tests {
             name: "測試員工".into(),
             dept_code: None,
             title: String::new(),
-            role_code: "staff".into(),
             employment_type: "full_time".into(),
             hired_on: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
             left_on: None,
             status: "active".into(),
-            base_salary: amount("1"),
-            labor_insured_salary: Money::ZERO,
-            health_insured_salary: Money::ZERO,
-            pension_wage: Money::ZERO,
-            id_no: "A12*****89".into(),
+            base_salary: Some(amount("1")),
+            labor_insured_salary: None,
+            health_insured_salary: None,
+            pension_wage: None,
+            id_no: "A123456789".into(),
             bank_account: String::new(),
             note: String::new(),
         }
@@ -777,13 +807,54 @@ mod tests {
         assert!(UpdateAccount.summary().contains("停用只阻止新分錄"));
     }
 
+    /// The number reaches the labour insurance filing and the withholding
+    /// statement, so a typo is found by the authorities rather than here.
     #[test]
-    fn create_employee_rejects_a_complete_id_number() {
+    fn an_id_number_whose_check_digit_disagrees_is_refused() {
         let mut input = valid_employee();
-        input.id_no = "A123456789".into();
+        assert!(validate_employee(&input).is_ok());
+
+        input.id_no = "A123456788".into();
         let error = validate_employee(&input).unwrap_err();
-        assert!(error.to_string().contains("完整身分證字號"));
+        assert!(error.to_string().contains("檢查碼"));
+
+        // Masking it is no longer a way to store it: the masked form fails the
+        // same check as any other malformed value.
+        input.id_no = "A12*****89".into();
+        assert!(validate_employee(&input).is_err());
+
+        // Not collected yet is not an error.
+        input.id_no = String::new();
+        assert!(validate_employee(&input).is_ok());
         assert!(CreateEmployee.summary().contains("登入帳號由系統管理員另行建立"));
+    }
+
+    #[test]
+    fn editing_a_job_title_alone_leaves_every_amount_untouched() {
+        // The roster never returns the four amounts, so an edit drawer has
+        // nothing to send back for them. Absent has to mean "leave as is",
+        // or changing a job title would zero out the salary.
+        let input: EmployeeInput = parse(json!({
+            "emp_no": "E001",
+            "name": "測試員工",
+            "title": "資深工程師",
+            "hired_on": "2026-07-01",
+        }))
+        .unwrap();
+        assert_eq!(input.base_salary, None);
+        assert_eq!(input.labor_insured_salary, None);
+        assert_eq!(input.health_insured_salary, None);
+        assert_eq!(input.pension_wage, None);
+
+        // An explicit zero is a different request: clear it back to unset.
+        let cleared: EmployeeInput = parse(json!({
+            "emp_no": "E001",
+            "name": "測試員工",
+            "hired_on": "2026-07-01",
+            "base_salary": "0",
+        }))
+        .unwrap();
+        assert_eq!(cleared.base_salary, Some(Money::ZERO));
     }
 
     #[test]
@@ -817,7 +888,7 @@ mod tests {
             sort_order: 0,
         };
         assert!(validate_dimension_value(&input).is_err());
-        assert!(CreateDimensionValue.summary().contains("在既有維度下新增一個值"));
+        assert!(CreateDimensionValue.summary().contains("在既有分類下新增一個項目"));
     }
 
     #[test]

@@ -111,6 +111,8 @@ pub struct AppState {
     /// Attempt limit for `/v1/auth/bootstrap`, which has no token to key on
     /// and so shares one bucket.
     pub setup_rate_limiter: ratelimit::RateLimiter,
+    /// Attempt limit for `/v1/auth/login`, bucketed by login name.
+    pub login_rate_limiter: ratelimit::RateLimiter,
     /// Allowed `Origin` values for `/mcp`, guarding against DNS rebinding. A
     /// request that carries an Origin must match this list; one that does not
     /// (as most AI connectors do not) is allowed. Empty by default.
@@ -267,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
         rustfs_endpoint,
         mcp_rate_limiter: ratelimit::RateLimiter::new(mcp_rate_limit),
         setup_rate_limiter: ratelimit::RateLimiter::new(setup::ATTEMPTS_PER_MINUTE),
+        login_rate_limiter: ratelimit::RateLimiter::new(auth::LOGIN_ATTEMPTS_PER_MINUTE),
         mcp_allowed_origins,
     });
 
@@ -343,6 +346,7 @@ pub fn ctx_from(
         objects: state.objects.clone(),
         actor: identity.actor.clone(),
         actor_role: identity.actor_role.clone(),
+        username: identity.username.clone(),
         employee_id: identity.employee_id,
         prompt,
         channel,

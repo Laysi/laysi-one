@@ -1,13 +1,13 @@
 //! Tax: the VAT (form 401) working paper and withholding on various income.
 //!
-//! Every figure on the return comes from the ledger, not from summing
-//! e-invoices. Output sales read 4111, output tax reads 2211, input tax reads
+//! Every figure on the return comes from the ledger, not from summing source
+//! documents. Output sales read 4111, output tax reads 2211, input tax reads
 //! 1284 — all period movements of GL accounts, counting posted vouchers only.
-//! Summing `einvoice` instead would create a second set of output figures, and
-//! the two would eventually disagree with no way to tell which is right.
-//! [`GetVatReturn`] therefore computes both "net sales x rate" and "period
-//! movement of 2211" and returns them together; agreement is a conclusion, not
-//! an assumption.
+//! Summing the receivable and payable subsidiaries instead would create a
+//! second set of output figures, and the two would eventually disagree with no
+//! way to tell which is right. [`GetVatReturn`] therefore computes both "net
+//! sales x rate" and "period movement of 2211" and returns them together;
+//! agreement is a conclusion, not an assumption.
 //!
 //! Unposted vouchers are reported in a separate column. The return cannot
 //! include them because the ledger has not moved, but the screen still needs
@@ -39,6 +39,71 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
     vec![Box::new(GetVatReturn), Box::new(ListWithholding), Box::new(ComputeWithholding)]
 }
 
+/// A document amount split into its net and tax halves.
+///
+/// Receivables and payables both need this: the return reads the period
+/// movement of 2211 and 1284, so a document that never splits its tax out
+/// leaves the return short by exactly that amount.
+pub(crate) struct VatSplit {
+    pub net: Money,
+    pub tax: Money,
+    pub total: Money,
+    pub version: String,
+}
+
+/// Complete a net / tax / total triple against the rules in force on `on`.
+///
+/// Any one or two of the three may be given; the rest follow. The rate itself
+/// is never named here — a caller that gives only one figure gets the missing
+/// two from the ruleset resolved on the document date, and a caller that gives
+/// two gets the third by subtraction, so a zero-rated export is expressed by
+/// sending a zero tax rather than by a flag.
+pub(crate) fn split_vat(
+    on: NaiveDate,
+    net: Option<Money>,
+    tax: Option<Money>,
+    total: Option<Money>,
+) -> Result<VatSplit, OpError> {
+    let rs = laysi_regulation::resolve("vat", on)?;
+    let (net, tax, total) = match (net, tax, total) {
+        (Some(net), Some(tax), Some(total)) => {
+            if net + tax != total {
+                return Err(OpError::BadInput(format!(
+                    "未稅 {} 加營業稅 {} 應等於含稅 {}",
+                    money(net),
+                    money(tax),
+                    money(total)
+                )));
+            }
+            (net, tax, total)
+        }
+        (Some(net), Some(tax), None) => (net, tax, net + tax),
+        (Some(net), None, Some(total)) => (net, total - net, total),
+        (None, Some(tax), Some(total)) => (total - tax, tax, total),
+        (Some(net), None, None) => {
+            let tax = laysi_regulation::vat(rs, net)?;
+            (net, tax, net + tax)
+        }
+        (None, None, Some(total)) => {
+            let tax = laysi_regulation::vat_from_total(rs, total)?;
+            (total - tax, tax, total)
+        }
+        (None, Some(_), None) | (None, None, None) => {
+            return Err(OpError::BadInput("請填未稅金額或含稅金額".into()))
+        }
+    };
+    if total <= Money::ZERO {
+        return Err(OpError::BadInput("含稅金額必須大於零".into()));
+    }
+    if net <= Money::ZERO {
+        return Err(OpError::BadInput("未稅金額必須大於零".into()));
+    }
+    if tax < Money::ZERO {
+        return Err(OpError::BadInput("營業稅不能是負數；零稅率與免稅填 0".into()));
+    }
+    Ok(VatSplit { net, tax, total, version: rs.version.clone() })
+}
+
 /// Round to whole dollars. Tax rounds half away from zero, not banker's
 /// rounding.
 ///
@@ -58,6 +123,22 @@ fn roc_year(year: i32) -> i32 {
 /// follows a rate change instead of contradicting the calculation.
 pub(crate) fn percent(rate: Money) -> String {
     (rate * Decimal::ONE_HUNDRED).normalize().to_string()
+}
+
+/// The VAT rules a document created now would use, as JSON for a screen.
+///
+/// The rate has one source, `vat.toml`. A screen that needs to fill in the
+/// third of net / tax / total gets it from here rather than carrying a copy.
+pub(crate) fn vat_json(on: NaiveDate) -> Result<Value, OpError> {
+    let rs = laysi_regulation::resolve("vat", on)?;
+    let rate = rs.decimal("rate")?;
+    Ok(json!({
+        "version": rs.version,
+        "rate": rate.to_string(),
+        "rate_percent": percent(rate),
+        "effective_from": rs.effective_from,
+        "source_note": rs.source_note,
+    }))
 }
 
 /// Which filing period a date falls in. The period length comes from the

@@ -6,6 +6,8 @@ import {
   STATUS_LABEL,
   type Voucher,
 } from '../api/client';
+import { ConfirmModal } from '../components/ConfirmModal';
+import { DateField } from '../components/DateField';
 
 type Filter = 'all' | 'draft' | 'pending' | 'posted';
 
@@ -34,6 +36,8 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
   const [vouchers, setVouchers] = useState<Voucher[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [posting, setPosting] = useState<Voucher | null>(null);
+  const [postBusy, setPostBusy] = useState(false);
   const [correction, setCorrection] = useState<Correction | null>(null);
   const [voidReason, setVoidReason] = useState('');
   const [reverseDate, setReverseDate] = useState('');
@@ -54,13 +58,17 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
   }, [filter, reloadKey]);
 
   async function post(no: string) {
+    setPostBusy(true);
     try {
       await callOp<{ voucher: Voucher }>('post_voucher', { no }, `將 ${no} 過帳`);
+      setPosting(null);
       onToast(`${no} 已過帳`);
       onChanged();
     } catch (e) {
       const msg = e instanceof OpFailed ? e.error.message : String(e);
       onToast(msg);
+    } finally {
+      setPostBusy(false);
     }
   }
 
@@ -185,7 +193,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
                   </td>
                   <td style={{ textAlign: 'right' }}>
                     {v.status === 'pending' || v.status === 'draft' ? (
-                      <button className="btn btn--compact" onClick={() => void post(v.no)}>
+                      <button className="btn btn--compact" onClick={() => setPosting(v)}>
                         過帳
                       </button>
                     ) : v.status === 'posted' ? (
@@ -210,6 +218,24 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
         </div>
       )}
 
+      {posting && (
+        <ConfirmModal
+          title={`過帳 ${posting.no}`}
+          subtitle={`${posting.date} · ${posting.memo}`}
+          body={
+            <p className="form-warn">
+              過帳 <span className="num">{money(posting.amount)}</span> 後這張傳票不能修改，
+              更正只能另開一張反向分錄。
+            </p>
+          }
+          confirmLabel={`確認過帳 ${posting.no}`}
+          busyLabel="過帳中…"
+          busy={postBusy}
+          onConfirm={() => void post(posting.no)}
+          onCancel={() => setPosting(null)}
+        />
+      )}
+
       {correction && (
         <div className="overlay overlay--center" onClick={closeCorrection}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -217,7 +243,9 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
               <div>
                 <div className="drawer__title">更正 {correction.voucher.no}</div>
                 <div className="drawer__subtitle">
-                  {correction.voucher.memo} · {money(correction.voucher.amount)} · {correction.voucher.date}
+                  {correction.voucher.memo} ·{' '}
+                  <span className="num">{money(correction.voucher.amount)}</span> ·{' '}
+                  <span className="num">{correction.voucher.date}</span>
                 </div>
               </div>
               <button className="btn btn--close" onClick={closeCorrection} aria-label="關閉">
@@ -278,11 +306,10 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
                   </p>
                   <label className="field field--full">
                     反向傳票日期（通常填發現錯誤的當日）
-                    <input
+                    <DateField
                       className="input"
-                      type="date"
                       value={reverseDate}
-                      onChange={(e) => setReverseDate(e.target.value)}
+                      onChange={(v) => setReverseDate(v)}
                     />
                   </label>
                 </>

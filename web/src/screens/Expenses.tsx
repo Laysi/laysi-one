@@ -3,6 +3,7 @@ import {
   callOp,
   money,
   OpFailed,
+  type ChartOfAccounts,
   type ExpenseClaim,
   type ExpenseClaimList,
 } from '../api/client';
@@ -26,6 +27,7 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
   const [includeDone, setIncludeDone] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [account, setAccount] = useState<Record<string, string>>({});
+  const [accounts, setAccounts] = useState<ChartOfAccounts | null>(null);
 
   const load = useCallback(() => {
     setError(null);
@@ -36,8 +38,14 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(load, [load, reloadKey]);
 
+  useEffect(() => {
+    callOp<ChartOfAccounts>('list_accounts')
+      .then(setAccounts)
+      .catch(() => setAccounts(null));
+  }, []);
+
   async function decide(c: ExpenseClaim, approve: boolean) {
-    const picked = (account[c.claim_no] ?? '').trim();
+    const picked = (account[c.claim_no] ?? c.suggested_account_code ?? '').trim();
     setBusy(c.claim_no);
     try {
       if (approve) {
@@ -92,10 +100,8 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
           </div>
 
           <p className="recon">
-            簽核門檻來自{data.thresholds_source}。僅輪到的關卡可以簽核，
-            負責人可代理任一關卡，
+            簽核門檻來自{data.thresholds_source}。僅輪到的關卡可以簽核，負責人可代理任一關卡，
             但<strong>申請人不得核准本人送出的單據</strong>。
-            無法簽核時，下方會顯示原因。
           </p>
 
           <div className="toolbar">
@@ -107,7 +113,12 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
             </button>
             <span className="spacer" />
             <span className="section-note">
-              簽核流程：{data.flow.map((s) => s.label).join(' → ')}
+              簽核流程：
+              {data.flow
+                .map((s) =>
+                  s.min_amount ? `${s.label}（超過 ${money(s.min_amount)}）` : s.label,
+                )
+                .join(' → ')}
             </span>
           </div>
 
@@ -164,18 +175,30 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
                       )}
                     </td>
                     <td className="align-right">
-                      {c.next_step ? (
+                      {c.next_step && !c.can_approve ? (
+                        <span className="cell-muted cell-reason">
+                          {c.approve_blocked_reason}
+                        </span>
+                      ) : c.next_step ? (
                         <span className="cell-actions">
 
                           {!c.account_confirmed && (
-                            <input
+                            <select
                               className="entry-input entry-input--code"
-                              placeholder={c.suggested_account_code ?? '科目'}
-                              value={account[c.claim_no] ?? ''}
+                              value={account[c.claim_no] ?? c.suggested_account_code ?? ''}
                               onChange={(e) =>
                                 setAccount((a) => ({ ...a, [c.claim_no]: e.target.value }))
                               }
-                            />
+                            >
+                              <option value="">費用科目</option>
+                              {(accounts?.accounts ?? [])
+                                .filter((a) => a.kind === 'expense' && a.is_postable)
+                                .map((a) => (
+                                  <option key={a.code} value={a.code}>
+                                    {a.code} {a.name}
+                                  </option>
+                                ))}
+                            </select>
                           )}
                           <button
                             className="btn btn--compact"
@@ -214,6 +237,7 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
 
           <p className="hint">
             最後一關核准後才開立傳票（借費用科目、貸應付帳款或零用金），狀態為待過帳。
+            月底彙總匯款的單據同時列入應付帳款，以單號為帳單號碼，於「應付帳款」勾選送出付款單匯出。
           </p>
 
         </>

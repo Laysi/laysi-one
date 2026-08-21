@@ -59,9 +59,10 @@ export function MyPayslips({ reloadKey }: Props) {
         </div>
         <span className="spacer" />
         <div className="pay-bar__note">
-          {data.employee.emp_no} · {data.employee.dept_label ?? '未指定'} ·{' '}
-          {data.employee.title} · 共 {slips.length} 期，應發合計{' '}
-          {money(data.gross_total)}。
+          <span className="num">{data.employee.emp_no}</span> ·{' '}
+          {data.employee.dept_label ?? '未指定'} · {data.employee.title} · 共{' '}
+          <span className="num">{slips.length}</span> 期，應發合計{' '}
+          <span className="num">{money(data.gross_total)}</span>。
         </div>
       </div>
 
@@ -105,7 +106,7 @@ export function MyPayslips({ reloadKey }: Props) {
                       {s.period}
                       {s.prorated && (
                         <span className="cell-hint cell-hint--block">
-                          {trimDecimal(s.paid_days)} / {trimDecimal(s.month_days)} 日，按日計算
+                          {trimDecimal(s.paid_days)} / {trimDecimal(s.month_days)} 日，按曆日比例計薪
                         </span>
                       )}
                     </td>
@@ -172,7 +173,7 @@ export function MyPayslips({ reloadKey }: Props) {
 
                 {shown.prorated && (
                   <p className="recon">
-                    本期按日計算：{trimDecimal(shown.paid_days)} 日 /{' '}
+                    本期按曆日比例計薪：{trimDecimal(shown.paid_days)} 日 /{' '}
                     {trimDecimal(shown.month_days)} 日，適用於到職或離職當月。
                   </p>
                 )}

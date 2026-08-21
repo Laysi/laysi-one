@@ -118,6 +118,11 @@ pub struct OpCtx {
     /// something the AI asserted.
     pub actor: String,
     pub actor_role: String,
+    /// Login name of the caller, `None` for an MCP token, which is bound to a
+    /// person rather than to an account. Operations that must tell the caller
+    /// apart from the account they are editing need a key `actor` cannot be:
+    /// display names collide.
+    pub username: Option<String>,
     /// Employee primary key linked to the login. External accountants and MCP
     /// tokens may have none.
     pub employee_id: Option<i32>,
@@ -154,10 +159,14 @@ pub enum OpError {
     #[error("「{tool}」限系統管理員執行，目前身分為「{role}」")]
     NeedsAdmin { tool: String, role: String },
 
-    #[error("角色「{role}」未獲授權執行「{tool}」，請洽負責人於「角色與核准」開啟")]
+    #[error("{role}未獲授權執行「{tool}」，請洽負責人於「角色與核准」開啟")]
     NotPermitted { tool: String, role: String },
 
-    #[error("參數不正確：{0}")]
+    /// The message stands alone. A 「參數不正確：」 prefix appears in front of
+    /// sentences the user never typed a parameter for — an empty budget, a
+    /// payroll run with nothing to run — where it names a cause that is not
+    /// the reason.
+    #[error("{0}")]
     BadInput(String),
 
     #[error("{0}")]
@@ -291,6 +300,13 @@ impl Default for Registry {
 /// by length instead of by value.
 const MAX_AUDITED_STRING: usize = 512;
 
+/// Fields recorded as present rather than by value, whatever their length.
+///
+/// A national ID is ten characters, so the length rule never reaches it, and
+/// it is personal data for life. Which employee a call was about is still
+/// answerable: `emp_no` travels in the same parameters.
+const REDACTED_FIELDS: [&str; 1] = ["id_no"];
+
 /// Parameters as the audit trail should hold them.
 ///
 /// File contents travel through the parameters as base64, so without this
@@ -299,8 +315,9 @@ const MAX_AUDITED_STRING: usize = 512;
 /// was is still answerable: `document_version` keeps the BLAKE3, and that hash
 /// is over the bytes that landed rather than over the bytes that were sent.
 ///
-/// The rule is the length of the value, not the name of the field, so a
-/// future operation that carries bytes is covered without being listed here.
+/// For bytes the rule is the length of the value, not the name of the field,
+/// so a future operation that carries bytes is covered without being listed
+/// here. [`REDACTED_FIELDS`] is the exception, and says why.
 fn redact_for_audit(input: &Value) -> Value {
     match input {
         Value::String(text) if text.len() > MAX_AUDITED_STRING => {
@@ -310,10 +327,43 @@ fn redact_for_audit(input: &Value) -> Value {
         Value::Object(fields) => Value::Object(
             fields
                 .iter()
-                .map(|(key, value)| (key.clone(), redact_for_audit(value)))
+                .map(|(key, value)| {
+                    if REDACTED_FIELDS.contains(&key.as_str()) && value.is_string() {
+                        return (key.clone(), Value::String("[已遮蔽]".into()));
+                    }
+                    (key.clone(), redact_for_audit(value))
+                })
                 .collect(),
         ),
         other => other.clone(),
+    }
+}
+
+/// Screen-facing name for an operation, taken from the first clause of its
+/// summary.
+///
+/// Refusals and the audit trail are read by people, so they must not carry
+/// the registry key: 「update_company_setting」 names nothing the reader has
+/// seen. Deriving the name from the summary keeps one copy of the wording
+/// rather than a second field that drifts away from it.
+/// The actor's role as the screens name it. Falls back to the code only when
+/// the role row has gone, which is a database inconsistency rather than
+/// something to render.
+pub(crate) async fn role_name(ctx: &OpCtx) -> String {
+    ctx.store
+        .role_name(&ctx.actor_role)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| ctx.actor_role.clone())
+}
+
+pub fn op_label(summary: &str) -> &str {
+    let label = summary.split(['：', '。', '，', '（']).next().unwrap_or(summary);
+    if label.is_empty() {
+        summary
+    } else {
+        label
     }
 }
 
@@ -359,15 +409,15 @@ impl Registry {
             Risk::BossOnly if ctx.actor_role != ROLE_BOSS => {
                 self.audit(ctx, op, &input, "被拒絕：需負責人身分", "blocked").await;
                 return Err(OpError::NeedsBoss {
-                    tool: name.to_string(),
-                    role: ctx.actor_role.clone(),
+                    tool: op_label(op.summary()).to_string(),
+                    role: role_name(ctx).await,
                 });
             }
             Risk::AdminOnly if ctx.actor_role != ROLE_ADMIN => {
                 self.audit(ctx, op, &input, "被拒絕：需系統管理員身分", "blocked").await;
                 return Err(OpError::NeedsAdmin {
-                    tool: name.to_string(),
-                    role: ctx.actor_role.clone(),
+                    tool: op_label(op.summary()).to_string(),
+                    role: role_name(ctx).await,
                 });
             }
             _ => {}
@@ -380,15 +430,11 @@ impl Registry {
         // leaving no window in which a revoked permission still works.
         let permitted = ctx.store.permitted_ops(&ctx.actor_role).await?;
         if !permitted.contains(name) {
-            let summary = format!(
-                "被拒絕：角色「{}」未獲授權執行「{name}」",
-                ctx.actor_role
-            );
+            let role = role_name(ctx).await;
+            let label = op_label(op.summary());
+            let summary = format!("被拒絕：{role}未獲授權執行「{label}」");
             self.audit(ctx, op, &input, &summary, "blocked").await;
-            return Err(OpError::NotPermitted {
-                tool: name.to_string(),
-                role: ctx.actor_role.clone(),
-            });
+            return Err(OpError::NotPermitted { tool: label.to_string(), role });
         }
 
         // 4. Execute.
@@ -465,6 +511,8 @@ mod tests {
             "file_name": "高鐵票.pdf",
             "content_base64": content,
             "nested": [{ "content_base64": content }],
+            "emp_no": "E010",
+            "id_no": "A123456789",
         }));
 
         assert_eq!(redacted["claim_no"], serde_json::json!("EX2608-004"));
@@ -472,6 +520,11 @@ mod tests {
         let marker = format!("[內容 {} 位元組，未存入稽核紀錄]", content.len());
         assert_eq!(redacted["content_base64"], serde_json::json!(marker));
         assert_eq!(redacted["nested"][0]["content_base64"], serde_json::json!(marker));
+
+        // Short enough to survive the length rule, personal data for life.
+        // The employee is still identified by emp_no.
+        assert_eq!(redacted["id_no"], serde_json::json!("[已遮蔽]"));
+        assert_eq!(redacted["emp_no"], serde_json::json!("E010"));
     }
 
     #[test]
@@ -491,7 +544,6 @@ mod tests {
             ops::receivables::ops(),
             ops::payables::ops(),
             ops::banking::ops(),
-            ops::invoicing::ops(),
             ops::tax::ops(),
             ops::assets::ops(),
             ops::expenses::ops(),
@@ -548,6 +600,7 @@ mod tests {
             include_str!("../../../migrations/0016_attendance_punch.sql"),
             include_str!("../../../migrations/0017_self_service_mcp.sql"),
             include_str!("../../../migrations/0020_expense_claim_receipt.sql"),
+            include_str!("../../../migrations/0045_employees_ask_to_fix_their_own_punches.sql"),
         ]
         .into_iter()
         .flat_map(grant_names)
@@ -712,6 +765,15 @@ mod tests {
             include_str!("../../../migrations/0017_self_service_mcp.sql"),
             include_str!("../../../migrations/0020_expense_claim_receipt.sql"),
             include_str!("../../../migrations/0023_system_administrator.sql"),
+            include_str!("../../../migrations/0025_user_account_roster.sql"),
+            include_str!("../../../migrations/0026_user_account_edit.sql"),
+            include_str!("../../../migrations/0027_user_account_delete.sql"),
+            include_str!("../../../migrations/0029_user_password_reset.sql"),
+            include_str!("../../../migrations/0031_drop_einvoicing.sql"),
+            include_str!("../../../migrations/0034_first_budget_version.sql"),
+            include_str!("../../../migrations/0039_register_fixed_assets.sql"),
+            include_str!("../../../migrations/0044_role_can_change_after_creation.sql"),
+            include_str!("../../../migrations/0045_employees_ask_to_fix_their_own_punches.sql"),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {
@@ -767,14 +829,36 @@ mod tests {
     #[test]
     fn not_permitted_error_names_the_role_and_operation() {
         let error = OpError::NotPermitted {
-            tool: "post_voucher".into(),
-            role: "cashier".into(),
+            tool: "將傳票過帳".into(),
+            role: "出納".into(),
         };
         assert_eq!(error.code(), "not_permitted");
         assert_eq!(
             error.to_string(),
-            "角色「cashier」未獲授權執行「post_voucher」，請洽負責人於「角色與核准」開啟"
+            "出納未獲授權執行「將傳票過帳」，請洽負責人於「角色與核准」開啟"
         );
+    }
+
+    /// Refusals name the operation the way the screens do. A reader who has
+    /// never seen `update_company_setting` cannot act on a sentence built
+    /// around it, and every operation already carries reviewed wording in its
+    /// summary.
+    #[test]
+    fn every_operation_yields_a_refusal_label_without_its_registry_key() {
+        for op in Registry::new().iter() {
+            let label = op_label(op.summary());
+            assert!(!label.is_empty(), "{} 的操作名是空的", op.name());
+            assert!(
+                !label.contains(op.name()),
+                "{} 的操作名帶著註冊表鍵值：{label}",
+                op.name()
+            );
+            assert!(
+                !label.contains('_') && label.is_char_boundary(label.len()),
+                "{} 的操作名看起來像識別字：{label}",
+                op.name()
+            );
+        }
     }
 
     /// Running the system and owning the business are different jobs, so the
@@ -794,6 +878,7 @@ mod tests {
         assert_eq!(
             boss,
             BTreeSet::from([
+                "create_budget_version",
                 "list_payslips",
                 "list_withholding_statements",
                 "set_approval_rule",
@@ -804,10 +889,15 @@ mod tests {
         assert_eq!(
             admin,
             BTreeSet::from([
+                "change_user_role",
                 "create_user_account",
+                "delete_user_account",
                 "issue_api_token",
+                "list_user_accounts",
+                "reset_user_password",
                 "set_role_permission",
                 "update_company_setting",
+                "update_user_account",
             ]),
             "限系統管理員的操作集合變了"
         );
@@ -818,13 +908,13 @@ mod tests {
     #[test]
     fn needs_admin_error_names_the_role_and_operation() {
         let error = OpError::NeedsAdmin {
-            tool: "set_role_permission".into(),
-            role: "boss".into(),
+            tool: "變更一項公司設定".into(),
+            role: "負責人".into(),
         };
         assert_eq!(error.code(), "needs_admin");
         assert_eq!(
             error.to_string(),
-            "「set_role_permission」限系統管理員執行，目前身分為「boss」"
+            "「變更一項公司設定」限系統管理員執行，目前身分為「負責人」"
         );
     }
 

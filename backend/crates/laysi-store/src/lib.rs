@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use laysi_domain::{LineInput, Money, TrialBalanceRow};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -74,6 +74,12 @@ pub enum StoreError {
     #[error("找不到應付帳單 {no}")]
     BillNotFound { no: String },
 
+    #[error("找不到資產 {code}")]
+    FixedAssetNotFound { code: String },
+
+    #[error("{no} 由本人送出，要由另一個帳號簽核。公司還沒有其他可簽核的帳號時，請系統管理員在「帳號管理」建立。")]
+    LeaveDecidedByRequester { no: String },
+
     /// The subsidiary ledger recognises posted vouchers only. While the
     /// source voucher is unposted the entry has not reached the ledger, and
     /// settling it now would put the subsidiary ledger ahead.
@@ -101,18 +107,6 @@ pub enum StoreError {
     #[error("傳票 {no} 已作廢，不能拿來核銷")]
     VoucherVoided { no: String },
 
-    #[error("找不到字軌 {track}")]
-    TrackNotFound { track: String },
-
-    #[error("字軌 {track} 的號碼用完了（配號到 {range_to}），要先向國稅局申請配號")]
-    TrackExhausted { track: String, range_to: i32 },
-
-    #[error("找不到電子發票 {no}")]
-    EInvoiceNotFound { no: String },
-
-    #[error("{no} 目前是「{status}」，只有上傳失敗的才需要重送")]
-    NotRetryable { no: String, status: String },
-
     #[error("{period} 的折舊已經提過了（傳票 {voucher}），同一期不能提兩次")]
     PeriodAlreadyDepreciated { period: String, voucher: String },
 
@@ -122,7 +116,7 @@ pub enum StoreError {
     #[error("沒有「{code}」這項設定")]
     SettingNotFound { code: String },
 
-    #[error("沒有「{code}」這個維度；這個操作只新增維度值")]
+    #[error("沒有「{code}」這個類別；只能在既有類別下新增項目")]
     DimensionNotFound { code: String },
 
     #[error("找不到簽核流程第 {step_no} 關")]
@@ -200,6 +194,11 @@ pub enum StoreError {
     #[error("異動單 {no} 的第 {step} 關已經完成過了")]
     MovementStepAlreadyDone { no: String, step: i32 },
 
+    /// Completing a leaving flow closes the person's login, and no operation
+    /// grants the administrator role, so the last one has to keep it.
+    #[error("{name} 的登入帳號「{username}」是唯一啟用中的系統管理員，離職結案會停用它。請先在「帳號管理」建立另一個系統管理員帳號。")]
+    LastAdministratorLeaving { name: String, username: String },
+
     #[error("找不到休假單 {no}")]
     LeaveNotFound { no: String },
 
@@ -214,6 +213,18 @@ pub enum StoreError {
 
     #[error("休假單 {no} 已經是「{status}」了，簽過的不能再簽一次")]
     LeaveAlreadyDecided { no: String, status: String },
+
+    #[error("找不到這張補登申請")]
+    PunchCorrectionNotFound,
+
+    #[error("這張補登申請已經是「{status}」了，決定過的不能再決定一次")]
+    PunchCorrectionAlreadyDecided { status: String },
+
+    #[error("這張補登申請由本人送出，要由另一個帳號決定。公司還沒有其他可決定的帳號時，請系統管理員在「帳號管理」建立。")]
+    PunchCorrectionDecidedByRequester,
+
+    #[error("{date} 的{kind}卡已經送出過一張補登申請，等它有結果再送下一張")]
+    PunchCorrectionAlreadyOpen { date: String, kind: String },
 
     #[error("{period} 的薪資已經算過了（傳票 {voucher}），同一期不能發兩次")]
     PeriodAlreadyPaid { period: String, voucher: String },
@@ -529,6 +540,30 @@ impl Store {
         .collect())
     }
 
+    /// Posted cash that is not attributed to any funding account.
+    ///
+    /// The cards on 「銀行與現金」 add up to less than the ledger's cash
+    /// balance whenever a line hits a cash account without naming one: petty
+    /// cash has no `bank_account` row at all, and a GL code shared by two
+    /// accounts cannot be split by inference. The figure exists either way,
+    /// so it is reported rather than left as an unexplained gap.
+    pub async fn unattributed_cash(&self, as_of: Option<NaiveDate>) -> Result<Money> {
+        Ok(sqlx::query(
+            "SELECT COALESCE(SUM(l.debit - l.credit), 0) AS balance
+               FROM voucher_line l
+               JOIN voucher v ON v.id = l.voucher_id
+               JOIN account a ON a.code = l.account_code
+              WHERE v.status = 'posted'
+                AND a.cash_flow_section = 'cash'
+                AND l.bank_account_id IS NULL
+                AND ($1::date IS NULL OR v.voucher_date <= $1)",
+        )
+        .bind(as_of)
+        .fetch_one(&self.pool)
+        .await?
+        .get("balance"))
+    }
+
     /// Month-end cash position (cumulative balance) over the last `months`.
     pub async fn cash_history(&self, as_of: NaiveDate, months: i32) -> Result<Vec<(String, Money)>> {
         Ok(sqlx::query(
@@ -630,9 +665,17 @@ impl Store {
             l.map(|l| format!("{} {}", l.account_code, l.account_name)).unwrap_or_default()
         };
         let accounts_label = format!(
-            "{} / {}",
+            "{} / {}{}",
             label(lines.iter().find(|l| l.debit > Money::ZERO)),
-            label(lines.iter().find(|l| l.credit > Money::ZERO))
+            label(lines.iter().find(|l| l.credit > Money::ZERO)),
+            // Two accounts named out of more is how the VAT line disappears
+            // from a three-line sales entry, on the one screen that has just
+            // argued the tax was split out.
+            if lines.len() > 2 {
+                format!(" 等 {} 個科目", lines.len())
+            } else {
+                String::new()
+            }
         );
 
         Ok(Voucher {
@@ -769,6 +812,7 @@ impl Store {
                 credit: debit,
                 memo: row.get("memo"),
                 bank_account_id: row.get("bank_account_id"),
+                dept_code: None,
             });
             departments.push(row.get::<Option<i32>, _>("dept_id"));
         }
@@ -837,22 +881,36 @@ impl Store {
         } else {
             req.memo.to_string()
         };
-        let lines = vec![
+        let mut lines = vec![
             LineInput {
                 account_code: req.receivable_account_code.to_string(),
                 debit: req.amount,
                 credit: Money::ZERO,
                 memo: Some(req.invoice_no.to_string()),
                 bank_account_id: None,
+                dept_code: None,
             },
             LineInput {
                 account_code: req.revenue_account_code.to_string(),
                 debit: Money::ZERO,
-                credit: req.amount,
+                credit: req.net_amount,
                 memo: Some(memo.clone()),
                 bank_account_id: None,
+                dept_code: None,
             },
         ];
+        // Zero-rated and exempt sales have no tax, so that line does not
+        // exist: a zero-amount journal line is not valid.
+        if req.tax_amount > Money::ZERO {
+            lines.push(LineInput {
+                account_code: req.output_tax_account_code.to_string(),
+                debit: Money::ZERO,
+                credit: req.tax_amount,
+                memo: Some(format!("{} 營業稅", req.invoice_no)),
+                bank_account_id: None,
+                dept_code: None,
+            });
+        }
         let voucher_no = insert_ar_invoice(
             &mut tx,
             InsertArInvoice {
@@ -1034,6 +1092,7 @@ impl Store {
                 credit: Money::ZERO,
                 memo: Some(memo.clone()),
                 bank_account_id: Some(bank_account_id),
+                dept_code: None,
             },
             LineInput {
                 account_code: "1131".into(),
@@ -1041,6 +1100,7 @@ impl Store {
                 credit: amount,
                 memo: Some(invoice_no.to_string()),
                 bank_account_id: None,
+                dept_code: None,
             },
         ];
 
@@ -1081,13 +1141,14 @@ impl Store {
         } else {
             req.memo.to_string()
         };
-        let lines = vec![
+        let mut lines = vec![
             LineInput {
                 account_code: req.debit_account_code.to_string(),
-                debit: req.amount,
+                debit: req.net_amount,
                 credit: Money::ZERO,
                 memo: Some(memo.clone()),
                 bank_account_id: None,
+                dept_code: None,
             },
             LineInput {
                 account_code: req.payable_account_code.to_string(),
@@ -1095,8 +1156,24 @@ impl Store {
                 credit: req.amount,
                 memo: Some(req.bill_no.to_string()),
                 bank_account_id: None,
+                dept_code: None,
             },
         ];
+        // A receipt with no deductible tax carries no 1284 line; a zero-amount
+        // journal line is not valid.
+        if req.tax_amount > Money::ZERO {
+            lines.insert(
+                1,
+                LineInput {
+                    account_code: req.input_tax_account_code.to_string(),
+                    debit: req.tax_amount,
+                    credit: Money::ZERO,
+                    memo: Some(format!("{} 進項稅額", req.bill_no)),
+                    bank_account_id: None,
+                    dept_code: None,
+                },
+            );
+        }
         let voucher_no = insert_voucher(
             &mut tx,
             req.billed_on,
@@ -1285,6 +1362,7 @@ impl Store {
                 credit: Money::ZERO,
                 memo: Some(format!("{vendor} {memo}")),
                 bank_account_id: None,
+                dept_code: None,
             });
             picked.push((row.get("id"), left));
             vendors.push(vendor);
@@ -1298,6 +1376,7 @@ impl Store {
             credit: total,
             memo: Some(format!("付款單 {} 筆", picked.len())),
             bank_account_id: Some(bank_account_id),
+            dept_code: None,
         });
 
         let memo = format!("付款單：{}", short_list(&vendors));
@@ -1512,241 +1591,14 @@ impl Store {
         self.bank_transaction(txn_id).await
     }
 
-    // E-invoices
-    //
-    // `einvoice` is the issuing record: track, buyer, tax, upload status. It
-    // is not a second revenue ledger — output tax of record is the balance of
-    // 2211, which is where `vat_figures` reads it from.
-
-    pub async fn einvoices(
-        &self,
-        q: Option<&str>,
-        include_void: bool,
-        limit: i64,
-    ) -> Result<Vec<EInvoice>> {
-        Ok(sqlx::query(
-            "SELECT e.invoice_no, e.track, e.serial_no, e.buyer_tax_id, e.buyer, e.item,
-                    e.issued_on, e.net_amount, e.tax_amount, e.total_amount, e.vat_version,
-                    e.upload_status, e.upload_attempts, e.uploaded_at, e.last_error,
-                    e.voucher_no, e.ar_invoice_no,
-                    COALESCE(ov.status, 'posted') = 'posted' AS recognised,
-                    ov.status AS voucher_status
-               FROM einvoice e
-               LEFT JOIN voucher ov ON ov.no = e.voucher_no
-              WHERE ($1 OR e.upload_status <> 'void')
-                AND ($2::text IS NULL
-                     OR e.buyer ILIKE '%' || $2 || '%'
-                     OR e.invoice_no ILIKE '%' || $2 || '%'
-                     OR e.item ILIKE '%' || $2 || '%')
-              ORDER BY e.issued_on DESC, e.serial_no DESC
-              LIMIT $3",
-        )
-        .bind(include_void)
-        .bind(q)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| EInvoice {
-            invoice_no: r.get("invoice_no"),
-            track: r.get("track"),
-            serial_no: r.get("serial_no"),
-            buyer_tax_id: r.get("buyer_tax_id"),
-            buyer: r.get("buyer"),
-            item: r.get("item"),
-            issued_on: r.get("issued_on"),
-            net_amount: r.get("net_amount"),
-            tax_amount: r.get("tax_amount"),
-            total_amount: r.get("total_amount"),
-            vat_version: r.get("vat_version"),
-            upload_status: r.get("upload_status"),
-            upload_attempts: r.get("upload_attempts"),
-            uploaded_at: r.get("uploaded_at"),
-            last_error: r.get("last_error"),
-            voucher_no: r.get("voucher_no"),
-            voucher_status: r.get("voucher_status"),
-            ar_invoice_no: r.get("ar_invoice_no"),
-            recognised: r.get("recognised"),
-        })
-        .collect())
-    }
-
-    /// Track status: allocation, next number, numbers remaining.
-    pub async fn einvoice_track(&self, track: &str) -> Result<TrackState> {
-        let r = sqlx::query(
-            "SELECT track, period, range_from, range_to, next_no
-               FROM einvoice_track WHERE track = $1",
-        )
-        .bind(track)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| StoreError::TrackNotFound { track: track.to_string() })?;
-        let range_to: i32 = r.get("range_to");
-        let next_no: i32 = r.get("next_no");
-        Ok(TrackState {
-            track: r.get("track"),
-            period: r.get("period"),
-            range_from: r.get("range_from"),
-            range_to,
-            next_no,
-            remaining: (range_to - next_no + 1).max(0),
-        })
-    }
-
-    /// Issue one e-invoice.
-    ///
-    /// Three things in one transaction: take a number, create the voucher
-    /// (debit 1131, credit 4111 and 2211), write the receivable. Done
-    /// separately, a track number could be consumed without books, or books
-    /// created with nothing to collect.
-    ///
-    /// The tax is computed by the caller and passed in: the rate is a
-    /// regulation value that only `laysi-regulation` may resolve.
-    pub async fn issue_einvoice(&self, req: IssueEInvoice<'_>) -> Result<IssuedEInvoice> {
-        let mut tx = self.pool.begin().await?;
-
-        // FOR UPDATE: two concurrent issues would otherwise take the same
-        // number; the second waits.
-        let t = sqlx::query(
-            "SELECT range_to, next_no FROM einvoice_track WHERE track = $1 FOR UPDATE",
-        )
-        .bind(req.track)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| StoreError::TrackNotFound { track: req.track.to_string() })?;
-
-        let range_to: i32 = t.get("range_to");
-        let serial_no: i32 = t.get("next_no");
-        if serial_no > range_to {
-            return Err(StoreError::TrackExhausted { track: req.track.to_string(), range_to });
-        }
-        let invoice_no = format!("{}-{serial_no}", req.track);
-
-        let total = req.net_amount + req.tax_amount;
-        let memo = format!("開票給{} {}", req.buyer, req.item);
-        let mut lines = vec![
-            LineInput {
-                account_code: "1131".into(),
-                debit: total,
-                credit: Money::ZERO,
-                memo: Some(invoice_no.clone()),
-                bank_account_id: None,
-            },
-            LineInput {
-                account_code: "4111".into(),
-                debit: Money::ZERO,
-                credit: req.net_amount,
-                memo: Some(req.item.to_string()),
-                bank_account_id: None,
-            },
-        ];
-        // Exempt or zero-rated invoices have no tax, so that line does not
-        // exist: a zero-amount journal line is not valid.
-        if req.tax_amount > Money::ZERO {
-            lines.push(LineInput {
-                account_code: "2211".into(),
-                debit: Money::ZERO,
-                credit: req.tax_amount,
-                memo: Some(format!("{invoice_no} 營業稅")),
-                bank_account_id: None,
-            });
-        }
-
-        let voucher_no = insert_ar_invoice(
-            &mut tx,
-            InsertArInvoice {
-                invoice_no: &invoice_no,
-                customer: req.buyer,
-                issued_on: req.issued_on,
-                due_on: req.due_on,
-                amount: total,
-                voucher_memo: &memo,
-                invoice_memo: req.item,
-                lines: &lines,
-                created_by: req.created_by,
-            },
-        )
-        .await?;
-
-        sqlx::query(
-            "INSERT INTO einvoice (track, serial_no, invoice_no, buyer_tax_id, buyer, item,
-                                   issued_on, net_amount, tax_amount, total_amount, vat_version,
-                                   upload_status, voucher_no, ar_invoice_no, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'queued',$12,$3,$13)",
-        )
-        .bind(req.track)
-        .bind(serial_no)
-        .bind(&invoice_no)
-        .bind(req.buyer_tax_id)
-        .bind(req.buyer)
-        .bind(req.item)
-        .bind(req.issued_on)
-        .bind(req.net_amount)
-        .bind(req.tax_amount)
-        .bind(total)
-        .bind(req.vat_version)
-        .bind(&voucher_no)
-        .bind(req.created_by)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query("UPDATE einvoice_track SET next_no = next_no + 1 WHERE track = $1")
-            .bind(req.track)
-            .execute(&mut *tx)
-            .await?;
-
-        tx.commit().await?;
-        Ok(IssuedEInvoice {
-            invoice_no,
-            voucher_no,
-            buyer: req.buyer.to_string(),
-            net_amount: req.net_amount,
-            tax_amount: req.tax_amount,
-            total_amount: total,
-            vat_version: req.vat_version.to_string(),
-            remaining: (range_to - serial_no).max(0),
-        })
-    }
-
-    /// Retry: put a failed invoice back in the upload queue.
-    ///
-    /// It is never marked as uploaded directly. The tax bureau interface is
-    /// not connected, and the status may only change when the platform
-    /// actually replies; faking success would make "uploaded" meaningless.
-    pub async fn retry_einvoice_upload(&self, invoice_no: &str) -> Result<EInvoice> {
-        let status: String = sqlx::query("SELECT upload_status FROM einvoice WHERE invoice_no = $1")
-            .bind(invoice_no)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| StoreError::EInvoiceNotFound { no: invoice_no.to_string() })?
-            .get("upload_status");
-        if status != "failed" {
-            return Err(StoreError::NotRetryable { no: invoice_no.to_string(), status });
-        }
-
-        sqlx::query(
-            "UPDATE einvoice
-                SET upload_status = 'queued', upload_attempts = upload_attempts + 1,
-                    last_error = NULL
-              WHERE invoice_no = $1",
-        )
-        .bind(invoice_no)
-        .execute(&self.pool)
-        .await?;
-
-        self.einvoices(Some(invoice_no), true, 1)
-            .await?
-            .pop()
-            .ok_or_else(|| StoreError::EInvoiceNotFound { no: invoice_no.to_string() })
-    }
-
     // VAT and withholding
 
     /// The four figures of the VAT return, all derived from posted entries.
     ///
     /// Output sales read 4111, output tax reads 2211, input tax reads 1284,
-    /// all GL accounts. Summing einvoice instead would create a second set of
-    /// output figures, and the two would eventually disagree.
+    /// all GL accounts. Summing the receivable and payable subsidiaries
+    /// instead would create a second set of output figures, and the two would
+    /// eventually disagree.
     ///
     /// `prior_credit` is the credit accumulated before the period start
     /// (input tax in excess of output tax).
@@ -1888,6 +1740,100 @@ impl Store {
         .collect())
     }
 
+    /// Register a fixed asset and, when the purchase was paid from an
+    /// account, write its acquisition voucher in the same transaction.
+    ///
+    /// The register and the ledger are two independent calculations that
+    /// `list_fixed_assets` compares, so an asset has to point at a voucher:
+    /// either the one written here, or one that already exists (a supplier
+    /// bill posted to 1601, an imported opening entry). An asset with no
+    /// voucher would claim a cost the ledger has never seen.
+    ///
+    /// The acquisition voucher is `pending`: it reaches the statements only
+    /// when a person posts it, and until then the asset is excluded from the
+    /// cost total and from depreciation.
+    pub async fn create_fixed_asset(&self, req: NewFixedAsset<'_>) -> Result<FixedAsset> {
+        let mut tx = self.pool.begin().await?;
+        let code = match req.code {
+            Some(code) => code.to_string(),
+            None => next_asset_code(&mut tx).await?,
+        };
+        let memo =
+            if req.memo.is_empty() { format!("購置 {}", req.name) } else { req.memo.to_string() };
+
+        let voucher_no = match (req.paid_from_account_code, req.origin_voucher_no) {
+            (Some(paid_from), _) => {
+                let mut lines = vec![LineInput {
+                    account_code: req.gl_code.to_string(),
+                    debit: req.cost,
+                    credit: Money::ZERO,
+                    memo: Some(format!("{code} {}", req.name)),
+                    bank_account_id: None,
+                    dept_code: req.dept_code.map(str::to_string),
+                }];
+                // A purchase with no deductible input tax carries no 1284
+                // line; a zero-amount journal line is not valid.
+                if req.tax_amount > Money::ZERO {
+                    lines.push(LineInput {
+                        account_code: req.input_tax_account_code.to_string(),
+                        debit: req.tax_amount,
+                        credit: Money::ZERO,
+                        memo: Some(format!("{code} 進項稅額")),
+                        bank_account_id: None,
+                        dept_code: None,
+                    });
+                }
+                lines.push(LineInput {
+                    account_code: paid_from.to_string(),
+                    debit: Money::ZERO,
+                    credit: req.cost + req.tax_amount,
+                    memo: Some(memo.clone()),
+                    bank_account_id: None,
+                    dept_code: None,
+                });
+                Some(
+                    insert_voucher(
+                        &mut tx,
+                        req.acquired_on,
+                        &memo,
+                        &lines,
+                        "pending",
+                        "invoice",
+                        req.created_by,
+                        None,
+                    )
+                    .await?,
+                )
+            }
+            (None, no) => no.map(str::to_string),
+        };
+
+        sqlx::query(
+            "INSERT INTO fixed_asset
+               (code, name, category, acquired_on, cost, gl_code, accum_gl_code,
+                origin_voucher_no, memo)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(&code)
+        .bind(req.name)
+        .bind(req.category)
+        .bind(req.acquired_on)
+        .bind(req.cost)
+        .bind(req.gl_code)
+        .bind(req.accum_gl_code)
+        .bind(&voucher_no)
+        .bind(&memo)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        self.fixed_assets(true)
+            .await?
+            .into_iter()
+            .find(|a| a.code == code)
+            .ok_or(StoreError::FixedAssetNotFound { code })
+    }
+
     /// Periods already charged. `preview_depreciation` uses it to reject a
     /// duplicate run.
     pub async fn depreciation_runs(&self, limit: i64) -> Result<Vec<DepreciationRun>> {
@@ -1918,7 +1864,8 @@ impl Store {
     }
 
     /// Charge one period of depreciation: an unposted voucher (debit 6152,
-    /// credit 1602) plus a run row and one entry per asset.
+    /// credit each asset's accumulated depreciation account) plus a run row
+    /// and one entry per asset.
     ///
     /// Every entry stores the useful life and ruleset version resolved at the
     /// time, so a retroactive amendment can identify the rows computed under
@@ -1951,8 +1898,9 @@ impl Store {
 
         let total: Money = lines.iter().map(|l| l.amount).sum();
         let memo = format!("{period} 折舊提列");
-        // The credits combine into one accumulated depreciation line; the
-        // per-asset debits are what show how much each asset was charged.
+        // The per-asset debits show how much each asset was charged; the
+        // credits combine per accumulated depreciation account, because the
+        // register is reconciled against those accounts one by one.
         let mut entries: Vec<LineInput> = lines
             .iter()
             .map(|l| LineInput {
@@ -1961,15 +1909,29 @@ impl Store {
                 credit: Money::ZERO,
                 memo: Some(l.asset_name.clone()),
                 bank_account_id: None,
+                dept_code: None,
             })
             .collect();
-        entries.push(LineInput {
-            account_code: "1602".into(),
-            debit: Money::ZERO,
-            credit: total,
-            memo: Some(format!("{} 項資產", lines.len())),
-            bank_account_id: None,
-        });
+        let mut by_accum: Vec<(String, Money, usize)> = Vec::new();
+        for l in lines {
+            match by_accum.iter_mut().find(|(code, _, _)| code == &l.accum_gl_code) {
+                Some((_, sum, count)) => {
+                    *sum += l.amount;
+                    *count += 1;
+                }
+                None => by_accum.push((l.accum_gl_code.clone(), l.amount, 1)),
+            }
+        }
+        for (code, sum, count) in by_accum {
+            entries.push(LineInput {
+                account_code: code,
+                debit: Money::ZERO,
+                credit: sum,
+                memo: Some(format!("{count} 項資產")),
+                bank_account_id: None,
+                dept_code: None,
+            });
+        }
 
         let voucher_no = insert_voucher(
             &mut tx,
@@ -2097,9 +2059,13 @@ impl Store {
 
     pub async fn recent_audit(&self, limit: i64) -> Result<Vec<AuditEntry>> {
         Ok(sqlx::query(
-            "SELECT id, at, actor, actor_role, tool_name, risk, prompt, channel,
-                    result_summary, outcome, voucher_no, reverted
-               FROM ai_audit_log ORDER BY at DESC, id DESC LIMIT $1",
+            "SELECT a.id, a.at, a.actor, a.actor_role,
+                    COALESCE(r.name, a.actor_role) AS actor_role_name,
+                    a.tool_name, a.risk, a.prompt, a.channel,
+                    a.result_summary, a.outcome, a.voucher_no, a.reverted
+               FROM ai_audit_log a
+               LEFT JOIN role r ON r.code = a.actor_role
+              ORDER BY a.at DESC, a.id DESC LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -2110,6 +2076,7 @@ impl Store {
             at: r.get("at"),
             actor: r.get("actor"),
             actor_role: r.get("actor_role"),
+            actor_role_name: r.get("actor_role_name"),
             tool_name: r.get("tool_name"),
             risk: r.get("risk"),
             prompt: r.get("prompt"),
@@ -2220,8 +2187,27 @@ impl Store {
         })
         .collect())
     }
-    /// Update one setting. Non-editable entries are refused here: changing
-    /// the fiscal year requires reopening the period, not editing a string.
+    /// Month the fiscal year starts in, from `company_setting.fiscal_year`.
+    ///
+    /// Anything outside 1 to 12 — including the blank a fresh installation
+    /// starts with — means the calendar year, because a report that refuses to
+    /// run until someone fills in a setting is worse than one that assumes the
+    /// case almost every company is in.
+    pub async fn fiscal_year_start_month(&self) -> Result<u32> {
+        let raw: Option<String> =
+            sqlx::query("SELECT value FROM company_setting WHERE code = 'fiscal_year'")
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get("value"));
+        Ok(raw
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|m| (1..=12).contains(m))
+            .unwrap_or(1))
+    }
+
+    /// Update one setting. Non-editable entries are refused here: the currency
+    /// is fixed for a single-country product, and the derived rows are not
+    /// stored at all.
     pub async fn update_company_setting(
         &self,
         code: &str,
@@ -2511,6 +2497,44 @@ impl Store {
         .map(row_to_user_account)
         .collect())
     }
+    /// The account roster the accounts screen lists. [`users`](Self::users)
+    /// returns rows carrying the password hash, which is why that type is not
+    /// serializable; this query never selects the column, and joins in the
+    /// role and employee names instead of ids.
+    pub async fn user_account_roster(&self) -> Result<Vec<UserAccountRow>> {
+        Ok(sqlx::query(
+            "SELECT u.username, u.display_name, u.email, u.role_code,
+                    COALESCE(r.name, u.role_code) AS role_name,
+                    e.emp_no, e.name AS employee_name, e.status AS employee_status,
+                    u.status, u.must_change_password,
+                    u.password_hash IS NOT NULL AS has_password,
+                    u.created_at, u.created_by, u.last_login_at
+               FROM user_account u
+               LEFT JOIN role r ON r.code = u.role_code
+               LEFT JOIN employee e ON e.id = u.employee_id
+              ORDER BY u.username",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| UserAccountRow {
+            username: r.get("username"),
+            display_name: r.get("display_name"),
+            email: r.get("email"),
+            role_code: r.get("role_code"),
+            role_name: r.get("role_name"),
+            employee_no: r.get("emp_no"),
+            employee_name: r.get("employee_name"),
+            employee_status: r.get("employee_status"),
+            status: r.get("status"),
+            must_change_password: r.get("must_change_password"),
+            has_password: r.get("has_password"),
+            created_at: r.get("created_at"),
+            created_by: r.get("created_by"),
+            last_login_at: r.get("last_login_at"),
+        })
+        .collect())
+    }
     /// Look up an account by username. The return value carries the password
     /// hash for verification and deliberately does not implement Serialize.
     pub async fn user_by_username(&self, username: &str) -> Result<Option<UserAccount>> {
@@ -2554,6 +2578,106 @@ impl Store {
     pub async fn create_user(&self, req: CreateUser<'_>) -> Result<UserAccount> {
         let mut conn = self.pool.acquire().await?;
         insert_user(&mut conn, req).await
+    }
+    /// Edit an account's display fields, its status and the employee it is
+    /// linked to. `role_code` and `password_hash` are deliberately not
+    /// reachable: the role is fixed at creation so an administrator cannot
+    /// promote anyone, and passwords are only ever set by their owner or by
+    /// `laysi-admin reset-password`.
+    pub async fn update_user(&self, req: UpdateUser<'_>) -> Result<Option<UserAccount>> {
+        Ok(sqlx::query(
+            "UPDATE user_account
+                SET display_name = COALESCE($2, display_name),
+                    email        = COALESCE($3, email),
+                    status       = COALESCE($4, status),
+                    employee_id  = CASE WHEN $5 THEN $6 ELSE employee_id END
+              WHERE username = $1
+          RETURNING id, username, display_name, email, password_hash, role_code,
+                    employee_id, status, must_change_password, created_at, created_by,
+                    last_login_at",
+        )
+        .bind(req.username)
+        .bind(req.display_name)
+        .bind(req.email)
+        .bind(req.status)
+        .bind(req.employee_id.is_some())
+        .bind(req.employee_id.flatten())
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(row_to_user_account))
+    }
+    /// Move an account to another role, and close what the old role left
+    /// behind in the same transaction.
+    ///
+    /// `dispatch` reads `user_account.role_code` on every call, so the role
+    /// itself takes effect at once. Two things do not follow it: a live
+    /// session already handed the browser the old permission list, and
+    /// `api_token.actor_role` is a snapshot taken when the token was issued.
+    /// Leaving either in place keeps the old role callable after the change.
+    pub async fn change_user_role(&self, req: ChangeUserRole<'_>) -> Result<Option<RoleChange>> {
+        let mut tx = self.pool.begin().await?;
+        let Some(row) = sqlx::query(
+            "UPDATE user_account SET role_code = $2
+              WHERE username = $1
+          RETURNING id, username, display_name, email, password_hash, role_code,
+                    employee_id, status, must_change_password, created_at, created_by,
+                    last_login_at",
+        )
+        .bind(req.username)
+        .bind(req.role_code)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let user = row_to_user_account(&row);
+
+        let sessions = sqlx::query(
+            "UPDATE user_session SET revoked_at = now(), revoked_by = $2
+              WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(user.id)
+        .bind(req.actor)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        // Only tokens the person issued for themselves carry `owner_employee_id`.
+        // `actor` is a display name and can collide, so it is not a key here
+        // either.
+        let tokens = match user.employee_id {
+            Some(employee_id) => sqlx::query(
+                "UPDATE api_token SET revoked_at = now(), revoked_by = $2
+                  WHERE owner_employee_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(employee_id)
+            .bind(req.actor)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+            None => 0,
+        };
+
+        tx.commit().await?;
+        Ok(Some(RoleChange { user, sessions, tokens }))
+    }
+    /// Remove an account. Its sessions and linked external identities cascade
+    /// with it, so the person is signed out everywhere at once. `ai_audit_log`
+    /// records the actor as text and keeps every row.
+    pub async fn delete_user(&self, username: &str) -> Result<Option<UserAccount>> {
+        Ok(sqlx::query(
+            "DELETE FROM user_account
+              WHERE username = $1
+          RETURNING id, username, display_name, email, password_hash, role_code,
+                    employee_id, status, must_change_password, created_at, created_by,
+                    last_login_at",
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(row_to_user_account))
     }
     /// Whether the web bootstrap endpoint may still create the first account.
     ///
@@ -2776,6 +2900,21 @@ impl Store {
         .await?
         .rows_affected()
             > 0)
+    }
+    /// Revoke every live session of one account and report how many were
+    /// live. A new password has to end the sessions the old one opened, or
+    /// resetting it would leave whoever is already signed in signed in.
+    pub async fn revoke_user_sessions(&self, user_id: i32, actor: &str) -> Result<u64> {
+        Ok(sqlx::query(
+            "UPDATE user_session
+                SET revoked_at = now(), revoked_by = $2
+              WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(user_id)
+        .bind(actor)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
     /// Touch the last-activity time of a live session. Expired, revoked or
     /// disabled sessions are not extended.
@@ -3159,6 +3298,52 @@ impl Store {
     // the ledger.
     //
 
+    /// Create a budget version, optionally making it the current one for its
+    /// fiscal year.
+    ///
+    /// Only one version per year may be current, enforced by a partial unique
+    /// index, so the previous current version is stood down inside the same
+    /// transaction rather than left to collide.
+    pub async fn create_budget_version(
+        &self,
+        code: &str,
+        label: &str,
+        fiscal_year: i32,
+        is_current: bool,
+        note: &str,
+        actor: &str,
+    ) -> Result<BudgetVersion> {
+        let mut tx = self.pool.begin().await?;
+        if is_current {
+            sqlx::query(
+                "UPDATE budget_version SET is_current = false
+                  WHERE fiscal_year = $1 AND is_current",
+            )
+            .bind(fiscal_year)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO budget_version (code, label, fiscal_year, is_current, note, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(code)
+        .bind(label)
+        .bind(fiscal_year)
+        .bind(is_current)
+        .bind(note)
+        .bind(actor)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        self.budget_versions()
+            .await?
+            .into_iter()
+            .find(|v| v.code == code)
+            .ok_or_else(|| StoreError::SettingNotFound { code: code.to_string() })
+    }
+
     pub async fn budget_versions(&self) -> Result<Vec<BudgetVersion>> {
         Ok(sqlx::query(
             "SELECT v.code, v.label, v.fiscal_year, v.is_current, v.note, v.created_by,
@@ -3512,7 +3697,10 @@ impl Store {
     }
 
     /// Approve one step. A `voucher` value means this was the final step, and
-    /// the voucher and approval record share the transaction.
+    /// the voucher and approval record share the transaction. A claim paid at
+    /// month end also gets its payables entry there, since the voucher credits
+    /// 2101 and the payables screen reconciles its detail against that
+    /// account.
     pub async fn approve_expense_step(
         &self,
         req: ApproveExpenseStep<'_>,
@@ -3609,6 +3797,7 @@ impl Store {
                     credit: Money::ZERO,
                     memo: Some(req.claim_no.to_string()),
                     bank_account_id: None,
+                    dept_code: None,
                 },
                 LineInput {
                     account_code: credit_code.into(),
@@ -3616,12 +3805,14 @@ impl Store {
                     credit: amount,
                     memo: Some(format!("{claimant} 報支")),
                     bank_account_id: bank_id,
+                    dept_code: None,
                 },
             ];
 
+            let billed_on = req.posted_on.unwrap_or(spent_on);
             let no = insert_voucher(
                 &mut tx,
-                req.posted_on.unwrap_or(spent_on),
+                billed_on,
                 &memo,
                 &lines,
                 "pending",
@@ -3634,6 +3825,31 @@ impl Store {
             // The expense line carries the department so departmental P&L sees
             // the cost.
             set_line_dept(&mut tx, &no, 1, dept_id).await?;
+
+            // A month-end reimbursement credits 2101, and the payables screen
+            // reconciles its own detail against that balance. Without a bill
+            // the two sides differ by this claim for good: the bill form only
+            // ever creates a voucher of its own, so no screen can enter the
+            // one that already exists. The bill is also what carries the claim
+            // into a payment batch, which is how the money actually leaves.
+            if credit_code == "2101" {
+                sqlx::query(
+                    "INSERT INTO ap_bill
+                        (bill_no, vendor, memo, billed_on, due_on, amount, origin_voucher_no)
+                     VALUES ($1,$2,$3,$4,
+                             (date_trunc('month', $4::date)
+                                 + interval '1 month' - interval '1 day')::date,
+                             $5,$6)",
+                )
+                .bind(req.claim_no)
+                .bind(&claimant)
+                .bind(&memo)
+                .bind(billed_on)
+                .bind(amount)
+                .bind(&no)
+                .execute(&mut *tx)
+                .await?;
+            }
 
             sqlx::query(
                 "UPDATE expense_claim SET status = 'approved', voucher_no = $2 WHERE id = $1",
@@ -4079,6 +4295,7 @@ impl Store {
                     credit: l.credit,
                     memo: l.memo.clone(),
                     bank_account_id: None,
+                    dept_code: None,
                 })
                 .collect();
             let no =
@@ -4167,6 +4384,25 @@ impl Store {
         self.import_batch(batch_no).await
     }
 
+    /// Posted vouchers dated after a statement's cut-off.
+    ///
+    /// They are in the ledger and immutable, yet outside the period, so a
+    /// statement can be complete and still omit an entry posted a minute ago.
+    /// Counting only unposted vouchers leaves that gap unexplained.
+    pub async fn posted_after(&self, after: NaiveDate) -> Result<(i64, Money)> {
+        let r = sqlx::query(
+            "SELECT COUNT(DISTINCT v.id)::bigint AS n,
+                    COALESCE(SUM(l.debit), 0) AS amount
+               FROM voucher v
+               JOIN voucher_line l ON l.voucher_id = v.id
+              WHERE v.status = 'posted' AND v.voucher_date > $1",
+        )
+        .bind(after)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((r.get("n"), r.get("amount")))
+    }
+
     /// System status as far as the database can see it.
     ///
     /// The brand fingerprint and RustFS connectivity are not here; `/healthz`
@@ -4180,6 +4416,7 @@ impl Store {
                (SELECT COUNT(*) FROM account)                                     AS accounts,
                (SELECT COUNT(*) FROM ai_audit_log)                                AS audit_entries,
                (SELECT COUNT(*) FROM ai_audit_log WHERE outcome = 'blocked')      AS audit_blocked,
+               (SELECT COUNT(*) FROM ai_audit_log WHERE outcome = 'error')        AS audit_errors,
                (SELECT MIN(at) FROM ai_audit_log)                                 AS audit_since,
                (SELECT COUNT(*) FROM api_token WHERE revoked_at IS NULL)          AS tokens_live,
                (SELECT COUNT(*) FROM api_token WHERE revoked_at IS NOT NULL)      AS tokens_revoked,
@@ -4196,6 +4433,7 @@ impl Store {
             accounts: r.get("accounts"),
             audit_entries: r.get("audit_entries"),
             audit_blocked: r.get("audit_blocked"),
+            audit_errors: r.get("audit_errors"),
             audit_since: r.get("audit_since"),
             tokens_live: r.get("tokens_live"),
             tokens_revoked: r.get("tokens_revoked"),
@@ -4228,35 +4466,48 @@ impl Store {
     // minimum wage check all happen in laysi-ops via `laysi-regulation`; the
     // repository must not become a second opinion.
 
+    /// Next number in the `E###` series. Numbers typed in another shape are
+    /// left out of the calculation rather than reinterpreted, so a roster that
+    /// uses its own scheme is not renumbered by this.
+    pub async fn next_employee_no(&self) -> Result<String> {
+        let highest: Option<i32> = sqlx::query(
+            "SELECT MAX((NULLIF(regexp_replace(emp_no, '^E0*', ''), ''))::int) AS highest
+               FROM employee
+              WHERE emp_no ~ '^E[0-9]+$'",
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .get("highest");
+        Ok(format!("E{:03}", highest.unwrap_or(0) + 1))
+    }
+
     /// Create an employee record. The three insured brackets are kept exactly
     /// as filed and are never validated, corrected or truncated against a
     /// ruleset here; rates and ceilings are the regulated part.
     pub async fn create_employee(&self, req: WriteEmployee<'_>) -> Result<Employee> {
         let mut tx = self.pool.begin().await?;
         let dept_id = resolve_department_id(&mut tx, req.dept_code).await?;
-        ensure_role_exists(&mut tx, req.role_code).await?;
 
         sqlx::query(
             "INSERT INTO employee
-                (emp_no, name, dept_id, title, role_code, employment_type,
+                (emp_no, name, dept_id, title, employment_type,
                  hired_on, left_on, status, base_salary, labor_insured_salary,
                  health_insured_salary, pension_wage, id_no, bank_account,
                  note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         )
         .bind(req.emp_no)
         .bind(req.name)
         .bind(dept_id)
         .bind(req.title)
-        .bind(req.role_code)
         .bind(req.employment_type)
         .bind(req.hired_on)
         .bind(req.left_on)
         .bind(req.status)
-        .bind(req.base_salary)
-        .bind(req.labor_insured_salary)
-        .bind(req.health_insured_salary)
-        .bind(req.pension_wage)
+        .bind(req.base_salary.unwrap_or(Money::ZERO))
+        .bind(req.labor_insured_salary.unwrap_or(Money::ZERO))
+        .bind(req.health_insured_salary.unwrap_or(Money::ZERO))
+        .bind(req.pension_wage.unwrap_or(Money::ZERO))
         .bind(req.id_no)
         .bind(req.bank_account)
         .bind(req.note)
@@ -4268,9 +4519,14 @@ impl Store {
         self.employee(req.emp_no).await
     }
 
-    /// Full update of an employee record. Neither creating nor updating an
-    /// employee creates a login; `user_account` stays with `laysi-admin`, and
-    /// the two tables are deliberately separate.
+    /// Update an employee record. Every column is overwritten except the four
+    /// amounts, which are left alone when the caller sends `None`: the roster
+    /// never returns them, so a caller editing a job title has nothing to send
+    /// back and would otherwise zero out the salary it never saw.
+    ///
+    /// Neither creating nor updating an employee creates a login;
+    /// `user_account` stays with `laysi-admin`, and the two tables are
+    /// deliberately separate.
     pub async fn update_employee(&self, req: WriteEmployee<'_>) -> Result<Employee> {
         let mut tx = self.pool.begin().await?;
         let exists = sqlx::query("SELECT 1 FROM employee WHERE emp_no = $1 FOR UPDATE")
@@ -4283,22 +4539,23 @@ impl Store {
         }
 
         let dept_id = resolve_department_id(&mut tx, req.dept_code).await?;
-        ensure_role_exists(&mut tx, req.role_code).await?;
         sqlx::query(
             "UPDATE employee
-                SET name = $2, dept_id = $3, title = $4, role_code = $5,
-                    employment_type = $6, hired_on = $7, left_on = $8,
-                    status = $9, base_salary = $10,
-                    labor_insured_salary = $11, health_insured_salary = $12,
-                    pension_wage = $13, id_no = $14, bank_account = $15,
-                    note = $16
+                SET name = $2, dept_id = $3, title = $4,
+                    employment_type = $5, hired_on = $6, left_on = $7,
+                    status = $8,
+                    base_salary = COALESCE($9::numeric, base_salary),
+                    labor_insured_salary = COALESCE($10::numeric, labor_insured_salary),
+                    health_insured_salary = COALESCE($11::numeric, health_insured_salary),
+                    pension_wage = COALESCE($12::numeric, pension_wage),
+                    id_no = $13, bank_account = $14,
+                    note = $15
               WHERE emp_no = $1",
         )
         .bind(req.emp_no)
         .bind(req.name)
         .bind(dept_id)
         .bind(req.title)
-        .bind(req.role_code)
         .bind(req.employment_type)
         .bind(req.hired_on)
         .bind(req.left_on)
@@ -4320,13 +4577,12 @@ impl Store {
     pub async fn employees(&self, include_left: bool, q: Option<&str>) -> Result<Vec<Employee>> {
         Ok(sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.role_code, r.name AS role_name, e.employment_type,
+                    e.title, e.employment_type,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.bank_account, e.note
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
-               LEFT JOIN role r           ON r.code = e.role_code
               WHERE ($1 OR e.status <> 'left')
                 AND ($2::text IS NULL OR e.name ILIKE '%' || $2 || '%'
                                       OR e.emp_no ILIKE '%' || $2 || '%'
@@ -4346,13 +4602,12 @@ impl Store {
     pub async fn employee(&self, emp_no: &str) -> Result<Employee> {
         sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.role_code, r.name AS role_name, e.employment_type,
+                    e.title, e.employment_type,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.bank_account, e.note
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
-               LEFT JOIN role r           ON r.code = e.role_code
               WHERE e.emp_no = $1",
         )
         .bind(emp_no)
@@ -4368,13 +4623,12 @@ impl Store {
     pub async fn employee_by_id(&self, id: i32) -> Result<Option<Employee>> {
         Ok(sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.role_code, r.name AS role_name, e.employment_type,
+                    e.title, e.employment_type,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.bank_account, e.note
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
-               LEFT JOIN role r           ON r.code = e.role_code
               WHERE e.id = $1",
         )
         .bind(id)
@@ -4519,19 +4773,21 @@ impl Store {
     }
 
     /// Mark one step complete. The movement closes automatically once every
-    /// step is done.
+    /// step is done, and a completed leaving flow closes the person's access
+    /// in the same transaction.
     pub async fn complete_movement_step(
         &self,
-        movement_no: &str,
-        step_no: i32,
-        actor: &str,
-        note: &str,
-    ) -> Result<EmployeeMovement> {
+        req: CompleteMovementStep<'_>,
+    ) -> Result<CompletedMovement> {
+        let movement_no = req.movement_no;
+        let step_no = req.step_no;
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
-            "SELECT m.id, m.kind, m.status, m.employee_id, m.effective_on
-               FROM employee_movement m WHERE m.movement_no = $1 FOR UPDATE",
+            "SELECT m.id, m.kind, m.status, m.employee_id, m.effective_on, e.name
+               FROM employee_movement m
+               JOIN employee e ON e.id = m.employee_id
+              WHERE m.movement_no = $1 FOR UPDATE OF m",
         )
         .bind(movement_no)
         .fetch_optional(&mut *tx)
@@ -4542,6 +4798,7 @@ impl Store {
         let kind: String = row.get("kind");
         let employee_id: i32 = row.get("employee_id");
         let effective_on: NaiveDate = row.get("effective_on");
+        let name: String = row.get("name");
 
         let total: i64 = sqlx::query("SELECT COUNT(*)::bigint AS n FROM hr_flow_step WHERE kind = $1")
             .bind(&kind)
@@ -4558,8 +4815,8 @@ impl Store {
         )
         .bind(id)
         .bind(step_no)
-        .bind(actor)
-        .bind(note)
+        .bind(req.actor)
+        .bind(req.note)
         .execute(&mut *tx)
         .await?;
         if inserted.rows_affected() == 0 {
@@ -4576,6 +4833,7 @@ impl Store {
                 .await?
                 .get("n");
 
+        let mut closed = ClosedAccess::default();
         if done >= total {
             sqlx::query("UPDATE employee_movement SET status = 'done' WHERE id = $1")
                 .bind(id)
@@ -4588,11 +4846,12 @@ impl Store {
                     .bind(effective_on)
                     .execute(&mut *tx)
                     .await?;
+                closed = close_access(&mut tx, employee_id, &name, req).await?;
             }
         }
 
         tx.commit().await?;
-        self.employee_movement(movement_no).await
+        Ok(CompletedMovement { movement: self.employee_movement(movement_no).await?, closed })
     }
 
     // HR: attendance and leave
@@ -4666,11 +4925,14 @@ impl Store {
         Ok(sqlx::query(
             "SELECT l.id, l.leave_no, l.employee_id, e.emp_no, e.name,
                     d.label AS dept_label, l.kind, l.from_on, l.to_on, l.days, l.reason,
-                    l.status, l.decided_by, l.decided_role, l.decided_at, l.decision_note,
+                    l.status, l.decided_by,
+                    COALESCE(r.name, l.decided_role) AS decided_role,
+                    l.decided_at, l.decision_note,
                     l.created_at, l.created_by
                FROM leave_request l
                JOIN employee e            ON e.id = l.employee_id
                LEFT JOIN dimension_value d ON d.id = e.dept_id
+               LEFT JOIN role r            ON r.code = l.decided_role
               WHERE ($1 OR l.status = 'pending')
                 AND ($3::int IS NULL OR l.employee_id = $3)
               ORDER BY l.from_on DESC, l.id DESC
@@ -4718,7 +4980,7 @@ impl Store {
         req: NewLeaveRequest<'_>,
     ) -> Result<LeaveRequest> {
         let mut tx = self.pool.begin().await?;
-        let period = roc_month(req.from_on);
+        let period = req.from_on.format("%y%m").to_string();
         let seq = next_doc_no(&mut tx, "LV", &period).await?;
         let leave_no = format!("LV{period}-{seq:03}");
 
@@ -4783,83 +5045,7 @@ impl Store {
     /// overwrite, from HR correcting a missed punch, which exists to.
     pub async fn record_punch(&self, p: NewPunch<'_>, replace: bool) -> Result<AttendancePunch> {
         let mut tx = self.pool.begin().await?;
-
-        let existing = sqlx::query(
-            "SELECT kind, punched_at FROM attendance_punch
-              WHERE employee_id = $1 AND punched_on = $2
-              FOR UPDATE",
-        )
-        .bind(p.employee_id)
-        .bind(p.punched_on)
-        .fetch_all(&mut *tx)
-        .await?;
-        let at_of = |kind: &str| -> Option<DateTime<Utc>> {
-            existing
-                .iter()
-                .find(|row| row.get::<String, _>("kind") == kind)
-                .map(|row| row.get("punched_at"))
-        };
-        let local = |at: DateTime<Utc>| laysi_domain::business_time(at).format("%H:%M:%S").to_string();
-
-        if !replace {
-            if let Some(at) = at_of(p.kind) {
-                return Err(StoreError::PunchAlreadyRecorded {
-                    date: p.punched_on.to_string(),
-                    kind: if p.kind == "in" { "上班".into() } else { "下班".into() },
-                    at: local(at),
-                });
-            }
-        }
-
-        match p.kind {
-            "out" => {
-                let Some(in_at) = at_of("in") else {
-                    return Err(StoreError::PunchOutWithoutIn {
-                        date: p.punched_on.to_string(),
-                    });
-                };
-                if p.punched_at < in_at {
-                    return Err(StoreError::PunchOutBeforeIn {
-                        out: local(p.punched_at),
-                        in_at: local(in_at),
-                    });
-                }
-            }
-            // Correcting an arrival to after the departure already recorded
-            // would leave the day with negative hours.
-            _ => {
-                if let Some(out_at) = at_of("out") {
-                    if p.punched_at > out_at {
-                        return Err(StoreError::PunchOutBeforeIn {
-                            out: local(out_at),
-                            in_at: local(p.punched_at),
-                        });
-                    }
-                }
-            }
-        }
-
-        sqlx::query(
-            "INSERT INTO attendance_punch
-               (employee_id, punched_on, punched_at, kind, source, note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)
-             ON CONFLICT (employee_id, punched_on, kind) DO UPDATE
-                SET punched_at = EXCLUDED.punched_at,
-                    source     = EXCLUDED.source,
-                    note       = EXCLUDED.note,
-                    created_by = EXCLUDED.created_by,
-                    created_at = now()",
-        )
-        .bind(p.employee_id)
-        .bind(p.punched_on)
-        .bind(p.punched_at)
-        .bind(p.kind)
-        .bind(p.source)
-        .bind(p.note)
-        .bind(p.actor)
-        .execute(&mut *tx)
-        .await?;
-
+        punch_in_tx(&mut tx, &p, replace).await?;
         tx.commit().await?;
 
         let month = p.punched_on.format("%Y-%m").to_string();
@@ -4876,23 +5062,32 @@ impl Store {
         approve: bool,
         actor: &str,
         actor_role: &str,
+        actor_employee_id: Option<i32>,
         note: &str,
     ) -> Result<LeaveRequest> {
-        let status: String = sqlx::query("SELECT status FROM leave_request WHERE leave_no = $1")
+        let row = sqlx::query("SELECT status, employee_id FROM leave_request WHERE leave_no = $1")
             .bind(leave_no)
             .fetch_optional(&self.pool)
             .await?
-            .ok_or_else(|| StoreError::LeaveNotFound { no: leave_no.to_string() })?
-            .get("status");
+            .ok_or_else(|| StoreError::LeaveNotFound { no: leave_no.to_string() })?;
+        let status: String = row.get("status");
         if status != "pending" {
             return Err(StoreError::LeaveAlreadyDecided { no: leave_no.to_string(), status });
         }
+        // Same separation of duties the expense flow enforces. The key is the
+        // employee id, not the name: two people can share a name.
+        if actor_employee_id.is_some() && actor_employee_id == Some(row.get("employee_id")) {
+            return Err(StoreError::LeaveDecidedByRequester { no: leave_no.to_string() });
+        }
 
-        sqlx::query(
+        // The status is re-checked in the UPDATE itself, so two managers
+        // acting at the same moment cannot both win: the second changes no
+        // row and is told the request was already decided.
+        let updated = sqlx::query(
             "UPDATE leave_request
                 SET status = CASE WHEN $2 THEN 'approved' ELSE 'rejected' END,
                     decided_by = $3, decided_role = $4, decided_at = now(), decision_note = $5
-              WHERE leave_no = $1",
+              WHERE leave_no = $1 AND status = 'pending'",
         )
         .bind(leave_no)
         .bind(approve)
@@ -4901,12 +5096,188 @@ impl Store {
         .bind(note)
         .execute(&self.pool)
         .await?;
+        if updated.rows_affected() == 0 {
+            return Err(StoreError::LeaveAlreadyDecided {
+                no: leave_no.to_string(),
+                status: "已處理".into(),
+            });
+        }
 
         self.leave_requests(true, 1000)
             .await?
             .into_iter()
             .find(|l| l.leave_no == leave_no)
             .ok_or_else(|| StoreError::LeaveNotFound { no: leave_no.to_string() })
+    }
+
+    /// Punch correction requests, newest working day first.
+    pub async fn punch_corrections(
+        &self,
+        include_done: bool,
+        employee_id: Option<i32>,
+    ) -> Result<Vec<PunchCorrection>> {
+        Ok(sqlx::query(
+            "SELECT c.id, c.employee_id, e.emp_no, e.name, d.label AS dept_label,
+                    c.punched_on, c.kind, c.punched_at, c.reason, c.status,
+                    c.decided_by,
+                    COALESCE(r.name, c.decided_role) AS decided_role,
+                    c.decided_at, c.decision_note, c.created_at, c.created_by
+               FROM punch_correction c
+               JOIN employee e             ON e.id = c.employee_id
+               LEFT JOIN dimension_value d ON d.id = e.dept_id
+               LEFT JOIN role r            ON r.code = c.decided_role
+              WHERE ($1 OR c.status = 'submitted')
+                AND ($2::int IS NULL OR c.employee_id = $2)
+              ORDER BY c.punched_on DESC, c.id DESC",
+        )
+        .bind(include_done)
+        .bind(employee_id)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(row_to_punch_correction)
+        .collect())
+    }
+
+    /// Write a request. With `auto_approve` the punch is written in the same
+    /// transaction, so the company that trusts its people never has a row
+    /// waiting for a decision nobody is going to make.
+    pub async fn submit_punch_correction(
+        &self,
+        n: NewPunchCorrection<'_>,
+        auto_approve: bool,
+    ) -> Result<PunchCorrection> {
+        let mut tx = self.pool.begin().await?;
+
+        if auto_approve {
+            punch_in_tx(
+                &mut tx,
+                &NewPunch {
+                    employee_id: n.employee_id,
+                    punched_on: n.punched_on,
+                    punched_at: n.punched_at,
+                    kind: n.kind,
+                    source: "manual",
+                    note: n.reason,
+                    actor: n.actor,
+                },
+                true,
+            )
+            .await?;
+        }
+
+        let inserted = sqlx::query(
+            "INSERT INTO punch_correction
+               (employee_id, punched_on, kind, punched_at, reason, status,
+                decided_at, decision_note, created_by)
+             VALUES ($1,$2,$3,$4,$5,
+                     CASE WHEN $6 THEN 'approved' ELSE 'submitted' END,
+                     CASE WHEN $6 THEN now() END,
+                     CASE WHEN $6 THEN '依公司設定自動通過' ELSE '' END,
+                     $7)
+             ON CONFLICT DO NOTHING
+             RETURNING id",
+        )
+        .bind(n.employee_id)
+        .bind(n.punched_on)
+        .bind(n.kind)
+        .bind(n.punched_at)
+        .bind(n.reason)
+        .bind(auto_approve)
+        .bind(n.actor)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = inserted else {
+            return Err(StoreError::PunchCorrectionAlreadyOpen {
+                date: n.punched_on.to_string(),
+                kind: if n.kind == "in" { "上班".into() } else { "下班".into() },
+            });
+        };
+        let id: i32 = row.get("id");
+        tx.commit().await?;
+
+        self.punch_correction(id).await
+    }
+
+    pub async fn punch_correction(&self, id: i32) -> Result<PunchCorrection> {
+        self.punch_corrections(true, None)
+            .await?
+            .into_iter()
+            .find(|c| c.id == id)
+            .ok_or(StoreError::PunchCorrectionNotFound)
+    }
+
+    /// Approve or reject one request. Approving writes the punch through the
+    /// same path HR's own correction uses, in this transaction, so a request
+    /// can never be marked approved without the punch it promised.
+    pub async fn decide_punch_correction(
+        &self,
+        id: i32,
+        approve: bool,
+        actor: &str,
+        actor_role: &str,
+        actor_employee_id: Option<i32>,
+        note: &str,
+    ) -> Result<PunchCorrection> {
+        let mut tx = self.pool.begin().await?;
+
+        let row = sqlx::query(
+            "SELECT employee_id, punched_on, kind, punched_at, reason, status
+               FROM punch_correction WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::PunchCorrectionNotFound)?;
+
+        let status: String = row.get("status");
+        if status != "submitted" {
+            return Err(StoreError::PunchCorrectionAlreadyDecided { status });
+        }
+        // Same separation of duties as leave and expenses. The key is the
+        // employee id, not the name: two people can share a name.
+        let employee_id: i32 = row.get("employee_id");
+        if actor_employee_id.is_some() && actor_employee_id == Some(employee_id) {
+            return Err(StoreError::PunchCorrectionDecidedByRequester);
+        }
+
+        if approve {
+            let kind: String = row.get("kind");
+            let reason: String = row.get("reason");
+            punch_in_tx(
+                &mut tx,
+                &NewPunch {
+                    employee_id,
+                    punched_on: row.get("punched_on"),
+                    punched_at: row.get("punched_at"),
+                    kind: &kind,
+                    source: "manual",
+                    note: &reason,
+                    actor,
+                },
+                true,
+            )
+            .await?;
+        }
+
+        sqlx::query(
+            "UPDATE punch_correction
+                SET status = CASE WHEN $2 THEN 'approved' ELSE 'rejected' END,
+                    decided_by = $3, decided_role = $4, decided_at = now(),
+                    decision_note = $5
+              WHERE id = $1 AND status = 'submitted'",
+        )
+        .bind(id)
+        .bind(approve)
+        .bind(actor)
+        .bind(actor_role)
+        .bind(note)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        self.punch_correction(id).await
     }
 
     // HR: payroll
@@ -5091,6 +5462,7 @@ impl Store {
                 credit: Money::ZERO,
                 memo: Some(format!("{label} {n} 人")),
                 bank_account_id: None,
+                dept_code: None,
             })
             .collect();
 
@@ -5101,6 +5473,7 @@ impl Store {
                 credit: deduction,
                 memo: Some(req.deduction_memo.to_string()),
                 bank_account_id: None,
+                dept_code: None,
             });
         }
         lines.push(LineInput {
@@ -5109,6 +5482,7 @@ impl Store {
             credit: net,
             memo: Some(format!("實發 {} 人", req.slips.len())),
             bank_account_id: Some(req.bank_account_id),
+            dept_code: None,
         });
 
         let voucher_no = insert_voucher(
@@ -5184,6 +5558,30 @@ impl Store {
             .bind(&s.note)
             .execute(&mut *tx)
             .await?;
+
+            // Payment records for the withholding statement. Without them the
+            // 「扣繳與法遵」 reconciliation compares payroll against nothing
+            // and reports the whole year as a difference, with no action on
+            // screen that could close it. The tax itself is not stored: it is
+            // 5% of the gross by the ruleset in force on the payment date, so
+            // a stored copy would be a second answer to the same question.
+            if s.gross > Money::ZERO {
+                sqlx::query(
+                    "INSERT INTO withholding_record
+                       (paid_on, payee, payee_id, income_code, gross_amount,
+                        basis, supplementary_base, memo, voucher_no)
+                     SELECT $1, e.name, e.id_no, $2, $3, 'rate', false, $4, $5
+                       FROM employee e WHERE e.id = $6",
+                )
+                .bind(req.pay_on)
+                .bind(req.income_code)
+                .bind(s.gross)
+                .bind(format!("{} 薪資", req.period))
+                .bind(&voucher_no)
+                .bind(s.employee_id)
+                .execute(&mut *tx)
+                .await?;
+            }
         }
 
         tx.commit().await?;
@@ -5282,6 +5680,8 @@ pub struct AuditEntry {
     pub at: DateTime<Utc>,
     pub actor: String,
     pub actor_role: String,
+    /// The role's name as the screens say it, e.g. 「系統管理員」 for `admin`.
+    pub actor_role_name: String,
     pub tool_name: String,
     pub risk: String,
     pub prompt: Option<String>,
@@ -5330,10 +5730,14 @@ pub struct CreateArInvoice<'a> {
     pub customer: &'a str,
     pub issued_on: NaiveDate,
     pub due_on: NaiveDate,
+    /// Tax inclusive; this is the receivable and the debit to 1131.
     pub amount: Money,
+    pub net_amount: Money,
+    pub tax_amount: Money,
     pub memo: &'a str,
     pub receivable_account_code: &'a str,
     pub revenue_account_code: &'a str,
+    pub output_tax_account_code: &'a str,
     pub created_by: &'a str,
 }
 
@@ -5379,9 +5783,13 @@ pub struct CreateApBill<'a> {
     pub memo: &'a str,
     pub billed_on: NaiveDate,
     pub due_on: NaiveDate,
+    /// Tax inclusive; this is the payable and the credit to 2101.
     pub amount: Money,
+    pub net_amount: Money,
+    pub tax_amount: Money,
     pub debit_account_code: &'a str,
     pub payable_account_code: &'a str,
+    pub input_tax_account_code: &'a str,
     pub created_by: &'a str,
 }
 
@@ -5462,85 +5870,6 @@ pub struct MatchCandidate {
     pub day_gap: i32,
 }
 
-/// The issuing record of one e-invoice.
-///
-/// `net_amount` and `tax_amount` were computed at issue time and are never
-/// recomputed on read: once an invoice is issued, the tax printed on it is
-/// a fact. `vat_version` records which ruleset produced it, so a
-/// retroactive amendment can identify the invoices to reissue.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct EInvoice {
-    pub invoice_no: String,
-    pub track: String,
-    pub serial_no: i32,
-    pub buyer_tax_id: String,
-    pub buyer: String,
-    pub item: String,
-    pub issued_on: NaiveDate,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub net_amount: Money,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub tax_amount: Money,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub total_amount: Money,
-    pub vat_version: String,
-    /// `queued`, `uploaded`, `failed` or `void`.
-    pub upload_status: String,
-    pub upload_attempts: i32,
-    pub uploaded_at: Option<DateTime<Utc>>,
-    pub last_error: Option<String>,
-    pub voucher_no: Option<String>,
-    pub voucher_status: Option<String>,
-    pub ar_invoice_no: Option<String>,
-    /// The issuing voucher is posted, so this invoice's output tax is in the
-    /// ledger.
-    pub recognised: bool,
-}
-
-/// Track status. `remaining` is how many invoices can still be issued.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TrackState {
-    pub track: String,
-    pub period: String,
-    pub range_from: i32,
-    pub range_to: i32,
-    pub next_no: i32,
-    pub remaining: i32,
-}
-
-/// Everything needed to issue one e-invoice. The tax is computed by the
-/// caller from the ruleset.
-pub struct IssueEInvoice<'a> {
-    pub track: &'a str,
-    pub buyer_tax_id: &'a str,
-    pub buyer: &'a str,
-    pub item: &'a str,
-    pub issued_on: NaiveDate,
-    pub due_on: NaiveDate,
-    pub net_amount: Money,
-    pub tax_amount: Money,
-    /// VAT ruleset version used for this tax amount.
-    pub vat_version: &'a str,
-    pub created_by: &'a str,
-}
-
-/// Result of issuing one invoice.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct IssuedEInvoice {
-    pub invoice_no: String,
-    pub voucher_no: String,
-    pub buyer: String,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub net_amount: Money,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub tax_amount: Money,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub total_amount: Money,
-    pub vat_version: String,
-    /// Numbers remaining in this track.
-    pub remaining: i32,
-}
-
 /// Ledger figures for the VAT return. Posted entries only.
 #[derive(Debug, Clone)]
 pub struct VatFigures {
@@ -5580,9 +5909,35 @@ pub struct WithholdingRecord {
     pub voucher_no: Option<String>,
 }
 
+/// A fixed asset to register, with the purchase it came from.
+pub struct NewFixedAsset<'a> {
+    /// Asset code. `None` takes the next `FA###`.
+    pub code: Option<&'a str>,
+    pub name: &'a str,
+    /// Key into the useful life table; the years themselves are regulation.
+    pub category: &'a str,
+    pub acquired_on: NaiveDate,
+    /// Cost before tax. This is the depreciable base and the debit to 1601.
+    pub cost: Money,
+    /// Deductible input tax, debited to 1284. Zero writes no tax line.
+    pub tax_amount: Money,
+    pub gl_code: &'a str,
+    pub accum_gl_code: &'a str,
+    pub input_tax_account_code: &'a str,
+    /// Which account the money left. `Some` writes the acquisition voucher.
+    pub paid_from_account_code: Option<&'a str>,
+    /// An existing voucher that already carries the purchase, used instead of
+    /// writing one.
+    pub origin_voucher_no: Option<&'a str>,
+    /// Department carrying the asset, for departmental profit and loss.
+    pub dept_code: Option<&'a str>,
+    pub memo: &'a str,
+    pub created_by: &'a str,
+}
+
 /// One fixed asset. The useful life is not here: ask the depreciation
 /// ruleset with `category` and `acquired_on`, which is its only source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FixedAsset {
     pub id: i32,
     pub code: String,
@@ -5745,6 +6100,56 @@ pub struct UserAccount {
     pub created_at: DateTime<Utc>,
     pub created_by: String,
     pub last_login_at: Option<DateTime<Utc>>,
+}
+
+/// One row of the account roster. Unlike [`UserAccount`] it holds no password
+/// hash, so it can be serialized to the screen.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserAccountRow {
+    pub username: String,
+    pub display_name: String,
+    pub email: String,
+    pub role_code: String,
+    pub role_name: String,
+    pub employee_no: Option<String>,
+    pub employee_name: Option<String>,
+    /// Roster status of the linked employee, `active` or `left`. An account
+    /// belonging to someone who has left is worth seeing on this screen; the
+    /// alternative is reading it off the roster on another one.
+    pub employee_status: Option<String>,
+    /// `active` or `suspended`.
+    pub status: String,
+    pub must_change_password: bool,
+    /// `false` means the account can only sign in through a linked external
+    /// identity.
+    pub has_password: bool,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+    pub last_login_at: Option<DateTime<Utc>>,
+}
+
+/// Fields an administrator may change on an existing account. `None` leaves a
+/// column alone; for the employee link, `Some(None)` clears it.
+pub struct UpdateUser<'a> {
+    pub username: &'a str,
+    pub display_name: Option<&'a str>,
+    pub email: Option<&'a str>,
+    /// `active` or `suspended`.
+    pub status: Option<&'a str>,
+    pub employee_id: Option<Option<i32>>,
+}
+
+pub struct ChangeUserRole<'a> {
+    pub username: &'a str,
+    pub role_code: &'a str,
+    pub actor: &'a str,
+}
+
+/// The account after the change, with what the change closed behind it.
+pub struct RoleChange {
+    pub user: UserAccount,
+    pub sessions: u64,
+    pub tokens: u64,
 }
 
 /// Data needed to create an account. The password must already be hashed by
@@ -5954,7 +6359,11 @@ pub struct SystemStats {
     pub unposted_vouchers: i64,
     pub accounts: i64,
     pub audit_entries: i64,
+    /// Calls the permission layer refused. A call the business rules refused
+    /// is `audit_errors`: both were told no, and a screen that reports only
+    /// the first reads as "nothing was refused" to someone who was.
     pub audit_blocked: i64,
+    pub audit_errors: i64,
     pub audit_since: Option<DateTime<Utc>>,
     pub tokens_live: i64,
     pub tokens_revoked: i64,
@@ -6295,6 +6704,10 @@ pub struct DepreciationLine {
     pub asset_name: String,
     pub amount: Money,
     pub useful_life_years: i32,
+    /// Which contra account this asset's depreciation credits. Assets on
+    /// different asset accounts have different contra accounts, so the
+    /// voucher carries one credit line per account rather than one in total.
+    pub accum_gl_code: String,
 }
 
 // HR types
@@ -6314,8 +6727,6 @@ pub struct Employee {
     pub dept_label: Option<String>,
     pub dept_id: Option<i32>,
     pub title: String,
-    pub role_code: Option<String>,
-    pub role_name: Option<String>,
     pub employment_type: String,
     pub hired_on: NaiveDate,
     pub left_on: Option<NaiveDate>,
@@ -6339,15 +6750,15 @@ pub struct WriteEmployee<'a> {
     pub name: &'a str,
     pub dept_code: Option<&'a str>,
     pub title: &'a str,
-    pub role_code: &'a str,
     pub employment_type: &'a str,
     pub hired_on: NaiveDate,
     pub left_on: Option<NaiveDate>,
     pub status: &'a str,
-    pub base_salary: Money,
-    pub labor_insured_salary: Money,
-    pub health_insured_salary: Money,
-    pub pension_wage: Money,
+    /// `None` means "leave as is" on update and "not agreed yet" on create.
+    pub base_salary: Option<Money>,
+    pub labor_insured_salary: Option<Money>,
+    pub health_insured_salary: Option<Money>,
+    pub pension_wage: Option<Money>,
     pub id_no: &'a str,
     pub bank_account: &'a str,
     pub note: &'a str,
@@ -6394,6 +6805,31 @@ impl EmployeeMovement {
     }
 }
 
+pub struct CompleteMovementStep<'a> {
+    pub movement_no: &'a str,
+    pub step_no: i32,
+    pub actor: &'a str,
+    pub note: &'a str,
+    /// Role that must keep one active login. A completed leaving flow closes
+    /// the person's logins, and no operation grants a role, so the last
+    /// account holding this one cannot be closed that way.
+    pub keep_active_role: &'a str,
+}
+
+pub struct CompletedMovement {
+    pub movement: EmployeeMovement,
+    pub closed: ClosedAccess,
+}
+
+/// What a completed leaving flow shut off. Every count is zero for a person
+/// who never had a login.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ClosedAccess {
+    pub logins: Vec<String>,
+    pub sessions: u64,
+    pub tokens: u64,
+}
+
 pub struct RecordMovement<'a> {
     pub emp_no: &'a str,
     pub kind: &'a str,
@@ -6433,6 +6869,41 @@ pub struct NewPunch<'a> {
     pub kind: &'a str,
     pub source: &'a str,
     pub note: &'a str,
+    pub actor: &'a str,
+}
+
+/// One employee's request to have a punch entered or corrected. It is not a
+/// punch: nothing that reads the working day sees it until it is approved.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PunchCorrection {
+    pub id: i32,
+    pub employee_id: i32,
+    pub emp_no: String,
+    pub name: String,
+    pub dept_label: Option<String>,
+    pub punched_on: NaiveDate,
+    pub kind: String,
+    pub punched_at: DateTime<Utc>,
+    pub reason: String,
+    pub status: String,
+    /// Empty when the company setting let it through without review.
+    pub decided_by: String,
+    pub decided_role: String,
+    pub decided_at: Option<DateTime<Utc>>,
+    pub decision_note: String,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+}
+
+/// A correction request to be written. `employee_id` and `actor` are
+/// resolved from the session by the self-service operation and never appear
+/// as API input.
+pub struct NewPunchCorrection<'a> {
+    pub employee_id: i32,
+    pub punched_on: NaiveDate,
+    pub kind: &'a str,
+    pub punched_at: DateTime<Utc>,
+    pub reason: &'a str,
     pub actor: &'a str,
 }
 
@@ -6574,6 +7045,9 @@ pub struct RecordPayroll<'a> {
     pub pay_on: NaiveDate,
     pub slips: &'a [NewPayslip],
     pub bank_account_id: i32,
+    /// Income code on the withholding statement for salary. It comes from the
+    /// ruleset, so the caller supplies it; this crate does not name tax codes.
+    pub income_code: &'a str,
     pub deduction_memo: &'a str,
     pub labor_version: &'a str,
     pub health_version: &'a str,
@@ -6695,18 +7169,6 @@ async fn resolve_department_id(
     .ok_or_else(|| StoreError::DepartmentNotFound { code: dept_code.to_string() })
 }
 
-async fn ensure_role_exists(tx: &mut Tx<'_>, role_code: &str) -> Result<()> {
-    if sqlx::query("SELECT 1 FROM role WHERE code = $1")
-        .bind(role_code)
-        .fetch_optional(&mut **tx)
-        .await?
-        .is_none()
-    {
-        return Err(StoreError::RoleNotFound { code: role_code.to_string() });
-    }
-    Ok(())
-}
-
 struct InsertArInvoice<'a> {
     invoice_no: &'a str,
     customer: &'a str,
@@ -6722,9 +7184,8 @@ struct InsertArInvoice<'a> {
 /// Create the receivable and its source voucher inside an existing
 /// transaction.
 ///
-/// Plain receivables and e-invoices share this path; e-invoicing only adds
-/// taking a track number, computing the tax and writing `einvoice`. The
-/// rules for creating a receivable and its ledger entry must not diverge.
+/// Every receivable goes through here, so the rules for creating one and its
+/// ledger entry cannot diverge between callers.
 async fn insert_ar_invoice(tx: &mut Tx<'_>, req: InsertArInvoice<'_>) -> Result<String> {
     let voucher_no = insert_voucher(
         tx,
@@ -6794,23 +7255,34 @@ async fn bank_gl_code(tx: &mut Tx<'_>, bank_account_id: i32) -> Result<String> {
         .ok_or(StoreError::BankAccountNotFound { id: bank_account_id })
 }
 
-/// ROC year and month for leave request numbers. Calendar conversion, not a
-/// regulation value.
-fn roc_month(date: NaiveDate) -> String {
-    let roc_year = date.year() - 1911;
-    format!("{roc_year:03}{:02}", date.month())
+/// Next free asset code in the `FA###` series.
+///
+/// Not a `doc_sequence` prefix: those restart every period, and an asset code
+/// identifies one machine for its whole life rather than one document in one
+/// month.
+async fn next_asset_code(tx: &mut Tx<'_>) -> Result<String> {
+    let highest: Option<i32> = sqlx::query(
+        "SELECT MAX((NULLIF(regexp_replace(code, '^FA0*', ''), ''))::int) AS highest
+           FROM fixed_asset WHERE code ~ '^FA[0-9]+$'",
+    )
+    .fetch_one(&mut **tx)
+    .await?
+    .get("highest");
+    Ok(format!("FA{:03}", highest.unwrap_or(0) + 1))
 }
 
-/// Take the next number from `doc_sequence`, restarting at 1 in a new
-/// period.
+/// Take the next number from `doc_sequence`, restarting at 1 in a new period.
+///
+/// The counter is per (prefix, period). Keying it on the prefix alone made
+/// every period change reset it, which is right going forward and wrong going
+/// back: a voucher dated in a month already left behind would be handed a
+/// number that month has issued before (0041).
 async fn next_doc_no(tx: &mut Tx<'_>, prefix: &str, period: &str) -> Result<i32> {
     Ok(sqlx::query(
         "INSERT INTO doc_sequence (prefix, period, next_no) VALUES ($1, $2, 2)
-         ON CONFLICT (prefix) DO UPDATE
-           SET next_no = CASE WHEN doc_sequence.period = EXCLUDED.period
-                              THEN doc_sequence.next_no + 1 ELSE 2 END,
-               period  = EXCLUDED.period
-         RETURNING CASE WHEN next_no = 2 THEN 1 ELSE next_no - 1 END",
+         ON CONFLICT (prefix, period) DO UPDATE
+           SET next_no = doc_sequence.next_no + 1
+         RETURNING next_no - 1",
     )
     .bind(prefix)
     .bind(period)
@@ -6878,10 +7350,16 @@ async fn insert_voucher(
     .await?;
 
     for (i, l) in lines.iter().enumerate() {
+        let bank_account_id = match l.bank_account_id {
+            Some(id) => Some(id),
+            None => sole_bank_account(tx, &l.account_code).await?,
+        };
+        let dept_id = resolve_department_id(tx, l.dept_code.as_deref()).await?;
         sqlx::query(
             "INSERT INTO voucher_line
-               (voucher_id, line_no, account_code, debit, credit, memo, bank_account_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)",
+               (voucher_id, line_no, account_code, debit, credit, memo,
+                bank_account_id, dept_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(id)
         .bind(i as i32 + 1)
@@ -6889,12 +7367,33 @@ async fn insert_voucher(
         .bind(l.debit)
         .bind(l.credit)
         .bind(&l.memo)
-        .bind(l.bank_account_id)
+        .bind(bank_account_id)
+        .bind(dept_id)
         .execute(&mut **tx)
         .await?;
     }
 
     Ok(no)
+}
+
+/// The one funding account this GL code stands for, if there is exactly one.
+///
+/// `cash_position` groups posted lines by `bank_account_id`, and only the
+/// operations that move money through a named account set it. A voucher
+/// typed by hand against 1102 therefore left the bank card reading zero while
+/// the balance sheet read the real figure. When a single `bank_account` row
+/// carries that GL code the attribution is the only one available, so it is
+/// read off rather than asked for; with several accounts on one code the
+/// question is real and the line stays unattributed.
+async fn sole_bank_account(tx: &mut Tx<'_>, account_code: &str) -> Result<Option<i32>> {
+    let rows = sqlx::query("SELECT id FROM bank_account WHERE gl_code = $1 LIMIT 2")
+        .bind(account_code)
+        .fetch_all(&mut **tx)
+        .await?;
+    Ok(match rows.len() {
+        1 => Some(rows[0].get("id")),
+        _ => None,
+    })
 }
 
 /// Attach a department to one journal line.
@@ -6921,6 +7420,74 @@ async fn set_line_dept(
     Ok(())
 }
 
+/// Close every way the person still had in, in the transaction that records
+/// them as having left. `user_account.status` alone stops a session on its
+/// next request, but an MCP token never reads it, and a live session that is
+/// merely ignored leaves no record of when access ended.
+async fn close_access(
+    tx: &mut Tx<'_>,
+    employee_id: i32,
+    name: &str,
+    req: CompleteMovementStep<'_>,
+) -> Result<ClosedAccess> {
+    let last_of_role: Option<String> = sqlx::query(
+        "SELECT u.username FROM user_account u
+          WHERE u.employee_id = $1 AND u.status = 'active' AND u.role_code = $2
+            AND NOT EXISTS (
+                SELECT 1 FROM user_account other
+                 WHERE other.role_code = $2 AND other.status = 'active'
+                   AND other.employee_id IS DISTINCT FROM $1)
+          ORDER BY u.username LIMIT 1",
+    )
+    .bind(employee_id)
+    .bind(req.keep_active_role)
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(|r| r.get("username"));
+    if let Some(username) = last_of_role {
+        return Err(StoreError::LastAdministratorLeaving { name: name.to_string(), username });
+    }
+
+    let suspended = sqlx::query(
+        "UPDATE user_account SET status = 'suspended'
+          WHERE employee_id = $1 AND status = 'active'
+      RETURNING id, username",
+    )
+    .bind(employee_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let ids: Vec<i32> = suspended.iter().map(|r| r.get("id")).collect();
+    let mut closed = ClosedAccess {
+        logins: suspended.iter().map(|r| r.get("username")).collect(),
+        ..ClosedAccess::default()
+    };
+
+    if !ids.is_empty() {
+        closed.sessions = sqlx::query(
+            "UPDATE user_session SET revoked_at = now(), revoked_by = $2
+              WHERE user_id = ANY($1) AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(&ids)
+        .bind(req.actor)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    }
+
+    closed.tokens = sqlx::query(
+        "UPDATE api_token SET revoked_at = now(), revoked_by = $2
+          WHERE owner_employee_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(employee_id)
+    .bind(req.actor)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    Ok(closed)
+}
+
 fn row_to_employee(r: &PgRow) -> Employee {
     Employee {
         id: r.get("id"),
@@ -6930,8 +7497,6 @@ fn row_to_employee(r: &PgRow) -> Employee {
         dept_code: r.get("dept_code"),
         dept_label: r.get("dept_label"),
         title: r.get("title"),
-        role_code: r.get("role_code"),
-        role_name: r.get("role_name"),
         employment_type: r.get("employment_type"),
         hired_on: r.get("hired_on"),
         left_on: r.get("left_on"),
@@ -6972,6 +7537,118 @@ fn row_to_leave(r: &PgRow) -> LeaveRequest {
         from_on: r.get("from_on"),
         to_on: r.get("to_on"),
         days: r.get("days"),
+        reason: r.get("reason"),
+        status: r.get("status"),
+        decided_by: r.get("decided_by"),
+        decided_role: r.get("decided_role"),
+        decided_at: r.get("decided_at"),
+        decision_note: r.get("decision_note"),
+        created_at: r.get("created_at"),
+        created_by: r.get("created_by"),
+    }
+}
+
+/// The write half of [`Store::record_punch`], so that approving a
+/// correction can put the punch and the decision in one transaction.
+///
+/// The two orderings a UNIQUE constraint cannot express are checked here: a
+/// day may not have two arrivals, and a departure may not precede the arrival
+/// it belongs to. `replace` is what separates an employee pressing the
+/// button, which must refuse to overwrite, from a correction, which exists to.
+async fn punch_in_tx(
+tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+p: &NewPunch<'_>,
+replace: bool,
+) -> Result<()> {
+    let existing = sqlx::query(
+        "SELECT kind, punched_at FROM attendance_punch
+          WHERE employee_id = $1 AND punched_on = $2
+          FOR UPDATE",
+    )
+    .bind(p.employee_id)
+    .bind(p.punched_on)
+    .fetch_all(&mut **tx)
+    .await?;
+    let at_of = |kind: &str| -> Option<DateTime<Utc>> {
+        existing
+            .iter()
+            .find(|row| row.get::<String, _>("kind") == kind)
+            .map(|row| row.get("punched_at"))
+    };
+    let local = |at: DateTime<Utc>| laysi_domain::business_time(at).format("%H:%M:%S").to_string();
+
+    if !replace {
+        if let Some(at) = at_of(p.kind) {
+            return Err(StoreError::PunchAlreadyRecorded {
+                date: p.punched_on.to_string(),
+                kind: if p.kind == "in" { "上班".into() } else { "下班".into() },
+                at: local(at),
+            });
+        }
+    }
+
+    match p.kind {
+        "out" => {
+            let Some(in_at) = at_of("in") else {
+                return Err(StoreError::PunchOutWithoutIn {
+                    date: p.punched_on.to_string(),
+                });
+            };
+            if p.punched_at < in_at {
+                return Err(StoreError::PunchOutBeforeIn {
+                    out: local(p.punched_at),
+                    in_at: local(in_at),
+                });
+            }
+        }
+        // Correcting an arrival to after the departure already recorded
+        // would leave the day with negative hours.
+        _ => {
+            if let Some(out_at) = at_of("out") {
+                if p.punched_at > out_at {
+                    return Err(StoreError::PunchOutBeforeIn {
+                        out: local(out_at),
+                        in_at: local(p.punched_at),
+                    });
+                }
+            }
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO attendance_punch
+           (employee_id, punched_on, punched_at, kind, source, note, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (employee_id, punched_on, kind) DO UPDATE
+            SET punched_at = EXCLUDED.punched_at,
+                source     = EXCLUDED.source,
+                note       = EXCLUDED.note,
+                created_by = EXCLUDED.created_by,
+                created_at = now()",
+    )
+    .bind(p.employee_id)
+    .bind(p.punched_on)
+    .bind(p.punched_at)
+    .bind(p.kind)
+    .bind(p.source)
+    .bind(p.note)
+    .bind(p.actor)
+    .execute(&mut **tx)
+    .await?;
+
+Ok(())
+}
+
+fn row_to_punch_correction(r: &PgRow) -> PunchCorrection {
+    PunchCorrection {
+        id: r.get("id"),
+        employee_id: r.get("employee_id"),
+        emp_no: r.get("emp_no"),
+        name: r.get("name"),
+        dept_label: r.get("dept_label"),
+        punched_on: r.get("punched_on"),
+        kind: r.get("kind"),
+        punched_at: r.get("punched_at"),
         reason: r.get("reason"),
         status: r.get("status"),
         decided_by: r.get("decided_by"),
@@ -7266,10 +7943,14 @@ fn fnv1a(s: &str) -> u64 {
 mod tests {
     use super::*;
 
+    /// Every document number in the system carries the same two-digit
+    /// Western year: V2608-001, AR-2608-001, EX2608-001. Leave requests used
+    /// the Republic era, so the same day produced LV11508-001 and two
+    /// calendars sat side by side on one screen.
     #[test]
-    fn leave_number_period_uses_republic_era_year_and_month() {
+    fn leave_number_period_matches_every_other_document_number() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 26).unwrap();
-        assert_eq!(roc_month(date), "11507");
+        assert_eq!(date.format("%y%m").to_string(), "2607");
     }
 
     #[test]
@@ -7387,6 +8068,7 @@ mod tests {
                 credit: Money::ZERO,
                 memo: Some("原始借方".into()),
                 bank_account_id: None,
+                dept_code: None,
             },
             LineInput {
                 account_code: credit_code.clone(),
@@ -7394,6 +8076,7 @@ mod tests {
                 credit: amount,
                 memo: Some("原始貸方".into()),
                 bank_account_id: None,
+                dept_code: None,
             },
         ];
 
@@ -7483,6 +8166,7 @@ mod tests {
                 credit: Money::ZERO,
                 memo: None,
                 bank_account_id: None,
+                dept_code: None,
             },
             LineInput {
                 account_code: credit_code.clone(),
@@ -7490,6 +8174,7 @@ mod tests {
                 credit: void_amount,
                 memo: None,
                 bank_account_id: None,
+                dept_code: None,
             },
         ];
         let void_no = store

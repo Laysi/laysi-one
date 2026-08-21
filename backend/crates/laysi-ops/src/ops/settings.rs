@@ -45,6 +45,11 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListRoles),
         Box::new(SetRolePermission),
         Box::new(CreateUserAccount),
+        Box::new(UpdateUserAccount),
+        Box::new(ChangeUserRole),
+        Box::new(ResetUserPassword),
+        Box::new(DeleteUserAccount),
+        Box::new(ListUserAccounts),
         Box::new(ListApprovalRules),
     ]
 }
@@ -104,7 +109,7 @@ impl Operation for GetCompanySettings {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀公司與帳務設定：公司名稱、統編、會計年度、本位幣、單據編號規則。營業稅那一列不是設定值，是從法規規則庫依生效日算出來的。"
+        "讀公司與帳務設定：公司名稱、統編、會計年度、本位幣。本期會計期間與單據編號規則是現算的，營業稅那一列則是從法規規則庫依生效日算出來的。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -127,6 +132,28 @@ impl Operation for GetCompanySettings {
                 })
             })
             .collect();
+
+        // Derived rows. The current period follows the calendar and the
+        // numbering rule follows the document numberer, so neither can be
+        // stored without becoming a second copy that drifts. 0033 removed
+        // their `company_setting` rows for that reason.
+        let start_month = ctx.store.fiscal_year_start_month().await?;
+        rows.push(json!({
+            "code": "period",
+            "label": "本期會計期間",
+            "value": ctx.today.format("%Y / %m").to_string(),
+            "note": format!("會計年度自 {start_month} 月起。"),
+            "editable": false,
+            "source": "derived",
+        }));
+        rows.push(json!({
+            "code": "doc_number",
+            "label": "單據編號規則",
+            "value": format!("V{}-001 起，每月從 001 重新編號", ctx.today.format("%y%m")),
+            "note": "傳票以 V、付款批次以 P、費用報支以 EX、文件以 D 為前綴。",
+            "editable": false,
+            "source": "derived",
+        }));
 
         // VAT is not a setting. It has an effective date and settings do not;
         // the difference only appears the day the law changes, by which time
@@ -153,7 +180,10 @@ impl Operation for GetCompanySettings {
             },
         }));
 
-        let summary = format!("讀取公司設定 · {} 項（含 1 項來自法規規則庫）", rows.len());
+        let summary = format!(
+            "讀取公司設定 · {} 項（含 2 項現算、1 項來自法規規則庫）",
+            rows.len()
+        );
         Ok(OpOutcome::new(
             json!({
                 "settings": rows,
@@ -172,6 +202,69 @@ pub struct UpdateCompanySettingInput {
     pub value: String,
 }
 
+/// Check digit of a business administration number (統一編號).
+///
+/// Eight digits weighted 1,2,1,2,1,2,4,1; each product is reduced to its digit
+/// sum and the total must be divisible by five. A seventh digit of 7 has
+/// historically been allowed to satisfy the test either way, and numbers
+/// issued under that rule are still in use, so both are accepted.
+fn is_valid_tax_id(value: &str) -> bool {
+    const WEIGHTS: [u32; 8] = [1, 2, 1, 2, 1, 2, 4, 1];
+    let digits: Vec<u32> = value.chars().filter_map(|c| c.to_digit(10)).collect();
+    if value.chars().count() != 8 || digits.len() != 8 {
+        return false;
+    }
+    let sum: u32 = digits
+        .iter()
+        .zip(WEIGHTS)
+        .map(|(d, w)| {
+            let p = d * w;
+            p / 10 + p % 10
+        })
+        .sum();
+    sum % 5 == 0 || (digits[6] == 7 && (sum + 1) % 5 == 0)
+}
+
+/// Settings for which no value is itself an answer.
+///
+/// The working day is the case: `attendance::late()` returns `Option<bool>`,
+/// where `None` means nobody has said when work starts, which is different
+/// from nobody being late. A company that has not decided has to be able to
+/// say so, and to take it back after having set one.
+const CLEARABLE_SETTINGS: [&str; 4] =
+    ["work_start", "work_end", "late_grace_minutes", "flex_window_minutes"];
+
+/// Settings whose shape is a fact about the outside world rather than a
+/// preference. Anything not listed here is stored as typed.
+fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
+    match code {
+        "tax_id" if !is_valid_tax_id(value) => {
+            Err(OpError::BadInput("統一編號是 8 位數字，且檢查碼要相符".into()))
+        }
+        "fiscal_year" if !matches!(value.parse::<u32>(), Ok(1..=12)) => {
+            Err(OpError::BadInput("會計年度起始月份要填 1 到 12".into()))
+        }
+        "work_start" | "work_end" if !is_clock_time(value) => {
+            Err(OpError::BadInput(format!("「{value}」不是時刻，格式是 HH:MM，例如 09:00")))
+        }
+        "late_grace_minutes" | "flex_window_minutes" if value.parse::<u32>().is_err() => {
+            Err(OpError::BadInput(format!("「{value}」不是分鐘數")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `HH:MM` on a 24-hour clock.
+fn is_clock_time(value: &str) -> bool {
+    let Some((h, m)) = value.split_once(':') else {
+        return false;
+    };
+    if h.len() != 2 || m.len() != 2 || !h.chars().chain(m.chars()).all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    matches!((h.parse::<u32>(), m.parse::<u32>()), (Ok(h), Ok(m)) if h < 24 && m < 60)
+}
+
 struct UpdateCompanySetting;
 
 #[async_trait]
@@ -184,7 +277,7 @@ impl Operation for UpdateCompanySetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "變更一項公司設定。僅標示為可編輯的項目可以修改；會計年度與期初餘額要重跑期初，法規決定的值由規則檔決定。"
+        "變更一項公司設定。僅標示為可編輯的項目可以修改；統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班時間收 HH:MM 且可以留空表示不判定遲到；法規決定的值由規則檔決定，不在這裡。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateCompanySettingInput>()
@@ -193,11 +286,17 @@ impl Operation for UpdateCompanySetting {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: UpdateCompanySettingInput = parse(input)?;
         let value = i.value.trim();
-        if value.is_empty() {
+        if value.is_empty() && !CLEARABLE_SETTINGS.contains(&i.code.as_str()) {
             return Err(OpError::BadInput("設定值為必填".into()));
         }
+        if !value.is_empty() {
+            validate_setting(&i.code, value)?;
+        }
         let s = ctx.store.update_company_setting(&i.code, value, &ctx.actor).await?;
-        let summary = format!("改設定 · {} 改成「{}」", s.label, s.value);
+        let summary = match s.value.is_empty() {
+            true => format!("改設定 · {} 清為尚未設定", s.label),
+            false => format!("改設定 · {} 改成「{}」", s.label, s.value),
+        };
         Ok(OpOutcome::new(json!({ "setting": s }), summary))
     }
 }
@@ -244,7 +343,7 @@ impl Operation for ListChartOfAccounts {
                     "kind": m.kind,
                     "kind_label": kind_label(&m.kind),
                     "normal_side": m.normal_side,
-                    "normal_side_label": if m.normal_side == "debit" { "借" } else { "貸" },
+                    "normal_side_label": if m.normal_side == "debit" { "借方" } else { "貸方" },
                     "is_postable": m.is_postable,
                     "is_active": m.is_active,
                     "report_group": m.report_group,
@@ -277,7 +376,7 @@ impl Operation for ListDimensions {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀既有維度與其值：部門、專案、成本中心、付款條件。這個操作只讀設定；department 維度已掛到分錄與員工的部門欄位。"
+        "讀部門、專案、成本中心與付款條件的分類項目。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -286,7 +385,7 @@ impl Operation for ListDimensions {
     async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
         let dims = ctx.store.dimensions().await?;
         let values: usize = dims.iter().map(|d| d.values.len()).sum();
-        let summary = format!("讀取維度 · {} 種、共 {values} 個值", dims.len());
+        let summary = format!("讀取分類 · {} 類、共 {values} 個項目", dims.len());
         Ok(OpOutcome::new(
             json!({
                 "dimensions": dims,
@@ -294,8 +393,7 @@ impl Operation for ListDimensions {
                 // guarantees dept_id cannot point at another dimension.
                 "applied_to_entries": true,
                 "entry_dimension": "department",
-                "application_note":
-                    "部門欄位只接受部門維度的值；專案、成本中心與付款條件尚未掛到分錄。",
+                "application_note": "部門欄位只接受部門分類的項目。",
             }),
             summary,
         ))
@@ -389,12 +487,8 @@ impl Operation for ListRoles {
                 "roles": roles,
                 "permissions": perms,
                 "grants": cells,
-                // These two fields are the most important output of this operation
-                // and must be shown on screen.
                 "enforced": true,
-                "enforcement_note":
-                    "每次呼叫都即時檢查該角色的權限，未獲授權即拒絕並留下紀錄。\
-                     「限負責人」為額外限制。",
+                "enforcement_note": "「限負責人」是矩陣之外的額外限制。",
                 "actor_role": ctx.actor_role,
             }),
             summary,
@@ -460,6 +554,56 @@ impl Operation for SetRolePermission {
     }
 }
 
+/// Resolve the employee an account points at, writing a roster entry when the
+/// number names nobody yet.
+///
+/// An existing number links; anything else creates a roster entry carrying a
+/// name and a hire date and nothing else. There is no flag to turn that off:
+/// an account without an employee cannot punch in, take leave or claim an
+/// expense, so the roster entry is part of what "create an account" means.
+/// Linking is by number, not by name, because names repeat. The amounts stay
+/// HR's to fill in, and payroll refuses an employee whose salary is still zero.
+async fn link_employee(
+    ctx: &OpCtx,
+    employee_no: &str,
+    name: &str,
+) -> Result<laysi_store::Employee, OpError> {
+    if !employee_no.is_empty() {
+        if let Ok(found) = ctx.store.employee(employee_no).await {
+            return Ok(found);
+        }
+    }
+
+    let emp_no = if employee_no.is_empty() {
+        ctx.store.next_employee_no().await?
+    } else {
+        employee_no.to_string()
+    };
+
+    let employee = ctx
+        .store
+        .create_employee(laysi_store::WriteEmployee {
+            emp_no: &emp_no,
+            name,
+            dept_code: None,
+            title: "",
+            employment_type: "full_time",
+            hired_on: ctx.today,
+            left_on: None,
+            status: "active",
+            base_salary: None,
+            labor_insured_salary: None,
+            health_insured_salary: None,
+            pension_wage: None,
+            id_no: "",
+            bank_account: "",
+            note: "",
+            actor: &ctx.actor,
+        })
+        .await?;
+    Ok(employee)
+}
+
 /// Login name rules, shared with the web bootstrap endpoint so the two
 /// entry points cannot drift.
 const USERNAME_MIN_CHARS: usize = 3;
@@ -469,7 +613,7 @@ const EMAIL_MAX_CHARS: usize = 254;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CreateUserAccountInput {
-    /// Login name: letters, digits and `.` `_` `-`, 3 to 64 characters.
+    /// Login name: any 3 to 64 printable characters, control characters aside.
     pub username: String,
     /// Name shown on screen and in the audit trail.
     pub display_name: String,
@@ -478,7 +622,8 @@ pub struct CreateUserAccountInput {
     pub email: String,
     /// Role code from the role table, e.g. `acct`.
     pub role_code: String,
-    /// Optional employee number to link, so the account can use self-service.
+    /// Employee number this login belongs to. An unknown number, or none at
+    /// all, writes a roster entry; the number is allocated when empty.
     #[serde(default)]
     pub employee_no: String,
 }
@@ -495,7 +640,7 @@ impl Operation for CreateUserAccount {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；角色建立後無法在系統內變更。"
+        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更。員工編號指不到既有的人時會一併建立員工主檔，留空則自動配號。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateUserAccountInput>()
@@ -509,10 +654,12 @@ impl Operation for CreateUserAccount {
         if !(USERNAME_MIN_CHARS..=USERNAME_MAX_CHARS).contains(&count) {
             return Err(OpError::BadInput("登入名稱需要 3 到 64 個字元".into()));
         }
-        if !username.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-            return Err(OpError::BadInput(
-                "登入名稱只能使用英文字母、數字與 . _ - 三種符號".into(),
-            ));
+        // Only control characters are refused. They cannot be typed at a login
+        // prompt and they would break the audit trail's alignment, while a
+        // symbol or a Chinese name is a login name the account's owner can read
+        // back. `username` has no CHECK in SQL, so this is the only filter.
+        if username.chars().any(char::is_control) {
+            return Err(OpError::BadInput("登入名稱不能包含控制字元".into()));
         }
 
         let display_name = i.display_name.trim();
@@ -546,15 +693,7 @@ impl Operation for CreateUserAccount {
             return Err(OpError::BadInput(format!("登入名稱「{username}」已被使用")));
         }
 
-        // Linking is by employee number, not by name: names repeat.
-        let employee_no = i.employee_no.trim();
-        let employee = if employee_no.is_empty() {
-            None
-        } else {
-            Some(ctx.store.employee(employee_no).await.map_err(|_| {
-                OpError::BadInput(format!("查無員工編號「{employee_no}」"))
-            })?)
-        };
+        let employee = link_employee(ctx, i.employee_no.trim(), display_name).await?;
 
         // The administrator never sets a lasting password. A generated one is
         // returned once and must be changed at first login, so the person who
@@ -571,7 +710,7 @@ impl Operation for CreateUserAccount {
                 email,
                 password_hash: Some(&password_hash),
                 role_code,
-                employee_id: employee.as_ref().map(|e| e.id),
+                employee_id: Some(employee.id),
                 status: "active",
                 must_change_password: true,
                 created_by: &ctx.actor,
@@ -579,14 +718,8 @@ impl Operation for CreateUserAccount {
             .await?;
 
         let summary = format!(
-            "建立帳號 · {}（{}）角色{}{}",
-            user.username,
-            user.display_name,
-            role.name,
-            match &employee {
-                Some(e) => format!("，連結員工 {}", e.emp_no),
-                None => String::new(),
-            }
+            "建立帳號 · {}（{}）角色{}，連結員工 {}",
+            user.username, user.display_name, role.name, employee.emp_no
         );
         Ok(OpOutcome::new(
             json!({
@@ -597,7 +730,8 @@ impl Operation for CreateUserAccount {
                     "email": user.email,
                     "role_code": user.role_code,
                     "role_name": role.name,
-                    "employee_no": employee.as_ref().map(|e| e.emp_no.clone()),
+                    "employee_no": employee.emp_no,
+                    "employee_name": employee.name,
                 },
                 // Shown once and never retrievable: only the hash is stored.
                 "temporary_password": temporary,
@@ -605,6 +739,518 @@ impl Operation for CreateUserAccount {
             }),
             summary,
         ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateUserAccountInput {
+    /// Which account to edit. Login names are unique and never change.
+    pub username: String,
+    /// Leave the field out to keep the current value.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// An empty string clears the address.
+    #[serde(default)]
+    pub email: Option<String>,
+    /// `active` or `suspended`. A suspended account cannot sign in.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Employee number this login belongs to. An unknown number writes a
+    /// roster entry; an empty string removes the link; leaving the field out
+    /// keeps the current one.
+    #[serde(default)]
+    pub employee_no: Option<String>,
+}
+
+struct UpdateUserAccount;
+
+#[async_trait]
+impl Operation for UpdateUserAccount {
+    fn name(&self) -> &'static str {
+        "update_user_account"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "改一個登入帳號的顯示名稱、電子郵件、啟用狀態與連結的員工。員工編號指不到既有的人時會一併建立員工主檔。角色請用變更角色的操作，密碼只能由本人變更。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<UpdateUserAccountInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: UpdateUserAccountInput = parse(input)?;
+
+        let username = i.username.trim();
+        let Some(current) = ctx.store.user_by_username(username).await? else {
+            return Err(OpError::BadInput(format!("查無登入名稱「{username}」")));
+        };
+
+        let display_name = match &i.display_name {
+            Some(name) => {
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(OpError::BadInput("顯示名稱為必填".into()));
+                }
+                if name.chars().count() > DISPLAY_NAME_MAX_CHARS {
+                    return Err(OpError::BadInput("顯示名稱不可超過 64 個字元".into()));
+                }
+                Some(name)
+            }
+            None => None,
+        };
+
+        let email = match &i.email {
+            Some(email) => {
+                let email = email.trim();
+                if !email.is_empty()
+                    && (email.chars().count() > EMAIL_MAX_CHARS
+                        || !email.contains('@')
+                        || email.chars().any(char::is_whitespace))
+                {
+                    return Err(OpError::BadInput("電子郵件格式不正確；此欄可以留空".into()));
+                }
+                Some(email)
+            }
+            None => None,
+        };
+
+        let status = match &i.status {
+            Some(status) => match status.trim() {
+                s @ ("active" | "suspended") => Some(s),
+                other => {
+                    return Err(OpError::BadInput(format!(
+                        "狀態只能是 active 或 suspended，收到的是「{other}」"
+                    )))
+                }
+            },
+            None => None,
+        };
+
+        // Locking out the last administrator would leave nobody able to open
+        // the accounts screen, and no operation restores a role. Refusing here
+        // is the only guard, since dispatch checks the caller and not the
+        // target.
+        if status == Some("suspended") && current.role_code == crate::ROLE_ADMIN {
+            let others = ctx
+                .store
+                .users()
+                .await?
+                .into_iter()
+                .filter(|u| {
+                    u.role_code == crate::ROLE_ADMIN
+                        && u.status == "active"
+                        && u.username != current.username
+                })
+                .count();
+            if others == 0 {
+                return Err(OpError::BadInput(
+                    "至少要保留一個啟用中的系統管理員帳號，無法停用最後一個".into(),
+                ));
+            }
+        }
+
+        // `Some(None)` clears the link, `None` leaves it as it is.
+        let employee = match i.employee_no.as_deref().map(str::trim) {
+            None => None,
+            Some("") => Some(None),
+            Some(no) => Some(Some(
+                link_employee(ctx, no, display_name.unwrap_or(&current.display_name)).await?,
+            )),
+        };
+
+        let updated = ctx
+            .store
+            .update_user(laysi_store::UpdateUser {
+                username: &current.username,
+                display_name,
+                email,
+                status,
+                employee_id: employee.as_ref().map(|e| e.as_ref().map(|e| e.id)),
+            })
+            .await?
+            .ok_or_else(|| OpError::BadInput(format!("查無登入名稱「{username}」")))?;
+
+        let roles = ctx.store.roles().await?;
+        let role_name = roles
+            .iter()
+            .find(|r| r.code == updated.role_code)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| updated.role_code.clone());
+
+        let mut changed: Vec<String> = Vec::new();
+        if display_name.is_some() {
+            changed.push(format!("顯示名稱改為 {}", updated.display_name));
+        }
+        if email.is_some() {
+            changed.push(match updated.email.as_str() {
+                "" => "清除電子郵件".to_string(),
+                set => format!("電子郵件改為 {set}"),
+            });
+        }
+        if let Some(status) = status {
+            changed.push(if status == "active" { "啟用".into() } else { "停用".to_string() });
+        }
+        if let Some(employee) = &employee {
+            changed.push(match employee {
+                Some(e) => format!("連結員工 {}", e.emp_no),
+                None => "解除員工連結".to_string(),
+            });
+        }
+        if changed.is_empty() {
+            changed.push("沒有欄位變更".to_string());
+        }
+
+        let summary = format!("改帳號 · {}（{}）{}", updated.username, role_name, changed.join("、"));
+        Ok(OpOutcome::new(
+            json!({
+                "user": {
+                    "id": updated.id,
+                    "username": updated.username,
+                    "display_name": updated.display_name,
+                    "email": updated.email,
+                    "role_code": updated.role_code,
+                    "role_name": role_name,
+                    "status": updated.status,
+                },
+                "changed": changed,
+            }),
+            summary,
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ChangeUserRoleInput {
+    /// Login name of the account to move.
+    pub username: String,
+    /// Role code from the role table, e.g. `acct`.
+    pub role_code: String,
+    /// Must be `true`. The account's sessions and MCP tokens end at once.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+struct ChangeUserRole;
+
+#[async_trait]
+impl Operation for ChangeUserRole {
+    fn name(&self) -> &'static str {
+        "change_user_role"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "變更一個登入帳號的角色。該帳號目前的登入工作階段與本人核發的 MCP Token 立刻失效，本人重新登入後才會拿到新的權限。不能變更自己的角色。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<ChangeUserRoleInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: ChangeUserRoleInput = parse(input)?;
+        if !i.confirm {
+            return Err(OpError::BadInput(
+                "變更角色會讓該帳號登出並失去現有 Token，請帶入 confirm".into(),
+            ));
+        }
+
+        let username = i.username.trim();
+        let Some(current) = ctx.store.user_by_username(username).await? else {
+            return Err(OpError::BadInput(format!("查無登入名稱「{username}」")));
+        };
+
+        // The only escalation this operation could add is upward on the
+        // caller's own account: everything else an administrator can already
+        // do by creating an account with that role. `actor` is a display name
+        // and collides, so the login name is the key; an MCP token has none
+        // and therefore cannot be told apart from the account it is editing.
+        let Some(caller) = ctx.username.as_deref() else {
+            return Err(OpError::BadInput("請以本人的登入帳號進行角色變更".into()));
+        };
+        if caller == current.username {
+            return Err(OpError::BadInput(
+                "不能變更自己的角色，請由另一個系統管理員帳號變更".into(),
+            ));
+        }
+
+        let role_code = i.role_code.trim();
+        let roles = ctx.store.roles().await?;
+        let Some(role) = roles.iter().find(|r| r.code == role_code) else {
+            let known: Vec<&str> = roles.iter().map(|r| r.code.as_str()).collect();
+            return Err(OpError::BadInput(format!(
+                "查無角色「{role_code}」；可用的角色是 {}",
+                known.join("、")
+            )));
+        };
+        if current.role_code == role.code {
+            return Err(OpError::BadInput(format!(
+                "「{}」已經是{}",
+                current.username, role.name
+            )));
+        }
+
+        // Same guard as suspending the last administrator: nobody left who can
+        // open the accounts screen means nobody left who can undo it.
+        if current.role_code == crate::ROLE_ADMIN {
+            let others = ctx
+                .store
+                .users()
+                .await?
+                .into_iter()
+                .filter(|u| {
+                    u.role_code == crate::ROLE_ADMIN
+                        && u.status == "active"
+                        && u.username != current.username
+                })
+                .count();
+            if others == 0 {
+                return Err(OpError::BadInput(
+                    "至少要保留一個啟用中的系統管理員帳號，請先建立另一個管理員帳號".into(),
+                ));
+            }
+        }
+
+        let was = roles
+            .iter()
+            .find(|r| r.code == current.role_code)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| current.role_code.clone());
+
+        let changed = ctx
+            .store
+            .change_user_role(laysi_store::ChangeUserRole {
+                username: &current.username,
+                role_code: &role.code,
+                actor: &ctx.actor,
+            })
+            .await?
+            .ok_or_else(|| OpError::BadInput(format!("查無登入名稱「{username}」")))?;
+
+        let summary = format!(
+            "變更角色 · {}（{}）由{}改為{}，登出 {} 個工作階段，撤銷 {} 把 Token",
+            changed.user.username,
+            changed.user.display_name,
+            was,
+            role.name,
+            changed.sessions,
+            changed.tokens
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "user": {
+                    "id": changed.user.id,
+                    "username": changed.user.username,
+                    "display_name": changed.user.display_name,
+                    "role_code": changed.user.role_code,
+                    "role_name": role.name,
+                    "previous_role_name": was,
+                    "status": changed.user.status,
+                },
+                "revoked_sessions": changed.sessions,
+                "revoked_tokens": changed.tokens,
+            }),
+            summary,
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ResetUserPasswordInput {
+    /// Login name of the account that needs a new password.
+    pub username: String,
+    /// Must be `true`. The current password stops working at once.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+struct ResetUserPassword;
+
+#[async_trait]
+impl Operation for ResetUserPassword {
+    fn name(&self) -> &'static str {
+        "reset_user_password"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "為忘記密碼的人重新產生一組臨時密碼。舊密碼與該帳號目前的登入工作階段立刻失效，新密碼僅在本次回應出現一次，本人首次登入必須變更。只用外部帳號登入的帳號不適用。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<ResetUserPasswordInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: ResetUserPasswordInput = parse(input)?;
+        if !i.confirm {
+            return Err(OpError::BadInput("重設密碼會讓舊密碼立刻失效，請帶入 confirm".into()));
+        }
+
+        let username = i.username.trim();
+        let Some(user) = ctx.store.user_by_username(username).await? else {
+            return Err(OpError::BadInput(format!("查無登入名稱「{username}」")));
+        };
+        // Giving a password to an account that has none would turn an
+        // identity-provider login into a password login, which is the one
+        // thing clearing the hash was for.
+        if user.password_hash.is_none() {
+            return Err(OpError::BadInput(format!(
+                "「{username}」只用外部帳號登入，密碼請在身分提供者重設"
+            )));
+        }
+
+        let temporary = laysi_store::password::temporary_password();
+        let password_hash = laysi_store::password::hash_password(&temporary)
+            .map_err(|e| OpError::BadInput(format!("無法建立密碼雜湊：{e}")))?;
+        let updated = ctx.store.set_password_hash(user.id, Some(&password_hash), true).await?;
+        let revoked = ctx.store.revoke_user_sessions(user.id, &ctx.actor).await?;
+
+        let roles = ctx.store.roles().await?;
+        let role_name = roles
+            .iter()
+            .find(|r| r.code == updated.role_code)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| updated.role_code.clone());
+
+        let summary =
+            format!("重設密碼 · {}（{}）舊密碼失效，登出 {revoked} 個工作階段", updated.username, role_name);
+        Ok(OpOutcome::new(
+            json!({
+                "user": {
+                    "id": updated.id,
+                    "username": updated.username,
+                    "display_name": updated.display_name,
+                    "role_code": updated.role_code,
+                    "role_name": role_name,
+                },
+                // Shown once and never retrievable: only the hash is stored.
+                "temporary_password": temporary,
+                "must_change_password": true,
+                "revoked_sessions": revoked,
+            }),
+            summary,
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DeleteUserAccountInput {
+    /// Login name of the account to remove.
+    pub username: String,
+    /// Must be `true`. Removing an account cannot be undone.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+struct DeleteUserAccount;
+
+#[async_trait]
+impl Operation for DeleteUserAccount {
+    fn name(&self) -> &'static str {
+        "delete_user_account"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "刪除一個登入帳號，連同它的登入工作階段與外部帳號連結。無法復原，稽核紀錄上的既有紀錄不受影響。最後一個帳號與最後一個啟用中的系統管理員刪不掉。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<DeleteUserAccountInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: DeleteUserAccountInput = parse(input)?;
+        if !i.confirm {
+            return Err(OpError::BadInput("刪除帳號無法復原，請帶入 confirm".into()));
+        }
+
+        let username = i.username.trim();
+        let accounts = ctx.store.users().await?;
+        let Some(target) = accounts.iter().find(|u| u.username == username) else {
+            return Err(OpError::BadInput(format!("查無登入名稱「{username}」")));
+        };
+
+        // The web bootstrap endpoint does not reopen once an installation has
+        // been claimed, so an empty user_account table can only be repaired
+        // from a shell.
+        if accounts.len() == 1 {
+            return Err(OpError::BadInput(
+                "這是最後一個帳號，刪掉就沒有人能登入；請先建立另一個帳號".into(),
+            ));
+        }
+        if target.role_code == crate::ROLE_ADMIN {
+            let others = accounts
+                .iter()
+                .filter(|u| {
+                    u.role_code == crate::ROLE_ADMIN
+                        && u.status == "active"
+                        && u.username != target.username
+                })
+                .count();
+            if others == 0 {
+                return Err(OpError::BadInput(
+                    "至少要保留一個啟用中的系統管理員帳號；請先建立另一個管理員帳號".into(),
+                ));
+            }
+        }
+
+        let removed = ctx
+            .store
+            .delete_user(username)
+            .await?
+            .ok_or_else(|| OpError::BadInput(format!("查無登入名稱「{username}」")))?;
+
+        let roles = ctx.store.roles().await?;
+        let role_name = roles
+            .iter()
+            .find(|r| r.code == removed.role_code)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| removed.role_code.clone());
+
+        let summary = format!("刪帳號 · {}（{}）已移除", removed.username, role_name);
+        Ok(OpOutcome::new(
+            json!({
+                "user": {
+                    "username": removed.username,
+                    "display_name": removed.display_name,
+                    "role_code": removed.role_code,
+                    "role_name": role_name,
+                },
+                "remaining": accounts.len() - 1,
+            }),
+            summary,
+        ))
+    }
+}
+
+struct ListUserAccounts;
+
+#[async_trait]
+impl Operation for ListUserAccounts {
+    fn name(&self) -> &'static str {
+        "list_user_accounts"
+    }
+    fn risk(&self) -> Risk {
+        // Who can sign in is the same subject as creating a login, so it sits
+        // on the same floor. The roster carries no amount and no payslip.
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "讀登入帳號清單：登入名稱、角色、連結的員工、狀態與最後登入時間。密碼與密碼雜湊不在回應內，也無法從這裡取回。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<crate::Empty>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
+        let accounts = ctx.store.user_account_roster().await?;
+        let pending = accounts.iter().filter(|a| a.must_change_password).count();
+        let summary = format!("讀取登入帳號 · {} 個，其中 {pending} 個尚未變更初始密碼", accounts.len());
+        Ok(OpOutcome::new(json!({ "accounts": accounts }), summary))
     }
 }
 
@@ -619,7 +1265,7 @@ impl Operation for ListApprovalRules {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀費用報支的簽核流程：幾關、每一關是誰、超過多少錢才需要。金額門檻是公司政策，可隨時調整，不是寫死在程式碼中。"
+        "讀費用報支的簽核流程：幾關、每一關是誰、超過多少錢才需要。金額門檻可隨時調整。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -647,9 +1293,7 @@ impl Operation for ListApprovalRules {
             json!({
                 "steps": steps,
                 "enforced": true,
-                "enforcement_note":
-                    "費用報支會依各關的金額門檻現算所需關卡；同一個關卡編號可覆寫\
-                     或刪除，但流程至少保留一關。",
+                "enforcement_note": "同一個關卡編號可覆寫或刪除，流程至少保留一關。",
             }),
             summary,
         ))
@@ -689,6 +1333,33 @@ mod tests {
         }
         // P&L accounts have no activity; that is deliberate, not a gap.
         assert_eq!(section_label(None), "併入本期損益");
+    }
+
+    /// A blank working day is an answer, not a missing field: `late()` returns
+    /// `None` for "nobody said when work starts", which is not "nobody was
+    /// late". Every other setting still has to carry a value.
+    #[test]
+    fn the_working_day_can_be_cleared_but_the_company_name_cannot() {
+        assert_eq!(
+            CLEARABLE_SETTINGS,
+            ["work_start", "work_end", "late_grace_minutes", "flex_window_minutes"],
+            "可清空的設定變了：每一項的空值都要在畫面上有意義"
+        );
+        for code in ["company_name", "tax_id", "fiscal_year", "currency"] {
+            assert!(!CLEARABLE_SETTINGS.contains(&code), "{code} 不該可以清空");
+        }
+    }
+
+    #[test]
+    fn a_working_day_is_hh_mm_on_a_24_hour_clock() {
+        for good in ["00:00", "09:00", "18:30", "23:59"] {
+            assert!(is_clock_time(good), "{good} 應該通過");
+            assert!(validate_setting("work_start", good).is_ok());
+        }
+        for bad in ["9:00", "0900", "24:00", "18:60", "18:5", "上午九點", "09:00:00"] {
+            assert!(!is_clock_time(bad), "{bad} 不該通過");
+            assert!(validate_setting("work_end", bad).is_err());
+        }
     }
 
     #[test]

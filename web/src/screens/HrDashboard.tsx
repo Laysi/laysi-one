@@ -41,7 +41,9 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
   if (error) return <p className="state-note state-note--error">{error}</p>;
   if (!data) return <p className="state-note">讀取中…</p>;
 
-  const connected = data.links.filter((l) => l.implemented).length;
+  const connected = data.links.filter((l) => l.implemented && !l.partial).length;
+  const partial = data.links.filter((l) => l.implemented && l.partial).length;
+  const pending = data.links.filter((l) => !l.implemented).length;
 
   return (
     <div>
@@ -52,7 +54,7 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
           <div className="card stat-card" key={s.kicker}>
             <div className="stat-card__kicker">{s.kicker}</div>
             <div className="stat-card__value num">{s.value}</div>
-            <div className="stat-card__note">{s.note}</div>
+            <div className="stat-card__note num">{s.note}</div>
           </div>
         ))}
       </div>
@@ -98,7 +100,7 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
             {!isZero(data.payroll_not_yet_posted) && (
               <>
                 {' '}另有 <span className="num">{money(data.payroll_not_yet_posted)}</span>{' '}
-                的薪資傳票尚未過帳，薪資試算完成不代表已入總帳。
+                的薪資傳票尚未過帳。
               </>
             )}
           </p>
@@ -107,7 +109,8 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
         <section>
           <h2 className="section-title">人資與財務銜接狀態</h2>
           <p className="section-note">
-            {data.links.length} 條銜接中已接上 {connected} 條。
+            共 {data.links.length} 條：已接上 {connected} 條、部分接上 {partial} 條、尚未接上{' '}
+            {pending} 條。
           </p>
           <div className="card fact-card">
             {data.links.map((l) => (
@@ -148,8 +151,8 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
 
       <p className="hint">逐人薪資明細與年度扣繳憑單限負責人檢視。</p>
       <p className="hint">
-        到職、離職、調薪、調部門各走哪幾關可自行調整，目前收了{' '}
-        {new Set(data.flow_kinds).size} 種異動、共 {data.flow_kinds.length} 關。
+        目前收了 {new Set(data.flow_kinds).size} 種異動、共 {data.flow_kinds.length} 關，
+        逐關列在「到離職與異動」。
       </p>
     </div>
   );

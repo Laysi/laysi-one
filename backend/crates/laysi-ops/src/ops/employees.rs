@@ -14,6 +14,14 @@
 //! require lives in `hr_flow_step`. This module only compares completed steps
 //! against that table to determine where a movement is stuck.
 //!
+//! Completing a leaving flow marks the employee `left` and closes their
+//! access in the same transaction. The two are one event: the roster says the
+//! company has stopped employing this person, and nothing checks the
+//! effective date afterwards, so a login left open is open for good. The last
+//! remaining administrator is the exception, because no operation grants a
+//! role and the installation would have nobody able to open the accounts
+//! screen.
+//!
 //! Each of the four HR-to-finance links on the dashboard carries an
 //! `implemented` flag: the ones that are wired report their evidence (voucher
 //! number, reconciliation result), the ones that are not state what is
@@ -27,6 +35,18 @@ use laysi_store::{EmployeeMovement, HrFlowStep};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+/// Voucher status as the screens name it. The stored value is an internal
+/// code and must not reach a page.
+fn voucher_status_label(status: Option<&str>) -> &'static str {
+    match status {
+        Some("draft") => "待確認",
+        Some("pending") => "待過帳",
+        Some("posted") => "已過帳",
+        Some("void") => "已作廢",
+        _ => "—",
+    }
+}
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
@@ -61,7 +81,7 @@ pub(crate) fn service_label(months: u32) -> String {
     }
 }
 
-fn employment_label(kind: &str) -> &'static str {
+pub(crate) fn employment_label(kind: &str) -> &'static str {
     match kind {
         "part_time" => "兼職",
         "contract" => "約聘",
@@ -69,7 +89,7 @@ fn employment_label(kind: &str) -> &'static str {
     }
 }
 
-fn status_label(status: &str) -> &'static str {
+pub(crate) fn status_label(status: &str) -> &'static str {
     match status {
         "leaving" => "離職中",
         "left" => "已離職",
@@ -229,7 +249,7 @@ impl Operation for GetHrDashboard {
                         "{} 的薪資產生 {}（{}），應發 {} 計入 6111 薪資支出。人資已過帳合計 {}，總帳 6111 為 {}；兩條獨立計算路徑{}。",
                         r.period,
                         r.voucher_no.clone().unwrap_or_else(|| "—".into()),
-                        r.voucher_status.clone().unwrap_or_else(|| "—".into()),
+                        voucher_status_label(r.voucher_status.as_deref()),
                         money(r.gross_total),
                         money(posted),
                         money(gl),
@@ -249,7 +269,7 @@ impl Operation for GetHrDashboard {
                 "label": "代扣所得稅 → 2117 代扣款",
                 "implemented": true,
                 "partial": true,
-                "detail": "員工自付的勞保、健保與代扣所得稅合併為一行貸 2117 代扣款，故總帳可看到尚未繳納的代扣款。**繳款沖銷尚無對應操作**：繳給國稅局與勞保局的款項目前要手動開傳票。",
+                "detail": "員工自付的勞保、健保與代扣所得稅合併為一行貸 2117 代扣款。繳給國稅局與勞保局之後，到「傳票 · 總帳」開一張傳票沖銷這個科目。",
                 "screen": "gl",
             },
             {
@@ -257,7 +277,7 @@ impl Operation for GetHrDashboard {
                 "implemented": false,
                 "detail": match latest {
                     Some(r) => format!(
-                        "{} 公司負擔 {}，目前**尚未進入總帳**。入帳需另設保險費科目並開立新傳票（借保險費／貸應付費用）；此為四條銜接中唯一尚未接上者。",
+                        "{} 公司負擔 {}，總帳裡還沒有這筆金額。要入帳請先在「基礎設定」新增保險費科目，再開一張借保險費／貸應付費用的傳票。",
                         r.period,
                         money(r.employer_total)
                     ),
@@ -311,7 +331,7 @@ impl Operation for ListEmployees {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀員工名冊：部門、職稱、到職日、年資與特休額度（額度依年資由特休規則計算）。不含月薪與投保級距，薪資明細見 list_payslips，該操作限負責人。"
+        "讀員工名冊：部門、職稱、到職日、年資、特休額度（額度依年資由特休規則計算），以及約定的底薪與三個投保級距。逐月薪資單另有操作，且限負責人。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListEmployeesInput>()
@@ -353,8 +373,6 @@ impl Operation for ListEmployees {
                 "dept_code": e.dept_code,
                 "dept_label": e.dept_label,
                 "title": e.title,
-                "role_code": e.role_code,
-                "role_name": e.role_name,
                 "employment_type": e.employment_type,
                 "employment_label": employment_label(&e.employment_type),
                 "hired_on": e.hired_on,
@@ -367,8 +385,19 @@ impl Operation for ListEmployees {
                 "annual_leave_days": quota,
                 "annual_leave_taken": used.to_string(),
                 "annual_leave_left": (Money::from(quota) - used).to_string(),
-                // The full national ID does not exist in this system.
-                "id_no_masked": e.id_no,
+                // Masking is a display decision; the roster returns what is
+                // stored, and the screen decides whether to show it.
+                "id_no": e.id_no,
+                // Terms of employment, not a payslip. Without them no screen
+                // in the system says what someone is paid today, so a rise
+                // has to be typed from memory, and the edit drawer cannot show
+                // the value it is about to leave alone. `get_insurance_summary`
+                // already lists the three insured grades per person under this
+                // same permission.
+                "base_salary": e.base_salary.to_string(),
+                "labor_insured_salary": e.labor_insured_salary.to_string(),
+                "health_insured_salary": e.health_insured_salary.to_string(),
+                "pension_wage": e.pension_wage.to_string(),
                 "bank_account": e.bank_account,
                 "note": e.note,
             }));
@@ -398,7 +427,6 @@ impl Operation for ListEmployees {
                 // A blank column reads as "no data" more easily than a sentence
                 // explaining where the figure lives.
                 "salary_note": "個人薪資明細見「薪資作業」，限負責人檢視；投保級距見「勞健保與勞退」，該數字為向勞保局申報值，供會計核對繳款單。",
-                "id_note": "身分證字號只存遮罩後的形式。",
             }),
             summary,
         ))
@@ -418,7 +446,7 @@ impl Operation for ListEmployeeMovements {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀到離職與異動單：每一張走到哪一關、還差哪幾關。流程本身（到職四步、離職四步…）為公司設定，不寫死在程式裡。"
+        "讀到離職與異動單：每一張走到哪一關、還差哪幾關。流程本身（到職四步、離職四步…）為公司設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::LimitInput>()
@@ -455,7 +483,6 @@ impl Operation for ListEmployeeMovements {
                 "movements": movements.iter().map(|m| movement_json(m, &flow)).collect::<Vec<_>>(),
                 "flows": kinds,
                 "open_count": open,
-                "flow_source": "公司自訂設定，非法規要求",
             }),
             summary,
         ))
@@ -573,7 +600,7 @@ impl Operation for CompleteMovementStep {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "將異動單的某一關標記為完成。全部關卡完成時異動單自動結案；離職流程完成後，員工才會變成「已離職」。"
+        "將異動單的某一關標記為完成。全部關卡完成時異動單自動結案。離職流程走完最後一關，員工即變成「已離職」，他的登入帳號一併停用、登入工作階段結束、MCP Token 全數撤銷，不等生效日；帳號要再開，由系統管理員在「帳號管理」啟用。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CompleteMovementStepInput>()
@@ -596,15 +623,17 @@ impl Operation for CompleteMovementStep {
                 })?,
         };
 
-        let updated = ctx
+        let done = ctx
             .store
-            .complete_movement_step(
-                &i.movement_no,
+            .complete_movement_step(laysi_store::CompleteMovementStep {
+                movement_no: &i.movement_no,
                 step_no,
-                &ctx.actor,
-                i.note.as_deref().unwrap_or(""),
-            )
+                actor: &ctx.actor,
+                note: i.note.as_deref().unwrap_or(""),
+                keep_active_role: crate::ROLE_ADMIN,
+            })
             .await?;
+        let updated = done.movement;
 
         let label = flow
             .iter()
@@ -612,8 +641,15 @@ impl Operation for CompleteMovementStep {
             .map(|s| s.label.clone())
             .unwrap_or_default();
         let total = flow.iter().filter(|s| s.kind == updated.kind).count();
+        let mut closed_note = String::new();
+        if !done.closed.logins.is_empty() {
+            closed_note.push_str(&format!(" · 停用登入帳號 {}", done.closed.logins.join("、")));
+        }
+        if done.closed.tokens > 0 {
+            closed_note.push_str(&format!(" · 撤銷 {} 把 MCP Token", done.closed.tokens));
+        }
         let summary = format!(
-            "{} {} {} · 完成第 {step_no} 關「{label}」（{}/{total}）{}",
+            "{} {} {} · 完成第 {step_no} 關「{label}」（{}/{total}）{}{closed_note}",
             updated.movement_no,
             updated.emp_no,
             updated.name,
@@ -625,6 +661,7 @@ impl Operation for CompleteMovementStep {
                 "movement": movement_json(&updated, &flow),
                 "step_taken": step_no,
                 "finished": updated.status == "done",
+                "closed_access": done.closed,
             }),
             summary,
         ))

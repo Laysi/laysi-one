@@ -12,6 +12,7 @@ import {
   type MyExpenseClaimResult,
 } from '../api/client';
 import type { ScreenId } from '../nav';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -156,12 +157,12 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         <div className="card stat-card">
           <div className="stat-card__kicker">尚未撥付</div>
           <div className="stat-card__value num">{money(data.waiting_total)}</div>
-          <div className="stat-card__note">{data.waiting_count} 張進行中</div>
+          <div className="stat-card__note num">{data.waiting_count} 張進行中</div>
         </div>
         <div className="card stat-card">
           <div className="stat-card__kicker">累計送出</div>
           <div className="stat-card__value num">{data.claims.length}</div>
-          <div className="stat-card__note">張</div>
+          <div className="stat-card__note num">張</div>
         </div>
       </div>
 
@@ -192,11 +193,10 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
               </label>
               <label className="field field--date">
                 消費日期
-                <input
+                <DateField
                   className="input input--date"
-                  type="date"
                   value={spentOn}
-                  onChange={(e) => setSpentOn(e.target.value)}
+                  onChange={(v) => setSpentOn(v)}
                 />
               </label>
             </div>
@@ -257,8 +257,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
             {formError && <p className="state-note state-note--error">{formError}</p>}
 
             <p className="form-note">
-              申請人為 {data.employee.name}（{data.employee.emp_no}）；
-              費用科目由會計確認，不在此填寫。收據單檔上限{' '}
+              申請人為{data.employee.name}（{data.employee.emp_no}）。費用科目由會計確認，不在此填寫。收據單檔上限{' '}
               {fileSizeLabel(MAX_UPLOAD_BYTES)}，送出後仍可在「我的請款」補附。
             </p>
           </div>

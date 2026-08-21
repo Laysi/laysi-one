@@ -39,6 +39,21 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
 }
 
 /// Join a few names into one sentence, eliding the rest. Display only.
+/// What a tool is called on 「安全與營運」.
+///
+/// The reader of that page is deciding what AI may do, not wiring anything to
+/// it, so the switch's own note carries the name; the registry key belongs on
+/// 「MCP 與 AI」 where the switch is. A grant without a note falls back to the
+/// key rather than to nothing.
+fn grant_label(grant: &laysi_store::ToolGrant) -> String {
+    let note = grant.note.trim();
+    if note.is_empty() {
+        grant.tool_name.clone()
+    } else {
+        crate::op_label(note).to_string()
+    }
+}
+
 fn short_list(names: &[String]) -> String {
     match names.len() {
         0 => "（無）".into(),
@@ -60,7 +75,7 @@ impl Operation for GetSecurityPolicy {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀控制規則：職責分離、金額門檻、雙因素、AI 禁止事項、稽核保留。逐條標示是否實際執行；AI 禁止事項依目前的工具開關即時計算，非固定文字。"
+        "讀控制規則：職責分離、金額門檻、AI 禁止事項、稽核紀錄。逐條標示是否實際執行；AI 禁止事項依目前的工具開關即時計算，非固定文字。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -74,15 +89,14 @@ impl Operation for GetSecurityPolicy {
         // "What AI may not do" is the set of tools currently disabled. The
         // sentence changes with the switches because it is the switches, not
         // a description of them.
-        let blocked: Vec<String> =
-            grants.iter().filter(|g| !g.enabled).map(|g| g.tool_name.clone()).collect();
+        let blocked: Vec<String> = grants.iter().filter(|g| !g.enabled).map(grant_label).collect();
         // Tools still enabled that move money or change the books. This matters
         // more than the line above: what the user needs to know is not which
         // tools are off, but which are still on.
         let risky_on: Vec<String> = grants
             .iter()
             .filter(|g| g.enabled && matches!(g.risk.as_str(), "high_risk" | "boss_only"))
-            .map(|g| g.tool_name.clone())
+            .map(grant_label)
             .collect();
 
         let mut rows = vec![json!({
@@ -90,17 +104,17 @@ impl Operation for GetSecurityPolicy {
             "label": "AI 禁止事項",
             "value": format!("AI 目前不能呼叫：{}", short_list(&blocked)),
             "detail": if risky_on.is_empty() {
-                "會動到錢或帳的工具目前全部對 AI 關閉。".to_string()
+                "會動到錢或帳的工具都已對 AI 關閉。".to_string()
             } else {
                 format!(
-                    "注意：{} 仍然對 AI 開著，它會動到錢或帳。要關請到「MCP 與 AI」。",
+                    "{} 對 AI 開著，可在「MCP 與 AI」關閉。",
                     short_list(&risky_on)
                 )
             },
             // This one really does stop a call: the first step of dispatch is the
             // mcp_tool_grant lookup.
             "enforced": true,
-            "source": "mcp_tool_grant",
+            "source": "tool_grant",
             "sort_order": 10,
             "blocked_tools": blocked,
             "risky_enabled_tools": risky_on,
@@ -119,9 +133,9 @@ impl Operation for GetSecurityPolicy {
             "code": "amount_threshold",
             "label": "金額門檻",
             "value": if thresholds.is_empty() { "未設定門檻".into() } else { thresholds.join("　") },
-            "detail": "門檻是公司政策，在「角色與簽核」改動後立即生效。費用報支送出時即依金額決定要經過幾關，簽核時逐關檢查身分。",
+            "detail": "金額門檻在「角色與核准」調整。",
             "enforced": true,
-            "source": "approval_rule",
+            "source": "approval_flow",
             "sort_order": 30,
         }));
 
@@ -232,11 +246,8 @@ impl Operation for ListApiTokens {
             json!({
                 "tokens": rows,
                 "live_count": live,
-                "storage_note":
-                    "只保留雜湊與前八碼，明文在核發時回傳一次。",
-                "wiring_note":
-                    "Token 的身分取自核發時的登記資料，每次成功呼叫都會更新「最後使用」。\
-                     設定輪替天數後，期限一到即強制拒絕，不必等人手動撤銷。",
+                "storage_note": "明文只在核發時顯示一次。",
+                "wiring_note": "設定輪替天數後，期限一到就無法連線。",
             }),
             summary,
         ))

@@ -21,6 +21,7 @@
 
 use crate::ops::employees::service_months;
 use crate::ops::insurance::{premiums_on, ruleset_json};
+use crate::ops::payroll::SALARY_INCOME_CODE;
 use crate::ops::tax::{code_rule, withhold};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -231,7 +232,7 @@ impl Operation for GetHrCompliance {
                     "health_employee": health_employee.to_string(),
                     "pension_employer": pension_employer.to_string(),
                 },
-                "scope_note": "逐人以現行費率重算保費。這代表目前的申報值都算得出金額，不代表投保級距本身已核對過。",
+                "scope_note": "逐人以現行費率重算保費。檢查的是申報值算不算得出保費，級距本身是否正確另行核對。",
             }),
             json!({
                 "name": "特休額度與已核准天數",
@@ -366,9 +367,14 @@ impl Operation for ListWithholdingStatements {
         let mut gross_total = Money::ZERO;
         let mut known_withheld_total = Money::ZERO;
         let mut missing_table_amounts = 0usize;
-        let mut table_gross = Money::ZERO;
-        let mut known_table_withheld = Money::ZERO;
-        let mut table_withheld_complete = true;
+        // Reconciliation against the payroll module runs on the salary income
+        // code, not on the basis. Payroll writes its payment records at the
+        // ruleset's withholding rate, so counting only `table` records
+        // compared payroll against an empty set and reported a whole year of
+        // salary as a difference.
+        let mut salary_gross = Money::ZERO;
+        let mut known_salary_withheld = Money::ZERO;
+        let mut salary_withheld_complete = true;
 
         for record in &records {
             let rs = laysi_regulation::resolve("withholding", record.paid_on)?;
@@ -388,7 +394,7 @@ impl Operation for ListWithholdingStatements {
                 ),
                 other => {
                     return Err(OpError::BadInput(format!(
-                        "{} 的扣繳基礎「{other}」非 rate 或 table，系統不代為推定算法",
+                        "{} 的扣繳基礎「{other}」算不出稅額，請改為 rate 或 table",
                         record.payee
                     )));
                 }
@@ -397,11 +403,11 @@ impl Operation for ListWithholdingStatements {
             if record.basis == "table" && withheld.is_none() {
                 missing_table_amounts += 1;
             }
-            if record.basis == "table" {
-                table_gross += record.gross_amount;
+            if record.income_code == SALARY_INCOME_CODE {
+                salary_gross += record.gross_amount;
                 match withheld {
-                    Some(amount) => known_table_withheld += amount,
-                    None => table_withheld_complete = false,
+                    Some(amount) => known_salary_withheld += amount,
+                    None => salary_withheld_complete = false,
                 }
             }
             gross_total += record.gross_amount;
@@ -533,9 +539,9 @@ impl Operation for ListWithholdingStatements {
                 })
             })
             .collect::<Vec<_>>();
-        let payroll_gross_difference = payroll_gross - table_gross;
+        let payroll_gross_difference = payroll_gross - salary_gross;
         let payroll_withheld_difference =
-            table_withheld_complete.then_some(payroll_withheld - known_table_withheld);
+            salary_withheld_complete.then_some(payroll_withheld - known_salary_withheld);
         let payroll_reconciled = payroll_gross_difference.is_zero()
             && payroll_withheld_difference.is_some_and(|difference| difference.is_zero());
 
@@ -571,14 +577,14 @@ impl Operation for ListWithholdingStatements {
                 "employee_income": payroll_rows,
                 "payroll_reconciliation": {
                     "payroll_gross": payroll_gross.to_string(),
-                    "withholding_record_table_gross": table_gross.to_string(),
+                    "withholding_record_salary_gross": salary_gross.to_string(),
                     "gross_difference": payroll_gross_difference.to_string(),
                     "payroll_withheld": payroll_withheld.to_string(),
-                    "withholding_record_known_table_withheld":
-                        known_table_withheld.to_string(),
+                    "withholding_record_known_salary_withheld":
+                        known_salary_withheld.to_string(),
                     "withheld_difference":
                         payroll_withheld_difference.map(|amount| amount.to_string()),
-                    "table_withheld_complete": table_withheld_complete,
+                    "salary_withheld_complete": salary_withheld_complete,
                     "reconciled": payroll_reconciled,
                     "note": "薪資模組與扣繳紀錄分開計算，這裡只作對帳，差異照實列出。",
                 },

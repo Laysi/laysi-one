@@ -76,6 +76,12 @@ interface Envelope<T> {
   setup?: SetupState;
 }
 
+function landOnStart(): void {
+  if (window.location.pathname !== '/') {
+    window.history.replaceState({}, '', '/');
+  }
+}
+
 async function readEnvelope(res: Response): Promise<Envelope<SessionUser>> {
   const body: unknown = await res.json().catch(() => null);
   if (body && typeof body === 'object') return body as Envelope<SessionUser>;
@@ -146,6 +152,7 @@ export function useAuthSession(): AuthValue {
     });
     const envelope = await readEnvelope(res);
     if (!res.ok || !envelope.user) throw failure(res, envelope);
+    landOnStart();
     setUser(envelope.user);
     setStatus('signed-in');
     return envelope.user;
@@ -182,6 +189,7 @@ export function useAuthSession(): AuthValue {
     const envelope = await readEnvelope(res);
     if (!res.ok || !envelope.user) throw failure(res, envelope);
     setSetup(CLOSED_SETUP);
+    landOnStart();
     setUser(envelope.user);
     setStatus('signed-in');
     return envelope.user;

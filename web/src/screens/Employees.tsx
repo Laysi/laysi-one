@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
+  maskId,
+  money,
   OpFailed,
   trimDecimal,
   type DimensionList,
   type EmployeeList,
   type EmployeeRow,
-  type RoleMatrix,
 } from '../api/client';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -16,7 +18,7 @@ interface Props {
 }
 
 const EMPLOYMENT_TYPES: { value: string; label: string }[] = [
-  { value: 'full_time', label: '全職' },
+  { value: 'full_time', label: '正職' },
   { value: 'part_time', label: '兼職' },
   { value: 'contract', label: '約聘' },
 ];
@@ -32,7 +34,6 @@ interface FormState {
   name: string;
   dept_code: string;
   title: string;
-  role_code: string;
   employment_type: string;
   hired_on: string;
   left_on: string;
@@ -51,7 +52,6 @@ const EMPTY_FORM: FormState = {
   name: '',
   dept_code: '',
   title: '',
-  role_code: 'staff',
   employment_type: 'full_time',
   hired_on: '',
   left_on: '',
@@ -70,12 +70,14 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [includeLeft, setIncludeLeft] = useState(false);
+  const [showIds, setShowIds] = useState(false);
 
   const [drawer, setDrawer] = useState<'create' | 'edit' | null>(null);
+  const [current, setCurrent] = useState<EmployeeRow | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const [missing, setMissing] = useState<string[]>([]);
   const [dims, setDims] = useState<DimensionList | null>(null);
-  const [roles, setRoles] = useState<{ code: string; name: string }[] | null>(null);
 
   const load = useCallback(() => {
     setError(null);
@@ -92,25 +94,22 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
   useEffect(() => {
     if (!drawer) return;
     if (!dims) callOp<DimensionList>('list_dimensions').then(setDims).catch(() => setDims(null));
-    if (!roles) {
-      callOp<RoleMatrix>('list_roles')
-        .then((m) => setRoles(m.roles.map((r) => ({ code: r.code, name: r.name }))))
-        .catch(() => setRoles([]));
-    }
-  }, [drawer, dims, roles]);
+  }, [drawer, dims]);
 
   function openCreate() {
+    setCurrent(null);
     setForm(EMPTY_FORM);
+    setMissing([]);
     setDrawer('create');
   }
 
   function openEdit(e: EmployeeRow) {
+    setCurrent(e);
     setForm({
       emp_no: e.emp_no,
       name: e.name,
       dept_code: e.dept_code ?? '',
       title: e.title,
-      role_code: e.role_code ?? 'staff',
       employment_type: e.employment_type,
       hired_on: e.hired_on,
       left_on: e.left_on ?? '',
@@ -121,11 +120,35 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       health_insured_salary: '',
       pension_wage: '',
 
-      id_no: e.id_no_masked,
+      id_no: e.id_no,
       bank_account: e.bank_account,
       note: e.note,
     });
+    setMissing([]);
     setDrawer('edit');
+  }
+
+  function currentAmount(
+    field: 'base_salary' | 'labor_insured_salary' | 'health_insured_salary' | 'pension_wage',
+  ): string {
+    const value = current?.[field];
+    if (!value || Number(value) === 0) return '尚未設定';
+    return `目前 ${money(value)}`;
+  }
+
+  function amountFields(f: FormState): Record<string, string> {
+    const keys = [
+      'base_salary',
+      'labor_insured_salary',
+      'health_insured_salary',
+      'pension_wage',
+    ] as const;
+    const out: Record<string, string> = {};
+    for (const k of keys) {
+      const v = f[k].trim();
+      if (v) out[k] = v;
+    }
+    return out;
   }
 
   function setField<K extends keyof FormState>(key: K, value: FormState[K]) {
@@ -133,17 +156,12 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
   }
 
   async function save() {
-    if (!form.emp_no.trim() || !form.name.trim() || !form.hired_on) {
-      onToast('員工編號、姓名與到職日都要填寫');
-      return;
-    }
-    if (
-      !form.base_salary.trim() ||
-      !form.labor_insured_salary.trim() ||
-      !form.health_insured_salary.trim() ||
-      !form.pension_wage.trim()
-    ) {
-      onToast('本薪與三項投保級距為必填');
+    const blank: string[] = [];
+    if (!form.name.trim()) blank.push('name');
+    if (!form.hired_on) blank.push('hired_on');
+    setMissing(blank);
+    if (blank.length > 0) {
+      onToast(`還要填：${blank.map((k) => (k === 'name' ? '姓名' : '到職日')).join('、')}`);
       return;
     }
     if ((form.status === 'leaving' || form.status === 'left') && !form.left_on) {
@@ -157,15 +175,11 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         name: form.name.trim(),
         dept_code: form.dept_code || null,
         title: form.title.trim(),
-        role_code: form.role_code.trim() || 'staff',
         employment_type: form.employment_type,
         hired_on: form.hired_on,
         left_on: form.left_on || null,
         status: form.status,
-        base_salary: form.base_salary.trim(),
-        labor_insured_salary: form.labor_insured_salary.trim(),
-        health_insured_salary: form.health_insured_salary.trim(),
-        pension_wage: form.pension_wage.trim(),
+        ...amountFields(form),
         id_no: form.id_no.trim(),
         bank_account: form.bank_account.trim(),
         note: form.note.trim(),
@@ -219,6 +233,12 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
             >
               併同顯示已離職
             </button>
+            <button
+              className={`chip${showIds ? ' chip--on' : ''}`}
+              onClick={() => setShowIds((v) => !v)}
+            >
+              顯示身分證字號
+            </button>
             <span className="spacer" />
             <span className="section-note">
               {data.by_dept.map((d) => `${d.label} ${d.count}`).join('　')}
@@ -255,14 +275,15 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                           {e.name}
                         </button>
                         <span className="cell-hint cell-hint--block num">
-                          {e.emp_no} · {e.id_no_masked || '未登錄身分證字號'}
+                          {e.emp_no} ·{' '}
+                          {e.id_no ? (showIds ? e.id_no : maskId(e.id_no)) : '未登錄身分證字號'}
                         </span>
                       </td>
                       <td className="cell-accounts">
                         {e.dept_label ?? '未指定'}
                         <span className="cell-hint cell-hint--block">
-                          {e.title} · {e.employment_label}
-                          {e.role_name && ` · ${e.role_name}`}
+                          {e.title ? `${e.title} · ` : ''}
+                          {e.employment_label}
                         </span>
                       </td>
                       <td className="num cell-nowrap">
@@ -309,7 +330,6 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
             <span className="num">{data.annual_leave_ruleset.version}</span>{' '}
             計算（{data.annual_leave_ruleset.effective_from} 起適用）。
           </p>
-          <p className="hint">{data.id_note}</p>
         </>
       )}
 
@@ -319,7 +339,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
             <div className="drawer__head">
               <div>
                 <div className="drawer__title">{drawer === 'edit' ? `編輯 ${form.emp_no}` : '新增員工'}</div>
-                <div className="drawer__subtitle">登入帳號另在「角色與核准」建立</div>
+                <div className="drawer__subtitle">登入帳號另在「帳號管理」建立</div>
               </div>
               <button className="btn btn--close" onClick={() => setDrawer(null)} aria-label="關閉">
                 ×
@@ -334,7 +354,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     value={form.emp_no}
                     disabled={drawer === 'edit'}
-                    placeholder="E010"
+                    placeholder={drawer === 'edit' ? '' : '留空自動配號'}
                     onChange={(e) => setField('emp_no', e.target.value)}
                   />
                   {drawer === 'edit' && <span className="field__hint">編輯時不可變更員工編號</span>}
@@ -346,6 +366,9 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     value={form.name}
                     onChange={(e) => setField('name', e.target.value)}
                   />
+                  {missing.includes('name') && (
+                    <span className="field__hint field__hint--missing">還沒填</span>
+                  )}
                 </label>
 
                 <label className="field">
@@ -373,20 +396,6 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                 </label>
 
                 <label className="field">
-                  系統角色
-                  <select
-                    className="input"
-                    value={form.role_code}
-                    onChange={(e) => setField('role_code', e.target.value)}
-                  >
-                    {(roles ?? [{ code: form.role_code, name: form.role_code }]).map((r) => (
-                      <option key={r.code} value={r.code}>
-                        {r.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
                   僱用型態
                   <select
                     className="input"
@@ -403,12 +412,14 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
 
                 <label className="field">
                   到職日
-                  <input
+                  <DateField
                     className="input"
-                    type="date"
                     value={form.hired_on}
-                    onChange={(e) => setField('hired_on', e.target.value)}
+                    onChange={(v) => setField('hired_on', v)}
                   />
+                  {missing.includes('hired_on') && (
+                    <span className="field__hint field__hint--missing">還沒填</span>
+                  )}
                 </label>
                 <label className="field">
                   狀態
@@ -428,25 +439,23 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                 {form.status !== 'active' && (
                   <label className="field field--full">
                     離職日（狀態不是在職時必填）
-                    <input
+                    <DateField
                       className="input"
-                      type="date"
                       value={form.left_on}
-                      onChange={(e) => setField('left_on', e.target.value)}
+                      onChange={(v) => setField('left_on', v)}
                     />
                   </label>
                 )}
 
                 <label className="field field--full">
-                  身分證字號（只接受遮罩後的值）
+                  身分證字號
                   <input
                     className="input num"
                     value={form.id_no}
-                    placeholder="A12*****89"
                     onChange={(e) => setField('id_no', e.target.value)}
                   />
                   <span className="field__hint">
-                    可留空。如果要填，請先遮罩；完整字號（一個英文字母加九碼數字）不予接受。
+                    勞保申報與扣繳憑單要用；還沒收到可以留空。
                   </span>
                 </label>
 
@@ -461,9 +470,9 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
               </div>
 
               <p className="form-warn">
-                本薪與三項投保級距依填寫值保存。
-                {drawer === 'edit' &&
-                  '請照薪資單與投保申報表填寫；留空無法儲存，填錯會蓋掉原本的數字。'}
+                {drawer === 'edit'
+                  ? '留空的欄位不會更動，要清成尚未設定請填 0。'
+                  : '留空表示尚未談定，薪資作業會擋下這個人。'}
               </p>
 
               <div className="field-grid">
@@ -473,7 +482,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     inputMode="decimal"
                     value={form.base_salary}
-                    placeholder={drawer === 'edit' ? '重新輸入目前的本薪' : '38000'}
+                    placeholder={drawer === 'edit' ? currentAmount('base_salary') : '38000'}
                     onChange={(e) => setField('base_salary', e.target.value)}
                   />
                 </label>
@@ -483,7 +492,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     inputMode="decimal"
                     value={form.labor_insured_salary}
-                    placeholder={drawer === 'edit' ? '重新輸入目前的投保薪資' : '38200'}
+                    placeholder={drawer === 'edit' ? currentAmount('labor_insured_salary') : '38200'}
                     onChange={(e) => setField('labor_insured_salary', e.target.value)}
                   />
                 </label>
@@ -493,7 +502,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     inputMode="decimal"
                     value={form.health_insured_salary}
-                    placeholder={drawer === 'edit' ? '重新輸入目前的投保薪資' : '38200'}
+                    placeholder={drawer === 'edit' ? currentAmount('health_insured_salary') : '38200'}
                     onChange={(e) => setField('health_insured_salary', e.target.value)}
                   />
                 </label>
@@ -503,7 +512,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     inputMode="decimal"
                     value={form.pension_wage}
-                    placeholder={drawer === 'edit' ? '重新輸入目前的提繳工資' : '40100'}
+                    placeholder={drawer === 'edit' ? currentAmount('pension_wage') : '40100'}
                     onChange={(e) => setField('pension_wage', e.target.value)}
                   />
                 </label>
@@ -522,7 +531,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
 
             <div className="drawer__foot">
               <span className="drawer__foot-note">
-                {drawer === 'edit' ? '完整更新本筆員工主檔' : '建立員工主檔'}
+                {drawer === 'edit' ? '更新本筆員工主檔' : '建立員工主檔'}
               </span>
               <button className={`btn${saving ? ' btn--off' : ''}`} disabled={saving} onClick={() => void save()}>
                 {saving ? '存檔中…' : '存檔'}

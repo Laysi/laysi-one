@@ -45,11 +45,39 @@ pub fn verify_password(password: &str, encoded: &str) -> bool {
         .is_some_and(|hash| engine().verify_password(password.as_bytes(), &hash).is_ok())
 }
 
-/// Generate the high-entropy temporary password the admin tool shows once.
+/// Alphabet for temporary passwords, without the characters that are read or
+/// heard wrong: `0`/`o`, `1`/`l`/`i`. Lower case only, for the same reason.
+const TEMPORARY_ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
+
+/// Number of characters in a temporary password. Thirty-one symbols to the
+/// eighth is about 39 bits, which is more than a password that must be changed
+/// on first use needs, and short enough to read out over the phone.
+const TEMPORARY_LENGTH: usize = 8;
+
+/// Generate the temporary password shown once when an account is created or
+/// its password reset.
+///
+/// It is dictated to a person, usually by telephone, so length is a cost paid
+/// by the user rather than by an attacker: the account cannot be used without
+/// changing it, and every login goes through the same Argon2id cost above.
 pub fn temporary_password() -> String {
-    let mut bytes = [0_u8; 18];
-    TokenOsRng.fill_bytes(&mut bytes);
-    format!("tmp-{}", hex::encode(bytes))
+    // Rejection sampling: taking a byte modulo the alphabet length would make
+    // the first few symbols more likely than the rest.
+    let limit = (u8::MAX as usize / TEMPORARY_ALPHABET.len() * TEMPORARY_ALPHABET.len()) as u8;
+    let mut out = String::with_capacity(TEMPORARY_LENGTH);
+    let mut buffer = [0_u8; 32];
+    while out.len() < TEMPORARY_LENGTH {
+        TokenOsRng.fill_bytes(&mut buffer);
+        for byte in buffer {
+            if byte < limit {
+                out.push(TEMPORARY_ALPHABET[byte as usize % TEMPORARY_ALPHABET.len()] as char);
+                if out.len() == TEMPORARY_LENGTH {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -68,13 +96,18 @@ mod tests {
         assert!(!verify_password("錯誤密碼", &encoded));
     }
 
+    /// It is read out loud to the person it belongs to, so every character
+    /// has to survive being spoken and written down.
     #[test]
-    fn temporary_password_is_high_entropy_and_hashable() {
+    fn a_temporary_password_can_be_dictated_and_still_hashes() {
         let first = temporary_password();
         let second = temporary_password();
-        assert!(first.starts_with("tmp-"));
-        assert_eq!(first.len(), 40);
+        assert_eq!(first.chars().count(), TEMPORARY_LENGTH);
         assert_ne!(first, second);
+        assert!(first.bytes().all(|b| TEMPORARY_ALPHABET.contains(&b)));
+        for confusable in ['0', 'o', '1', 'l', 'i'] {
+            assert!(!first.contains(confusable), "{first} 含有會聽錯的字元");
+        }
 
         let encoded = hash_password(&first).expect("暫時密碼應可雜湊");
         assert!(verify_password(&first, &encoded));

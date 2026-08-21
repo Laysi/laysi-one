@@ -16,7 +16,6 @@ pub mod expenses;
 pub mod hr_compliance;
 pub mod imports;
 pub mod insurance;
-pub mod invoicing;
 pub mod ledger;
 pub mod masters;
 pub mod payables;
@@ -35,7 +34,6 @@ pub fn all() -> Vec<Box<dyn Operation>> {
     out.extend(receivables::ops());
     out.extend(payables::ops());
     out.extend(banking::ops());
-    out.extend(invoicing::ops());
     out.extend(tax::ops());
     out.extend(assets::ops());
     out.extend(expenses::ops());

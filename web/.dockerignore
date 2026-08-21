@@ -1,0 +1,6 @@
+# The web image builds from ./web, so the repository root .dockerignore does not
+# apply here. Without this file the build context carries node_modules and dist,
+# which are rebuilt inside the image anyway.
+node_modules/
+dist/
+.env

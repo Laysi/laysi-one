@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
+  docNumberHint,
   isZero,
   money,
   OpFailed,
   type ApBill,
   type PayablesResult,
 } from '../api/client';
+import {
+  EMPTY_TAX_TRIPLE,
+  TaxAmountFields,
+  type TaxTriple,
+} from '../components/TaxAmountFields';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -44,7 +51,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
   const [debitAccounts, setDebitAccounts] = useState<DebitAccount[] | null>(null);
   const [vendor, setVendor] = useState('');
   const [billNo, setBillNo] = useState('');
-  const [amount, setAmount] = useState('');
+  const [amounts, setAmounts] = useState<TaxTriple>(EMPTY_TAX_TRIPLE);
   const [dueOn, setDueOn] = useState('');
   const [debitAccountCode, setDebitAccountCode] = useState('');
   const [memo, setMemo] = useState('');
@@ -77,7 +84,13 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
   }, [drawer, debitAccounts]);
 
   async function saveBill() {
-    if (!vendor.trim() || !billNo.trim() || !amount.trim() || !dueOn || !debitAccountCode) {
+    if (
+      !vendor.trim() ||
+      !billNo.trim() ||
+      (!amounts.total.trim() && !amounts.net.trim()) ||
+      !dueOn ||
+      !debitAccountCode
+    ) {
       onToast('供應商、單號、金額、到期日與借方科目都要填寫');
       return;
     }
@@ -88,7 +101,9 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
         {
           vendor: vendor.trim(),
           bill_no: billNo.trim(),
-          amount: amount.trim(),
+          ...(amounts.total.trim() ? { amount: amounts.total.trim() } : {}),
+          ...(amounts.net.trim() ? { net_amount: amounts.net.trim() } : {}),
+          ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
           due_on: dueOn,
           debit_account_code: debitAccountCode,
           memo: memo.trim(),
@@ -100,7 +115,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
       );
       setVendor('');
       setBillNo('');
-      setAmount('');
+      setAmounts(EMPTY_TAX_TRIPLE);
       setDueOn('');
       setMemo('');
       setDrawer(false);
@@ -285,22 +300,25 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
                   <input
                     className="input num"
                     value={billNo}
-                    placeholder="AP-2607-030"
+                    placeholder={docNumberHint('AP-')}
                     onChange={(e) => setBillNo(e.target.value)}
                   />
                 </label>
-                <label className="field">
-                  含稅應付總額
-                  <input
-                    className="input num"
-                    inputMode="decimal"
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
-                  />
-                </label>
+                <TaxAmountFields
+                  label="應付總額"
+                  taxLabel="進項稅額"
+                  value={amounts}
+                  rate={data?.vat.rate ?? null}
+                  ratePercent={data?.vat.rate_percent ?? null}
+                  onChange={setAmounts}
+                />
                 <label className="field">
                   到期日
-                  <input className="input" type="date" value={dueOn} onChange={(e) => setDueOn(e.target.value)} />
+                  <DateField
+                    className="input"
+                    value={dueOn}
+                    onChange={(v) => setDueOn(v)}
+                  />
                 </label>
                 <label className="field field--full">
                   借方科目（費用、存貨或預付款等啟用中的可入帳科目）
@@ -324,7 +342,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
             </div>
             <div className="drawer__foot">
               <span className="drawer__foot-note">
-                同時產生待過帳傳票（借指定科目／貸 2101 應付帳款）
+                同時產生待過帳傳票（借指定科目與 1284 進項稅額／貸 2101 應付帳款）
               </span>
               <button
                 className={`btn${savingBill ? ' btn--off' : ''}`}

@@ -1,0 +1,182 @@
+#!/bin/sh
+# Development loop. PostgreSQL and RustFS run in containers; the server and the
+# frontend run on this machine, where a code change is an incremental cargo
+# build instead of a release build inside an image.
+#
+#   scripts/dev          containers, then the server and the Vite dev server
+#   scripts/dev api      containers, then the server only
+#   scripts/dev web      the Vite dev server only
+#   scripts/dev stop     stop the two containers
+#
+# The server rebuilds and restarts on a source change through cargo-watch, the
+# way Vite already reloads the frontend. Set WATCH=0 to run it once instead;
+# without cargo-watch installed the script says so and runs it once.
+#
+# LAN=1 binds the Vite dev server to every interface, for testing from another
+# machine on the same network; the line it prints carries this machine's IP.
+#
+# Ctrl-C stops what this script started. The containers keep running, so the
+# next start does not wait for PostgreSQL to initialise again.
+#
+# Rust links through `cc`, which this machine may not have; scripts/toolchain
+# puts a zig-backed one on PATH. See scripts/toolchain/cc.
+
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+compose=${COMPOSE:-}
+if [ -z "$compose" ]; then
+  if command -v podman >/dev/null 2>&1; then
+    compose="podman compose"
+  elif command -v docker >/dev/null 2>&1; then
+    compose="docker compose"
+  else
+    echo "找不到 podman 或 docker" >&2
+    exit 1
+  fi
+fi
+files="-f docker-compose.yml -f docker-compose.dev.yml"
+
+what=${1:-all}
+case "$what" in
+  all | api | web | stop) ;;
+  *)
+    echo "用法：scripts/dev [all|api|web|stop]" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$what" = "stop" ]; then
+  # shellcheck disable=SC2086
+  $compose $files stop postgres rustfs
+  exit 0
+fi
+
+if [ ! -f .env ]; then
+  echo ".env 不存在：先 cp .env.example .env 並改掉裡面的密碼" >&2
+  exit 1
+fi
+
+# Values with spaces or shell metacharacters would need quoting in .env; the
+# file is a small list of passwords and ports, so this stays a plain source.
+set -a
+# shellcheck disable=SC1091
+. ./.env
+set +a
+
+: "${POSTGRES_USER:=laysi}"
+: "${POSTGRES_DB:=laysi}"
+: "${POSTGRES_PORT:=5432}"
+: "${RUSTFS_PORT:=9000}"
+: "${RUSTFS_ACCESS_KEY:=laysi}"
+
+setsid=""
+if command -v setsid >/dev/null 2>&1; then
+  setsid="setsid"
+fi
+
+api_pid=""
+web_pid=""
+
+stop_one() {
+  pid=$1
+  [ -n "$pid" ] || return 0
+  # cargo and npm both spawn the real process as a child, so the whole group
+  # has to go; without setsid only the launcher is reachable.
+  if [ -n "$setsid" ]; then
+    kill -TERM "-$pid" 2>/dev/null || true
+  else
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  trap - INT TERM EXIT
+  stop_one "$api_pid"
+  stop_one "$web_pid"
+  wait 2>/dev/null || true
+  echo "已停止。容器仍在執行，需要時用 scripts/dev stop 關掉。"
+}
+trap cleanup INT TERM EXIT
+
+if [ "$what" != "web" ]; then
+  # shellcheck disable=SC2086
+  $compose $files up -d postgres rustfs
+
+  printf '等待 postgres'
+  waited=0
+  # shellcheck disable=SC2086
+  until $compose $files exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt 60 ]; then
+      echo
+      echo "postgres 60 秒內沒有就緒，看 $compose $files logs postgres" >&2
+      exit 1
+    fi
+    sleep 1
+    printf '.'
+  done
+  echo ' 就緒'
+
+  PATH="$root/scripts/toolchain:$PATH"
+  export PATH
+  DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_PORT}/${POSTGRES_DB}"
+  RUSTFS_ENDPOINT="http://localhost:${RUSTFS_PORT}"
+  BIND_ADDR=${BIND_ADDR:-0.0.0.0:8080}
+  export DATABASE_URL RUSTFS_ENDPOINT RUSTFS_ACCESS_KEY RUSTFS_SECRET_KEY BIND_ADDR
+
+  # 0.0.0.0 is where the socket binds, not an address to open. Print the port
+  # on localhost so the line names an address a browser can reach.
+  api_url="http://localhost:${BIND_ADDR##*:}"
+
+  # The package ships laysi-admin and laysi-schema as well, so the binary has
+  # to be named.
+  run="run -q -p laysi-server --bin laysi-server"
+  # crates alone would miss the two directories that are embedded rather than
+  # compiled: migrations run at startup and the regulation TOMLs are
+  # include_str!'d, and editing either is a normal part of a day's work.
+  watch="watch --why -w crates -w migrations -w regulation -x"
+
+  if [ "${WATCH:-1}" = 0 ]; then
+    echo "API：$api_url"
+    # shellcheck disable=SC2086
+    (cd backend && $setsid cargo $run) &
+  elif (cd backend && cargo watch --version >/dev/null 2>&1); then
+    echo "API：$api_url（改動後自動重建重啟）"
+    # shellcheck disable=SC2086
+    (cd backend && $setsid cargo $watch "$run") &
+  else
+    echo "API：$api_url（改動後要自己重啟；cargo install cargo-watch 可省下這一步）"
+    # shellcheck disable=SC2086
+    (cd backend && $setsid cargo $run) &
+  fi
+  api_pid=$!
+  if [ "$what" = api ]; then
+    echo "畫面要另外跑：scripts/dev web"
+  fi
+fi
+
+if [ "$what" != "api" ]; then
+  if [ ! -d web/node_modules ]; then
+    echo "安裝前端相依套件…"
+    (cd web && npm install --no-audit --no-fund)
+  fi
+  # Vite binds localhost, which no other machine can reach. LAN=1 binds every
+  # interface, so a second device on the same network can open the frontend;
+  # its proxy carries /v1 to the backend, so the browser stays same-origin and
+  # nothing else has to be published.
+  if [ "${LAN:-0}" != 0 ]; then
+    lan_ip=$(ip -4 -o route get 1.1.1.1 2>/dev/null |
+      awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')
+    echo "畫面：http://${lan_ip:-本機 IP}:5173（同網段的裝置都連得到）"
+    (cd web && $setsid npm run dev -- --host) &
+  else
+    echo "畫面：http://localhost:5173"
+    (cd web && $setsid npm run dev) &
+  fi
+  web_pid=$!
+fi
+
+wait

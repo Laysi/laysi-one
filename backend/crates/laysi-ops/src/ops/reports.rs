@@ -272,7 +272,7 @@ impl Operation for GetBalanceSheet {
                 "profit": bs.profit.to_string(),
                 "difference": bs.difference().to_string(),
                 "balanced": bs.balanced(),
-                "unposted": unposted_note(ctx).await?,
+                "unposted": unposted_note(ctx, as_of).await?,
             }),
             summary,
         ))
@@ -387,7 +387,7 @@ pub struct PeriodInput {
 fn resolve_period(
     i: &PeriodInput,
     today: NaiveDate,
-    default_from: fn(NaiveDate) -> NaiveDate,
+    default_from: impl Fn(NaiveDate) -> NaiveDate,
 ) -> Result<(NaiveDate, NaiveDate), OpError> {
     let to = i.to.unwrap_or(today);
     let from = i.from.unwrap_or_else(|| default_from(to));
@@ -397,10 +397,14 @@ fn resolve_period(
     Ok((from, to))
 }
 
-/// First day of the fiscal year. Calendar year; the year itself is a
-/// `company_setting` value.
-fn year_start(d: NaiveDate) -> NaiveDate {
-    NaiveDate::from_ymd_opt(d.year(), 1, 1).unwrap_or(d)
+/// First day of the fiscal year containing `d`.
+///
+/// `start_month` comes from `company_setting.fiscal_year`. A year starting in
+/// April means 2026-03-31 still belongs to the year that began 2025-04-01, so
+/// the calendar year is one case of this rather than the rule.
+fn year_start(d: NaiveDate, start_month: u32) -> NaiveDate {
+    let year = if d.month() >= start_month { d.year() } else { d.year() - 1 };
+    NaiveDate::from_ymd_opt(year, start_month, 1).unwrap_or(d)
 }
 
 /// First day of the current month.
@@ -427,7 +431,8 @@ impl Operation for GetIncomeStatement {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: PeriodInput = parse(input)?;
-        let (from, to) = resolve_period(&i, ctx.today, year_start)?;
+        let start_month = ctx.store.fiscal_year_start_month().await?;
+        let (from, to) = resolve_period(&i, ctx.today, |d| year_start(d, start_month))?;
         let rows = ctx.store.ledger_movements(Some(from), to).await?;
         let st = income_statement(&rows);
 
@@ -451,7 +456,7 @@ impl Operation for GetIncomeStatement {
                 "operating_expense": st.operating_expense.to_string(),
                 "operating_profit": st.operating_profit().to_string(),
                 "profit": st.profit().to_string(),
-                "unposted": unposted_note(ctx).await?,
+                "unposted": unposted_note(ctx, to).await?,
             }),
             summary,
         ))
@@ -647,8 +652,17 @@ impl Operation for GetCashFlow {
         // A third path: the balance on the bank account side. Same calculation as
         // get_cash_position, cut off at `to`. The statement is only trustworthy
         // if all three agree.
+        //
+        // Cash sitting on a cash account with no funding account named is not
+        // a discrepancy — it is on the ledger and counted here — so it joins
+        // the account side instead of turning the whole statement red on a
+        // company's first day. What it does mean is that the cards on 「銀行
+        // 與現金」 do not yet say where that money is, which is reported as
+        // its own figure.
         let accounts = ctx.store.cash_position_as_of(to).await?;
-        let accounts_total: Money = accounts.iter().map(|a| a.balance).sum();
+        let assigned_total: Money = accounts.iter().map(|a| a.balance).sum();
+        let unattributed = ctx.store.unattributed_cash(Some(to)).await?;
+        let accounts_total = assigned_total + unattributed;
         let account_gap = cf.ledger_closing() - accounts_total;
         let reconciled = cf.difference().is_zero() && account_gap.is_zero();
 
@@ -675,9 +689,11 @@ impl Operation for GetCashFlow {
                 "difference": cf.difference().to_string(),
                 "cash_accounts": accounts,
                 "cash_accounts_total": accounts_total.to_string(),
+                "cash_accounts_assigned": assigned_total.to_string(),
+                "cash_accounts_unattributed": unattributed.to_string(),
                 "cash_accounts_difference": account_gap.to_string(),
                 "reconciled": reconciled,
-                "unposted": unposted_note(ctx).await?,
+                "unposted": unposted_note(ctx, to).await?,
             }),
             summary,
         ))
@@ -686,17 +702,27 @@ impl Operation for GetCashFlow {
 
 // Shared
 
-/// Count and value of vouchers that are not yet posted.
+/// What the statement leaves out, and why.
 ///
-/// All three statements count posted entries only, so each has to state how
-/// much is not yet included.
-async fn unposted_note(ctx: &OpCtx) -> Result<Value, OpError> {
+/// Two different reasons, so two counts. A voucher is missing either because
+/// nobody posted it yet, or because it is posted but dated after the
+/// statement's cut-off — the second is what happens the moment someone runs
+/// depreciation for the whole of a month and then opens today's balance
+/// sheet. Reporting only the first leaves that entry unaccounted for on every
+/// screen that could answer for it.
+async fn unposted_note(ctx: &OpCtx, through: NaiveDate) -> Result<Value, OpError> {
     let mut pending = ctx.store.search_vouchers(Some("pending"), None, 500).await?;
     pending.extend(ctx.store.search_vouchers(Some("draft"), None, 500).await?);
     let total: Money = pending.iter().map(|v| v.amount).sum();
+    let (later_count, later_total) = ctx.store.posted_after(through).await?;
     Ok(json!({
         "count": pending.len(),
         "amount": total.to_string(),
+        "after_period": {
+            "count": later_count,
+            "amount": later_total.to_string(),
+            "through": through,
+        },
     }))
 }
 
@@ -1060,7 +1086,7 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 7, 25).unwrap();
         let empty = PeriodInput::default();
         assert_eq!(
-            resolve_period(&empty, today, year_start).unwrap(),
+            resolve_period(&empty, today, |d| year_start(d, 1)).unwrap(),
             (NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(), today)
         );
         assert_eq!(
@@ -1072,6 +1098,15 @@ mod tests {
             from: Some(NaiveDate::from_ymd_opt(2026, 8, 1).unwrap()),
             to: Some(today),
         };
-        assert!(resolve_period(&backwards, today, year_start).is_err(), "起日晚於迄日要擋下");
+        assert!(
+            resolve_period(&backwards, today, |d| year_start(d, 1)).is_err(),
+            "起日晚於迄日要擋下"
+        );
+
+        // A fiscal year starting in April: March still belongs to the year
+        // that began the previous April.
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        assert_eq!(year_start(day(2026, 3, 31), 4), day(2025, 4, 1));
+        assert_eq!(year_start(day(2026, 4, 1), 4), day(2026, 4, 1));
     }
 }

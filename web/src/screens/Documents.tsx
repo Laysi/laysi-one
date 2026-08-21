@@ -66,7 +66,7 @@ export function Documents({ onToast, reloadKey }: Props) {
       setVerified((v) => ({
         ...v,
         [d.doc_no]: r.verified
-          ? `已自物件儲存取回 ${r.byte_size_actual} 位元組，重算雜湊與登記值相符`
+          ? `已自檔案儲存取回 ${r.byte_size_actual} 位元組，重算雜湊與登記值相符`
           : '雜湊不符，檔案內容已遭變更',
       }));
     } catch (e) {
@@ -90,13 +90,13 @@ export function Documents({ onToast, reloadKey }: Props) {
             <div className="card stat-card">
               <div className="stat-card__kicker">文件</div>
               <div className="stat-card__value num">{data.stats.documents}</div>
-              <div className="stat-card__note">{data.stats.versions} 個版本</div>
+              <div className="stat-card__note num">{data.stats.versions} 個版本</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">佔用空間</div>
               <div className="stat-card__value num">{data.stats.size_label}</div>
-              <div className="stat-card__note">
-                {data.bucket ? `儲存區 ${data.bucket.bucket}` : '未接上物件儲存'}
+              <div className="stat-card__note num">
+                {data.bucket ? '已存入檔案儲存' : '未接上檔案儲存'}
               </div>
             </div>
             <div className="card stat-card">
@@ -106,26 +106,25 @@ export function Documents({ onToast, reloadKey }: Props) {
             <div className="card stat-card">
               <div className="stat-card__kicker">缺附件的傳票</div>
               <div className="stat-card__value num">{data.stats.vouchers_without_doc}</div>
-              <div className="stat-card__note">查帳時常見的查核項目</div>
+              <div className="stat-card__note num">查帳時常見的查核項目</div>
             </div>
           </div>
 
           <p className={`recon${data.bucket_reconciled === false ? ' recon--off' : ''}`}>
             {data.storage_error ? (
-              <>無法讀取物件儲存：{data.storage_error}</>
+              <>無法讀取檔案儲存：{data.storage_error}</>
             ) : data.bucket ? (
               <>
                 系統登記 <span className="num">{data.stats.versions}</span> 個版本／
                 <span className="num">{data.stats.size_label}</span>，
-                儲存區 <span className="num">{data.bucket.endpoint}</span> 實際有{' '}
-                <span className="num">{data.bucket.objects}</span> 個檔案／
+                檔案儲存實際有 <span className="num">{data.bucket.objects}</span> 個檔案／
                 <span className="num">{data.bucket.size_label}</span>
                 {data.bucket_reconciled
                   ? '，兩者分開計數，結果相符。'
                   : `　差 ${data.bucket_difference} 位元組，需查明原因。`}
               </>
             ) : (
-              <>尚未接上物件儲存。</>
+              <>尚未接上檔案儲存。</>
             )}
           </p>
 

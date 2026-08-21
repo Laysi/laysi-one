@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import { callOp, OpFailed, type MovementList, type MovementRow } from '../api/client';
+import {
+  callOp,
+  OpFailed,
+  type ClosedAccess,
+  type EmployeeList,
+  type MovementList,
+  type MovementRow,
+} from '../api/client';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -11,8 +19,17 @@ function statusTag(m: MovementRow): string {
   return m.status === 'done' ? 'tag tag--static' : 'tag tag--warn tag--static';
 }
 
+function closedNote(closed: ClosedAccess | undefined): string {
+  if (!closed) return '';
+  const parts: string[] = [];
+  if (closed.logins.length > 0) parts.push(`停用登入帳號 ${closed.logins.join('、')}`);
+  if (closed.tokens > 0) parts.push(`撤銷 ${closed.tokens} 把 MCP Token`);
+  return parts.length > 0 ? `，並${parts.join('、')}` : '';
+}
+
 export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
   const [data, setData] = useState<MovementList | null>(null);
+  const [staff, setStaff] = useState<EmployeeList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -33,17 +50,27 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(load, [load, reloadKey]);
 
+  useEffect(() => {
+    callOp<EmployeeList>('list_employees')
+      .then(setStaff)
+      .catch(() => setStaff(null));
+  }, [reloadKey]);
+
   async function completeStep(m: MovementRow) {
     setBusy(m.movement_no);
     try {
-      const d = await callOp<{ movement: MovementRow; finished: boolean }>(
+      const d = await callOp<{
+        movement: MovementRow;
+        finished: boolean;
+        closed_access: ClosedAccess;
+      }>(
         'complete_movement_step',
         { movement_no: m.movement_no },
         `${m.name}的${m.kind_label}本關卡已完成`,
       );
       onToast(
         d.finished
-          ? `${m.movement_no} 全部關卡已完成，單據結案`
+          ? `${m.movement_no} 全部關卡已完成，單據結案${closedNote(d.closed_access)}`
           : `${m.movement_no} 本關已完成，尚待「${d.movement.next_step?.label ?? '結案'}」`,
       );
       onChanged();
@@ -185,7 +212,8 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
 
             <p className="hint">
               開立離職單時，該員工在名冊與薪資作業即標示為「離職中」並記錄預定離職日；
-              完成最後一關後變成「已離職」。
+              完成最後一關後變成「已離職」，登入帳號同時停用、MCP Token 一併撤銷，
+              要再開由系統管理員在「帳號管理」啟用。
             </p>
             <p className="hint">
               關卡所列名稱為<strong>承辦人</strong>；能否操作由角色權限決定。
@@ -197,13 +225,19 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
             <div className="card form-card">
               <div className="field-row">
                 <label className="field field--grow">
-                  員工編號
-                  <input
+                  員工
+                  <select
                     className="input"
-                    placeholder="E006"
                     value={empNo}
                     onChange={(e) => setEmpNo(e.target.value)}
-                  />
+                  >
+                    <option value="">請選擇</option>
+                    {(staff?.employees ?? []).map((e) => (
+                      <option key={e.emp_no} value={e.emp_no}>
+                        {e.emp_no} {e.name}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <label className="field field--grow">
                   異動種類
@@ -225,11 +259,10 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
               <div className="field-row">
                 <label className="field field--date">
                   生效日
-                  <input
+                  <DateField
                     className="input input--date"
-                    type="date"
                     value={effectiveOn}
-                    onChange={(e) => setEffectiveOn(e.target.value)}
+                    onChange={(v) => setEffectiveOn(v)}
                   />
                 </label>
                 <label className="field field--grow">
@@ -273,28 +306,30 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
               </p>
             </div>
 
-            <h3 className="section-title section-title--spaced">各類異動的簽核關卡</h3>
-            {data.flows.map((f) => (
-              <div key={f.kind}>
-                <p className="section-note">{f.label}</p>
-                <div className="flow">
-                  {f.steps.map((s, i) => (
-                    <div className="flow__step-wrap" key={s.step_no}>
-                      <div className="card flow__step">
-                        <div className="flow__role">{s.label}</div>
-                        <div className="flow__cond">{s.note}</div>
-                      </div>
-                      {i < f.steps.length - 1 && <span className="flow__arrow">→</span>}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-            <p className="hint">
-              上述流程取自 {data.flow_source}，可依公司需要調整。
-            </p>
           </section>
         </div>
+      )}
+
+      {data && (
+        <section>
+          <h3 className="section-title section-title--spaced">各類異動的簽核關卡</h3>
+          {data.flows.map((f) => (
+            <div key={f.kind}>
+              <p className="section-note">{f.label}</p>
+              <div className="flow">
+                {f.steps.map((s, i) => (
+                  <div className="flow__step-wrap" key={s.step_no}>
+                    <div className="card flow__step">
+                      <div className="flow__role">{s.label}</div>
+                      <div className="flow__cond">{s.note}</div>
+                    </div>
+                    {i < f.steps.length - 1 && <span className="flow__arrow">→</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>
       )}
     </div>
   );

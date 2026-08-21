@@ -8,8 +8,11 @@ import {
   type AttendancePunchList,
   type LeaveRequestList,
   type LeaveRequestRow,
+  type PunchCorrectionList,
   type PunchReconciliation,
 } from '../api/client';
+import { DateField } from '../components/DateField';
+import { useCurrentUser } from '../auth';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -47,6 +50,9 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const [att, setAtt] = useState<AttendanceMonth | null>(null);
   const [leave, setLeave] = useState<LeaveRequestList | null>(null);
   const [punches, setPunches] = useState<AttendancePunchList | null>(null);
+  const [fixes, setFixes] = useState<PunchCorrectionList | null>(null);
+  const [fixDone, setFixDone] = useState(false);
+  const [fixNoteById, setFixNoteById] = useState<Record<number, string>>({});
   const [month, setMonth] = useState<string | undefined>(undefined);
   const [picked, setPicked] = useState<string | null>(null);
   const [fixOn, setFixOn] = useState('');
@@ -75,6 +81,39 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       })
       .catch((e: Error) => setError(e.message));
   }, [month, includeDone, picked]);
+
+  const me = useCurrentUser();
+  const canSeeFixes = me.permissions.includes('list_punch_corrections');
+  const canDecideFixes = me.permissions.includes('decide_punch_correction');
+
+  const loadFixes = useCallback(() => {
+    if (!canSeeFixes) return;
+    callOp<PunchCorrectionList>('list_punch_corrections', { include_done: fixDone })
+      .then(setFixes)
+      .catch(() => setFixes(null));
+  }, [canSeeFixes, fixDone]);
+
+  useEffect(loadFixes, [loadFixes, reloadKey]);
+
+  async function decideFix(id: number, approve: boolean) {
+    setBusy(`fix-${id}`);
+    try {
+      await callOp<unknown>(
+        'decide_punch_correction',
+        { id, approve, ...(fixNoteById[id]?.trim() ? { note: fixNoteById[id].trim() } : {}) },
+        approve ? '核准補登申請' : '駁回補登申請',
+      );
+      onToast(approve ? '已核准，時間已寫進打卡紀錄' : '已駁回');
+      setFixNoteById((n) => ({ ...n, [id]: '' }));
+      onChanged();
+      loadFixes();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   useEffect(load, [load, reloadKey]);
 
@@ -160,22 +199,22 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
             <div className="card stat-card">
               <div className="stat-card__kicker">實際出勤</div>
               <div className="stat-card__value num">{trimDecimal(att.totals.worked_days)}</div>
-              <div className="stat-card__note">應出勤 {trimDecimal(att.totals.required_days)} 日</div>
+              <div className="stat-card__note num">應出勤 {trimDecimal(att.totals.required_days)} 日</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">休假</div>
               <div className="stat-card__value num">{trimDecimal(att.totals.leave_days)}</div>
-              <div className="stat-card__note">日</div>
+              <div className="stat-card__note num">日</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">加班時數</div>
               <div className="stat-card__value num">{trimDecimal(att.totals.overtime_hours)}</div>
-              <div className="stat-card__note">小時 · 遲到 {att.totals.late_count} 次</div>
+              <div className="stat-card__note num">小時 · 遲到 {att.totals.late_count} 次</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">加班費</div>
               <div className="stat-card__value num">{money(att.totals.overtime_pay)}</div>
-              <div className="stat-card__note">由差勤系統帶入</div>
+              <div className="stat-card__note num">由差勤系統帶入</div>
             </div>
           </div>
 
@@ -229,7 +268,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
             <>
               <h3 className="section-title section-title--spaced">打卡紀錄</h3>
               <p className="section-note">
-                {!punches.schedule.judges_lateness
+                {!punches.schedule.judges_lateness || !punches.schedule.counts_overtime
                   ? punches.schedule.note
                   : (punches.schedule.flexible
                       ? `彈性工時 ${punches.schedule.work_start}–${punches.schedule.latest_start} 開始，下班同步順延`
@@ -366,11 +405,10 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       <div className="field-row">
                         <label className="field field--date">
                           日期
-                          <input
+                          <DateField
                             className="input input--date"
-                            type="date"
                             value={fixOn}
-                            onChange={(e) => setFixOn(e.target.value)}
+                            onChange={(v) => setFixOn(v)}
                           />
                         </label>
                         <label className="field field--date">
@@ -419,6 +457,111 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                   </section>
                 </div>
               )}
+            </>
+          )}
+
+          {fixes && (
+            <>
+              <h3 className="section-title section-title--spaced">補登申請</h3>
+              <div className="toolbar">
+                <button
+                  className={`chip${fixDone ? ' chip--on' : ''}`}
+                  onClick={() => setFixDone((v) => !v)}
+                >
+                  含已決定
+                </button>
+                <span className="spacer" />
+                <span className="section-note">{fixes.waiting_count} 張待審核</span>
+              </div>
+              <div className="table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>員工</th>
+                      <th>日期</th>
+                      <th>格</th>
+                      <th className="align-right">時間</th>
+                      <th>事由</th>
+                      <th>決定</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fixes.corrections.map((c) => (
+                      <tr
+                        key={c.id}
+                        className={c.status === 'submitted' ? 'row--pending' : undefined}
+                      >
+                        <td>
+                          {c.name}
+                          <span className="cell-hint cell-hint--block num">{c.emp_no}</span>
+                        </td>
+                        <td className="num cell-nowrap">{c.punched_on}</td>
+                        <td>{c.kind_label}</td>
+                        <td className="num align-right">{c.at}</td>
+                        <td className="cell-muted">{c.reason || '—'}</td>
+                        <td>
+                          {c.status !== 'submitted' ? (
+                            <>
+                              <span
+                                className={
+                                  c.status === 'rejected'
+                                    ? 'tag tag--bad tag--static'
+                                    : 'tag tag--static'
+                                }
+                              >
+                                {c.status_label}
+                              </span>
+                              <span className="cell-hint cell-hint--block">
+                                {c.decided_by || '自動通過'}
+                                {c.decision_note ? ` · ${c.decision_note}` : ''}
+                              </span>
+                            </>
+                          ) : !canDecideFixes ? (
+                            <span className="cell-hint">由人資決定</span>
+                          ) : c.can_decide === false ? (
+                            <span className="cell-hint">{c.decide_blocked_reason}</span>
+                          ) : (
+                            <>
+                              <input
+                                className="entry-input"
+                                placeholder="說明，選填"
+                                value={fixNoteById[c.id] ?? ''}
+                                onChange={(e) =>
+                                  setFixNoteById((n) => ({ ...n, [c.id]: e.target.value }))
+                                }
+                              />
+                              <div className="cell-actions">
+                                <button
+                                  className="btn btn--compact"
+                                  disabled={busy === `fix-${c.id}`}
+                                  onClick={() => void decideFix(c.id, true)}
+                                >
+                                  核准
+                                </button>
+                                <button
+                                  className="btn btn--compact btn--secondary"
+                                  disabled={busy === `fix-${c.id}`}
+                                  onClick={() => void decideFix(c.id, false)}
+                                >
+                                  駁回
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {fixes.corrections.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="cell-muted">
+                          {fixDone ? '還沒有任何補登申請。' : '沒有待審核的補登申請。'}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <p className="hint">{fixes.policy_note}</p>
             </>
           )}
 
@@ -479,7 +622,9 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       )}
                     </td>
                     <td className="align-right">
-                      {r.status === 'pending' ? (
+                      {r.status === 'pending' && !r.can_decide ? (
+                        <span className="cell-muted cell-reason">{r.decide_blocked_reason}</span>
+                      ) : r.status === 'pending' ? (
                         <>
                           <input
                             className="entry-input entry-input--code"

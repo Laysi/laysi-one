@@ -26,6 +26,7 @@ interface GlAccount {
 export function Banking({ onToast, reloadKey, onChanged }: Props) {
   const [accounts, setAccounts] = useState<CashAccount[] | null>(null);
   const [total, setTotal] = useState<string>('0');
+  const [unattributed, setUnattributed] = useState<string>('0');
   const [rows, setRows] = useState<BankTxn[] | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [candidates, setCandidates] = useState<MatchCandidate[] | null>(null);
@@ -42,12 +43,15 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<{ accounts: CashAccount[]; total: string }>('get_cash_position'),
+      callOp<{ accounts: CashAccount[]; total: string; unattributed: string }>(
+        'get_cash_position',
+      ),
       callOp<{ transactions: BankTxn[] }>('list_bank_transactions'),
     ])
       .then(([c, t]) => {
         setAccounts(c.accounts);
         setTotal(c.total);
+        setUnattributed(c.unattributed);
         setRows(t.transactions);
       })
       .catch((e: Error) => setError(e.message));
@@ -163,14 +167,29 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
               <div className="stat-card__note num">{a.account_no}</div>
             </div>
           ))}
+          {Number(unattributed) !== 0 && (
+            <div className="card stat-card">
+              <div className="stat-card__kicker">尚未指定資金帳戶</div>
+              <div className="stat-card__value num">{money(unattributed)}</div>
+              <div className="stat-card__note num">零用金，或分錄沒有指定帳戶</div>
+            </div>
+          )}
           <div className="card stat-card stat-card--total">
             <div className="stat-card__kicker">合計</div>
             <div className="stat-card__value num">{money(total)}</div>
+            <div className="stat-card__note num">等於總帳的現金餘額</div>
           </div>
         </div>
       )}
 
-      {rows && accounts && accounts.length > 0 && (
+      {rows && rows.length === 0 && accounts && accounts.length > 0 && (
+        <div className="placeholder">
+          <div className="placeholder__title">尚無銀行明細</div>
+          <p>銀行明細由銀行對帳檔匯入後出現在這裡，供逐筆與傳票核銷。</p>
+        </div>
+      )}
+
+      {rows && rows.length > 0 && accounts && accounts.length > 0 && (
         <div className="recon-columns">
           <section>
             <h2 className="section-title">銀行流水（未核銷 {unmatched}）</h2>

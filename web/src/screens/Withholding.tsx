@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
+  maskId,
   money,
   OpFailed,
   type ComplianceCheck,
@@ -32,6 +33,7 @@ export function Withholding({ onToast, reloadKey }: Props) {
   const [year, setYear] = useState<number | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const [showIds, setShowIds] = useState(false);
 
   const load = useCallback(() => {
     setError(null);
@@ -82,24 +84,24 @@ export function Withholding({ onToast, reloadKey }: Props) {
             <div className="card stat-card">
               <div className="stat-card__kicker">已檢查</div>
               <div className="stat-card__value num">{compliance.checked_count}</div>
-              <div className="stat-card__note">規則庫已收錄的項目</div>
+              <div className="stat-card__note num">規則庫已收錄的項目</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">未檢查</div>
               <div className="stat-card__value num">{compliance.unchecked_count}</div>
-              <div className="stat-card__note">規則庫尚未收錄</div>
+              <div className="stat-card__note num">規則庫尚未收錄</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">待確認差異</div>
               <div className="stat-card__value num">{compliance.failure_count}</div>
-              <div className="stat-card__note">
+              <div className="stat-card__note num">
                 {compliance.checked_all_passed ? '目前無差異' : '需逐筆確認'}
               </div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">檢核基準日</div>
               <div className="stat-card__value num">{compliance.as_of}</div>
-              <div className="stat-card__note">{compliance.employee_count} 位在職員工</div>
+              <div className="stat-card__note num">{compliance.employee_count} 位在職員工</div>
             </div>
           </div>
 
@@ -179,6 +181,12 @@ export function Withholding({ onToast, reloadKey }: Props) {
                   {statements.from} 至 {statements.to} · {statements.statement_count} 位給付對象
                   （其中 {statements.person_specific_count} 位有逐人識別資料）
                 </span>
+                <button
+                  className={`btn btn--compact${showIds ? '' : ' btn--secondary'}`}
+                  onClick={() => setShowIds((v) => !v)}
+                >
+                  顯示身分證字號
+                </button>
               </div>
 
               <div className="table-scroll">
@@ -207,7 +215,11 @@ export function Withholding({ onToast, reloadKey }: Props) {
                             {s.payee}
                           </button>
                           <span className="cell-hint cell-hint--block num">
-                            {s.payee_id || '來源無識別資料'}
+                            {s.payee_id
+                              ? showIds
+                                ? s.payee_id
+                                : maskId(s.payee_id)
+                              : '來源無識別資料'}
                           </span>
                           {!s.person_specific && (
                             <span className="cell-hint cell-hint--block">{s.source_note}</span>
@@ -269,7 +281,7 @@ export function Withholding({ onToast, reloadKey }: Props) {
                     `（另有 ${statements.missing_table_amounts} 筆來源未提供稅額）`}
                 </span>
                 <span className="num">
-                  {statements.withheld_total ?? money(statements.known_withheld_total)}
+                  {money(statements.withheld_total ?? statements.known_withheld_total)}
                 </span>
               </div>
 
@@ -294,14 +306,14 @@ export function Withholding({ onToast, reloadKey }: Props) {
                     </span>
                     ，扣繳紀錄{' '}
                     <span className="num">
-                      {money(statements.payroll_reconciliation.withholding_record_table_gross)}
+                      {money(statements.payroll_reconciliation.withholding_record_salary_gross)}
                     </span>
                     ，差{' '}
                     <span className="num">
                       {money(statements.payroll_reconciliation.gross_difference)}
                     </span>{' '}
                     元。
-                    {!statements.payroll_reconciliation.table_withheld_complete &&
+                    {!statements.payroll_reconciliation.salary_withheld_complete &&
                       ' 另有來源沒有帶稅額，因此稅額的差異無法計算。'}
                   </>
                 )}
@@ -326,7 +338,8 @@ export function Withholding({ onToast, reloadKey }: Props) {
                         <td>
                           {e.name}
                           <span className="cell-hint num">
-                            {e.emp_no} · {e.payee_id || '未登錄'}
+                            {e.emp_no} ·{' '}
+                            {e.payee_id ? (showIds ? e.payee_id : maskId(e.payee_id)) : '未登錄'}
                           </span>
                         </td>
                         <td className="num align-right">{money(e.gross_amount)}</td>

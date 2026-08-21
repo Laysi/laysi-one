@@ -7,19 +7,36 @@ import {
   type BudgetStatus,
   type DepartmentPl,
 } from '../api/client';
+import { useCurrentUser } from '../auth';
 
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
 }
 
+interface BudgetableAccount {
+  code: string;
+  name: string;
+  kind: string;
+  is_postable: boolean;
+  is_active: boolean;
+}
+
 export function Budget({ onToast, reloadKey }: Props) {
+  const me = useCurrentUser();
+  const canCreateVersion = me.permissions.includes('create_budget_version');
+  const [creating, setCreating] = useState(false);
   const [status, setStatus] = useState<BudgetStatus | null>(null);
   const [pl, setPl] = useState<DepartmentPl | null>(null);
   const [version, setVersion] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const [accounts, setAccounts] = useState<BudgetableAccount[] | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [newCode, setNewCode] = useState('');
+  const [newAmount, setNewAmount] = useState('');
+  const canSetBudget = me.permissions.includes('set_budget');
 
   const load = useCallback(() => {
     setError(null);
@@ -36,11 +53,57 @@ export function Budget({ onToast, reloadKey }: Props) {
 
   useEffect(load, [load, reloadKey]);
 
-  async function save(code: string) {
+  useEffect(() => {
+    if (!adding || accounts) return;
+    callOp<{ accounts: BudgetableAccount[] }>('list_accounts')
+      .then((d) =>
+        setAccounts(
+          d.accounts.filter(
+            (a) => a.is_postable && a.is_active && (a.kind === 'expense' || a.kind === 'revenue'),
+          ),
+        ),
+      )
+      .catch((e: Error) => onToast(e.message));
+  }, [adding, accounts, onToast]);
+
+  function openAdd() {
+    setNewCode('');
+    setNewAmount('');
+    setAdding(true);
+  }
+
+  async function addLine() {
+    if (!newCode) {
+      onToast('請先選一個科目');
+      return;
+    }
+    await save(newCode, newAmount);
+    setAdding(false);
+  }
+
+  async function createFirstVersion() {
+    setCreating(true);
+    try {
+      const d = await callOp<{ version: { code: string; label: string } }>(
+        'create_budget_version',
+        { code: 'V1' },
+        '建立第一版年度預算',
+      );
+      onToast(`已建立 ${d.version.label}，接著逐科目填入金額`);
+      setVersion(d.version.code);
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function save(code: string, amount = draft) {
     try {
       await callOp<unknown>('set_budget', {
         account_code: code,
-        amount: draft.trim(),
+        amount: amount.trim() || '0',
         ...(status ? { version: status.version } : {}),
       });
       onToast(`已更新 ${code} 的預算`);
@@ -54,16 +117,39 @@ export function Budget({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">預算與管理</h1>
-      {status && (
+      {status?.version && (
         <p className="page-lede">
-          預算版本 {status.version_label}。執行率超過 {status.alert_percent}% 會標示出來。
+          預算版本 {status.version_label}。
+          {status.alert_percent
+            ? `執行率超過 ${status.alert_percent}% 會標示出來。`
+            : '尚未設定提醒門檻，超支仍會標示出來。'}
         </p>
       )}
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!status && !error && <p className="state-note">讀取中…</p>}
 
-      {status && pl && (
+      {status && !status.version && (
+        <div className="placeholder">
+          <div className="placeholder__title">尚未建立預算</div>
+          <p>
+            {canCreateVersion
+              ? '建立一版之後，逐個科目填入年度金額；實際數一律由已過帳分錄現算。'
+              : '建立預算版本限負責人，請洽負責人。'}
+          </p>
+          {canCreateVersion && (
+            <button
+              className={`btn${creating ? ' btn--off' : ''}`}
+              disabled={creating}
+              onClick={() => void createFirstVersion()}
+            >
+              {creating ? '建立中…' : '建立第一版預算'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {status?.version && pl && (
         <>
           <div className="toolbar">
             {status.versions.map((v) => (
@@ -80,28 +166,83 @@ export function Budget({ onToast, reloadKey }: Props) {
             <span className="section-note">
               {status.from} 至 {status.to} 累計
             </span>
+            {canSetBudget && (
+              <button className="btn btn--compact" onClick={openAdd}>
+                ＋ 編列科目預算
+              </button>
+            )}
           </div>
+
+          {adding && (
+            <div className="card form-card">
+              <h3 className="section-title">編列科目預算</h3>
+              <p className="section-note">
+                {status.version_label}。已編列過的科目再選一次即為修改。
+              </p>
+              <div className="field-row">
+                <label className="field field--grow">
+                  科目
+                  <select
+                    className="input"
+                    value={newCode}
+                    onChange={(e) => setNewCode(e.target.value)}
+                  >
+                    <option value="">請選擇</option>
+                    {(accounts ?? []).map((a) => (
+                      <option key={a.code} value={a.code}>
+                        {a.code} {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field field--date">
+                  年度預算金額
+                  <input
+                    className="input num"
+                    inputMode="decimal"
+                    value={newAmount}
+                    placeholder="1200000"
+                    onChange={(e) => setNewAmount(e.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="wizard-actions">
+                <button className="btn btn--ghost" onClick={() => setAdding(false)}>
+                  取消
+                </button>
+                <button className="btn" onClick={() => void addLine()}>
+                  儲存
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="stat-grid">
             <div className="card stat-card">
               <div className="stat-card__kicker">年度預算</div>
               <div className="stat-card__value num">{money(status.budget_total)}</div>
-              <div className="stat-card__note">{status.version_label}</div>
+              <div className="stat-card__note num">{status.version_label}</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">實際支用</div>
               <div className="stat-card__value num">{money(status.actual_total)}</div>
-              <div className="stat-card__note">由總帳即時計算</div>
+              <div className="stat-card__note num">由總帳即時計算</div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">可用餘額</div>
               <div className="stat-card__value num">{money(status.remaining_total)}</div>
-              <div className="stat-card__note">預算 − 實際</div>
+              <div className="stat-card__note num">預算 − 實際</div>
             </div>
             <div className="card stat-card stat-card--total">
               <div className="stat-card__kicker">需注意科目</div>
-              <div className="stat-card__value num">{status.alert_count}</div>
-              <div className="stat-card__note">執行率超過 {status.alert_percent}%</div>
+              <div className="stat-card__value num">
+                {status.alert_percent ? status.alert_count : '—'}
+              </div>
+              <div className="stat-card__note num">
+                {status.alert_percent
+                  ? `執行率超過 ${status.alert_percent}%`
+                  : '尚未設定提醒門檻'}
+              </div>
             </div>
           </div>
 
@@ -148,6 +289,7 @@ export function Budget({ onToast, reloadKey }: Props) {
                       ) : (
                         <>
                           {money(r.budget)}
+                          {canSetBudget && (
                           <button
                             className="btn--icon fact__pencil"
                             title="編輯預算"
@@ -158,6 +300,7 @@ export function Budget({ onToast, reloadKey }: Props) {
                           >
                             ✎
                           </button>
+                          )}
                         </>
                       )}
                     </td>
@@ -180,7 +323,9 @@ export function Budget({ onToast, reloadKey }: Props) {
                 {status.rows.length === 0 && (
                   <tr>
                     <td colSpan={5} className="cell-muted">
-                      本版本尚未編列任何科目預算。
+                      {canSetBudget
+                        ? '請由上方「＋ 編列科目預算」加入第一個科目。'
+                        : '本版本尚未編列任何科目預算。'}
                     </td>
                   </tr>
                 )}
@@ -189,7 +334,11 @@ export function Budget({ onToast, reloadKey }: Props) {
           </div>
 
           <p className="hint">異動預算限負責人。</p>
+        </>
+      )}
 
+      {pl && (
+        <>
           <h3 className="section-title section-title--spaced">部門損益</h3>
           <p className="section-note">
             {pl.from} 至 {pl.to}。未指定部門的支出單獨列示，不分攤。

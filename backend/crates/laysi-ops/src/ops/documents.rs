@@ -218,8 +218,7 @@ pub struct UploadDocumentInput {
     #[serde(default)]
     pub kind: Option<String>,
     /// Kind of linked record: `voucher`, `ap_bill`, `ar_invoice`,
-    /// `expense_claim`, `bank_account`, `einvoice`, `import_batch`, `period`
-    /// or `other`.
+    /// `expense_claim`, `bank_account`, `import_batch`, `period` or `other`.
     #[serde(default)]
     pub link_type: Option<String>,
     /// Linked record number, e.g. `V2607-018`.
@@ -236,14 +235,13 @@ pub struct UploadDocumentInput {
 /// Permitted document kinds. Kept in step with the CHECK in migrations/0007.
 const KINDS: [&str; 7] =
     ["receipt", "vendor_bill", "expense_receipt", "bank", "contract", "closing", "other"];
-const LINK_TYPES: [&str; 10] = [
+const LINK_TYPES: [&str; 9] = [
     "",
     "voucher",
     "ap_bill",
     "ar_invoice",
     "expense_claim",
     "bank_account",
-    "einvoice",
     "import_batch",
     "period",
     "other",
@@ -272,7 +270,7 @@ impl Operation for UploadDocument {
 
         let body = base64::engine::general_purpose::STANDARD
             .decode(i.content_base64.trim())
-            .map_err(|e| OpError::BadInput(format!("content_base64 不是合法的 base64：{e}")))?;
+            .map_err(|e| OpError::BadInput(format!("檔案內容不是合法的 base64：{e}")))?;
         if body.is_empty() {
             return Err(OpError::BadInput("檔案是空的".into()));
         }

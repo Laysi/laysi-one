@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  businessDate,
   callOp,
   isZero,
   money,
@@ -8,6 +9,7 @@ import {
   type PayrollSummary,
   type PayslipList,
 } from '../api/client';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -33,6 +35,8 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
     callOp<PayrollSummary>('get_payroll_summary', period ? { period } : {})
       .then((s) => {
         setSummary(s);
+        setRunPeriod((v) => v || s.next_period || '');
+        setPayOn((v) => v || s.suggested_pay_on);
 
         if (!s.detail_visible) {
           setSlips(null);
@@ -88,6 +92,8 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
   }
 
   const run0 = summary?.run ?? null;
+  const alreadyRun =
+    runPeriod.trim() !== '' && (summary?.runs ?? []).some((r) => r.period === runPeriod.trim());
 
   return (
     <div>
@@ -110,7 +116,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
             ))}
             <span className="spacer" />
             <span className="section-note">
-              {run0 ? `${run0.headcount} 人 · 給付日 ${run0.pay_on}` : '尚無任何期別的薪資計算紀錄'}
+              {run0 ? `${run0.headcount} 人 · 給付日 ${run0.pay_on}` : ''}
             </span>
           </div>
 
@@ -120,22 +126,22 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 <div className="card stat-card">
                   <div className="stat-card__kicker">應發總額</div>
                   <div className="stat-card__value num">{money(run0.gross_total)}</div>
-                  <div className="stat-card__note">本薪與加班費合計</div>
+                  <div className="stat-card__note num">本薪與加班費合計</div>
                 </div>
                 <div className="card stat-card">
                   <div className="stat-card__kicker">代扣</div>
                   <div className="stat-card__value num">{money(run0.deduction_total)}</div>
-                  <div className="stat-card__note">勞保、健保自付與代扣所得稅</div>
+                  <div className="stat-card__note num">勞保、健保自付與代扣所得稅</div>
                 </div>
                 <div className="card stat-card">
                   <div className="stat-card__kicker">實發</div>
                   <div className="stat-card__value num">{money(run0.net_total)}</div>
-                  <div className="stat-card__note">實際匯出金額</div>
+                  <div className="stat-card__note num">實際匯出金額</div>
                 </div>
                 <div className="card stat-card stat-card--total">
                   <div className="stat-card__kicker">公司另負擔</div>
                   <div className="stat-card__value num">{money(run0.employer_total)}</div>
-                  <div className="stat-card__note">勞健保與勞退</div>
+                  <div className="stat-card__note num">勞健保與勞退</div>
                 </div>
               </div>
 
@@ -159,7 +165,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 {!isZero(summary.not_yet_posted) && (
                   <>
                     {' '}另有 <span className="num">{money(summary.not_yet_posted)}</span>{' '}
-                    的薪資傳票尚未過帳，薪資計算完成不代表已入總帳。
+                    的薪資傳票尚未過帳。
                   </>
                 )}
               </p>
@@ -181,14 +187,14 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 <div className="fact">
                   <span className="fact__key">本期適用規則版本</span>
                   <span className="fact__value num">
-                    勞保 {run0.rulesets.labor_insurance}　健保 {run0.rulesets.health_insurance}
-                    　勞退 {run0.rulesets.pension}　扣繳 {run0.rulesets.withholding}
+                    勞保 {run0.rulesets.labor_insurance}　健保 {run0.rulesets.health_insurance}　勞退{' '}
+                    {run0.rulesets.pension}　扣繳 {run0.rulesets.withholding}
                   </span>
                 </div>
                 <div className="fact">
                   <span className="fact__key">計算人員與時間</span>
                   <span className="fact__value">
-                    {run0.created_by} · {run0.created_at.slice(0, 10)}
+                    {run0.created_by} · <span className="num">{businessDate(run0.created_at)}</span>
                     {run0.note && <span className="fact__note">{run0.note}</span>}
                   </span>
                 </div>
@@ -288,25 +294,33 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                   期別
                   <input
                     className="input input--date"
-                    placeholder="2026-07"
+                    placeholder="YYYY-MM"
                     value={runPeriod}
                     onChange={(e) => setRunPeriod(e.target.value)}
                   />
                 </label>
                 <label className="field field--date">
                   給付日
-                  <input
+                  <DateField
                     className="input input--date"
-                    type="date"
                     value={payOn}
-                    onChange={(e) => setPayOn(e.target.value)}
+                    onChange={(v) => setPayOn(v)}
                   />
                 </label>
                 <span className="spacer" />
               </div>
-              <button className="btn" disabled={busy} onClick={() => void run()}>
-                {busy ? '計算中…' : '計算薪資並產生傳票'}
+              <button
+                className={`btn${alreadyRun ? ' btn--off' : ''}`}
+                disabled={busy || alreadyRun}
+                onClick={() => void run()}
+              >
+                {busy ? '計算中…' : alreadyRun ? `${runPeriod.trim()} 已計算` : '計算薪資並產生傳票'}
               </button>
+              {alreadyRun && (
+                <p className="form-note">
+                  同一期不能算兩次。要更正 {runPeriod.trim()} 請開立反向分錄。
+                </p>
+              )}
               <p className="form-note">
                 保費依<strong>期末日</strong>、扣繳依<strong>給付日</strong>認定。
                 兩者通常同月，跨月發薪時才會分開。
@@ -346,8 +360,8 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                   </div>
                   <div className="doc-row doc-row--sub">
                     <span>
-                      代扣所得稅（{result.withholding.income_name}，率{' '}
-                      {result.withholding.rate}）
+                      代扣所得稅（{result.withholding.income_name}，
+                      <span className="num">{result.withholding.rate_percent}%</span>）
                     </span>
                     <span className="num">{money(result.deduction_breakdown.income_tax)}</span>
                   </div>

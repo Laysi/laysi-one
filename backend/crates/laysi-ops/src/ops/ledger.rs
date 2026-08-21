@@ -47,7 +47,7 @@ impl Operation for GetDashboard {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀總覽：現金、應收、應付、本月損益，以及待處理事項與近期 AI 動作"
+        "讀總覽：現金、應收、應付、本月損益，以及待處理事項與最近的操作紀錄"
     }
     fn input_schema(&self) -> Value {
         schema_of::<Empty>()
@@ -66,11 +66,17 @@ impl Operation for GetDashboard {
         let drafts = s.search_vouchers(Some("draft"), None, 500).await?.len();
         let bars = s.cash_history(ctx.today, 6).await?;
         let audit = s.recent_audit(3).await?;
+        // Every figure above is drawn from posted vouchers only, so with none of
+        // them the four stats are zero for want of data rather than of money.
+        let started = !s.search_vouchers(Some("posted"), None, 1).await?.is_empty();
 
-        let mut todos = vec![json!({
-            "count": pending.to_string(), "label": "張傳票已建立但尚未過帳",
-            "due": "影響報表", "screen": "gl"
-        })];
+        let mut todos = Vec::new();
+        if pending > 0 {
+            todos.push(json!({
+                "count": pending.to_string(), "label": "張傳票已建立但尚未過帳",
+                "due": "影響報表", "screen": "gl"
+            }));
+        }
         if drafts > 0 {
             todos.push(json!({
                 "count": drafts.to_string(), "label": "張 AI 草稿待確認會計科目",
@@ -86,13 +92,20 @@ impl Operation for GetDashboard {
                 { "kicker": "本月損益",     "value": money(profit), "note": "未過帳傳票將影響本數" }
             ],
             "todos": todos,
+            "ledger_started": started,
             "cash_bars": bars.iter().map(|(m, v)| json!({
                 "month": m, "value": v.to_string(), "label": money(*v)
             })).collect::<Vec<_>>(),
-            "ai_recent": audit.iter().map(|a| json!({
+            // Named "recent", not "AI": every call is audited, and on a
+            // company's first day every row is the reader's own click. A list
+            // headed 「AI 操作紀錄」 showing nothing but the owner's own name
+            // reads as something impersonating them.
+            "recent": audit.iter().map(|a| json!({
                 "what": a.result_summary,
-                "time": a.at.format("%m/%d %H:%M").to_string(),
-                "who": format!("{} · {}", a.actor, a.tool_name),
+                "time": laysi_domain::business_time(a.at).format("%m/%d %H:%M").to_string(),
+                "who": a.actor,
+                "channel": a.channel,
+                "channel_label": if a.channel == "mcp" { "AI" } else { "人員" },
                 "outcome": a.outcome,
             })).collect::<Vec<_>>(),
         });
@@ -150,7 +163,7 @@ impl Operation for GetCashPosition {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀各銀行帳戶與零用金的現金水位"
+        "讀各銀行帳戶與零用金的現金水位。合計等於總帳的現金餘額；還沒指定資金帳戶的金額另列一筆。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<Empty>()
@@ -158,10 +171,24 @@ impl Operation for GetCashPosition {
 
     async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
         let accounts = ctx.store.cash_position().await?;
-        let total: Money = accounts.iter().map(|a| a.balance).sum();
+        let assigned: Money = accounts.iter().map(|a| a.balance).sum();
+        // Cash that landed on a cash account without naming one. Petty cash
+        // has no account row, and a GL code shared by two accounts cannot be
+        // split by inference; either way the money is on the ledger, so the
+        // cards have to add up to the ledger rather than to each other.
+        let unattributed = ctx.store.unattributed_cash(None).await?;
+        let total = assigned + unattributed;
         let names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
         let summary = format!("讀取現金水位 · {} · 合計 {}", names.join("、"), money(total));
-        Ok(OpOutcome::new(json!({ "accounts": accounts, "total": total.to_string() }), summary))
+        Ok(OpOutcome::new(
+            json!({
+                "accounts": accounts,
+                "assigned_total": assigned.to_string(),
+                "unattributed": unattributed.to_string(),
+                "total": total.to_string(),
+            }),
+            summary,
+        ))
     }
 }
 
@@ -240,7 +267,7 @@ impl Operation for ListAiAudit {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀 AI 稽核軌跡：每一次工具呼叫的時間、身分、原始提問與結果"
+        "讀 AI 稽核紀錄：每一次工具呼叫的時間、身分、原始提問與結果"
     }
     fn input_schema(&self) -> Value {
         schema_of::<LimitInput>()
@@ -249,7 +276,7 @@ impl Operation for ListAiAudit {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: LimitInput = parse(input)?;
         let entries = ctx.store.recent_audit(i.limit.unwrap_or(50).clamp(1, 500)).await?;
-        let summary = format!("讀取稽核軌跡 · {} 筆", entries.len());
+        let summary = format!("讀取稽核紀錄 · {} 筆", entries.len());
         Ok(OpOutcome::new(json!({ "entries": entries }), summary))
     }
 }

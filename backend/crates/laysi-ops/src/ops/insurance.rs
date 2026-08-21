@@ -226,7 +226,7 @@ impl Operation for GetInsuranceSummary {
             {
                 "title": "健保的公司負擔會超過員工自付的兩倍",
                 "body": format!(
-                    "雇主依全體平均眷口數 {} 口分攤，非依個別員工實際眷屬人數，故單身員工的公司負擔同樣乘以 {}。一般保險費率 {}%。",
+                    "雇主依全體平均眷口數 {} 口分攤，單身員工的公司負擔同樣乘以 {}。一般保險費率 {}%。",
                     avg, avg, percent(health_rs.decimal("rate")?),
                 ),
                 "source": health_rs.source_note,
@@ -235,7 +235,7 @@ impl Operation for GetInsuranceSummary {
             {
                 "title": "勞退全額由雇主提繳",
                 "body": format!(
-                    "提繳率 {}%，全額提繳至員工個人專戶，員工不分攤，故不列入薪資單代扣欄，而屬公司成本。",
+                    "提繳率 {}%，全額提繳至員工個人專戶，列為公司成本，薪資單的代扣欄沒有這一項。",
                     percent(pension_rs.decimal("employer_rate")?),
                 ),
                 "source": pension_rs.source_note,

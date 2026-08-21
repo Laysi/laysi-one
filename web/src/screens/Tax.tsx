@@ -102,17 +102,7 @@ export function Tax({ reloadKey }: Props) {
               <button className="chip" onClick={() => setAsOf(shift(vat, 1))}>
                 下一期 →
               </button>
-              <span className="spacer" />
-              <button className="btn btn--compact btn--off" disabled>
-                產生媒體申報檔
-              </button>
-              <button className="btn btn--compact btn--secondary btn--off" disabled>
-                送給會計師覆核
-              </button>
             </div>
-            <p className="form-note">
-              媒體申報檔與會計師覆核尚未接上。
-            </p>
           </section>
 
           <section>

@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use laysi_domain::{business_offset, business_time, Money};
 use laysi_regulation::Ruleset;
-use laysi_store::{AttendancePunch, AttendanceRow, LeaveRequest};
+use laysi_store::{AttendancePunch, AttendanceRow, LeaveRequest, PunchCorrection};
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -46,6 +46,8 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(CorrectPunch),
         Box::new(ListLeaveRequests),
         Box::new(DecideLeaveRequest),
+        Box::new(ListPunchCorrections),
+        Box::new(DecidePunchCorrection),
     ]
 }
 
@@ -755,7 +757,7 @@ impl Operation for CorrectPunch {
     }
 
     fn summary(&self) -> &'static str {
-        "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。已存在的同一格會被覆蓋，這正是本操作存在的理由；漏打卡沒有其他更正管道。"
+        "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。已存在的同一格會被覆蓋。漏打卡沒有其他更正管道。"
     }
 
     fn input_schema(&self) -> Value {
@@ -817,7 +819,7 @@ impl Operation for CorrectPunch {
                 "day": day.map(|d| d.json(&schedule)),
                 "schedule": schedule.json(),
                 "source": "manual",
-                "note": "來源為 manual 的打卡在明細上會標示出來，因為整天由他人填寫的紀錄與本人按下的紀錄不是同一種證據。",
+                "note": "補登的打卡在明細上標示為手動輸入，並記錄補登的人。",
             }),
             summary,
         ))
@@ -859,7 +861,7 @@ impl Operation for ListLeaveRequests {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ListLeaveRequestsInput = parse(input)?;
         if i.limit.is_some_and(|limit| limit <= i64::default()) {
-            return Err(OpError::BadInput("limit 要大於零".into()));
+            return Err(OpError::BadInput("查詢筆數要大於零".into()));
         }
 
         let requests = ctx
@@ -890,9 +892,23 @@ impl Operation for ListLeaveRequests {
             );
         }
 
+        // Whether this identity can decide each request, answered here so the
+        // screen can draw the button dead with the reason beside it. Same
+        // separation of duties as the expense flow.
         let rows = requests
             .iter()
-            .map(|request| leave_json(request, balances.get(&request.employee_id).copied()))
+            .map(|request| {
+                let mut row = leave_json(request, balances.get(&request.employee_id).copied());
+                let own = ctx.employee_id.is_some() && ctx.employee_id == Some(request.employee_id);
+                row["can_decide"] = json!(request.status == "pending" && !own);
+                row["decide_blocked_reason"] = json!(own.then(|| {
+                    format!(
+                        "{} 由你本人送出，要由另一個帳號簽核。公司還沒有其他可簽核的帳號時，請系統管理員在「帳號管理」建立。",
+                        request.leave_no
+                    )
+                }));
+                row
+            })
             .collect::<Vec<_>>();
         let annual_balances = staff
             .iter()
@@ -958,7 +974,7 @@ impl Operation for DecideLeaveRequest {
     }
 
     fn summary(&self) -> &'static str {
-        "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕。"
+        "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕；申請人不得核准本人送出的單據。"
     }
 
     fn input_schema(&self) -> Value {
@@ -974,6 +990,7 @@ impl Operation for DecideLeaveRequest {
                 i.approve,
                 &ctx.actor,
                 &ctx.actor_role,
+                ctx.employee_id,
                 i.note.as_deref().unwrap_or(""),
             )
             .await?;
@@ -987,10 +1004,197 @@ impl Operation for DecideLeaveRequest {
             leave_kind_label(&request.kind),
             request.days.normalize(),
             ctx.actor,
-            ctx.actor_role
+            crate::role_name(ctx).await
         );
         Ok(OpOutcome::new(
             json!({ "request": leave_json(&request, None), "action": request.status }),
+            summary,
+        ))
+    }
+}
+
+
+// Punch corrections
+//
+// The employee proposes, and either the company reviews it or the company
+// setting lets it through. Until it is approved nothing that reads the
+// working day can see it: the row lives in `punch_correction`, and only an
+// approval writes an `attendance_punch`.
+
+pub(crate) fn punch_correction_status_label(status: &str) -> &'static str {
+    match status {
+        "submitted" => "待審核",
+        "approved" => "已核准",
+        _ => "已駁回",
+    }
+}
+
+pub(crate) fn punch_correction_json(c: &PunchCorrection) -> Value {
+    json!({
+        "id": c.id,
+        "emp_no": c.emp_no,
+        "name": c.name,
+        "dept_label": c.dept_label,
+        "punched_on": c.punched_on,
+        "kind": c.kind,
+        "kind_label": punch_kind_label(&c.kind),
+        "at": business_time(c.punched_at).format(PUNCH_TIME).to_string(),
+        "reason": c.reason,
+        "status": c.status,
+        "status_label": punch_correction_status_label(&c.status),
+        // Empty when the setting let it through, so the screen can say so
+        // rather than naming a person who made no decision.
+        "decided_by": c.decided_by,
+        "decided_role": c.decided_role,
+        "decided_at": c.decided_at,
+        "decision_note": c.decision_note,
+        "created_at": c.created_at,
+    })
+}
+
+/// The value that turns review off. Company policy, so it is a
+/// `company_setting` row and never a constant in a calculation.
+pub(crate) const CORRECTION_AUTO: &str = "自動通過";
+
+pub(crate) async fn correction_auto_approves(ctx: &OpCtx) -> Result<bool, OpError> {
+    Ok(ctx
+        .store
+        .company_settings()
+        .await?
+        .iter()
+        .find(|s| s.code == "punch_correction_policy")
+        .map(|s| s.value.trim() == CORRECTION_AUTO)
+        .unwrap_or(false))
+}
+
+struct ListPunchCorrections;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListPunchCorrectionsInput {
+    /// Include the ones already decided. Omitted shows only what is waiting.
+    #[serde(default)]
+    pub include_done: Option<bool>,
+}
+
+#[async_trait]
+impl Operation for ListPunchCorrections {
+    fn name(&self) -> &'static str {
+        "list_punch_corrections"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+
+    fn summary(&self) -> &'static str {
+        "讀打卡補登申請：誰、哪一天的哪一格、申請的時間與理由，以及目前的狀態。核准後才會寫進打卡紀錄。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<ListPunchCorrectionsInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: ListPunchCorrectionsInput = parse(input)?;
+        let include_done = i.include_done.unwrap_or(false);
+        let corrections = ctx.store.punch_corrections(include_done, None).await?;
+        let auto = correction_auto_approves(ctx).await?;
+
+        // Whether this identity can decide each request, answered here so the
+        // screen draws the reason instead of a button that must be refused.
+        let rows = corrections
+            .iter()
+            .map(|c| {
+                let mut row = punch_correction_json(c);
+                let own = ctx.employee_id.is_some() && ctx.employee_id == Some(c.employee_id);
+                row["can_decide"] = json!(c.status == "submitted" && !own);
+                row["decide_blocked_reason"] = json!(own.then(|| {
+                    "這張由你本人送出，要由另一個帳號決定。公司還沒有其他可決定的帳號時，請系統管理員在「帳號管理」建立。"
+                        .to_string()
+                }));
+                row
+            })
+            .collect::<Vec<_>>();
+        let waiting = corrections.iter().filter(|c| c.status == "submitted").count();
+
+        let summary = format!(
+            "讀補登申請 · {} 張（{waiting} 張待審核）· {}",
+            rows.len(),
+            if auto { "送出即通過" } else { "由人資審核" }
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "corrections": rows,
+                "waiting_count": waiting,
+                "auto_approve": auto,
+                "policy_note": match auto {
+                    true => "目前設定為送出即通過，這裡只留紀錄。要改回逐張審核，請系統管理員到「基礎設定」變更補登申請。",
+                    false => "核准會把時間寫進打卡紀錄，來源標示為補登。要改成送出即通過，請系統管理員到「基礎設定」變更補登申請。",
+                },
+            }),
+            summary,
+        ))
+    }
+}
+
+struct DecidePunchCorrection;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DecidePunchCorrectionInput {
+    /// Which request.
+    pub id: i32,
+    /// True approves and writes the punch; false turns it down.
+    pub approve: bool,
+    /// What to tell the employee. Kept on the record.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[async_trait]
+impl Operation for DecidePunchCorrection {
+    fn name(&self) -> &'static str {
+        "decide_punch_correction"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "核准或駁回一張待審核的補登申請。核准會在同一個交易寫進打卡紀錄，來源記為補登並留下決定者。申請人不得決定本人送出的申請。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<DecidePunchCorrectionInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: DecidePunchCorrectionInput = parse(input)?;
+        let decided = ctx
+            .store
+            .decide_punch_correction(
+                i.id,
+                i.approve,
+                &ctx.actor,
+                &ctx.actor_role,
+                ctx.employee_id,
+                i.note.as_deref().unwrap_or("").trim(),
+            )
+            .await?;
+
+        let summary = format!(
+            "{} {} 的{}卡補登 {} · {} 決定",
+            decided.emp_no,
+            decided.punched_on,
+            punch_kind_label(&decided.kind),
+            punch_correction_status_label(&decided.status),
+            ctx.actor
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "correction": punch_correction_json(&decided),
+                "punch_written": i.approve,
+            }),
             summary,
         ))
     }

@@ -109,17 +109,20 @@ export interface CashBar {
   value: string;
   label: string;
 }
-export interface AiRecent {
+export interface RecentAction {
   what: string;
   time: string;
   who: string;
+  channel: 'ui' | 'mcp';
+  channel_label: string;
   outcome: string;
 }
 export interface Dashboard {
   stats: Stat[];
   todos: Todo[];
   cash_bars: CashBar[];
-  ai_recent: AiRecent[];
+  recent: RecentAction[];
+  ledger_started: boolean;
 }
 
 export interface VoucherLine {
@@ -198,6 +201,14 @@ export interface ApBill {
   batch_no: string | null;
 }
 
+export interface VatInfo {
+  version: string;
+  rate: string;
+  rate_percent: string;
+  effective_from: string;
+  source_note: string;
+}
+
 export interface PayablesResult {
   bills: ApBill[];
   listed_total: string;
@@ -207,6 +218,7 @@ export interface PayablesResult {
   reconciled: boolean;
   not_yet_posted: string;
   overdue_count: number;
+  vat: VatInfo;
 }
 
 export interface BankTxn {
@@ -233,54 +245,6 @@ export interface MatchCandidate {
   day_gap: number;
   exact: boolean;
   reason: string;
-}
-
-export interface EInvoice {
-  invoice_no: string;
-  track: string;
-  serial_no: number;
-  buyer_tax_id: string;
-  buyer: string;
-  item: string;
-  issued_on: string;
-  net_amount: string;
-  tax_amount: string;
-  total_amount: string;
-  vat_version: string;
-  upload_status: 'queued' | 'uploaded' | 'failed' | 'void';
-  status_label: string;
-  upload_attempts: number;
-  uploaded_at: string | null;
-  last_error: string | null;
-  voucher_no: string | null;
-  voucher_status: string | null;
-  ar_invoice_no: string | null;
-  recognised: boolean;
-}
-
-export interface EInvoiceTrack {
-  track: string;
-  period: string;
-  range_from: number;
-  range_to: number;
-  next_no: number;
-  remaining: number;
-}
-
-export interface EInvoiceList {
-  invoices: EInvoice[];
-  track: EInvoiceTrack;
-  track_label: string;
-  issued_total: string;
-  failed_count: number;
-  queued_count: number;
-  vat: {
-    version: string;
-    rate: string;
-    rate_percent: string;
-    effective_from: string;
-    source_note: string;
-  };
 }
 
 export interface VatRow {
@@ -381,6 +345,13 @@ export interface DepreciationRunRow {
   total: string;
 }
 
+export interface AssetCategory {
+  code: string;
+  label: string;
+  life_years: string;
+  life_label: string;
+}
+
 export interface FixedAssetList {
   assets: FixedAsset[];
   cost_total: string;
@@ -391,8 +362,12 @@ export interface FixedAssetList {
   cost_difference: string;
   accumulated_difference: string;
   reconciled: boolean;
+  cost_accounts_label: string;
+  accum_accounts_label: string;
   not_yet_posted: string;
   runs: DepreciationRunRow[];
+  categories: AssetCategory[];
+  vat: VatInfo;
 }
 
 export interface DepreciationLine {
@@ -431,6 +406,11 @@ export interface ReportRow {
 export interface Unposted {
   count: number;
   amount: string;
+  after_period: {
+    count: number;
+    amount: string;
+    through: string;
+  };
 }
 
 export interface BalanceSheet {
@@ -477,6 +457,8 @@ export interface CashFlow {
   difference: string;
   cash_accounts: CashAccount[];
   cash_accounts_total: string;
+  cash_accounts_assigned: string;
+  cash_accounts_unattributed: string;
   cash_accounts_difference: string;
   reconciled: boolean;
   unposted: Unposted;
@@ -583,7 +565,8 @@ export interface NewUserAccount {
     email: string;
     role_code: string;
     role_name: string;
-    employee_no: string | null;
+    employee_no: string;
+    employee_name: string;
   };
   temporary_password: string;
   must_change_password: boolean;
@@ -611,7 +594,7 @@ export interface SecurityRule {
   value: string;
   detail: string;
   enforced: boolean;
-  source: 'policy' | 'mcp_tool_grant' | 'approval_rule';
+  source: 'policy' | 'tool_grant' | 'approval_flow';
   blocked_tools?: string[];
   risky_enabled_tools?: string[];
 }
@@ -620,6 +603,77 @@ export interface SecurityPolicy {
   rules: SecurityRule[];
   enforced_count: number;
   total: number;
+}
+
+export interface UserAccountRow {
+  username: string;
+  display_name: string;
+  email: string;
+  role_code: string;
+  role_name: string;
+  employee_no: string | null;
+  employee_name: string | null;
+  employee_status: string | null;
+  status: string;
+  must_change_password: boolean;
+  has_password: boolean;
+  created_at: string;
+  created_by: string;
+  last_login_at: string | null;
+}
+
+export interface UserAccountList {
+  accounts: UserAccountRow[];
+}
+
+export interface UserPasswordReset {
+  user: {
+    id: number;
+    username: string;
+    display_name: string;
+    role_code: string;
+    role_name: string;
+  };
+  temporary_password: string;
+  must_change_password: boolean;
+  revoked_sessions: number;
+}
+
+export interface ChangedUserRole {
+  user: {
+    id: number;
+    username: string;
+    display_name: string;
+    role_code: string;
+    role_name: string;
+    previous_role_name: string;
+    status: string;
+  };
+  revoked_sessions: number;
+  revoked_tokens: number;
+}
+
+export interface DeletedUserAccount {
+  user: {
+    username: string;
+    display_name: string;
+    role_code: string;
+    role_name: string;
+  };
+  remaining: number;
+}
+
+export interface UpdatedUserAccount {
+  user: {
+    id: number;
+    username: string;
+    display_name: string;
+    email: string;
+    role_code: string;
+    role_name: string;
+    status: string;
+  };
+  changed: string[];
 }
 
 export interface ApiTokenRow {
@@ -659,6 +713,7 @@ export interface SystemHealth {
     accounts: number;
     audit_entries: number;
     audit_blocked: number;
+    audit_errors: number;
     audit_since: string | null;
     tokens_live: number;
     tokens_revoked: number;
@@ -739,6 +794,8 @@ export interface ExpenseClaim {
   memo: string;
   created_at: string;
   created_by: string;
+  can_approve?: boolean;
+  approve_blocked_reason?: string | null;
 }
 
 export interface ExpenseClaimList {
@@ -774,7 +831,7 @@ export interface BudgetVersionRow {
 }
 
 export interface BudgetStatus {
-  version: string;
+  version: string | null;
   version_label: string;
   fiscal_year: number;
   versions: BudgetVersionRow[];
@@ -784,7 +841,7 @@ export interface BudgetStatus {
   budget_total: string;
   actual_total: string;
   remaining_total: string;
-  alert_percent: string;
+  alert_percent: string | null;
   alert_count: number;
   actual_source: string;
 }
@@ -965,8 +1022,6 @@ export interface EmployeeRow {
   dept_code: string | null;
   dept_label: string | null;
   title: string;
-  role_code: string | null;
-  role_name: string | null;
   employment_type: string;
   employment_label: string;
   hired_on: string;
@@ -978,7 +1033,11 @@ export interface EmployeeRow {
   annual_leave_days: number;
   annual_leave_taken: string;
   annual_leave_left: string;
-  id_no_masked: string;
+  id_no: string;
+  base_salary: string;
+  labor_insured_salary: string;
+  health_insured_salary: string;
+  pension_wage: string;
   bank_account: string;
   note: string;
 }
@@ -993,7 +1052,6 @@ export interface EmployeeList {
   avg_service_label: string;
   annual_leave_ruleset: RulesetRef;
   salary_note: string;
-  id_note: string;
 }
 
 export interface FlowStepRef {
@@ -1043,7 +1101,12 @@ export interface MovementList {
   movements: MovementRow[];
   flows: MovementFlow[];
   open_count: number;
-  flow_source: string;
+}
+
+export interface ClosedAccess {
+  logins: string[];
+  sessions: number;
+  tokens: number;
 }
 
 export interface AttendanceRow {
@@ -1104,6 +1167,8 @@ export interface LeaveRequestRow {
   created_at: string;
   created_by: string;
   annual_leave: AnnualLeaveBalance | null;
+  can_decide?: boolean;
+  decide_blocked_reason?: string | null;
 }
 
 export interface LeaveBalanceRow extends AnnualLeaveBalance {
@@ -1157,6 +1222,8 @@ export interface PayrollSummary {
   detail_op: string;
   detail_note: string;
   actor_role: string;
+  next_period: string | null;
+  suggested_pay_on: string;
   employer_in_ledger: boolean;
   employer_note: string;
 }
@@ -1212,6 +1279,7 @@ export interface PayrollRunResult {
     income_code: string;
     income_name: string;
     rate: string;
+    rate_percent: string;
     note: string;
     ruleset: RulesetRef;
   };
@@ -1402,12 +1470,12 @@ export interface WithholdingStatements {
   employee_income: EmployeeIncomeRow[];
   payroll_reconciliation: {
     payroll_gross: string;
-    withholding_record_table_gross: string;
+    withholding_record_salary_gross: string;
     gross_difference: string;
     payroll_withheld: string;
-    withholding_record_known_table_withheld: string;
+    withholding_record_known_salary_withheld: string;
     withheld_difference: string | null;
-    table_withheld_complete: boolean;
+    salary_withheld_complete: boolean;
     reconciled: boolean;
     note: string;
   };
@@ -1421,12 +1489,12 @@ export interface MyProfile {
   dept_code: string | null;
   dept_label: string | null;
   title: string;
-  role_code: string | null;
-  role_name: string | null;
   employment_type: string;
+  employment_label: string;
   hired_on: string;
   left_on: string | null;
   status: string;
+  status_label: string;
   service_months: number;
   service_label: string;
   bank_account_masked: string;
@@ -1667,6 +1735,47 @@ export interface PunchResult {
   scope_note: string;
 }
 
+export interface PunchCorrection {
+  id: number;
+  emp_no: string;
+  name: string;
+  dept_label: string | null;
+  punched_on: string;
+  kind: 'in' | 'out';
+  kind_label: string;
+  at: string;
+  reason: string;
+  status: 'submitted' | 'approved' | 'rejected';
+  status_label: string;
+  decided_by: string;
+  decided_role: string;
+  decided_at: string | null;
+  decision_note: string;
+  created_at: string;
+  can_decide?: boolean;
+  decide_blocked_reason?: string | null;
+}
+
+export interface MyPunchCorrectionList {
+  corrections: PunchCorrection[];
+  waiting_count: number;
+  auto_approve: boolean;
+  scope_note: string;
+}
+
+export interface PunchCorrectionList {
+  corrections: PunchCorrection[];
+  waiting_count: number;
+  auto_approve: boolean;
+  policy_note: string;
+}
+
+export interface PunchCorrectionResult {
+  correction: PunchCorrection;
+  punch_written: boolean;
+  next_note: string;
+}
+
 export interface AttendancePunchList {
   month: string;
   months: string[];
@@ -1688,6 +1797,7 @@ export interface MyMcpTools {
   usable: string[];
   blocked_for_ai: string[];
   role: string;
+  role_name: string;
   note: string;
 }
 
@@ -1737,6 +1847,11 @@ export const STATUS_LABEL: Record<Voucher['status'], string> = {
   void: '已作廢',
 };
 
+export function maskId(value: string): string {
+  if (value.length < 6) return value;
+  return `${value.slice(0, 3)}${'*'.repeat(value.length - 5)}${value.slice(-2)}`;
+}
+
 export function money(v: string): string {
   const neg = v.startsWith('-');
   const [whole = '0'] = (neg ? v.slice(1) : v).split('.');
@@ -1750,6 +1865,42 @@ export function reportAmount(v: string): string {
 
 export function signedMoney(v: string): string {
   return v.startsWith('-') ? money(v) : `+${money(v)}`;
+}
+
+const BUSINESS_UTC_OFFSET_HOURS = 8;
+
+function shiftToBusiness(v: string): Date | null {
+  const t = new Date(v);
+  if (Number.isNaN(t.getTime())) return null;
+  return new Date(t.getTime() + BUSINESS_UTC_OFFSET_HOURS * 3600_000);
+}
+
+const two = (n: number) => String(n).padStart(2, '0');
+
+export function businessTime(v: string | null | undefined, fallback = '—'): string {
+  if (!v) return fallback;
+  const shifted = shiftToBusiness(v);
+  if (!shifted) return v;
+  return `${two(shifted.getUTCMonth() + 1)}/${two(shifted.getUTCDate())} ${two(
+    shifted.getUTCHours(),
+  )}:${two(shifted.getUTCMinutes())}`;
+}
+
+export function docNumberHint(prefix: string): string {
+  const now = shiftToBusiness(new Date().toISOString());
+  if (!now) return `例如 ${prefix}001`;
+  return `例如 ${prefix}${String(now.getUTCFullYear()).slice(2)}${two(
+    now.getUTCMonth() + 1,
+  )}-001`;
+}
+
+export function businessDate(v: string | null | undefined, fallback = '—'): string {
+  if (!v) return fallback;
+  const shifted = shiftToBusiness(v);
+  if (!shifted) return v.slice(0, 10);
+  return `${shifted.getUTCFullYear()}-${two(shifted.getUTCMonth() + 1)}-${two(
+    shifted.getUTCDate(),
+  )}`;
 }
 
 export function trimDecimal(v: string): string {

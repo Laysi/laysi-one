@@ -22,7 +22,7 @@ use std::sync::Arc;
 const SESSION_COOKIE_NAME: &str = "laysi_session";
 const DEFAULT_SESSION_IDLE_MINUTES: i64 = 60;
 const DEFAULT_SESSION_ABSOLUTE_HOURS: i64 = 168;
-pub(crate) const MIN_PASSWORD_CHARS: usize = 12;
+pub(crate) const MIN_PASSWORD_CHARS: usize = 8;
 const LOGIN_FAILED_MESSAGE: &str = "登入名稱或密碼不正確";
 
 /// Tunable settings for REST sessions.
@@ -101,6 +101,8 @@ pub(crate) fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
 pub struct VerifiedIdentity {
     pub actor: String,
     pub actor_role: String,
+    /// Login name, absent when the credential is an MCP token.
+    pub username: Option<String>,
     pub employee_id: Option<i32>,
 }
 
@@ -109,6 +111,7 @@ impl VerifiedIdentity {
         Self {
             actor: user.display_name.clone(),
             actor_role: user.role_code.clone(),
+            username: Some(user.username.clone()),
             employee_id: user.employee_id,
         }
     }
@@ -312,11 +315,28 @@ async fn password_matches(password: String, encoded: String) -> Result<bool, Res
         })
 }
 
+/// Login attempts per minute for one login name.
+///
+/// Argon2id already makes each attempt expensive, so this is not the only
+/// defence; it is here because guessing at machine speed against one account
+/// should not be free. The bucket is the login name rather than the client
+/// address: behind a reverse proxy every request arrives from the same
+/// address, which would turn one attacker into a lockout for everybody.
+pub const LOGIN_ATTEMPTS_PER_MINUTE: u32 = 10;
+
 pub async fn login(
     State(state): State<Shared>,
     headers: HeaderMap,
     Json(input): Json<LoginInput>,
 ) -> Response {
+    if !state.login_rate_limiter.allow(input.username.trim()) {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "login_rate_limited",
+            "登入嘗試過於頻繁，請稍候再試",
+        );
+    }
+
     match state.store.user_count().await {
         Ok(0) => {
             return error_response(
@@ -485,7 +505,7 @@ pub async fn change_password(
         return error_response(
             StatusCode::BAD_REQUEST,
             "password_too_short",
-            "新密碼至少需要 12 個字元",
+            "新密碼至少需要 8 個字元",
         );
     }
 
@@ -544,6 +564,19 @@ fn user_json(user: &UserAccount) -> Value {
     })
 }
 
+/// Whether a role clears an operation's risk floor.
+///
+/// An operation missing from the registry is left in: the permission tables
+/// and the registry are kept equal by a test, so a mismatch is a bug to see
+/// rather than a row to hide.
+fn callable_by(registry: &laysi_ops::Registry, name: &str, role: &str) -> bool {
+    match registry.get(name).map(|op| op.risk()) {
+        Some(laysi_ops::Risk::BossOnly) => role == laysi_ops::ROLE_BOSS,
+        Some(laysi_ops::Risk::AdminOnly) => role == laysi_ops::ROLE_ADMIN,
+        _ => true,
+    }
+}
+
 /// `user_json` plus the role's display name.
 ///
 /// An unknown name falls back to the code: the sidebar showing `acct` is
@@ -563,12 +596,22 @@ pub(crate) async fn user_json_with_role(state: &Shared, user: &UserAccount) -> V
     // what is allowed. Every call is still checked server-side, so a stale or
     // tampered copy of this list gains nothing.
     //
+    // The two risk floors are subtracted here as well, because `dispatch`
+    // checks them before it checks the matrix. The owner holds
+    // `update_company_setting` in the matrix but is refused by the admin
+    // floor, so a list that kept it made the settings screen draw a pencil,
+    // accept a value, and fail on save. This list has to mean "what this
+    // identity can actually call".
+    //
     // An empty list on error rather than a fabricated one: a sidebar with no
     // sections is visibly wrong, while a full sidebar that then refuses every
     // click looks like the product is broken.
     let permissions = match state.store.permitted_ops(&user.role_code).await {
         Ok(ops) => {
-            let mut ops: Vec<String> = ops.into_iter().collect();
+            let mut ops: Vec<String> = ops
+                .into_iter()
+                .filter(|name| callable_by(&state.registry, name, &user.role_code))
+                .collect();
             ops.sort();
             ops
         }
@@ -614,6 +657,7 @@ mod tests {
             setup: crate::setup::SetupConfig::for_tests(),
             oidc: None,
             mcp_rate_limiter: crate::ratelimit::RateLimiter::new(60),
+            login_rate_limiter: crate::ratelimit::RateLimiter::new(LOGIN_ATTEMPTS_PER_MINUTE),
             setup_rate_limiter: crate::ratelimit::RateLimiter::new(
                 crate::setup::ATTEMPTS_PER_MINUTE,
             ),
@@ -647,6 +691,7 @@ mod tests {
         let identity = VerifiedIdentity {
             actor: "可信帳號".into(),
             actor_role: "acct".into(),
+            username: Some("trusted".into()),
             employee_id: Some(7),
         };
         let mut headers = HeaderMap::new();

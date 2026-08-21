@@ -36,7 +36,7 @@
 //! not individuals). Both read the same table; the difference is whether
 //! `dispatch` stops the caller. The filter is not written into the query.
 
-use crate::ops::insurance::{premiums_on, ruleset_json};
+use crate::ops::insurance::{percent, premiums_on, ruleset_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -55,7 +55,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
 
 /// Withholding income code for salary. A code, not a rate; the rate is
 /// looked up in the payload.
-const SALARY_INCOME_CODE: &str = "50";
+pub(crate) const SALARY_INCOME_CODE: &str = "50";
 
 /// Round to whole dollars. A rounding mode, not a regulated rate.
 fn to_dollars(v: Money) -> Money {
@@ -163,6 +163,16 @@ async fn compute_one(
     if days <= Decimal::ZERO {
         return Err(OpError::BadInput(format!(
             "{} {} 於本期無在職日，不應列入計薪名單",
+            e.emp_no, e.name
+        )));
+    }
+
+    // Zero is "not agreed yet", not "unpaid": 0028 dropped the requirement that
+    // a roster entry carry an amount. Saying so here is the point of that
+    // change; a zero payslip would look like a computation rather than a gap.
+    if e.base_salary <= Decimal::ZERO {
+        return Err(OpError::BadInput(format!(
+            "{} {} 尚未設定底薪，請先在「員工名冊」填上再計薪",
             e.emp_no, e.name
         )));
     }
@@ -308,6 +318,13 @@ impl Operation for GetPayrollSummary {
         let detail_visible = ctx.actor_role == crate::ROLE_BOSS;
         let period_label = picked.map(|r| r.period.clone()).unwrap_or_else(|| "—".into());
 
+        // Same question the HR dashboard asks, asked the same way: is there a
+        // run for this month? Scanning the recent-runs list would answer it
+        // from a window instead of from the table.
+        let this_month = ctx.today.format("%Y-%m").to_string();
+        let next_period =
+            ctx.store.payroll_run(&this_month).await?.is_none().then_some(this_month);
+
         let summary = match picked {
             Some(r) => format!(
                 "讀薪資彙總 {} · {} 人應發 {} 代扣 {} 實發 {} · 與總帳 6111 {}",
@@ -343,6 +360,11 @@ impl Operation for GetPayrollSummary {
                     "逐人薪資明細限負責人檢視。目前身分可檢視彙總，無法檢視個別金額。"
                 },
                 "actor_role": ctx.actor_role,
+                // What the run form should start on: the current month when it
+                // has no run yet. Nothing to suggest once it is paid — the
+                // next period is not due until the month turns.
+                "next_period": next_period,
+                "suggested_pay_on": ctx.today,
                 "employer_in_ledger": false,
                 "employer_note": "公司負擔的勞健保與勞退不在薪資傳票內。",
             }),
@@ -587,6 +609,7 @@ impl Operation for RunPayroll {
                 pay_on,
                 slips: &slips,
                 bank_account_id,
+                income_code: SALARY_INCOME_CODE,
                 deduction_memo: &deduction_memo,
                 labor_version: &labor_v,
                 health_version: &health_v,
@@ -631,6 +654,7 @@ impl Operation for RunPayroll {
                     "income_code": SALARY_INCOME_CODE,
                     "income_name": income_name,
                     "rate": rate.to_string(),
+                    "rate_percent": percent(rate),
                     "note": income_note,
                     "ruleset": ruleset_json(wht_rs),
                 },
@@ -666,8 +690,6 @@ mod tests {
             dept_code: None,
             dept_label: None,
             title: "測試職稱".into(),
-            role_code: None,
-            role_name: None,
             employment_type: "full_time".into(),
             hired_on: hired,
             left_on: left,

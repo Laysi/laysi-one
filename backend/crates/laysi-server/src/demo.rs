@@ -98,6 +98,7 @@ fn ctx_for(
         objects: laysi_store::ObjectStore::from_env().ok(),
         actor: actor.to_string(),
         actor_role: role.to_string(),
+        username: None,
         employee_id,
         prompt: None,
         // Not Mcp: this is a person running a command, and the MCP tool
@@ -144,7 +145,7 @@ pub async fn seed(store: &Store, today: NaiveDate, force: bool) -> anyhow::Resul
 
     seed_company(&registry, &admin, &mut calls).await?;
     seed_people(&registry, &boss, today, &mut calls).await?;
-    seed_ledger(&registry, store, &boss, today, &mut calls).await?;
+    seed_ledger(&registry, &boss, today, &mut calls).await?;
     seed_budget(&registry, store, &boss, today, &mut calls).await?;
     seed_self_service(&registry, store, &boss, today, &mut calls).await?;
     seed_payroll(&registry, &boss, today, &mut calls).await?;
@@ -353,50 +354,17 @@ enum Step {
         /// that is present but excluded from the batch total.
         post: bool,
     },
-    /// Issuing consumes a track number and writes a voucher, so it belongs in
-    /// the same order as everything else. Only the net amount is stated: the
-    /// operation takes the VAT rate from the ruleset.
-    EInvoice { buyer: &'static str, tax_id: &'static str, item: &'static str, net: &'static str },
 }
 
 /// Three months of trading: capital, sales on credit, some of it collected,
 /// supplier bills and the monthly running costs.
 async fn seed_ledger(
     registry: &Registry,
-    store: &Store,
     ctx: &OpCtx,
     today: NaiveDate,
     calls: &mut usize,
 ) -> anyhow::Result<()> {
-    // The one write here that is not an operation. A track is a number range
-    // the tax bureau allocates to the company, and no operation records that
-    // allocation, so a fresh installation cannot issue an e-invoice at all
-    // until a row exists. Recording an allocation is provisioning rather than
-    // a business action; issuing still goes through the operation, which
-    // consumes the range and reports what is left.
-    sqlx::query(
-        "INSERT INTO einvoice_track (track, period, range_from, range_to, next_no)
-         VALUES ($1, $2, $3, $4, $3) ON CONFLICT (track) DO NOTHING",
-    )
-    .bind("KX")
-    .bind(today.format("%y%m").to_string())
-    .bind(38_472_901_i32)
-    .bind(38_472_950_i32)
-    .execute(store.pool())
-    .await
-    .context("配發示範用的發票字軌失敗")?;
-
     let mut steps: Vec<(NaiveDate, Step)> = vec![(back(today, 3, 1), Step::Opening)];
-
-    let issues = [
-        ("明泰科技股份有限公司", "24681357", "工業電腦主機板", "486000", 2, 5),
-        ("首鴻實業有限公司", "13572468", "連接器組件", "212500", 2, 18),
-        ("合眾電子股份有限公司", "86420975", "電源供應器", "358000", 1, 8),
-        ("大川五金行", "", "零件加工", "94200", 1, 22),
-    ];
-    for (buyer, tax_id, item, net, months, day) in issues {
-        steps.push((back(today, months, day), Step::EInvoice { buyer, tax_id, item, net }));
-    }
 
     let invoices = [
         ("AR-2601", "明泰科技股份有限公司", "486000", 3, 5, 30, true),
@@ -529,22 +497,6 @@ async fn seed_ledger(
                     call(registry, ctx, "post_voucher", json!({ "no": voucher_no(&out)? }), calls)
                         .await?;
                 }
-            }
-            Step::EInvoice { buyer, tax_id, item, net } => {
-                call(
-                    registry,
-                    ctx,
-                    "issue_einvoice",
-                    json!({
-                        "buyer": buyer,
-                        "buyer_tax_id": tax_id,
-                        "item": item,
-                        "net_amount": net,
-                        "issued_on": date,
-                    }),
-                    calls,
-                )
-                .await?;
             }
         }
     }

@@ -102,6 +102,7 @@ impl Operation for ListPayables {
                 "reconciled": diff.is_zero(),
                 "not_yet_posted": waiting.to_string(),
                 "overdue_count": overdue,
+                "vat": crate::ops::tax::vat_json(ctx.today)?,
             }),
             summary,
         ))
@@ -126,33 +127,51 @@ pub struct CreateApBillInput {
     pub billed_on: Option<NaiveDate>,
     /// Due date.
     pub due_on: NaiveDate,
-    /// Gross payable, tax inclusive. Amounts are strings in JSON.
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schemars(with = "String")]
-    pub amount: Money,
+    /// Tax-inclusive total, which is what the supplier is owed. Amounts are
+    /// strings in JSON. Give any one or two of `amount`, `net_amount` and
+    /// `tax_amount`; the rest follow from the VAT rules in force on the bill
+    /// date.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub amount: Option<Money>,
+    /// Amount before tax, debited to the expense or asset account.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub net_amount: Option<Money>,
+    /// Deductible input tax, debited to 1284. Send `0` for a receipt that
+    /// carries no deductible tax.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub tax_amount: Option<Money>,
     /// Debit account: any active, postable expense, inventory or prepayment
     /// account.
     pub debit_account_code: String,
     /// Payables control account, default 2101.
     #[serde(default = "default_payable_account")]
     pub payable_account_code: String,
+    /// Input tax account, default 1284. The VAT return reads the period
+    /// movement of this account.
+    #[serde(default = "default_input_tax_account")]
+    pub input_tax_account_code: String,
+}
+
+fn default_input_tax_account() -> String {
+    "1284".into()
 }
 
 fn validate_ap_bill(input: &CreateApBillInput, billed_on: NaiveDate) -> Result<(), OpError> {
     if input.bill_no.trim().is_empty() || input.vendor.trim().is_empty() {
         return Err(OpError::BadInput("帳單號碼與供應商都要填寫".into()));
     }
-    if input.amount <= Money::ZERO {
-        return Err(OpError::BadInput("應付金額必須大於零".into()));
-    }
     if input.due_on < billed_on {
         return Err(OpError::BadInput("到期日不得早於帳單日".into()));
     }
     if input.debit_account_code.trim().is_empty()
         || input.payable_account_code.trim().is_empty()
+        || input.input_tax_account_code.trim().is_empty()
     {
         return Err(OpError::BadInput(
-            "借方科目與應付控制科目都要填寫，建立帳單時會同時產生傳票".into(),
+            "借方科目、應付控制科目與進項稅額科目都要填寫，建立帳單時會同時產生傳票".into(),
         ));
     }
     Ok(())
@@ -169,7 +188,7 @@ impl Operation for CreateApBill {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立應付帳單，並一併產生待過帳傳票（借指定科目／貸應付帳款）。傳票過帳後才會列入未付合計；實際匯款另行執行。"
+        "建立應付帳單，並一併產生待過帳傳票（借指定科目＋進項稅額／貸應付帳款）。進項稅額依帳單日適用的稅率拆出，不可扣抵時填 0；傳票過帳後才會列入未付合計，實際匯款另行執行。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateApBillInput>()
@@ -179,6 +198,8 @@ impl Operation for CreateApBill {
         let input: CreateApBillInput = parse(input)?;
         let billed_on = input.billed_on.unwrap_or(ctx.today);
         validate_ap_bill(&input, billed_on)?;
+        let split =
+            crate::ops::tax::split_vat(billed_on, input.net_amount, input.tax_amount, input.amount)?;
         let bill = ctx
             .store
             .create_ap_bill(StoreCreateApBill {
@@ -187,22 +208,38 @@ impl Operation for CreateApBill {
                 memo: input.memo.trim(),
                 billed_on,
                 due_on: input.due_on,
-                amount: input.amount,
+                amount: split.total,
+                net_amount: split.net,
+                tax_amount: split.tax,
                 debit_account_code: input.debit_account_code.trim(),
                 payable_account_code: input.payable_account_code.trim(),
+                input_tax_account_code: input.input_tax_account_code.trim(),
                 created_by: &ctx.actor,
             })
             .await?;
         let no = bill.voucher_no.clone();
         let voucher = ctx.store.voucher_by_no(&no).await?;
         let summary = format!(
-            "建立應付 {} · {} {} · {} 待過帳",
+            "建立應付 {} · {} 含稅 {}（未稅 {} ＋ 進項稅額 {}，依 vat {}）· {} 待過帳",
             bill.bill_no,
             bill.vendor,
-            money(bill.amount),
+            money(split.total),
+            money(split.net),
+            money(split.tax),
+            split.version,
             bill.voucher_no
         );
-        Ok(OpOutcome::new(json!({ "bill": bill, "voucher": voucher }), summary).with_voucher(no))
+        Ok(OpOutcome::new(
+            json!({
+                "bill": bill,
+                "voucher": voucher,
+                "net_amount": split.net.to_string(),
+                "tax_amount": split.tax.to_string(),
+                "vat_version": split.version,
+            }),
+            summary,
+        )
+        .with_voucher(no))
     }
 }
 
@@ -276,9 +313,12 @@ mod tests {
             memo: String::new(),
             billed_on: Some(billed_on),
             due_on: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
-            amount: Decimal::from_str("1").unwrap(),
+            amount: Some(Decimal::from_str("1").unwrap()),
+            net_amount: None,
+            tax_amount: None,
             debit_account_code: "6199".into(),
             payable_account_code: "2101".into(),
+            input_tax_account_code: "1284".into(),
         };
         assert!(validate_ap_bill(&input, billed_on).unwrap_err().to_string().contains("到期日"));
         assert_eq!(CreateApBill.risk(), Risk::NeedsConfirm);

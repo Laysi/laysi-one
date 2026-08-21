@@ -126,7 +126,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
                         {s.supported ? (
                           <span className="tag tag--warn tag--static">可匯入</span>
                         ) : (
-                          <span className="tag tag--pale tag--static">尚未實作</span>
+                          <span className="tag tag--pale tag--static">尚未開放</span>
                         )}
                         {s.last_batch_no && (
                           <span className="cell-hint cell-hint--block num">{s.last_batch_no}</span>

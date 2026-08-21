@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrandMark } from './components/BrandMark';
 import { EntryDrawer } from './components/EntryDrawer';
 import { SetupWizard } from './components/SetupWizard';
+import { Accounts } from './screens/Accounts';
 import { Attendance } from './screens/Attendance';
 import { Banking } from './screens/Banking';
 import { Budget } from './screens/Budget';
@@ -18,7 +19,6 @@ import { FixedAssets } from './screens/FixedAssets';
 import { GeneralLedger } from './screens/GeneralLedger';
 import { HrDashboard } from './screens/HrDashboard';
 import { Insurance } from './screens/Insurance';
-import { Invoicing } from './screens/Invoicing';
 import { Login } from './screens/Login';
 import { McpTools } from './screens/McpTools';
 import { Me } from './screens/Me';
@@ -44,6 +44,7 @@ import {
   SCREEN_PATH,
   screenForPath,
   screenOp,
+  screenTitle,
   SYSTEM_NAV,
   visibleEntries,
   type NavEntry,
@@ -95,6 +96,13 @@ function sectionOf(id: ScreenId): Section {
   return found ?? 'fin';
 }
 
+/// A typed-in address that matches no screen. The root is not one: the first
+/// render replaces it with the landing screen's path.
+function unknownPath(path: string): string | null {
+  const clean = path.replace(/\/+$/, '') || '/';
+  return clean === '/' || screenForPath(clean) !== null ? null : path;
+}
+
 function screenAllowed(
   id: ScreenId,
   permissions: string[],
@@ -133,12 +141,18 @@ function Workspace() {
 
   const tabs = sections.filter((s) => TAB_SECTIONS.includes(s.section));
   const admin = sections.find((s) => s.section === 'sys');
+  const canWriteVouchers =
+    permissions.includes('create_voucher') && permissions.includes('list_accounts');
+  const canSetUp = permissions.includes('update_company_setting');
   const start = tabs[0] ?? sections[0];
   const landing = start?.screen ?? 'me';
   const [screen, setScreen] = useState<ScreenId>(() => {
     const asked = screenForPath(window.location.pathname);
     return asked && screenAllowed(asked, permissions, user?.employee_id) ? asked : landing;
   });
+  const [missingPath, setMissingPath] = useState<string | null>(() =>
+    unknownPath(window.location.pathname),
+  );
   const section = sectionOf(screen);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -162,6 +176,7 @@ function Workspace() {
 
   const go = useCallback((id: ScreenId) => {
     setScreen(id);
+    setMissingPath(null);
     setNavOpen(false);
     if (window.location.pathname !== SCREEN_PATH[id]) {
       window.history.pushState({ screen: id }, '', SCREEN_PATH[id]);
@@ -175,10 +190,13 @@ function Workspace() {
   };
 
   useEffect(() => {
-    if (window.location.pathname !== SCREEN_PATH[screen]) {
+    if (!missingPath && window.location.pathname !== SCREEN_PATH[screen]) {
       window.history.replaceState({ screen }, '', SCREEN_PATH[screen]);
     }
-    const onPop = () => setScreen(resolvePath.current(window.location.pathname));
+    const onPop = () => {
+      setScreen(resolvePath.current(window.location.pathname));
+      setMissingPath(unknownPath(window.location.pathname));
+    };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
@@ -194,13 +212,13 @@ function Workspace() {
     getMeta()
       .then((m) => {
         setMeta(m);
-        if (m.setup_required && !wizardPromptedRef.current) {
+        if (m.setup_required && canSetUp && !wizardPromptedRef.current) {
           wizardPromptedRef.current = true;
           setShowWizard(true);
         }
       })
       .catch(() => setMeta(null));
-  }, [reloadKey]);
+  }, [reloadKey, canSetUp]);
 
   useEffect(() => {
     if (section !== 'me' || !permissions.includes('list_my_punches')) {
@@ -270,7 +288,7 @@ function Workspace() {
       <aside id="laysi-nav" className={`sidebar${navOpen ? ' sidebar--open' : ''}`}>
         <div className="sidebar__brand">
 
-          <BrandMark height={26} />
+          <BrandMark height={14} />
           <div className="sidebar__company">{meta?.company ?? '　'}</div>
 
           {tabs.length > 1 && (
@@ -311,10 +329,14 @@ function Workspace() {
 
         {meta?.setup_required && !showWizard && (
           <div className="sidebar__setup">
-            <p className="sidebar__setup-note">尚未完成首次設定。</p>
-            <button className="btn btn--compact" onClick={() => setShowWizard(true)}>
-              繼續設定
-            </button>
+            <p className="sidebar__setup-note">
+              {canSetUp ? '尚未完成首次設定。' : '尚未完成首次設定，請系統管理員設定公司資料。'}
+            </p>
+            {canSetUp && (
+              <button className="btn btn--compact" onClick={() => setShowWizard(true)}>
+                繼續設定
+              </button>
+            )}
           </div>
         )}
 
@@ -350,7 +372,7 @@ function Workspace() {
             ☰
           </button>
           <span className="header__brand">
-            <BrandMark height={18} />
+            <BrandMark height={12} />
           </span>
 
           <div className="header__section">{SECTION_LABEL[section]}</div>
@@ -358,7 +380,7 @@ function Workspace() {
 
           <span className="spacer" />
 
-          {section === 'fin' && (
+          {section === 'fin' && canWriteVouchers && (
             <div className="header__actions">
               <button className="btn" onClick={() => setDrawer(true)}>
                 ＋ 建立傳票
@@ -374,22 +396,20 @@ function Workspace() {
                   {punch.today_punches.out_at ? ` – ${punch.today_punches.out_at}` : ' 上班中'}
                 </span>
               )}
-              {punch.next_kind ? (
-                <button
-                  className="btn"
-                  disabled={punching}
-                  onClick={() => void punchNow(punch.next_kind as 'in' | 'out')}
-                >
-                  {punching ? '記錄中…' : `${punch.next_kind_label}打卡`}
-                </button>
-              ) : (
-                <button
-                  className="btn btn--secondary"
-                  onClick={() => go('meclock')}
-                >
-                  今日已完成
-                </button>
-              )}
+              {screen !== 'meclock' &&
+                (punch.next_kind ? (
+                  <button
+                    className="btn"
+                    disabled={punching}
+                    onClick={() => void punchNow(punch.next_kind as 'in' | 'out')}
+                  >
+                    {punching ? '記錄中…' : `${punch.next_kind_label}打卡`}
+                  </button>
+                ) : (
+                  <button className="btn btn--secondary" onClick={() => go('meclock')}>
+                    今日已完成
+                  </button>
+                ))}
             </div>
           )}
         </header>
@@ -406,6 +426,16 @@ function Workspace() {
               onProgress={reload}
               onExit={() => setShowWizard(false)}
             />
+          ) : missingPath ? (
+            <div className="placeholder">
+              <div className="placeholder__title">找不到這一頁</div>
+              <p className="num">{missingPath}</p>
+              <div className="placeholder__actions">
+                <button className="btn" onClick={() => go(landing)}>
+                  回到{screenTitle(landing)}
+                </button>
+              </div>
+            </div>
           ) : (
             <>
               {screen === 'dash' && <Dashboard onGo={go} reloadKey={reloadKey} />}
@@ -421,9 +451,6 @@ function Workspace() {
               {screen === 'bank' && (
                 <Banking onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
               )}
-              {screen === 'inv' && (
-                <Invoicing onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
-              )}
               {screen === 'tax' && <Tax reloadKey={reloadKey} />}
               {screen === 'fa' && (
                 <FixedAssets onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
@@ -437,7 +464,12 @@ function Workspace() {
               {screen === 'imp' && (
                 <Imports onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
               )}
-              {screen === 'setup' && <Setup onToast={showToast} reloadKey={reloadKey} />}
+              {screen === 'setup' && (
+                <Setup onGo={go} onToast={showToast} reloadKey={reloadKey} />
+              )}
+              {screen === 'acc' && (
+                <Accounts onGo={go} onToast={showToast} reloadKey={reloadKey} />
+              )}
               {screen === 'roles' && <Roles onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'mcp' && <McpTools reloadKey={reloadKey} />}
               {screen === 'sec' && <Security onToast={showToast} reloadKey={reloadKey} />}

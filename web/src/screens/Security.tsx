@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import {
+  businessTime,
   callOp,
   getHealthz,
   OpFailed,
@@ -13,14 +14,6 @@ import {
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
-}
-
-function when(v: string | null): string {
-  if (!v) return '尚未使用';
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return v;
-  const two = (n: number) => String(n).padStart(2, '0');
-  return `${two(d.getMonth() + 1)}/${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }
 
 export function Security({ onToast, reloadKey }: Props) {
@@ -116,7 +109,7 @@ export function Security({ onToast, reloadKey }: Props) {
                   <span className="fact__key">
                     {r.label}
                     <span className={`tag${r.enforced ? ' tag--warn tag--static' : ' tag--pale'}`}>
-                      {r.enforced ? '執行中' : '尚未執行'}
+                      {r.enforced ? '執行中' : '未啟用'}
                     </span>
                   </span>
                   <span className="fact__value">
@@ -126,10 +119,7 @@ export function Security({ onToast, reloadKey }: Props) {
                 </div>
               ))}
             </div>
-            <p className="recon">
-              {policy.enforced_count} 條執行中，{policy.total - policy.enforced_count} 條尚未執行。
-              「AI 禁止事項」該列在「MCP 與 AI」調整。
-            </p>
+            <p className="recon">「AI 禁止事項」在「MCP 與 AI」調整。</p>
 
             <h3 className="section-title section-title--spaced">系統健康</h3>
             <div className="card fact-card">
@@ -141,7 +131,7 @@ export function Security({ onToast, reloadKey }: Props) {
                 </span>
               </div>
               <div className="fact">
-                <span className="fact__key">物件儲存</span>
+                <span className="fact__key">檔案儲存</span>
                 <span className="fact__value">
                   {hz ? (hz.rustfs.ok ? '正常' : '無法連線') : '無法讀取'}
                   <span className="fact__note">{hz?.rustfs.endpoint ?? '由 /healthz 回報'}</span>
@@ -171,7 +161,8 @@ export function Security({ onToast, reloadKey }: Props) {
                 <span className="fact__key">稽核紀錄</span>
                 <span className="fact__value">
                   <span className="num">
-                    {health.stats.audit_entries} 筆（{health.stats.audit_blocked} 筆被擋下）
+                    {health.stats.audit_entries} 筆（{health.stats.audit_blocked} 筆被權限擋下、
+                    {health.stats.audit_errors} 筆被規則拒絕）
                   </span>
                 </span>
               </div>
@@ -216,7 +207,7 @@ export function Security({ onToast, reloadKey }: Props) {
                     <span className="fact__note">
                       代表 {t.actor}
                       {t.actor_role_name ? `（${t.actor_role_name}）` : ''} · 最後使用{' '}
-                      <span className="num">{when(t.last_used_at)}</span> · {t.expiry_note}
+                      <span className="num">{businessTime(t.last_used_at, '尚未使用')}</span> · {t.expiry_note}
                       {t.rotate_due_on && (
                         <>
                           （<span className="num">{t.rotate_due_on}</span> 到期）
@@ -242,23 +233,12 @@ export function Security({ onToast, reloadKey }: Props) {
               <button className="btn btn--compact" onClick={() => void issue()}>
                 核發新 Token
               </button>
-              <button className="btn btn--compact btn--secondary btn--off" disabled>
-                立即備份
-              </button>
-              <button className="btn btn--compact btn--secondary btn--off" disabled>
-                匯出全部資料
-              </button>
             </div>
 
             <p className="recon recon--off">{tokens.wiring_note}</p>
 
             <p className="hint">
-              新發的 Token 代表 <span className="num">{me.display_name}</span>
-              （角色 <span className="num">{me.role}</span>）。
-            </p>
-
-            <p className="hint">
-              Token 外洩時任何人都能立即撤銷。
+              新發的 Token 代表<span className="num">{me.display_name}</span>。
             </p>
           </section>
         </div>

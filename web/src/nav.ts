@@ -4,7 +4,6 @@ export type ScreenId =
   | 'ar'
   | 'ap'
   | 'bank'
-  | 'inv'
   | 'tax'
   | 'exp'
   | 'fa'
@@ -14,6 +13,7 @@ export type ScreenId =
   | 'imp'
 
   | 'setup'
+  | 'acc'
   | 'roles'
   | 'mcp'
   | 'sec'
@@ -55,7 +55,6 @@ export const FINANCE_NAV: NavEntry[] = [
   { kind: 'head', label: '日常' },
   { kind: 'item', id: 'dash', label: '總覽', op: 'get_dashboard', ready: true },
   { kind: 'item', id: 'gl', label: '傳票 · 總帳', op: 'search_vouchers', ready: true, badge: 'pending' },
-  { kind: 'item', id: 'inv', label: '電子發票', op: 'list_einvoices', ready: true },
   { kind: 'head', label: '收付' },
   { kind: 'item', id: 'ar', label: '應收帳款', op: 'get_ar_aging', ready: true },
   { kind: 'item', id: 'ap', label: '應付帳款', op: 'list_payables', ready: true },
@@ -75,6 +74,7 @@ export const FINANCE_NAV: NavEntry[] = [
 export const SYSTEM_NAV: NavEntry[] = [
   { kind: 'head', label: '設定' },
   { kind: 'item', id: 'setup', label: '基礎設定', op: 'get_company_settings', ready: true },
+  { kind: 'item', id: 'acc', label: '帳號管理', op: 'list_user_accounts', ready: true },
   { kind: 'item', id: 'roles', label: '角色與核准', op: 'list_roles', ready: true },
   { kind: 'head', label: 'AI 與監控' },
   { kind: 'item', id: 'mcp', label: 'MCP 與 AI', op: 'list_ai_audit', ready: true },
@@ -143,7 +143,6 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
 
   dash: '/finance',
   gl: '/finance/ledger',
-  inv: '/finance/einvoice',
   ar: '/finance/receivables',
   ap: '/finance/payables',
   bank: '/finance/bank',
@@ -164,6 +163,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   wht: '/hr/withholding',
 
   setup: '/system/settings',
+  acc: '/system/accounts',
   roles: '/system/roles',
   mcp: '/system/mcp',
   sec: '/system/security',
@@ -183,4 +183,9 @@ const ALL_NAV: NavEntry[] = [...FINANCE_NAV, ...HR_NAV, ...ME_NAV, ...SYSTEM_NAV
 export function screenOp(id: ScreenId): string | null {
   const item = ALL_NAV.find((e): e is NavItem => e.kind === 'item' && e.id === id);
   return item ? item.op : null;
+}
+
+export function screenTitle(id: ScreenId): string {
+  const item = ALL_NAV.find((e): e is NavItem => e.kind === 'item' && e.id === id);
+  return item ? item.label : '首頁';
 }

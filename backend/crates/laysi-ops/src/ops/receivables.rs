@@ -12,10 +12,9 @@
 //! receipt as awaiting posting.
 //!
 //! [`CreateArInvoice`] stays here rather than in `masters.rs`: receivables are
-//! transactions, and not every one of them gets an e-invoice. It shares the
-//! store's "subsidiary row plus unposted voucher" transaction with
-//! `issue_einvoice`, so B2B monthly settlement and overseas customers do not
-//! have to pretend an e-invoice exists.
+//! transactions, not master data. It splits the output tax onto 2211 because
+//! the VAT return reads the period movement of that account and nothing else
+//! writes to it; a zero-rated export says so with a zero tax amount.
 
 use crate::{money, parse, schema_of, Channel, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -181,7 +180,12 @@ impl Operation for ListReceivables {
         let summary =
             format!("查詢應收 · {} 筆未收 {} · 逾期 {overdue} 筆", rows.len(), money(total));
         Ok(OpOutcome::new(
-            json!({ "invoices": rows, "total": total.to_string(), "overdue_count": overdue }),
+            json!({
+                "invoices": rows,
+                "total": total.to_string(),
+                "overdue_count": overdue,
+                "vat": crate::ops::tax::vat_json(ctx.today)?,
+            }),
             summary,
         ))
     }
@@ -189,6 +193,10 @@ impl Operation for ListReceivables {
 
 fn default_receivable_account() -> String {
     "1131".into()
+}
+
+fn default_output_tax_account() -> String {
+    "2211".into()
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -205,32 +213,46 @@ pub struct CreateArInvoiceInput {
     pub issued_on: Option<NaiveDate>,
     /// Due date.
     pub due_on: NaiveDate,
-    /// Total receivable. Amounts are strings in JSON.
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schemars(with = "String")]
-    pub amount: Money,
+    /// Tax-inclusive total, which is what the customer owes. Amounts are
+    /// strings in JSON. Give any one or two of `amount`, `net_amount` and
+    /// `tax_amount`; the rest follow from the VAT rules in force on the issue
+    /// date.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub amount: Option<Money>,
+    /// Amount before tax, credited to the revenue account.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub net_amount: Option<Money>,
+    /// Output tax, credited to 2211. Send `0` for a zero-rated export or an
+    /// exempt sale.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub tax_amount: Option<Money>,
     /// Credit revenue account.
     pub revenue_account_code: String,
     /// Receivables control account, default 1131.
     #[serde(default = "default_receivable_account")]
     pub receivable_account_code: String,
+    /// Output tax account, default 2211. The VAT return reads the period
+    /// movement of this account.
+    #[serde(default = "default_output_tax_account")]
+    pub output_tax_account_code: String,
 }
 
 fn validate_ar_invoice(input: &CreateArInvoiceInput, issued_on: NaiveDate) -> Result<(), OpError> {
     if input.invoice_no.trim().is_empty() || input.customer.trim().is_empty() {
         return Err(OpError::BadInput("應收單號與客戶都要填寫".into()));
     }
-    if input.amount <= Money::ZERO {
-        return Err(OpError::BadInput("應收金額必須大於零".into()));
-    }
     if input.due_on < issued_on {
         return Err(OpError::BadInput("到期日不得早於發生日".into()));
     }
     if input.revenue_account_code.trim().is_empty()
         || input.receivable_account_code.trim().is_empty()
+        || input.output_tax_account_code.trim().is_empty()
     {
         return Err(OpError::BadInput(
-            "收益科目與應收控制科目都要填寫，建立應收時會同時產生傳票".into(),
+            "收益科目、應收控制科目與代收營業稅科目都要填寫，建立應收時會同時產生傳票".into(),
         ));
     }
     Ok(())
@@ -247,7 +269,7 @@ impl Operation for CreateArInvoice {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立不需電子發票的應收單據，並一併產生待過帳傳票（借應收帳款／貸指定收益科目）。適用 B2B 月結與國外客戶；傳票過帳後才列入未收合計。"
+        "建立應收單據，並一併產生待過帳傳票（借應收帳款／貸指定收益科目＋代收營業稅）。營業稅依發生日適用的稅率拆出，零稅率與免稅填 0；傳票過帳後才列入未收合計。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateArInvoiceInput>()
@@ -257,6 +279,8 @@ impl Operation for CreateArInvoice {
         let input: CreateArInvoiceInput = parse(input)?;
         let issued_on = input.issued_on.unwrap_or(ctx.today);
         validate_ar_invoice(&input, issued_on)?;
+        let split =
+            crate::ops::tax::split_vat(issued_on, input.net_amount, input.tax_amount, input.amount)?;
         let invoice = ctx
             .store
             .create_ar_invoice(StoreCreateArInvoice {
@@ -264,24 +288,36 @@ impl Operation for CreateArInvoice {
                 customer: input.customer.trim(),
                 issued_on,
                 due_on: input.due_on,
-                amount: input.amount,
+                amount: split.total,
+                net_amount: split.net,
+                tax_amount: split.tax,
                 memo: input.memo.trim(),
                 receivable_account_code: input.receivable_account_code.trim(),
                 revenue_account_code: input.revenue_account_code.trim(),
+                output_tax_account_code: input.output_tax_account_code.trim(),
                 created_by: &ctx.actor,
             })
             .await?;
         let no = invoice.voucher_no.clone();
         let voucher = ctx.store.voucher_by_no(&no).await?;
         let summary = format!(
-            "建立應收 {} · {} {} · {} 待過帳",
+            "建立應收 {} · {} 含稅 {}（未稅 {} ＋ 營業稅 {}，依 vat {}）· {} 待過帳",
             invoice.invoice_no,
             invoice.customer,
-            money(invoice.amount),
+            money(split.total),
+            money(split.net),
+            money(split.tax),
+            split.version,
             invoice.voucher_no
         );
         Ok(OpOutcome::new(
-            json!({ "invoice": invoice, "voucher": voucher }),
+            json!({
+                "invoice": invoice,
+                "voucher": voucher,
+                "net_amount": split.net.to_string(),
+                "tax_amount": split.tax.to_string(),
+                "vat_version": split.version,
+            }),
             summary,
         )
         .with_voucher(no))
@@ -381,9 +417,12 @@ mod tests {
             memo: String::new(),
             issued_on: Some(issued_on),
             due_on: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
-            amount: Decimal::from_str("1").unwrap(),
+            amount: Some(Decimal::from_str("1").unwrap()),
+            net_amount: None,
+            tax_amount: None,
             revenue_account_code: "4111".into(),
             receivable_account_code: "1131".into(),
+            output_tax_account_code: "2211".into(),
         };
         assert!(
             validate_ar_invoice(&input, issued_on)
@@ -392,6 +431,37 @@ mod tests {
                 .contains("到期日")
         );
         assert_eq!(CreateArInvoice.risk(), Risk::NeedsConfirm);
-        assert!(CreateArInvoice.summary().contains("B2B"));
+        assert!(CreateArInvoice.summary().contains("代收營業稅"));
+    }
+
+    /// Without the tax line the 401 return is short by exactly the output tax,
+    /// because the return reads the period movement of 2211 and nothing else
+    /// writes to it.
+    #[test]
+    fn a_receivable_splits_its_output_tax_out_of_the_quoted_total() {
+        let on = NaiveDate::from_ymd_opt(2026, 7, 2).unwrap();
+        let split = crate::ops::tax::split_vat(
+            on,
+            None,
+            None,
+            Some(Decimal::from_str("47250").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(split.net, Decimal::from_str("45000").unwrap());
+        assert_eq!(split.tax, Decimal::from_str("2250").unwrap());
+        assert_eq!(split.net + split.tax, split.total);
+
+        // A zero-rated export is an explicit zero, not a flag.
+        let export = crate::ops::tax::split_vat(
+            on,
+            Some(Decimal::from_str("45000").unwrap()),
+            Some(Decimal::ZERO),
+            None,
+        )
+        .unwrap();
+        assert_eq!(export.total, Decimal::from_str("45000").unwrap());
+
+        // Neither figure given: refused, never guessed at zero.
+        assert!(crate::ops::tax::split_vat(on, None, None, None).is_err());
     }
 }

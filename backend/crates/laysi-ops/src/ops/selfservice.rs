@@ -31,8 +31,9 @@
 //! cannot derive it from a date range.
 
 use crate::ops::attendance::{
-    leave_kind_label, leave_status_label, punch_days, punch_kind_label, reconciliation, summarise,
-    valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
+    business_instant, correction_auto_approves, leave_kind_label, leave_status_label, punch_days,
+    punch_correction_json, punch_correction_status_label, punch_kind_label, reconciliation,
+    summarise, valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
@@ -41,13 +42,13 @@ use crate::ops::insurance::ruleset_json;
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::Engine;
-use chrono::{Datelike, NaiveDate, Utc};
-use laysi_domain::Money;
+use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
+use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES};
 use laysi_store::{
-    AttendanceRow, DocumentRow, Employee, LeaveRequest, NewLeaveRequest, Payslip, ReserveDocument,
-    SubmitExpenseClaim,
+    AttendanceRow, DocumentRow, Employee, LeaveRequest, NewLeaveRequest, NewPunchCorrection,
+    Payslip, ReserveDocument, SubmitExpenseClaim,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -68,6 +69,8 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(AttachMyExpenseReceipt),
         Box::new(PunchClock),
         Box::new(ListMyPunches),
+        Box::new(SubmitMyPunchCorrection),
+        Box::new(ListMyPunchCorrections),
         Box::new(IssueMyApiToken),
         Box::new(ListMyApiTokens),
         Box::new(RevokeMyApiToken),
@@ -190,12 +193,12 @@ fn profile_json(employee: &Employee, months: u32) -> Value {
         "dept_code": employee.dept_code,
         "dept_label": employee.dept_label,
         "title": employee.title,
-        "role_code": employee.role_code,
-        "role_name": employee.role_name,
         "employment_type": employee.employment_type,
+        "employment_label": crate::ops::employees::employment_label(&employee.employment_type),
         "hired_on": employee.hired_on,
         "left_on": employee.left_on,
         "status": employee.status,
+        "status_label": crate::ops::employees::status_label(&employee.status),
         "service_months": months,
         "service_label": service_label(months),
         "bank_account_masked": masked_bank_account(&employee.bank_account),
@@ -335,10 +338,13 @@ impl Operation for GetMyHome {
                 "profile": profile_json(&employee, months),
                 "attendance_month": month,
                 "attendance": attendance.as_ref().map(attendance_json),
+                // The summary and the punch record are two sources. Saying
+                // 「尚無差勤資料」 on a screen whose header shows today's
+                // clock-in reads as the system having lost it.
                 "attendance_note": if attendance.is_some() {
-                    "本月差勤已有來源資料。"
+                    "本月差勤彙總已由差勤系統匯入。"
                 } else {
-                    "本月尚無差勤資料，不代表休假與遲到皆為零。"
+                    "本月沒有匯入的差勤彙總。休假與遲到請看打卡紀錄。"
                 },
                 "annual_leave": annual_leave_json(
                     ctx.today.year(),
@@ -456,7 +462,7 @@ impl Operation for ListMyLeaveRequests {
             .filter(|request| request.status == "pending")
             .count();
         let summary = format!(
-            "讀 {} 的休假單 · {} 張（{pending} 張等簽）· 特休依特休規則 {} 現算",
+            "讀{}的休假單 · {} 張（{pending} 張等簽）· 特休依特休規則 {} 現算",
             employee.name,
             requests.len(),
             annual_rs.version
@@ -1144,11 +1150,25 @@ async fn my_mcp_tools(ctx: &OpCtx) -> Result<Value, OpError> {
     }
     usable.sort();
     blocked.sort();
+    let role_name = ctx
+        .store
+        .roles()
+        .await?
+        .into_iter()
+        .find(|r| r.code == ctx.actor_role)
+        .map(|r| r.name)
+        .unwrap_or_else(|| ctx.actor_role.clone());
     Ok(json!({
         "usable": usable,
         "blocked_for_ai": blocked,
         "role": ctx.actor_role,
-        "note": "可用工具是你的角色權限與 MCP 工具開關的交集。權限缺少要找負責人調整角色；工具對 AI 關閉則要在「MCP 與 AI」開啟。",
+        "role_name": role_name,
+        // Where to go next is left out on purpose: the role is fixed when
+        // the account is created, the permission matrix is the
+        // administrator's, and the tool switches have no operation behind
+        // them. Naming any of the three would send the reader somewhere that
+        // cannot help.
+        "note": "可用工具是你的角色權限與 MCP 工具開關的交集。",
     }))
 }
 
@@ -1311,7 +1331,7 @@ impl Operation for ListMyApiTokens {
                 "live_count": live,
                 "tools": tools,
                 "endpoint": "/mcp",
-                "storage_note": "系統只存不可還原的雜湊與前八碼，明文只在核發的那一次回傳。",
+                "storage_note": "明文只在核發時顯示一次。",
                 "scope_note": "只列出 owner_employee_id 等於 ctx.employee_id 的 Token；負責人代發的不在此列。",
             }),
             summary,
@@ -1363,6 +1383,149 @@ impl Operation for RevokeMyApiToken {
                 "token": { "id": token.id, "name": token.name, "prefix": token.prefix,
                            "revoked_at": token.revoked_at },
                 "scope_note": "所屬員工由 ctx.employee_id 決定並直接寫進 WHERE 條件。",
+            }),
+            summary,
+        ))
+    }
+}
+
+
+// My punch corrections
+//
+// The person who knows a punch is missing is the person who cannot record
+// one. These two put that back within reach without letting anybody reach
+// another person's day: neither input names an employee, so the subject can
+// only be ctx.employee_id.
+
+struct SubmitMyPunchCorrection;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SubmitMyPunchCorrectionInput {
+    /// The working day the punch belongs to.
+    pub punched_on: NaiveDate,
+    /// `in` for arrival, `out` for departure.
+    pub kind: String,
+    /// The time it was, `HH:MM:SS` or `HH:MM`. A remembered time rarely has
+    /// a second, so `HH:MM` is stored as second zero.
+    pub at: String,
+    /// Why it is being asked for. Kept on the record and shown to whoever
+    /// decides.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[async_trait]
+impl Operation for SubmitMyPunchCorrection {
+    fn name(&self) -> &'static str {
+        "submit_my_punch_correction"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "替目前登入帳號所連結的員工送一張打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為送出即通過時，同一個交易就寫進打卡紀錄。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<SubmitMyPunchCorrectionInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: SubmitMyPunchCorrectionInput = parse(input)?;
+        if !PUNCH_KINDS.contains(&i.kind.as_str()) {
+            return Err(OpError::BadInput(format!(
+                "打卡別只接受 in（上班）或 out（下班），收到「{}」",
+                i.kind
+            )));
+        }
+        let text = i.at.trim();
+        let at = NaiveTime::parse_from_str(text, "%H:%M:%S")
+            .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M"))
+            .map_err(|_| {
+                OpError::BadInput(format!("時間要寫成 HH:MM:SS 或 HH:MM，收到的是「{}」", i.at))
+            })?;
+        if i.punched_on > ctx.today {
+            return Err(OpError::BadInput("不能替未來的日期送補登申請".into()));
+        }
+
+        let employee = actor_employee(ctx).await?;
+        let auto = correction_auto_approves(ctx).await?;
+        let saved = ctx
+            .store
+            .submit_punch_correction(
+                NewPunchCorrection {
+                    employee_id: employee.id,
+                    punched_on: i.punched_on,
+                    kind: &i.kind,
+                    punched_at: business_instant(i.punched_on, at),
+                    reason: i.reason.as_deref().unwrap_or("").trim(),
+                    actor: &ctx.actor,
+                },
+                auto,
+            )
+            .await?;
+
+        let summary = format!(
+            "{} {} 的{}卡補登申請 {} · {}",
+            employee.emp_no,
+            saved.punched_on,
+            punch_kind_label(&saved.kind),
+            business_time(saved.punched_at).format(PUNCH_TIME),
+            punch_correction_status_label(&saved.status)
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "correction": punch_correction_json(&saved),
+                "punch_written": auto,
+                "next_note": match auto {
+                    true => "已寫進打卡紀錄，來源標示為補登。",
+                    false => "人資決定之後才會寫進打卡紀錄。",
+                },
+                "scope_note": "employee_id 由已驗證 session 的 ctx.employee_id 決定，輸入不含可指定他人的欄位。",
+            }),
+            summary,
+        ))
+    }
+}
+
+struct ListMyPunchCorrections;
+
+#[async_trait]
+impl Operation for ListMyPunchCorrections {
+    fn name(&self) -> &'static str {
+        "list_my_punch_corrections"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+
+    fn summary(&self) -> &'static str {
+        "讀本人送出的打卡補登申請與目前狀態。只回登入身分所連結的員工，輸入不含任何欄位。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<crate::Empty>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
+        let employee = actor_employee(ctx).await?;
+        let corrections = ctx.store.punch_corrections(true, Some(employee.id)).await?;
+        let waiting = corrections.iter().filter(|c| c.status == "submitted").count();
+        let auto = correction_auto_approves(ctx).await?;
+
+        let summary = format!(
+            "讀本人補登申請 · {} 張（{waiting} 張待審核）",
+            corrections.len()
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "corrections": corrections.iter().map(punch_correction_json).collect::<Vec<_>>(),
+                "waiting_count": waiting,
+                "auto_approve": auto,
+                "scope_note": "僅查詢已驗證 session 的 ctx.employee_id；輸入不含可指定他人的欄位。",
             }),
             summary,
         ))
@@ -1449,6 +1612,14 @@ mod tests {
             // whichever month is asked for, the rows still come from
             // ctx.employee_id.
             ("list_my_punches", BTreeSet::from(["month"])),
+            // `punched_on`, `kind` and `at` are the facts of the request;
+            // none of them can point at another person's day, because the
+            // employee is ctx.employee_id and never an input.
+            (
+                "submit_my_punch_correction",
+                BTreeSet::from(["punched_on", "kind", "at", "reason"]),
+            ),
+            ("list_my_punch_corrections", BTreeSet::new()),
             (
                 "issue_my_api_token",
                 BTreeSet::from(["label", "scope", "rotate_days"]),

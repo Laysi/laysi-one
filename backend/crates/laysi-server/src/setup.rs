@@ -49,9 +49,9 @@ const CREATED_BY: &str = "web-setup";
 /// purpose: it is used once in the life of an installation, and it is the one
 /// place where a wrong `SETUP_TOKEN` can be guessed.
 pub(crate) const ATTEMPTS_PER_MINUTE: u32 = 5;
-/// The rate limiter is keyed by token id for `/mcp`; this endpoint has no
-/// token, so all callers share one bucket.
-const RATE_BUCKET: i32 = 0;
+/// This endpoint is called once in the life of an installation and has no
+/// caller identity to bucket by, so every caller shares one bucket.
+const RATE_BUCKET: &str = "bootstrap";
 
 const USERNAME_MIN_CHARS: usize = 3;
 const USERNAME_MAX_CHARS: usize = 64;
@@ -126,11 +126,9 @@ fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
     if !(USERNAME_MIN_CHARS..=USERNAME_MAX_CHARS).contains(&count) {
         return Err("登入名稱需要 3 到 64 個字元");
     }
-    if !username
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
-        return Err("登入名稱只能使用英文字母、數字與 . _ - 三種符號");
+    // Same rule as `create_user_account`: only control characters are refused.
+    if username.chars().any(char::is_control) {
+        return Err("登入名稱不能包含控制字元");
     }
 
     let display_name = input.display_name.trim().to_string();
@@ -154,7 +152,7 @@ fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
     // with the password its owner chose, so unlike `laysi-admin create-user`
     // there is no temporary password to force a change from.
     if input.password.chars().count() < MIN_PASSWORD_CHARS {
-        return Err("密碼至少需要 12 個字元");
+        return Err("密碼至少需要 8 個字元");
     }
 
     Ok(FirstAccount { username, display_name, email, password: input.password })
@@ -372,12 +370,14 @@ mod tests {
     }
 
     #[test]
-    fn usernames_are_limited_to_characters_that_can_be_typed_at_a_login_prompt() {
+    fn usernames_are_bounded_by_length_and_refuse_only_control_characters() {
         assert!(validate(input("ow", GOOD_PASSWORD)).is_err());
-        assert!(validate(input("負責人", GOOD_PASSWORD)).is_err());
-        assert!(validate(input("owner name", GOOD_PASSWORD)).is_err());
-        assert!(validate(input("owner'--", GOOD_PASSWORD)).is_err());
+        assert!(validate(input(&"o".repeat(65), GOOD_PASSWORD)).is_err());
+        assert!(validate(input("own\ter", GOOD_PASSWORD)).is_err());
         assert!(validate(input("own.er_1-2", GOOD_PASSWORD)).is_ok());
+        assert!(validate(input("負責人", GOOD_PASSWORD)).is_ok());
+        assert!(validate(input("owner name", GOOD_PASSWORD)).is_ok());
+        assert!(validate(input("owner'--", GOOD_PASSWORD)).is_ok());
     }
 
     /// The password is chosen by its owner here, so it must meet the same

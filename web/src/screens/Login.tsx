@@ -56,7 +56,7 @@ export function Login() {
       <div className="card login__panel">
         <div className="login__brand">
 
-          <BrandMark height={30} />
+          <BrandMark height={20} />
         </div>
 
         {mustChange ? (
@@ -76,7 +76,7 @@ export function Login() {
                 />
               </label>
               <label className="login__field">
-                <span className="login__label">新密碼（至少 12 個字元）</span>
+                <span className="login__label">新密碼（至少 8 個字元）</span>
                 <input
                   className="entry-input"
                   type="password"

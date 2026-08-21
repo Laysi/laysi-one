@@ -34,7 +34,34 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(ListFixedAssets), Box::new(PreviewDepreciation), Box::new(RunDepreciation)]
+    vec![
+        Box::new(ListFixedAssets),
+        Box::new(CreateFixedAsset),
+        Box::new(PreviewDepreciation),
+        Box::new(RunDepreciation),
+    ]
+}
+
+/// Where an asset's cost and its accumulated depreciation land by default.
+/// Overridable per asset; both are only the starting point of the dropdowns.
+const DEFAULT_ASSET_ACCOUNT: &str = "1601";
+const DEFAULT_ACCUM_ACCOUNT: &str = "1602";
+
+/// The distinct ledger accounts the register actually uses, sorted. Empty
+/// register falls back to the default so the reconciliation still has
+/// something to read.
+fn account_codes(
+    assets: &[FixedAsset],
+    pick: impl Fn(&FixedAsset) -> &String,
+    fallback: &str,
+) -> Vec<String> {
+    let mut codes: Vec<String> = assets.iter().map(|a| pick(a).clone()).collect();
+    codes.sort();
+    codes.dedup();
+    if codes.is_empty() {
+        codes.push(fallback.to_string());
+    }
+    codes
 }
 
 /// Months in a year. A calendar constant, not a regulation value.
@@ -159,7 +186,7 @@ impl Operation for ListFixedAssets {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀固定資產：成本、累計折舊、帳面淨額與耐用年數（年數查自耐用年數表，不逐筆設定），並與 1601 辦公設備、1602 累計折舊的總帳餘額對帳"
+        "讀固定資產：成本、累計折舊、帳面淨額與耐用年數（年數查自耐用年數表，不逐筆設定），並與各資產科目與累計折舊科目的總帳餘額對帳"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListFixedAssetsInput>()
@@ -220,16 +247,37 @@ impl Operation for ListFixedAssets {
         }
 
         // Two independent paths: the asset register sums itself, the ledger
-        // computes its own balance.
-        let gl_cost = ctx.store.balance_of(&["1601"], true).await?;
-        let gl_accum = ctx.store.balance_of(&["1602"], false).await?;
+        // computes its own balance. Which ledger accounts to compare against
+        // comes from the register, not from a constant: an asset may be
+        // carried on 1501 rather than 1601, and reading a fixed pair would
+        // report a difference that is really "you looked at the wrong
+        // account".
+        let cost_codes = account_codes(&assets, |a| &a.gl_code, DEFAULT_ASSET_ACCOUNT);
+        let accum_codes = account_codes(&assets, |a| &a.accum_gl_code, DEFAULT_ACCUM_ACCOUNT);
+        let borrowed: Vec<&str> = cost_codes.iter().map(String::as_str).collect();
+        let gl_cost = ctx.store.balance_of(&borrowed, true).await?;
+        let borrowed: Vec<&str> = accum_codes.iter().map(String::as_str).collect();
+        let gl_accum = ctx.store.balance_of(&borrowed, false).await?;
+        let chart = ctx.store.accounts().await?;
+        let label_of = |codes: &[String]| {
+            codes
+                .iter()
+                .map(|code| match chart.iter().find(|a| &a.code == code) {
+                    Some(a) => format!("{} {}", a.code, a.name),
+                    None => code.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("、")
+        };
+        let cost_accounts_label = label_of(&cost_codes);
+        let accum_accounts_label = label_of(&accum_codes);
         let cost_gap = cost_total - gl_cost;
         let accum_gap = accum_total - gl_accum;
         let reconciled = cost_gap.is_zero() && accum_gap.is_zero();
 
         let runs = ctx.store.depreciation_runs(12).await?;
         let summary = format!(
-            "讀取固定資產 · {} 項成本 {} 累計折舊 {} 淨額 {} · 與 1601／1602 總帳{}",
+            "讀取固定資產 · {} 項成本 {} 累計折舊 {} 淨額 {} · 與資產科目總帳{}",
             rows.len(),
             money(cost_total),
             money(accum_total),
@@ -247,11 +295,257 @@ impl Operation for ListFixedAssets {
                 "cost_difference": cost_gap.to_string(),
                 "accumulated_difference": accum_gap.to_string(),
                 "reconciled": reconciled,
+                "cost_accounts_label": cost_accounts_label,
+                "accum_accounts_label": accum_accounts_label,
                 "not_yet_posted": waiting.to_string(),
                 "runs": runs,
+                "categories": categories(rs),
+                "vat": crate::ops::tax::vat_json(ctx.today)?,
             }),
             summary,
         ))
+    }
+}
+
+// Registering an asset
+
+fn default_asset_account() -> String {
+    "1601".into()
+}
+
+fn default_accum_account() -> String {
+    "1602".into()
+}
+
+fn default_input_tax_account() -> String {
+    "1284".into()
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateFixedAssetInput {
+    /// Asset code. Left out, the next free `FA###` is taken.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// What was bought, as it should read on the register.
+    pub name: String,
+    /// Which line of the useful life table applies. `list_fixed_assets`
+    /// returns the categories in force with their years.
+    pub category: String,
+    /// Acquisition date. Defaults to today. Depreciation starts in this month
+    /// and the useful life table is read as of this date.
+    #[serde(default)]
+    pub acquired_on: Option<NaiveDate>,
+    /// Cost before tax. This is the depreciable base and the debit to the
+    /// asset account. A string in JSON.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
+    pub cost: Money,
+    /// Deductible input tax. Left out it follows the VAT rules in force on
+    /// the acquisition date; send `0` for a purchase that carries none.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schemars(with = "Option<String>")]
+    pub tax_amount: Option<Money>,
+    /// Which account the money left, e.g. 1102 銀行存款. Writes the
+    /// acquisition voucher. Bought on credit, leave this out, enter the
+    /// supplier's bill on the payables screen with 1601 as its debit account,
+    /// and give that bill's voucher as `origin_voucher_no`.
+    #[serde(default)]
+    pub paid_from_account_code: Option<String>,
+    /// An existing voucher that already carries this purchase.
+    #[serde(default)]
+    pub origin_voucher_no: Option<String>,
+    /// Asset account, default 1601.
+    #[serde(default = "default_asset_account")]
+    pub gl_code: String,
+    /// Accumulated depreciation account, default 1602.
+    #[serde(default = "default_accum_account")]
+    pub accum_gl_code: String,
+    /// Input tax account, default 1284. The VAT return reads the period
+    /// movement of this account.
+    #[serde(default = "default_input_tax_account")]
+    pub input_tax_account_code: String,
+    /// Department carrying the asset, so its cost reaches departmental profit
+    /// and loss.
+    #[serde(default)]
+    pub dept_code: Option<String>,
+    /// Note on the register and on the voucher.
+    #[serde(default)]
+    pub memo: String,
+}
+
+/// Categories the useful life table in force actually covers, with their
+/// years. Read from the ruleset so the list cannot drift from the schedule
+/// the charges are computed against.
+fn categories(rs: &Ruleset) -> Vec<Value> {
+    let Some(lives) = rs.payload.get("useful_lives").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<Value> = lives
+        .keys()
+        .map(|code| {
+            let years = rs.decimal(&format!("useful_lives.{code}")).unwrap_or_default();
+            json!({
+                "code": code,
+                "label": category_label(code),
+                "life_years": years.trunc().to_string(),
+                "life_label": format!("{} 年", years.trunc()),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a["label"].as_str().cmp(&b["label"].as_str()));
+    rows
+}
+
+struct CreateFixedAsset;
+
+#[async_trait]
+impl Operation for CreateFixedAsset {
+    fn name(&self) -> &'static str {
+        "create_fixed_asset"
+    }
+    fn risk(&self) -> Risk {
+        // Produces an unposted voucher that a person still has to post, the
+        // same tier as create_ap_bill.
+        Risk::NeedsConfirm
+    }
+    fn summary(&self) -> &'static str {
+        "登記固定資產並產生取得傳票（借資產科目與 1284 進項稅額／貸付款科目）。成本填未稅金額，營業稅依取得日適用的稅率拆出，免稅填 0；賒購則改在應付帳款開單、以 1601 為借方科目，再把那張傳票號填進來。耐用年數查自耐用年數表，不逐筆設定。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<CreateFixedAssetInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: CreateFixedAssetInput = parse(input)?;
+        let acquired_on = i.acquired_on.unwrap_or(ctx.today);
+        let name = i.name.trim();
+        if name.is_empty() {
+            return Err(OpError::BadInput("資產名稱要填寫".into()));
+        }
+
+        // The life table is what makes an asset depreciable at all, so an
+        // unknown category is refused here rather than at the first
+        // depreciation run months later.
+        let rs = laysi_regulation::resolve("depreciation", acquired_on)?;
+        let category = i.category.trim();
+        if rs.decimal(&format!("useful_lives.{category}")).is_err() {
+            let known: Vec<String> = categories(rs)
+                .iter()
+                .map(|c| c["label"].as_str().unwrap_or_default().to_string())
+                .collect();
+            return Err(OpError::BadInput(format!(
+                "耐用年數表 {} 沒有「{}」這個類別。可選：{}",
+                rs.version,
+                category,
+                known.join("、")
+            )));
+        }
+
+        // Every asset has to point at a voucher, otherwise the register would
+        // claim a cost the ledger has never seen and the 1601 reconciliation
+        // on this screen would report a difference no one can clear.
+        let paid_from = i.paid_from_account_code.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let origin = i.origin_voucher_no.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        match (paid_from, origin) {
+            (None, None) => {
+                return Err(OpError::BadInput(
+                    "請填付款科目；賒購請先在應付帳款開單，再填那張帳單的傳票號".into(),
+                ))
+            }
+            (Some(_), Some(_)) => {
+                return Err(OpError::BadInput(
+                    "付款科目與既有傳票號只能填一個：填了付款科目會產生新傳票".into(),
+                ))
+            }
+            _ => {}
+        }
+
+        // The register and the ledger are compared account by account, so the
+        // two accounts have to be the kind that comparison assumes: the cost
+        // on a debit-normal non-current asset account, the accumulated
+        // depreciation on its credit-normal contra account.
+        let chart = ctx.store.accounts().await?;
+        let fixed_asset_account = |code: &str, side: &str, what: &str| -> Result<(), OpError> {
+            match chart.iter().find(|a| a.code == code) {
+                Some(a)
+                    if a.report_group == "non_current_asset"
+                        && a.normal_side == side
+                        && a.is_postable
+                        && a.is_active =>
+                {
+                    Ok(())
+                }
+                _ => Err(OpError::BadInput(format!(
+                    "「{code}」不是可入帳的{what}科目"
+                ))),
+            }
+        };
+        fixed_asset_account(i.gl_code.trim(), "debit", "固定資產")?;
+        fixed_asset_account(i.accum_gl_code.trim(), "credit", "累計折舊")?;
+
+        let split = crate::ops::tax::split_vat(acquired_on, Some(i.cost), i.tax_amount, None)?;
+        let asset = ctx
+            .store
+            .create_fixed_asset(laysi_store::NewFixedAsset {
+                code: i.code.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                name,
+                category,
+                acquired_on,
+                cost: split.net,
+                tax_amount: split.tax,
+                gl_code: i.gl_code.trim(),
+                accum_gl_code: i.accum_gl_code.trim(),
+                input_tax_account_code: i.input_tax_account_code.trim(),
+                paid_from_account_code: paid_from,
+                origin_voucher_no: origin,
+                dept_code: i.dept_code.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                memo: i.memo.trim(),
+                created_by: &ctx.actor,
+            })
+            .await?;
+
+        let plan = plan_for(rs, &asset)?;
+        let summary = format!(
+            "登記資產 {} {} · 成本 {}（營業稅 {}，依 vat {}）· 耐用 {} 年、每月折舊 {} · {}",
+            asset.code,
+            asset.name,
+            money(asset.cost),
+            money(split.tax),
+            split.version,
+            plan.life_years,
+            money(plan.monthly),
+            match &asset.origin_voucher_no {
+                Some(no) => format!("取得傳票 {no}"),
+                None => "無取得傳票".into(),
+            }
+        );
+        let outcome = OpOutcome::new(
+            json!({
+                "asset": {
+                    "code": asset.code,
+                    "name": asset.name,
+                    "category": asset.category,
+                    "category_label": category_label(&asset.category),
+                    "acquired_on": asset.acquired_on,
+                    "cost": asset.cost.to_string(),
+                    "gl_code": asset.gl_code,
+                    "accum_gl_code": asset.accum_gl_code,
+                    "origin_voucher_no": asset.origin_voucher_no,
+                    "recognised": asset.recognised,
+                    "memo": asset.memo,
+                },
+                "tax_amount": split.tax.to_string(),
+                "vat_version": split.version,
+                "life_years": plan.life_years,
+                "monthly": plan.monthly.to_string(),
+                "life_ruleset_version": plan.version,
+            }),
+            summary,
+        );
+        Ok(match asset.origin_voucher_no.clone() {
+            Some(no) if paid_from.is_some() => outcome.with_voucher(no),
+            _ => outcome,
+        })
     }
 }
 
@@ -317,6 +611,7 @@ async fn compute(
                 asset_name: a.name.clone(),
                 amount,
                 useful_life_years: p.life_years,
+                accum_gl_code: a.accum_gl_code.clone(),
             });
         }
     }
@@ -400,7 +695,7 @@ impl Operation for RunDepreciation {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "提列某一期的折舊，產生待過帳傳票（借 6152 折舊費用／貸 1602 累計折舊）。同一期僅能提列一次，各項均記錄所用耐用年數與規則版本。"
+        "提列某一期的折舊，產生待過帳傳票（借 6152 折舊費用／貸各資產的累計折舊科目）。同一期僅能提列一次，各項均記錄所用耐用年數與規則版本。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RunDepreciationInput>()

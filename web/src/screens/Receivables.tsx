@@ -1,17 +1,30 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
+  docNumberHint,
   isZero,
   money,
   OpFailed,
   type ArAging,
   type ArInvoice,
 } from '../api/client';
+import {
+  EMPTY_TAX_TRIPLE,
+  TaxAmountFields,
+  type TaxTriple,
+} from '../components/TaxAmountFields';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
   onChanged: () => void;
+}
+
+interface VatInfo {
+  rate: string;
+  rate_percent: string;
+  version: string;
 }
 
 interface RevenueAccount {
@@ -21,6 +34,14 @@ interface RevenueAccount {
   is_postable: boolean;
   is_active: boolean;
 }
+
+const FIELD_LABEL: Record<string, string> = {
+  customer: '客戶名稱',
+  invoiceNo: '應收單號',
+  amount: '金額',
+  dueOn: '到期日',
+  revenue: '收入科目',
+};
 
 function dueNote(i: ArInvoice): string {
   if (i.days_overdue > 0) return `逾期 ${i.days_overdue} 天`;
@@ -39,21 +60,26 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   const [revenueAccounts, setRevenueAccounts] = useState<RevenueAccount[] | null>(null);
   const [customer, setCustomer] = useState('');
   const [invoiceNo, setInvoiceNo] = useState('');
-  const [amount, setAmount] = useState('');
+  const [amounts, setAmounts] = useState<TaxTriple>(EMPTY_TAX_TRIPLE);
+  const [vat, setVat] = useState<VatInfo | null>(null);
   const [dueOn, setDueOn] = useState('');
   const [revenueAccountCode, setRevenueAccountCode] = useState('');
   const [memo, setMemo] = useState('');
   const [savingInvoice, setSavingInvoice] = useState(false);
+  const [missing, setMissing] = useState<string[]>([]);
 
   const load = useCallback(() => {
     setError(null);
     Promise.all([
       callOp<ArAging>('get_ar_aging'),
-      callOp<{ invoices: ArInvoice[] }>('list_receivables', { only_overdue: onlyOverdue }),
+      callOp<{ invoices: ArInvoice[]; vat: VatInfo }>('list_receivables', {
+        only_overdue: onlyOverdue,
+      }),
     ])
       .then(([a, l]) => {
         setAging(a);
         setRows(l.invoices);
+        setVat(l.vat);
       })
       .catch((e: Error) => setError(e.message));
   }, [onlyOverdue]);
@@ -72,8 +98,15 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   }, [drawer, revenueAccounts]);
 
   async function saveInvoice() {
-    if (!customer.trim() || !invoiceNo.trim() || !amount.trim() || !dueOn || !revenueAccountCode) {
-      onToast('客戶、單號、金額、到期日與收益科目都要填寫');
+    const blank: string[] = [];
+    if (!customer.trim()) blank.push('customer');
+    if (!invoiceNo.trim()) blank.push('invoiceNo');
+    if (!amounts.total.trim() && !amounts.net.trim()) blank.push('amount');
+    if (!dueOn) blank.push('dueOn');
+    if (!revenueAccountCode) blank.push('revenue');
+    setMissing(blank);
+    if (blank.length > 0) {
+      onToast(`還要填：${blank.map((k) => FIELD_LABEL[k]).join('、')}`);
       return;
     }
     setSavingInvoice(true);
@@ -85,7 +118,9 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
         {
           customer: customer.trim(),
           invoice_no: invoiceNo.trim(),
-          amount: amount.trim(),
+          ...(amounts.total.trim() ? { amount: amounts.total.trim() } : {}),
+          ...(amounts.net.trim() ? { net_amount: amounts.net.trim() } : {}),
+          ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
           due_on: dueOn,
           revenue_account_code: revenueAccountCode,
           memo: memo.trim(),
@@ -97,7 +132,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
       );
       setCustomer('');
       setInvoiceNo('');
-      setAmount('');
+      setAmounts(EMPTY_TAX_TRIPLE);
       setDueOn('');
       setMemo('');
       setDrawer(false);
@@ -145,13 +180,13 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
               <div className="card stat-card" key={b.label}>
                 <div className="stat-card__kicker">{b.label}</div>
                 <div className="stat-card__value num">{money(b.value)}</div>
-                <div className="stat-card__note">{b.count} 筆</div>
+                <div className="stat-card__note num">{b.count} 筆</div>
               </div>
             ))}
             <div className="card stat-card stat-card--total">
               <div className="stat-card__kicker">合計未收</div>
               <div className="stat-card__value num">{money(aging.total)}</div>
-              <div className="stat-card__note">到 {aging.as_of} 為止</div>
+              <div className="stat-card__note num">到 {aging.as_of} 為止</div>
             </div>
           </div>
 
@@ -266,9 +301,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
             <div className="drawer__head">
               <div>
                 <div className="drawer__title">新增應收單</div>
-                <div className="drawer__subtitle">
-                  適用不需電子發票的 B2B 月結與國外客戶
-                </div>
+                <div className="drawer__subtitle">營業稅由稅率自動拆出，零稅率填 0</div>
               </div>
               <button className="btn btn--close" onClick={() => setDrawer(false)} aria-label="關閉">
                 ×
@@ -279,31 +312,44 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                 <label className="field">
                   客戶名稱
                   <input className="input" value={customer} onChange={(e) => setCustomer(e.target.value)} />
+                  {missing.includes('customer') && (
+                    <span className="field__hint field__hint--missing">還沒填</span>
+                  )}
                 </label>
                 <label className="field">
                   應收單號
                   <input
                     className="input num"
                     value={invoiceNo}
-                    placeholder="AR-2607-030"
+                    placeholder={docNumberHint('AR-')}
                     onChange={(e) => setInvoiceNo(e.target.value)}
                   />
+                  {missing.includes('invoiceNo') && (
+                    <span className="field__hint field__hint--missing">還沒填</span>
+                  )}
                 </label>
-                <label className="field">
-                  應收總額
-                  <input
-                    className="input num"
-                    inputMode="decimal"
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
-                  />
-                </label>
+                <TaxAmountFields
+                  label="應收總額"
+                  taxLabel="代收營業稅"
+                  value={amounts}
+                  rate={vat?.rate ?? null}
+                  ratePercent={vat?.rate_percent ?? null}
+                  missing={missing.includes('amount')}
+                  onChange={setAmounts}
+                />
                 <label className="field">
                   到期日
-                  <input className="input" type="date" value={dueOn} onChange={(e) => setDueOn(e.target.value)} />
+                  <DateField
+                    className="input"
+                    value={dueOn}
+                    onChange={(v) => setDueOn(v)}
+                  />
+                  {missing.includes('dueOn') && (
+                    <span className="field__hint field__hint--missing">還沒填</span>
+                  )}
                 </label>
                 <label className="field field--full">
-                  貸方收益科目
+                  收入科目
                   <select
                     className="input"
                     value={revenueAccountCode}
@@ -315,6 +361,9 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                       </option>
                     ))}
                   </select>
+                  {missing.includes('revenue') && (
+                    <span className="field__hint field__hint--missing">還沒填</span>
+                  )}
                 </label>
                 <label className="field field--full">
                   內容說明
@@ -324,7 +373,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
             </div>
             <div className="drawer__foot">
               <span className="drawer__foot-note">
-                同時產生待過帳傳票（借 1131 應收帳款／貸指定收益科目）
+                同時產生待過帳傳票（借 1131 應收帳款／貸指定收益科目與 2211 代收營業稅）
               </span>
               <button
                 className={`btn${savingInvoice ? ' btn--off' : ''}`}

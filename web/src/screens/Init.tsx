@@ -13,6 +13,7 @@ export function Init() {
   const [setupToken, setSetupToken] = useState('');
   const [failure, setFailure] = useState<AuthFailed | null>(null);
   const [mismatch, setMismatch] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function submit(e: FormEvent) {
@@ -48,17 +49,17 @@ export function Init() {
     <div className="login">
       <div className="card login__panel">
         <div className="login__brand">
-          <BrandMark height={30} />
+          <BrandMark height={20} />
         </div>
 
         <h1 className="login__title">建立系統管理員帳號</h1>
         <p className="login__lede">
-          負責人與其他成員的帳號，登入後在「角色與核准」建立。
+          這個帳號管系統設定與帳號，看不到帳務與薪資。建好之後，第二步是在「帳號管理」建立負責人帳號。
         </p>
 
         <form onSubmit={(e) => void submit(e)}>
           <label className="login__field">
-            <span className="login__label">登入名稱（英文字母、數字與 . _ -）</span>
+            <span className="login__label">帳號（3 到 64 個字元）</span>
             <input
               className="entry-input"
               type="text"
@@ -69,7 +70,7 @@ export function Init() {
             />
           </label>
           <label className="login__field">
-            <span className="login__label">顯示名稱（記載於稽核軌跡）</span>
+            <span className="login__label">顯示名稱（其他人在系統裡看到的名字）</span>
             <input
               className="entry-input"
               type="text"
@@ -89,10 +90,19 @@ export function Init() {
             />
           </label>
           <label className="login__field">
-            <span className="login__label">密碼（至少 12 個字元）</span>
+            <span className="login__label">
+              密碼（至少 8 個字元）
+              <button
+                type="button"
+                className="link-cell login__reveal"
+                onClick={() => setShowPassword((v) => !v)}
+              >
+                {showPassword ? '隱藏密碼' : '顯示密碼'}
+              </button>
+            </span>
             <input
               className="entry-input"
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -102,7 +112,7 @@ export function Init() {
             <span className="login__label">請再次輸入密碼</span>
             <input
               className="entry-input"
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               autoComplete="new-password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}

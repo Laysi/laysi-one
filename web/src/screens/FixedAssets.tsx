@@ -5,8 +5,16 @@ import {
   money,
   OpFailed,
   type DepreciationPreview,
+  type DimensionList,
   type FixedAssetList,
 } from '../api/client';
+import {
+  EMPTY_TAX_TRIPLE,
+  TaxAmountFields,
+  type TaxTriple,
+} from '../components/TaxAmountFields';
+import { useCurrentUser } from '../auth';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -14,11 +22,43 @@ interface Props {
   onChanged: () => void;
 }
 
+interface PostableAccount {
+  code: string;
+  name: string;
+  kind: string;
+  normal_side: string;
+  is_postable: boolean;
+  is_active: boolean;
+  report_group: string;
+  cash_flow_section: string | null;
+}
+
+function fixedAssetAccounts(accounts: PostableAccount[], side: string): PostableAccount[] {
+  return accounts.filter((a) => a.report_group === 'non_current_asset' && a.normal_side === side);
+}
+
 export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
+  const me = useCurrentUser();
+  const canRegister = me.permissions.includes('create_fixed_asset');
   const [data, setData] = useState<FixedAssetList | null>(null);
   const [preview, setPreview] = useState<DepreciationPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const [drawer, setDrawer] = useState(false);
+  const [accounts, setAccounts] = useState<PostableAccount[]>([]);
+  const [depts, setDepts] = useState<DimensionList | null>(null);
+  const [name, setName] = useState('');
+  const [category, setCategory] = useState('');
+  const [acquiredOn, setAcquiredOn] = useState('');
+  const [amounts, setAmounts] = useState<TaxTriple>(EMPTY_TAX_TRIPLE);
+  const [paidFrom, setPaidFrom] = useState('');
+  const [glCode, setGlCode] = useState('1601');
+  const [accumGlCode, setAccumGlCode] = useState('1602');
+  const [voucherNo, setVoucherNo] = useState('');
+  const [deptCode, setDeptCode] = useState('');
+  const [assetMemo, setAssetMemo] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(() => {
     setError(null);
@@ -34,6 +74,73 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
   }, []);
 
   useEffect(load, [load, reloadKey]);
+
+  useEffect(() => {
+    if (!drawer || !canRegister) return;
+    if (accounts.length === 0) {
+      callOp<{ accounts: PostableAccount[] }>('list_accounts')
+        .then((d) => setAccounts(d.accounts.filter((a) => a.is_postable && a.is_active)))
+        .catch(() => setAccounts([]));
+    }
+    if (!depts) {
+      callOp<DimensionList>('list_dimensions')
+        .then(setDepts)
+        .catch(() => setDepts(null));
+    }
+  }, [drawer, canRegister, accounts.length, depts]);
+
+  function openDrawer() {
+    setName('');
+    setCategory(data?.categories[0]?.code ?? '');
+    setAcquiredOn('');
+    setAmounts(EMPTY_TAX_TRIPLE);
+    setPaidFrom('');
+    setGlCode('1601');
+    setAccumGlCode('1602');
+    setVoucherNo('');
+    setDeptCode('');
+    setAssetMemo('');
+    setDrawer(true);
+  }
+
+  async function register() {
+    setSaving(true);
+    try {
+      const d = await callOp<{
+        asset: { code: string; name: string; cost: string; origin_voucher_no: string | null };
+        life_years: number;
+        monthly: string;
+      }>(
+        'create_fixed_asset',
+        {
+          name: name.trim(),
+          category,
+          ...(acquiredOn ? { acquired_on: acquiredOn } : {}),
+          cost: amounts.net.trim(),
+          ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
+          gl_code: glCode,
+          accum_gl_code: accumGlCode,
+          ...(paidFrom ? { paid_from_account_code: paidFrom } : {}),
+          ...(paidFrom ? {} : { origin_voucher_no: voucherNo.trim() }),
+          ...(deptCode ? { dept_code: deptCode } : {}),
+          memo: assetMemo.trim(),
+        },
+        `登記固定資產 ${name.trim()}`,
+      );
+      onToast(
+        d.asset.origin_voucher_no && paidFrom
+          ? `已登記 ${d.asset.code} ${d.asset.name}，每月折舊 ${money(d.monthly)}；傳票 ${d.asset.origin_voucher_no} 待過帳，過帳後才計入成本並開始提列`
+          : `已登記 ${d.asset.code} ${d.asset.name}，每月折舊 ${money(d.monthly)}`,
+      );
+      setDrawer(false);
+      onChanged();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function run() {
     if (!preview) return;
@@ -98,18 +205,19 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
             {data.reconciled ? (
               <>
                 成本合計 <span className="num">{money(data.cost_total)}</span> 就是總帳{' '}
-                <span className="num">1601 辦公設備</span> 的餘額，累計折舊{' '}
+                <span className="num">{data.cost_accounts_label}</span> 的餘額，累計折舊{' '}
                 <span className="num">{money(data.accumulated_total)}</span> 就是{' '}
-                <span className="num">1602 累計折舊</span> 的餘額，帳面淨額{' '}
+                <span className="num">{data.accum_accounts_label}</span> 的餘額，帳面淨額{' '}
                 <span className="num">{money(data.book_total)}</span> 因此與總帳一致。
               </>
             ) : (
               <>
                 對不上：成本合計 <span className="num">{money(data.cost_total)}</span> 對{' '}
-                <span className="num">1601</span> 的 <span className="num">{money(data.gl_cost)}</span>
+                <span className="num">{data.cost_accounts_label}</span> 的{' '}
+                <span className="num">{money(data.gl_cost)}</span>
                 （差 <span className="num">{money(data.cost_difference)}</span>），累計折舊{' '}
                 <span className="num">{money(data.accumulated_total)}</span> 對{' '}
-                <span className="num">1602</span> 的{' '}
+                <span className="num">{data.accum_accounts_label}</span> 的{' '}
                 <span className="num">{money(data.gl_accumulated)}</span>（差{' '}
                 <span className="num">{money(data.accumulated_difference)}</span>）。請先暫緩本月折舊提列。
               </>
@@ -121,6 +229,15 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
               </>
             )}
           </p>
+
+          {canRegister && (
+            <div className="toolbar">
+              <span className="spacer" />
+              <button className="btn btn--compact" onClick={openDrawer}>
+                ＋ 登記資產
+              </button>
+            </div>
+          )}
 
           <div className="table-scroll">
             <table className="table">
@@ -164,7 +281,9 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
                 {data.assets.length === 0 && (
                   <tr>
                     <td colSpan={6} className="cell-muted">
-                      尚未登記固定資產。
+                      {canRegister
+                        ? '尚未登記固定資產。請由上方「＋ 登記資產」建立第一筆。'
+                        : '尚未登記固定資產。登記由會計維護。'}
                     </td>
                   </tr>
                 )}
@@ -255,6 +374,151 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
             </>
           )}
         </>
+      )}
+
+      {drawer && data && (
+        <div className="overlay overlay--center" onClick={() => setDrawer(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer__head">
+              <div>
+                <div className="drawer__title">登記資產</div>
+                <div className="drawer__subtitle">耐用年數查自耐用年數表</div>
+              </div>
+              <button className="btn btn--close" onClick={() => setDrawer(false)} aria-label="關閉">
+                ×
+              </button>
+            </div>
+            <div className="drawer__body">
+              <div className="field-grid">
+                <label className="field field--full">
+                  資產名稱
+                  <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+                </label>
+                <label className="field">
+                  類別
+                  <select
+                    className="input"
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value)}
+                  >
+                    {data.categories.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.label}（{c.life_label}）
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  取得日
+                  <DateField
+                    className="input"
+                    value={acquiredOn}
+                    onChange={(v) => setAcquiredOn(v)}
+                  />
+                </label>
+                <TaxAmountFields
+                  label="取得成本"
+                  taxLabel="進項稅額"
+                  value={amounts}
+                  rate={data.vat.rate}
+                  ratePercent={data.vat.rate_percent}
+                  onChange={setAmounts}
+                />
+                <label className="field">
+                  付款科目
+                  <select
+                    className="input"
+                    value={paidFrom}
+                    onChange={(e) => setPaidFrom(e.target.value)}
+                  >
+                    <option value="">賒購，填既有傳票號</option>
+                    {accounts
+                      .filter((a) => a.cash_flow_section === 'cash')
+                      .map((a) => (
+                        <option key={a.code} value={a.code}>
+                          {a.code} {a.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label className="field">
+                  取得傳票號
+                  <input
+                    className="input num"
+                    value={paidFrom ? '' : voucherNo}
+                    disabled={paidFrom !== ''}
+                    onChange={(e) => setVoucherNo(e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  資產科目
+                  <select className="input" value={glCode} onChange={(e) => setGlCode(e.target.value)}>
+                    {fixedAssetAccounts(accounts, 'debit').map((a) => (
+                      <option key={a.code} value={a.code}>
+                        {a.code} {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  累計折舊科目
+                  <select
+                    className="input"
+                    value={accumGlCode}
+                    onChange={(e) => setAccumGlCode(e.target.value)}
+                  >
+                    {fixedAssetAccounts(accounts, 'credit').map((a) => (
+                      <option key={a.code} value={a.code}>
+                        {a.code} {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  部門
+                  <select
+                    className="input"
+                    value={deptCode}
+                    onChange={(e) => setDeptCode(e.target.value)}
+                  >
+                    <option value="">未指定</option>
+                    {(depts?.dimensions ?? [])
+                      .filter((d) => d.code === 'department')
+                      .flatMap((d) => d.values)
+                      .filter((v) => v.active)
+                      .map((v) => (
+                        <option key={v.code} value={v.code}>
+                          {v.label}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label className="field field--full">
+                  備註
+                  <input
+                    className="input"
+                    value={assetMemo}
+                    onChange={(e) => setAssetMemo(e.target.value)}
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="drawer__foot">
+              <span className="drawer__foot-note">
+                {paidFrom
+                  ? '同時產生待過帳傳票（借資產科目與 1284 進項稅額／貸付款科目）'
+                  : '賒購請先在「應付帳款」以 1601 為借方科目開單，再把那張傳票號填進來'}
+              </span>
+              <button
+                className={`btn${saving ? ' btn--off' : ''}`}
+                disabled={saving || !name.trim() || !amounts.net.trim()}
+                onClick={() => void register()}
+              >
+                {saving ? '存檔中…' : '登記資產'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
