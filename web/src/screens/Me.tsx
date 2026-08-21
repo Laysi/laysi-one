@@ -112,10 +112,23 @@ export function Me({ onGo, reloadKey }: Props) {
                 </span>
               </span>
             </div>
-            <div className="fact">
-              <span className="fact__key">匯薪帳戶</span>
-              <span className="fact__value num">{p.bank_account_masked}</span>
-            </div>
+            {p.bank_accounts.length === 0 ? (
+              <div className="fact">
+                <span className="fact__key">銀行帳戶</span>
+                <span className="fact__value">尚未登錄，由人資維護</span>
+              </div>
+            ) : (
+              p.bank_accounts.map((b, i) => (
+                <div className="fact" key={i}>
+                  <span className="fact__key">{b.is_payroll ? '薪轉帳戶' : '其他帳戶'}</span>
+                  <span className="fact__value num">
+                    {b.bank_name ? `${b.bank_name} · ` : ''}
+                    {b.account_masked}
+                    {b.note && <span className="fact__note">{b.note}</span>}
+                  </span>
+                </div>
+              ))
+            )}
           </div>
 
         </section>

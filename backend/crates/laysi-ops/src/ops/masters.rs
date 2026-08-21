@@ -30,6 +30,7 @@ use laysi_store::{
     CreateBankAccount as StoreCreateBankAccount,
     CreateDimensionValue as StoreCreateDimensionValue,
     SetApprovalRule as StoreSetApprovalRule, WriteAccount, WriteEmployee,
+    WriteEmployeeBankAccount,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -335,10 +336,27 @@ pub struct EmployeeInput {
     /// May be blank while it has not been collected.
     #[serde(default)]
     pub id_no: String,
-    /// Payroll bank account.
+    /// Every bank account kept for this person. Omit to leave the accounts on
+    /// file alone; send the whole list to replace them.
     #[serde(default)]
-    pub bank_account: String,
+    pub bank_accounts: Option<Vec<EmployeeBankAccountInput>>,
     /// Notes.
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EmployeeBankAccountInput {
+    /// Bank and branch.
+    #[serde(default)]
+    pub bank_name: String,
+    /// Account number.
+    pub account_no: String,
+    /// Whether the monthly payroll transfer goes here. At most one account per
+    /// person may be marked; when none is, the first one in the list is used.
+    #[serde(default)]
+    pub is_payroll: bool,
+    /// What this account is for.
     #[serde(default)]
     pub note: String,
 }
@@ -414,6 +432,7 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
     if input.base_salary.is_some_and(|value| value < Money::ZERO) {
         return Err(OpError::BadInput("底薪不能是負數；尚未談定時留空即可".into()));
     }
+    validate_bank_accounts(input)?;
     if [input.labor_insured_salary, input.health_insured_salary, input.pension_wage]
         .iter()
         .any(|value| value.is_some_and(|value| value < Money::ZERO))
@@ -426,7 +445,60 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
     Ok(())
 }
 
-fn employee_write<'a>(input: &'a EmployeeInput, actor: &'a str) -> WriteEmployee<'a> {
+/// Reject a list the roster could not print back. An account with no number
+/// is not an account, and two payroll accounts leave payday with no answer.
+fn validate_bank_accounts(input: &EmployeeInput) -> Result<(), OpError> {
+    let Some(accounts) = &input.bank_accounts else {
+        return Ok(());
+    };
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for account in accounts {
+        let bank_name = account.bank_name.trim();
+        let account_no = account.account_no.trim();
+        if bank_name.is_empty() || account_no.is_empty() {
+            return Err(OpError::BadInput(
+                "銀行帳戶要填銀行名稱與帳號；不再使用的帳戶請整筆刪除".into(),
+            ));
+        }
+        if seen.contains(&(bank_name, account_no)) {
+            return Err(OpError::BadInput(format!(
+                "{bank_name} {account_no} 重複登錄了兩次"
+            )));
+        }
+        seen.push((bank_name, account_no));
+    }
+    if accounts.iter().filter(|account| account.is_payroll).count() > 1 {
+        return Err(OpError::BadInput("薪轉帳戶只能指定一個".into()));
+    }
+    Ok(())
+}
+
+/// The accounts as the store writes them. Kept out of [`employee_write`]
+/// because the borrowed slice has to outlive the call.
+fn employee_accounts(input: &EmployeeInput) -> Option<Vec<WriteEmployeeBankAccount<'_>>> {
+    let accounts = input.bank_accounts.as_ref()?;
+    // A single account nobody marked is still where the salary goes; asking
+    // for the flag would only be asking the caller to repeat itself.
+    let none_marked = !accounts.iter().any(|account| account.is_payroll);
+    Some(
+        accounts
+            .iter()
+            .enumerate()
+            .map(|(index, account)| WriteEmployeeBankAccount {
+                bank_name: account.bank_name.trim(),
+                account_no: account.account_no.trim(),
+                is_payroll: account.is_payroll || (none_marked && index == 0),
+                note: account.note.trim(),
+            })
+            .collect(),
+    )
+}
+
+fn employee_write<'a>(
+    input: &'a EmployeeInput,
+    actor: &'a str,
+    bank_accounts: Option<&'a [WriteEmployeeBankAccount<'a>]>,
+) -> WriteEmployee<'a> {
     WriteEmployee {
         emp_no: input.emp_no.trim(),
         name: input.name.trim(),
@@ -441,7 +513,7 @@ fn employee_write<'a>(input: &'a EmployeeInput, actor: &'a str) -> WriteEmployee
         health_insured_salary: input.health_insured_salary,
         pension_wage: input.pension_wage,
         id_no: input.id_no.trim(),
-        bank_account: input.bank_account.trim(),
+        bank_accounts,
         note: input.note.trim(),
         actor,
     }
@@ -473,7 +545,11 @@ impl Operation for CreateEmployee {
             input.emp_no = ctx.store.next_employee_no().await?;
         }
         validate_employee(&input)?;
-        let employee = ctx.store.create_employee(employee_write(&input, &ctx.actor)).await?;
+        let accounts = employee_accounts(&input);
+        let employee = ctx
+            .store
+            .create_employee(employee_write(&input, &ctx.actor, accounts.as_deref()))
+            .await?;
         let summary =
             format!("建立員工 {} {} · 未建立登入帳號", employee.emp_no, employee.name);
         Ok(OpOutcome::new(
@@ -507,7 +583,11 @@ impl Operation for UpdateEmployee {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let input: EmployeeInput = parse(input)?;
         validate_employee(&input)?;
-        let employee = ctx.store.update_employee(employee_write(&input, &ctx.actor)).await?;
+        let accounts = employee_accounts(&input);
+        let employee = ctx
+            .store
+            .update_employee(employee_write(&input, &ctx.actor, accounts.as_deref()))
+            .await?;
         let summary = format!(
             "更新員工 {} {} · 狀態 {} · 登入帳號未變更",
             employee.emp_no, employee.name, employee.status
@@ -779,7 +859,7 @@ mod tests {
             health_insured_salary: None,
             pension_wage: None,
             id_no: "A123456789".into(),
-            bank_account: String::new(),
+            bank_accounts: None,
             note: String::new(),
         }
     }
@@ -864,6 +944,68 @@ mod tests {
         let error = validate_employee(&input).unwrap_err();
         assert!(error.to_string().contains("離職日"));
         assert!(UpdateEmployee.summary().contains("離職日"));
+    }
+
+    fn account(bank_name: &str, account_no: &str, is_payroll: bool) -> EmployeeBankAccountInput {
+        EmployeeBankAccountInput {
+            bank_name: bank_name.into(),
+            account_no: account_no.into(),
+            is_payroll,
+            note: String::new(),
+        }
+    }
+
+    /// Payday has one destination. Two accounts claiming it is a question the
+    /// screen cannot answer later, so it is refused at the point it is typed.
+    #[test]
+    fn only_one_account_can_be_the_payroll_account() {
+        let mut input = valid_employee();
+        input.bank_accounts = Some(vec![
+            account("玉山銀行", "0012345", true),
+            account("台北富邦", "6789012", true),
+        ]);
+        let error = validate_employee(&input).unwrap_err();
+        assert!(error.to_string().contains("薪轉帳戶只能指定一個"));
+    }
+
+    /// One account nobody marked is where the salary goes: asking for the flag
+    /// would be asking the caller to repeat what the list already says.
+    #[test]
+    fn an_unmarked_list_pays_into_its_first_account() {
+        let mut input = valid_employee();
+        input.bank_accounts = Some(vec![
+            account("玉山銀行", "0012345", false),
+            account("台北富邦", "6789012", false),
+        ]);
+        let written = employee_accounts(&input).unwrap();
+        assert!(written[0].is_payroll);
+        assert!(!written[1].is_payroll);
+    }
+
+    /// Omitting the list leaves the accounts on file alone, the same three
+    /// states the four amounts use.
+    #[test]
+    fn omitting_the_list_leaves_the_accounts_on_file_alone() {
+        assert!(employee_accounts(&valid_employee()).is_none());
+    }
+
+    #[test]
+    fn an_account_needs_a_bank_and_a_number() {
+        let mut input = valid_employee();
+        input.bank_accounts = Some(vec![account("玉山銀行", "   ", false)]);
+        let error = validate_employee(&input).unwrap_err();
+        assert!(error.to_string().contains("銀行名稱與帳號"));
+    }
+
+    #[test]
+    fn the_same_account_cannot_be_listed_twice() {
+        let mut input = valid_employee();
+        input.bank_accounts = Some(vec![
+            account("玉山銀行", "0012345", true),
+            account("玉山銀行", " 0012345 ", false),
+        ]);
+        let error = validate_employee(&input).unwrap_err();
+        assert!(error.to_string().contains("重複登錄"));
     }
 
     #[test]

@@ -1056,6 +1056,14 @@ export interface HrDashboard {
   payroll_not_yet_posted: string;
 }
 
+export interface EmployeeBankAccountRow {
+  id: number;
+  bank_name: string;
+  account_no: string;
+  is_payroll: boolean;
+  note: string;
+}
+
 export interface EmployeeRow {
   emp_no: string;
   name: string;
@@ -1078,7 +1086,7 @@ export interface EmployeeRow {
   labor_insured_salary: string;
   health_insured_salary: string;
   pension_wage: string;
-  bank_account: string;
+  bank_accounts: EmployeeBankAccountRow[];
   note: string;
 }
 
@@ -1537,7 +1545,12 @@ export interface MyProfile {
   status_label: string;
   service_months: number;
   service_label: string;
-  bank_account_masked: string;
+  bank_accounts: {
+    bank_name: string;
+    account_masked: string;
+    is_payroll: boolean;
+    note: string;
+  }[];
   privacy_note: string;
 }
 

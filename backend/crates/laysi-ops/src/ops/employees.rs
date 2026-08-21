@@ -398,7 +398,10 @@ impl Operation for ListEmployees {
                 "labor_insured_salary": e.labor_insured_salary.to_string(),
                 "health_insured_salary": e.health_insured_salary.to_string(),
                 "pension_wage": e.pension_wage.to_string(),
-                "bank_account": e.bank_account,
+                // Full numbers, under the same permission as the insured
+                // brackets: the drawer that edits them has to show what it is
+                // about to replace. Self-service sees only the last digits.
+                "bank_accounts": e.bank_accounts,
                 "note": e.note,
             }));
         }

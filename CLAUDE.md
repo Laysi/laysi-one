@@ -340,6 +340,13 @@ Token。三件事要一起做——session 查詢帶 `u.status = 'active'`，但
 放寬權限——同一組 `view_hr` 底下的 `get_insurance_summary` 本來就逐人列出三個級距，
 而持有它的只有負責人與會計。逐月薪資單仍在 `list_payslips`，仍限負責人。
 
+**員工的銀行帳戶一人多筆（0049）**：`employee.bank_account` 那一欄自由文字只裝得下
+一個帳戶，而薪轉戶與收退款的帳戶常常不是同一個。`employee_bank_account` 把銀行名稱與
+帳號分成兩欄——自助頁只印銀行與尾碼，欄位分開就不必猜一個字串在哪裡結束；`is_payroll`
+以 `WHERE is_payroll` 的 partial UNIQUE 索引限制至多一筆，發薪當天只有一個去向。
+`bank_accounts` 不帶＝不動、給清單＝整份取代，與四個金額同一族的三態；至多一筆可標為
+薪轉，一筆都沒標時以第一筆為準。`account_no` 與 `id_no` 同列 `REDACTED_FIELDS`。
+
 **`employee.id_no` 完整保存（0032）**，寫入時驗一個英文字母加九碼數字的檢查碼。
 勞保申報與扣繳憑單都要完整字號，擋著只會讓人資另外開一份 Excel。**遮罩是顯示層
 的事**（名冊預設 `A12*****89`，一顆鈕整批切換）；稽核紀錄由 `redact_for_audit`

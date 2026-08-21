@@ -158,32 +158,21 @@ fn annual_leave_json(year: i32, rs: &Ruleset, balance: AnnualLeaveBalance) -> Va
     })
 }
 
-fn masked_bank_account(value: &str) -> String {
+/// An account number as the owner's own screen shows it: the last digits and
+/// nothing else. The bank name travels beside it in its own field, so this
+/// function never has to guess where one ends and the other begins.
+fn masked_account_no(value: &str) -> String {
     let digits = value
         .chars()
         .filter(char::is_ascii_digit)
         .collect::<Vec<_>>();
     if digits.len() <= BANK_ACCOUNT_VISIBLE_DIGITS {
-        return if value.trim().is_empty() {
-            "未提供".into()
-        } else {
-            "已遮罩".into()
-        };
+        return "已遮罩".into();
     }
-
     let tail = digits[digits.len() - BANK_ACCOUNT_VISIBLE_DIGITS..]
         .iter()
         .collect::<String>();
-    let bank = value
-        .split(|c: char| c.is_ascii_digit())
-        .next()
-        .unwrap_or_default()
-        .trim();
-    if bank.is_empty() {
-        format!("尾碼 {tail}")
-    } else {
-        format!("{bank} · 尾碼 {tail}")
-    }
+    format!("尾碼 {tail}")
 }
 
 fn profile_json(employee: &Employee, months: u32) -> Value {
@@ -201,8 +190,13 @@ fn profile_json(employee: &Employee, months: u32) -> Value {
         "status_label": crate::ops::employees::status_label(&employee.status),
         "service_months": months,
         "service_label": service_label(months),
-        "bank_account_masked": masked_bank_account(&employee.bank_account),
-        "privacy_note": "不回身分證字號；匯薪帳戶只回銀行名稱與尾碼。",
+        "bank_accounts": employee.bank_accounts.iter().map(|account| json!({
+            "bank_name": account.bank_name,
+            "account_masked": masked_account_no(&account.account_no),
+            "is_payroll": account.is_payroll,
+            "note": account.note,
+        })).collect::<Vec<_>>(),
+        "privacy_note": "不回身分證字號；銀行帳戶只回銀行名稱與尾碼。",
     })
 }
 
@@ -1682,11 +1676,8 @@ mod tests {
 
     #[test]
     fn bank_accounts_are_masked_again_before_they_leave_the_operation() {
-        assert_eq!(
-            masked_bank_account("示範銀行 3812-0000-5508"),
-            "示範銀行 · 尾碼 5508"
-        );
-        assert_eq!(masked_bank_account("5508"), "已遮罩");
-        assert_eq!(masked_bank_account(""), "未提供");
+        assert_eq!(masked_account_no("3812-0000-5508"), "尾碼 5508");
+        assert_eq!(masked_account_no("5508"), "已遮罩");
+        assert_eq!(masked_account_no(""), "已遮罩");
     }
 }

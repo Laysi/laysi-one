@@ -29,6 +29,13 @@ const STATUSES: { value: string; label: string }[] = [
   { value: 'left', label: '已離職' },
 ];
 
+interface BankAccountForm {
+  bank_name: string;
+  account_no: string;
+  is_payroll: boolean;
+  note: string;
+}
+
 interface FormState {
   emp_no: string;
   name: string;
@@ -43,7 +50,7 @@ interface FormState {
   health_insured_salary: string;
   pension_wage: string;
   id_no: string;
-  bank_account: string;
+  bank_accounts: BankAccountForm[];
   note: string;
 }
 
@@ -61,7 +68,7 @@ const EMPTY_FORM: FormState = {
   health_insured_salary: '',
   pension_wage: '',
   id_no: '',
-  bank_account: '',
+  bank_accounts: [],
   note: '',
 };
 
@@ -121,7 +128,12 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       pension_wage: '',
 
       id_no: e.id_no,
-      bank_account: e.bank_account,
+      bank_accounts: e.bank_accounts.map((b) => ({
+        bank_name: b.bank_name,
+        account_no: b.account_no,
+        is_payroll: b.is_payroll,
+        note: b.note,
+      })),
       note: e.note,
     });
     setMissing([]);
@@ -155,6 +167,42 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  function setBankAccounts(next: BankAccountForm[]) {
+    setForm((f) => ({ ...f, bank_accounts: next }));
+  }
+
+  function setBankField<K extends keyof BankAccountForm>(
+    index: number,
+    key: K,
+    value: BankAccountForm[K],
+  ) {
+    setBankAccounts(
+      form.bank_accounts.map((b, i) => (i === index ? { ...b, [key]: value } : b)),
+    );
+  }
+
+  function addBankAccount() {
+    setBankAccounts([
+      ...form.bank_accounts,
+      {
+        bank_name: '',
+        account_no: '',
+        is_payroll: form.bank_accounts.length === 0,
+        note: '',
+      },
+    ]);
+  }
+
+  function setPayrollAccount(index: number) {
+    setBankAccounts(form.bank_accounts.map((b, i) => ({ ...b, is_payroll: i === index })));
+  }
+
+  function removeBankAccount(index: number) {
+    const left = form.bank_accounts.filter((_, i) => i !== index);
+    const orphaned = left.length > 0 && !left.some((b) => b.is_payroll);
+    setBankAccounts(left.map((b, i) => (orphaned && i === 0 ? { ...b, is_payroll: true } : b)));
+  }
+
   async function save() {
     const blank: string[] = [];
     if (!form.name.trim()) blank.push('name');
@@ -166,6 +214,13 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
     }
     if ((form.status === 'leaving' || form.status === 'left') && !form.left_on) {
       onToast('狀態為「離職中」或「已離職」時，離職日為必填');
+      return;
+    }
+    const accounts = form.bank_accounts.filter(
+      (b) => b.bank_name.trim() || b.account_no.trim() || b.note.trim(),
+    );
+    if (accounts.some((b) => !b.bank_name.trim() || !b.account_no.trim())) {
+      onToast('銀行帳戶要填銀行名稱與帳號；不再使用的帳戶請按 × 刪除');
       return;
     }
     setSaving(true);
@@ -181,7 +236,12 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         status: form.status,
         ...amountFields(form),
         id_no: form.id_no.trim(),
-        bank_account: form.bank_account.trim(),
+        bank_accounts: accounts.map((b) => ({
+          bank_name: b.bank_name.trim(),
+          account_no: b.account_no.trim(),
+          is_payroll: b.is_payroll,
+          note: b.note.trim(),
+        })),
         note: form.note.trim(),
       };
       const op = drawer === 'edit' ? 'update_employee' : 'create_employee';
@@ -458,15 +518,6 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     勞保申報與扣繳憑單要用；還沒收到可以留空。
                   </span>
                 </label>
-
-                <label className="field field--full">
-                  匯薪帳號
-                  <input
-                    className="input num"
-                    value={form.bank_account}
-                    onChange={(e) => setField('bank_account', e.target.value)}
-                  />
-                </label>
               </div>
 
               <p className="form-warn">
@@ -517,6 +568,63 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                   />
                 </label>
               </div>
+
+              <div className="toolbar">
+                <h3 className="section-title">銀行帳戶</h3>
+                <span className="spacer" />
+                <button className="btn btn--compact" onClick={addBankAccount}>
+                  ＋ 新增帳戶
+                </button>
+              </div>
+
+              {form.bank_accounts.length === 0 ? (
+                <p className="section-note">尚未登錄帳戶。</p>
+              ) : (
+                <>
+                  <div className="bank-grid entry-head">
+                    <div>銀行</div>
+                    <div>帳號</div>
+                    <div>用途</div>
+                    <div>薪轉帳戶</div>
+                    <div />
+                  </div>
+                  {form.bank_accounts.map((b, i) => (
+                    <div className="bank-grid entry-row" key={i}>
+                      <input
+                        className="input"
+                        placeholder="玉山銀行 城中分行"
+                        value={b.bank_name}
+                        onChange={(e) => setBankField(i, 'bank_name', e.target.value)}
+                      />
+                      <input
+                        className="input num"
+                        placeholder="0123456789012"
+                        value={b.account_no}
+                        onChange={(e) => setBankField(i, 'account_no', e.target.value)}
+                      />
+                      <input
+                        className="input"
+                        placeholder="報支退款"
+                        value={b.note}
+                        onChange={(e) => setBankField(i, 'note', e.target.value)}
+                      />
+                      <button
+                        className={`chip${b.is_payroll ? ' chip--on' : ''}`}
+                        onClick={() => setPayrollAccount(i)}
+                      >
+                        {b.is_payroll ? '薪轉帳戶' : '設為薪轉帳戶'}
+                      </button>
+                      <button
+                        className="btn btn--icon"
+                        onClick={() => removeBankAccount(i)}
+                        aria-label="刪除本列帳戶"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </>
+              )}
 
               <label className="field field--full">
                 備註

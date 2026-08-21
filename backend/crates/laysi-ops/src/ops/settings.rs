@@ -599,7 +599,7 @@ async fn link_employee(
             health_insured_salary: None,
             pension_wage: None,
             id_no: "",
-            bank_account: "",
+            bank_accounts: None,
             note: "",
             actor: &ctx.actor,
         })

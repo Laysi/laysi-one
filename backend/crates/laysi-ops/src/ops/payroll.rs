@@ -699,7 +699,7 @@ mod tests {
             health_insured_salary: n("53000"),
             pension_wage: n("53000"),
             id_no: String::new(),
-            bank_account: String::new(),
+            bank_accounts: Vec::new(),
             note: String::new(),
         }
     }

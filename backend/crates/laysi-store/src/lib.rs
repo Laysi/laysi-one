@@ -4760,13 +4760,14 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let dept_id = resolve_department_id(&mut tx, req.dept_code).await?;
 
-        sqlx::query(
+        let employee_id: i32 = sqlx::query(
             "INSERT INTO employee
                 (emp_no, name, dept_id, title, employment_type,
                  hired_on, left_on, status, base_salary, labor_insured_salary,
-                 health_insured_salary, pension_wage, id_no, bank_account,
+                 health_insured_salary, pension_wage, id_no,
                  note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             RETURNING id",
         )
         .bind(req.emp_no)
         .bind(req.name)
@@ -4781,11 +4782,13 @@ impl Store {
         .bind(req.health_insured_salary.unwrap_or(Money::ZERO))
         .bind(req.pension_wage.unwrap_or(Money::ZERO))
         .bind(req.id_no)
-        .bind(req.bank_account)
         .bind(req.note)
         .bind(req.actor)
-        .execute(&mut *tx)
-        .await?;
+        .fetch_one(&mut *tx)
+        .await?
+        .get("id");
+
+        replace_bank_accounts(&mut tx, employee_id, &req).await?;
 
         tx.commit().await?;
         self.employee(req.emp_no).await
@@ -4801,14 +4804,15 @@ impl Store {
     /// deliberately separate.
     pub async fn update_employee(&self, req: WriteEmployee<'_>) -> Result<Employee> {
         let mut tx = self.pool.begin().await?;
-        let exists = sqlx::query("SELECT 1 FROM employee WHERE emp_no = $1 FOR UPDATE")
-            .bind(req.emp_no)
-            .fetch_optional(&mut *tx)
-            .await?
-            .is_some();
-        if !exists {
+        let employee_id: Option<i32> =
+            sqlx::query("SELECT id FROM employee WHERE emp_no = $1 FOR UPDATE")
+                .bind(req.emp_no)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|r| r.get("id"));
+        let Some(employee_id) = employee_id else {
             return Err(StoreError::EmployeeNotFound { no: req.emp_no.to_string() });
-        }
+        };
 
         let dept_id = resolve_department_id(&mut tx, req.dept_code).await?;
         sqlx::query(
@@ -4820,8 +4824,7 @@ impl Store {
                     labor_insured_salary = COALESCE($10::numeric, labor_insured_salary),
                     health_insured_salary = COALESCE($11::numeric, health_insured_salary),
                     pension_wage = COALESCE($12::numeric, pension_wage),
-                    id_no = $13, bank_account = $14,
-                    note = $15
+                    id_no = $13, note = $14
               WHERE emp_no = $1",
         )
         .bind(req.emp_no)
@@ -4837,22 +4840,23 @@ impl Store {
         .bind(req.health_insured_salary)
         .bind(req.pension_wage)
         .bind(req.id_no)
-        .bind(req.bank_account)
         .bind(req.note)
         .execute(&mut *tx)
         .await?;
+
+        replace_bank_accounts(&mut tx, employee_id, &req).await?;
 
         tx.commit().await?;
         self.employee(req.emp_no).await
     }
 
     pub async fn employees(&self, include_left: bool, q: Option<&str>) -> Result<Vec<Employee>> {
-        Ok(sqlx::query(
+        let mut staff: Vec<Employee> = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
                     e.title, e.employment_type,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
-                    e.id_no, e.bank_account, e.note
+                    e.id_no, e.note
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
               WHERE ($1 OR e.status <> 'left')
@@ -4868,16 +4872,51 @@ impl Store {
         .await?
         .iter()
         .map(row_to_employee)
-        .collect())
+        .collect();
+        self.attach_bank_accounts(&mut staff).await?;
+        Ok(staff)
+    }
+
+    /// Fill in [`Employee::bank_accounts`]. One query for the whole roster,
+    /// the same shape as movement steps: a query per person would be one round
+    /// trip per row on a page that reads every employee at once.
+    async fn attach_bank_accounts(&self, staff: &mut [Employee]) -> Result<()> {
+        if staff.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<i32> = staff.iter().map(|e| e.id).collect();
+        let rows = sqlx::query(
+            "SELECT employee_id, id, bank_name, account_no, is_payroll, note
+               FROM employee_bank_account
+              WHERE employee_id = ANY($1)
+              ORDER BY employee_id, is_payroll DESC, id",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await?;
+        for employee in staff.iter_mut() {
+            employee.bank_accounts = rows
+                .iter()
+                .filter(|r| r.get::<i32, _>("employee_id") == employee.id)
+                .map(|r| EmployeeBankAccount {
+                    id: r.get("id"),
+                    bank_name: r.get("bank_name"),
+                    account_no: r.get("account_no"),
+                    is_payroll: r.get("is_payroll"),
+                    note: r.get("note"),
+                })
+                .collect();
+        }
+        Ok(())
     }
 
     pub async fn employee(&self, emp_no: &str) -> Result<Employee> {
-        sqlx::query(
+        let mut found = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
                     e.title, e.employment_type,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
-                    e.id_no, e.bank_account, e.note
+                    e.id_no, e.note
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
               WHERE e.emp_no = $1",
@@ -4887,18 +4926,20 @@ impl Store {
         .await?
         .as_ref()
         .map(row_to_employee)
-        .ok_or_else(|| StoreError::EmployeeNotFound { no: emp_no.to_string() })
+        .ok_or_else(|| StoreError::EmployeeNotFound { no: emp_no.to_string() })?;
+        self.attach_bank_accounts(std::slice::from_mut(&mut found)).await?;
+        Ok(found)
     }
 
     /// Find an employee by the primary key linked to the account. Self-service
     /// must never guess an identity from a name, which may repeat.
     pub async fn employee_by_id(&self, id: i32) -> Result<Option<Employee>> {
-        Ok(sqlx::query(
+        let mut found = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
                     e.title, e.employment_type,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
-                    e.id_no, e.bank_account, e.note
+                    e.id_no, e.note
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
               WHERE e.id = $1",
@@ -4907,7 +4948,11 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?
         .as_ref()
-        .map(row_to_employee))
+        .map(row_to_employee);
+        if let Some(employee) = found.as_mut() {
+            self.attach_bank_accounts(std::slice::from_mut(employee)).await?;
+        }
+        Ok(found)
     }
 
     /// The steps required by hire, leave, pay change and transfer. The flow is
@@ -7109,8 +7154,30 @@ pub struct Employee {
     pub pension_wage: Money,
     /// Masked. The full national ID does not exist in this system.
     pub id_no: String,
-    pub bank_account: String,
+    /// Every account on file, the payroll one first. Loaded by
+    /// `attach_bank_accounts`, so a row read without it holds an empty list
+    /// rather than a wrong one.
+    pub bank_accounts: Vec<EmployeeBankAccount>,
     pub note: String,
+}
+
+/// One bank account belonging to one employee.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmployeeBankAccount {
+    pub id: i32,
+    pub bank_name: String,
+    pub account_no: String,
+    /// Where the monthly payroll transfer goes. At most one per employee.
+    pub is_payroll: bool,
+    pub note: String,
+}
+
+/// One account as the caller wants it stored.
+pub struct WriteEmployeeBankAccount<'a> {
+    pub bank_name: &'a str,
+    pub account_no: &'a str,
+    pub is_payroll: bool,
+    pub note: &'a str,
 }
 
 /// Create or fully update an employee record. The three insured brackets
@@ -7130,7 +7197,9 @@ pub struct WriteEmployee<'a> {
     pub health_insured_salary: Option<Money>,
     pub pension_wage: Option<Money>,
     pub id_no: &'a str,
-    pub bank_account: &'a str,
+    /// `None` leaves the accounts on file alone; `Some` replaces the whole
+    /// set, the same shape the edit drawer sends back.
+    pub bank_accounts: Option<&'a [WriteEmployeeBankAccount<'a>]>,
     pub note: &'a str,
     pub actor: &'a str,
 }
@@ -7539,6 +7608,43 @@ async fn resolve_department_id(
     .ok_or_else(|| StoreError::DepartmentNotFound { code: dept_code.to_string() })
 }
 
+/// Replace every bank account on file for one employee.
+///
+/// `None` leaves them alone, so an operation that never asked for them cannot
+/// erase them; `Some` is the whole set, which is what the edit drawer holds.
+/// Delete then insert rather than diff: the rows carry no history and nothing
+/// else references their ids, and a diff would have to decide what an edited
+/// account number means.
+async fn replace_bank_accounts(
+    tx: &mut Tx<'_>,
+    employee_id: i32,
+    req: &WriteEmployee<'_>,
+) -> Result<()> {
+    let Some(accounts) = req.bank_accounts else {
+        return Ok(());
+    };
+    sqlx::query("DELETE FROM employee_bank_account WHERE employee_id = $1")
+        .bind(employee_id)
+        .execute(&mut **tx)
+        .await?;
+    for account in accounts {
+        sqlx::query(
+            "INSERT INTO employee_bank_account
+                (employee_id, bank_name, account_no, is_payroll, note, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(employee_id)
+        .bind(account.bank_name)
+        .bind(account.account_no)
+        .bind(account.is_payroll)
+        .bind(account.note)
+        .bind(req.actor)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 struct InsertArInvoice<'a> {
     invoice_no: &'a str,
     customer: &'a str,
@@ -7876,7 +7982,7 @@ fn row_to_employee(r: &PgRow) -> Employee {
         health_insured_salary: r.get("health_insured_salary"),
         pension_wage: r.get("pension_wage"),
         id_no: r.get("id_no"),
-        bank_account: r.get("bank_account"),
+        bank_accounts: Vec::new(),
         note: r.get("note"),
     }
 }
@@ -8466,6 +8572,101 @@ mod tests {
             .expect("應可清除密鑰");
         assert_eq!(cleared.client_secret, "", "空字串代表清除");
         assert!(cleared.verified_at.is_none(), "設定變更後驗證結果要作廢");
+    }
+
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// bank_accounts_replace_as_a_set -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn bank_accounts_replace_as_a_set() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let emp_no = format!("T{}", &Uuid::new_v4().simple().to_string()[..8]);
+        fn write<'a>(
+            emp_no: &'a str,
+            accounts: Option<&'a [WriteEmployeeBankAccount<'a>]>,
+        ) -> WriteEmployee<'a> {
+            WriteEmployee {
+                emp_no,
+                name: "帳戶測試",
+                dept_code: None,
+                title: "",
+                employment_type: "full_time",
+                hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                left_on: None,
+                status: "active",
+                base_salary: None,
+                labor_insured_salary: None,
+                health_insured_salary: None,
+                pension_wage: None,
+                id_no: "",
+                bank_accounts: accounts,
+                note: "",
+                actor: "測試",
+            }
+        }
+
+        let created = store
+            .create_employee(write(&emp_no, Some(&[
+                WriteEmployeeBankAccount {
+                    bank_name: "玉山銀行",
+                    account_no: "0012345",
+                    is_payroll: true,
+                    note: "薪資",
+                },
+                WriteEmployeeBankAccount {
+                    bank_name: "台北富邦",
+                    account_no: "6789012",
+                    is_payroll: false,
+                    note: "報支退款",
+                },
+            ])))
+            .await
+            .expect("應可建立員工與帳戶");
+        assert_eq!(created.bank_accounts.len(), 2);
+        // The payroll account sorts first, whatever order it was sent in.
+        assert!(created.bank_accounts[0].is_payroll);
+        assert_eq!(created.bank_accounts[0].account_no, "0012345");
+
+        // Omitting the list leaves what is on file alone.
+        let untouched = store
+            .update_employee(write(&emp_no, None))
+            .await
+            .expect("應可只更新其他欄位");
+        assert_eq!(untouched.bank_accounts.len(), 2);
+
+        let replaced = store
+            .update_employee(write(&emp_no, Some(&[WriteEmployeeBankAccount {
+                bank_name: "台北富邦",
+                account_no: "6789012",
+                is_payroll: true,
+                note: "",
+            }])))
+            .await
+            .expect("應可整份取代");
+        assert_eq!(replaced.bank_accounts.len(), 1);
+        assert_eq!(replaced.bank_accounts[0].account_no, "6789012");
+        assert!(replaced.bank_accounts[0].is_payroll);
+
+        // Reading one employee and reading the roster must agree.
+        let by_id = store
+            .employee_by_id(replaced.id)
+            .await
+            .expect("應查得到員工")
+            .expect("員工應存在");
+        assert_eq!(by_id.bank_accounts.len(), 1);
+
+        sqlx::query("DELETE FROM employee WHERE emp_no = $1")
+            .bind(&emp_no)
+            .execute(&store.pool)
+            .await
+            .expect("應可清掉測試資料");
     }
 
     /// Run with:

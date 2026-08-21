@@ -316,6 +316,31 @@ SQL 會讓三張表對「什麼算已過帳」與日期怎麼比各有一套定�
 `id_no` 換成「[已遮蔽]」——長度規則只擋超過 512 位元組的值，十個字元的字號永遠
 碰不到它，而同一批參數裡的 `emp_no` 已經足以回答那次呼叫動的是誰。
 
+### 員工的銀行帳戶不只一個（0049）
+
+`employee.bank_account` 是一個自由文字欄，於是一個人只有一個帳戶，而那個帳戶
+是誰輸入的什麼字。兩件事都擋路：薪轉戶與收退款的帳戶常常不是同一個，而一欄
+文字回答不了「薪水匯到哪一個」——多打一個帳戶進去，那一欄就成了兩個帳號並排
+的字串，沒有任何程式讀得出其中一個。
+
+`employee_bank_account` 一人多筆，銀行名稱與帳號分成兩欄：自助頁只印銀行與
+尾碼，欄位分開就不必去猜一個字串在哪裡結束（原本的遮罩函式從第一個數字切開，
+「第一銀行」這種名字會被切在中間）。`is_payroll` 標出薪轉的那一筆，以
+`WHERE is_payroll` 的 partial UNIQUE 索引限制至多一筆——那是發薪當天唯一的
+去向，兩筆等於沒有答案。它是索引不是 `employee` 上的一欄，所以指不到別人的
+帳戶，也不會在帳戶被刪掉之後留一個指向空處的欄位。
+
+`bank_accounts` 是整份清單一次取代，不帶就不動——與四個金額同一族的三態，理由
+也相同：抽屜握有的就是整份清單，而逐筆增刪要另外三個操作與三份權限。至多一筆
+可標為薪轉，一筆都沒標時以第一筆為準（單一帳戶的呼叫端不必重複說一次清單已經
+說過的事）。
+
+`account_no` 加進 `REDACTED_FIELDS`：它與 `id_no` 同一類，長度規則碰不到，而
+稽核紀錄要回答的是哪一次呼叫動了誰，`emp_no` 已經在同一批參數裡。
+
+0049 把舊欄位的值搬過來時只能盡力拆：第一個數字之前是銀行、之後是帳號。整串
+沒有數字的原樣留在帳號欄，於是它會出現在名冊上等人更正，而不是安靜消失。
+
 ## REST 登入只接受伺服器端 session
 
 0010 的 `user_account`、`user_identity` 與 `user_session` 已接上 REST 登入。
@@ -843,6 +868,11 @@ account.is_active           0012 新增；停用阻止新分錄，但保留歷�
 integration.mcp             0013 更新為 api_token 雜湊驗證與資料列身分綁定
 voucher.reverses            0014 新增；沖銷傳票指回原傳票，UNIQUE 防止重複沖銷
 
+-- 員工的銀行帳戶（0049）
+employee_bank_account       一人可有多筆；`is_payroll` 標出薪轉的那一筆，
+                            以 partial UNIQUE 索引限制至多一筆。
+                            原本是 `employee.bank_account` 單一自由文字欄
+
 ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
              tool_name text, risk text, prompt text null,
              params jsonb, result_summary text, outcome text,
@@ -1032,8 +1062,8 @@ impl Registry {
 |---|---|---|
 | `create_account` | NeedsConfirm | `report_group` 與 `cash_flow_section` 都必填；損益科目明確送 `null`。`normal_side` 依 kind 採慣例值，但可覆寫 |
 | `update_account` | NeedsConfirm | 完整更新或以 `is_active = false` 停用；不提供刪除，既有分錄仍保留 |
-| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；不建立登入帳號 |
-| `update_employee` | NeedsConfirm | 除四個金額外完整更新；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
+| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 一次收整份清單；不建立登入帳號 |
+| `update_employee` | NeedsConfirm | 除四個金額外完整更新；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 不帶＝不動、給清單＝整份取代；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
 | `create_bank_account` | NeedsConfirm | `gl_code` 必須指向啟用中的可入帳資產科目 |
 | `create_dimension_value` | NeedsConfirm | 只在既有 `dimension` 下新增項目；不建立分類 |
 | `set_approval_rule` | BossOnly | 依 `step_no` upsert 或刪除；`min_amount = null` 代表一律需要，流程至少留一關 |

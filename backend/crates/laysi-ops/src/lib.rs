@@ -310,8 +310,9 @@ const MAX_AUDITED_STRING: usize = 512;
 ///
 /// A national ID is ten characters, so the length rule never reaches it, and
 /// it is personal data for life. Which employee a call was about is still
-/// answerable: `emp_no` travels in the same parameters.
-const REDACTED_FIELDS: [&str; 2] = ["id_no", "client_secret"];
+/// answerable: `emp_no` travels in the same parameters. A bank account number
+/// is the same case, and nothing about a past call needs it either.
+const REDACTED_FIELDS: [&str; 3] = ["id_no", "client_secret", "account_no"];
 
 /// Parameters as the audit trail should hold them.
 ///

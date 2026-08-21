@@ -120,6 +120,7 @@
   --entry-amount-col: 130px;
   --entry-dept-col: 120px;
   --entry-action-col: 28px;
+  --bank-payroll-col: 152px;
   --todo-count-col: 34px;
 
   --report-width: 720px;
@@ -1952,6 +1953,13 @@ textarea {
   align-items: center;
 }
 
+.bank-grid {
+  display: grid;
+  grid-template-columns:
+    1fr 1fr 1fr var(--bank-payroll-col) var(--entry-action-col);
+  gap: var(--space-lg);
+}
+
 .entry-input {
   padding: var(--space-md) var(--space-md);
   border: var(--rule-width) solid var(--rule-strong);
@@ -2539,6 +2547,17 @@ textarea {
 
   .entry-grid > :first-child,
   .entry-grid > :nth-child(2) {
+    grid-column: 1 / -1;
+  }
+
+  .bank-grid {
+    grid-template-columns: 1fr var(--bank-payroll-col) var(--entry-action-col);
+    gap: var(--space-md);
+  }
+
+  .bank-grid > :first-child,
+  .bank-grid > :nth-child(2),
+  .bank-grid > :nth-child(3) {
     grid-column: 1 / -1;
   }
 
