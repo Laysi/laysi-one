@@ -7,13 +7,14 @@ import {
   type DeletedUserAccount,
   type NewUserAccount,
   type RoleMatrix,
+  type UnlinkedUserIdentity,
   type UpdatedUserAccount,
   type UserAccountList,
   type UserAccountRow,
   type UserPasswordReset,
 } from '../api/client';
 import type { ScreenId } from '../nav';
-import { useCurrentUser } from '../auth';
+import { useAuth, useCurrentUser } from '../auth';
 
 interface Props {
   onGo: (screen: ScreenId) => void;
@@ -39,6 +40,8 @@ const EMPTY_FORM: FormState = {
   status: 'active',
 };
 
+type Confirming = 'reset' | 'delete' | 'role' | 'unlink' | null;
+
 interface Secret {
   heading: string;
   username: string;
@@ -49,6 +52,7 @@ interface Secret {
 
 export function Accounts({ onGo, onToast, reloadKey }: Props) {
   const me = useCurrentUser();
+  const { oauth } = useAuth();
   const [list, setList] = useState<UserAccountList | null>(null);
   const [matrix, setMatrix] = useState<RoleMatrix | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +60,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
   const [drawer, setDrawer] = useState<'create' | 'edit' | null>(null);
   const [original, setOriginal] = useState<UserAccountRow | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
-  const [confirming, setConfirming] = useState<'reset' | 'delete' | 'role' | null>(null);
+  const [confirming, setConfirming] = useState<Confirming>(null);
   const [nextRole, setNextRole] = useState('');
   const [saving, setSaving] = useState(false);
   const [secret, setSecret] = useState<Secret | null>(null);
@@ -78,6 +82,8 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
       .catch(() => setMatrix(null));
   }, [drawer, matrix]);
 
+  const canUnlink = me.permissions.includes('unlink_user_identity');
+
   function roleName(code: string) {
     return (matrix?.roles ?? []).find((r) => r.code === code)?.name ?? code;
   }
@@ -98,7 +104,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     setDrawer('create');
   }
 
-  function openEdit(a: UserAccountRow, confirm: 'reset' | 'delete' | 'role' | null = null) {
+  function openEdit(a: UserAccountRow, confirm: Confirming = null) {
     setOriginal(a);
     setForm({
       username: a.username,
@@ -114,8 +120,8 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
   }
 
   async function createAccount() {
-    if (!form.username.trim() || !form.display_name.trim()) {
-      onToast('登入名稱與顯示名稱都要填寫');
+    if (!form.email.trim() || !form.display_name.trim()) {
+      onToast('電子郵件與顯示名稱都要填寫');
       return;
     }
     if (!form.role_code) {
@@ -127,21 +133,22 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
       const d = await callOp<NewUserAccount>(
         'create_user_account',
         {
-          username: form.username.trim(),
-          display_name: form.display_name.trim(),
           email: form.email.trim(),
+          display_name: form.display_name.trim(),
           role_code: form.role_code,
           employee_no: form.employee_no.trim(),
         },
-        `建立帳號 ${form.username.trim()}`,
+        `建立帳號 ${form.email.trim()}`,
       );
-      setSecret({
-        heading: '初始密碼',
-        username: d.user.username,
-        subtitle: `${d.user.display_name} · ${d.user.role_name} · 員工 ${d.user.employee_no}`,
-        password: d.temporary_password,
-        recipient: d.user.display_name,
-      });
+      if (d.temporary_password) {
+        setSecret({
+          heading: '初始密碼',
+          username: d.user.username,
+          subtitle: `${d.user.display_name} · ${d.user.role_name} · 員工 ${d.user.employee_no}`,
+          password: d.temporary_password,
+          recipient: d.user.display_name,
+        });
+      }
       setCopied(false);
       close();
       load();
@@ -269,6 +276,26 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     }
   }
 
+  async function unlinkIdentity() {
+    if (!original) return;
+    setSaving(true);
+    try {
+      const d = await callOp<UnlinkedUserIdentity>(
+        'unlink_user_identity',
+        { username: original.username, confirm: true },
+        `解除 ${original.username} 的外部帳號連結`,
+      );
+      onToast(`${d.user.username} 已解除連結，登出 ${d.revoked_sessions} 個工作階段`);
+      close();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+      setConfirming(null);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function removeAccount() {
     if (!original) return;
     setSaving(true);
@@ -287,6 +314,28 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     } finally {
       setSaving(false);
     }
+  }
+
+  function runConfirm(): Promise<void> {
+    if (confirming === 'delete') return removeAccount();
+    if (confirming === 'role') return changeRole();
+    if (confirming === 'unlink') return unlinkIdentity();
+    return resetPassword();
+  }
+
+  function confirmLabel(): string {
+    if (saving) {
+      if (confirming === 'delete') return '刪除中…';
+      if (confirming === 'role') return '變更中…';
+      if (confirming === 'unlink') return '解除中…';
+      return '重設中…';
+    }
+    if (confirming === 'delete') return `確認刪除 ${form.username}`;
+    if (confirming === 'role') {
+      return nextRole ? `確認變更為${roleName(nextRole)}` : '請先選擇角色';
+    }
+    if (confirming === 'unlink') return `確認解除 ${form.username} 的連結`;
+    return `確認重設 ${form.username} 的密碼`;
   }
 
   return (
@@ -347,6 +396,11 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                       <td>
                         {a.display_name}
                         {a.email && <span className="cell-hint cell-hint--block">{a.email}</span>}
+                        {a.identity_label && (
+                          <span className="cell-hint cell-hint--block">
+                            {a.identity_label}：{a.identity_email ?? '已連結'}
+                          </span>
+                        )}
                       </td>
                       <td>{a.role_name}</td>
                       <td>
@@ -377,12 +431,23 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                         >
                           {a.status === 'active' ? '停用' : '啟用'}
                         </button>{' '}
-                        <button
-                          className="btn btn--compact btn--secondary"
-                          onClick={() => openEdit(a, 'delete')}
-                        >
-                          刪除
-                        </button>
+                        {a.identity_label ? (
+                          canUnlink && (
+                            <button
+                              className="btn btn--compact btn--secondary"
+                              onClick={() => openEdit(a, 'unlink')}
+                            >
+                              解除連結
+                            </button>
+                          )
+                        ) : (
+                          <button
+                            className="btn btn--compact btn--secondary"
+                            onClick={() => openEdit(a, 'delete')}
+                          >
+                            刪除
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -481,6 +546,13 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                     撤銷，需要時請重新核發。
                   </p>
                 </div>
+              ) : confirming === 'unlink' ? (
+                <p className="form-warn">
+                  解除後 <span className="num">{form.username}</span> 不能再以{' '}
+                  {original?.identity_label} 登入，已登入的裝置全部登出。
+                  {oauth.creates_accounts &&
+                    ' 同一個帳號再次登入會重新連結，要擋住登入請改為停用。'}
+                </p>
               ) : confirming === 'reset' ? (
                 <p className="form-warn">
                   重設後 <span className="num">{form.username}</span> 的舊密碼立刻失效，
@@ -488,16 +560,12 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                 </p>
               ) : (
                 <div className="field-grid">
-                  <label className="field">
-                    登入名稱（3 到 64 個字元）
-                    <input
-                      className="input"
-                      value={form.username}
-                      placeholder="chen.mei"
-                      disabled={drawer === 'edit'}
-                      onChange={(e) => setField('username', e.target.value)}
-                    />
-                  </label>
+                  {drawer === 'edit' && (
+                    <label className="field">
+                      登入信箱
+                      <input className="input" value={form.username} disabled />
+                    </label>
+                  )}
                   <label className="field">
                     顯示名稱
                     <input
@@ -569,6 +637,19 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                     </span>
                   </label>
 
+                  {drawer === 'edit' && original?.identity_label && (
+                    <div className="field">
+                      外部帳號
+                      <span className="field__fixed">
+                        {original.identity_label}
+                        {original.identity_email ? ` ${original.identity_email}` : ''}
+                      </span>
+                      <span className="field__hint">
+                        連結於 {businessTime(original.identity_linked_at, '—')}
+                      </span>
+                    </div>
+                  )}
+
                   {drawer === 'edit' && (
                     <label className="field">
                       狀態
@@ -584,7 +665,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                   )}
 
                   <label className="field field--full">
-                    電子郵件（選填）
+                    {drawer === 'edit' ? '電子郵件（選填）' : '電子郵件（也是登入帳號）'}
                     <input
                       className="input"
                       type="email"
@@ -606,27 +687,9 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                   <button
                     className={`btn${saving ? ' btn--off' : ''}`}
                     disabled={saving || (confirming === 'role' && !nextRole)}
-                    onClick={() =>
-                      void (confirming === 'delete'
-                        ? removeAccount()
-                        : confirming === 'role'
-                          ? changeRole()
-                          : resetPassword())
-                    }
+                    onClick={() => void runConfirm()}
                   >
-                    {confirming === 'delete'
-                      ? saving
-                        ? '刪除中…'
-                        : `確認刪除 ${form.username}`
-                      : confirming === 'role'
-                        ? saving
-                          ? '變更中…'
-                          : nextRole
-                            ? `確認變更為${roleName(nextRole)}`
-                            : '請先選擇角色'
-                        : saving
-                          ? '重設中…'
-                          : `確認重設 ${form.username} 的密碼`}
+                    {confirmLabel()}
                   </button>
                 </>
               ) : (
@@ -641,12 +704,23 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                           重設密碼
                         </button>
                       )}
-                      <button
-                        className="btn btn--compact btn--ghost"
-                        onClick={() => setConfirming('delete')}
-                      >
-                        刪除帳號
-                      </button>
+                      {original?.identity_label ? (
+                        canUnlink && (
+                          <button
+                            className="btn btn--compact btn--ghost"
+                            onClick={() => setConfirming('unlink')}
+                          >
+                            解除連結
+                          </button>
+                        )
+                      ) : (
+                        <button
+                          className="btn btn--compact btn--ghost"
+                          onClick={() => setConfirming('delete')}
+                        >
+                          刪除帳號
+                        </button>
+                      )}
                     </>
                   ) : null}
                   <span className="spacer" />

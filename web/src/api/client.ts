@@ -80,7 +80,12 @@ export interface Meta {
   actor: string;
   actor_role: string;
   employee_id: number | null;
-  oauth: { enabled: boolean; provider: string | null };
+  oauth: {
+    enabled: boolean;
+    label?: string;
+    domain?: string | null;
+    creates_accounts?: boolean;
+  };
   version: string;
   licence: string;
   brand_build: string;
@@ -568,7 +573,7 @@ export interface NewUserAccount {
     employee_no: string;
     employee_name: string;
   };
-  temporary_password: string;
+  temporary_password: string | null;
   must_change_password: boolean;
 }
 
@@ -617,6 +622,9 @@ export interface UserAccountRow {
   status: string;
   must_change_password: boolean;
   has_password: boolean;
+  identity_label: string | null;
+  identity_email: string | null;
+  identity_linked_at: string | null;
   created_at: string;
   created_by: string;
   last_login_at: string | null;
@@ -624,6 +632,38 @@ export interface UserAccountRow {
 
 export interface UserAccountList {
   accounts: UserAccountRow[];
+}
+
+export interface OidcSetting {
+  enabled: boolean;
+  issuer: string;
+  provider_label: string;
+  client_id: string;
+  has_client_secret: boolean;
+  redirect_url: string;
+  allowed_domain: string;
+  provision_role: string;
+  provision_role_name: string | null;
+  password_login_disabled: boolean;
+  updated_at: string;
+  updated_by: string;
+  verified_at: string | null;
+  verify_error: string;
+  roles: RoleRow[];
+}
+
+export interface UpdatedOidcSetting {
+  changed: string[];
+  enabled: boolean;
+}
+
+export interface UnlinkedUserIdentity {
+  user: {
+    username: string;
+    display_name: string;
+  };
+  removed: number;
+  revoked_sessions: number;
 }
 
 export interface UserPasswordReset {

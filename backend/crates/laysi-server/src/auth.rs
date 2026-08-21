@@ -383,6 +383,24 @@ pub async fn login(
         return login_failure_response(LoginFailure::WrongPassword);
     }
 
+    // Checked only after the password has already been confirmed correct, so
+    // this never becomes a second way to learn whether a login name exists.
+    // The system administrator role is exempt: turning this on and then
+    // having the IdP break would otherwise strand the whole installation
+    // with no way in and no way to reach the settings screen that could turn
+    // it back off.
+    if user.role_code != laysi_ops::ROLE_ADMIN {
+        if let Some(oidc) = crate::oidc::current(&state).await {
+            if oidc.password_login_disabled() {
+                return error_response(
+                    StatusCode::FORBIDDEN,
+                    "password_login_disabled",
+                    &format!("本站已改用{}登入，請使用上方的登入按鈕", oidc.label()),
+                );
+            }
+        }
+    }
+
     let secret = match issue_session(&state, &user, &headers).await {
         Ok(secret) => secret,
         Err(response) => return response,
@@ -420,7 +438,7 @@ pub async fn me(State(state): State<Shared>, headers: HeaderMap) -> Response {
         Ok(verified) => Json(json!({
             "ok": true,
             "user": user_json_with_role(&state, &verified.session.user).await,
-            "oauth": { "enabled": state.oidc.is_some() },
+            "oauth": crate::oidc::describe(&state).await,
             "setup": setup_json(&state, true).await,
         }))
         .into_response(),
@@ -437,7 +455,7 @@ pub async fn me(State(state): State<Shared>, headers: HeaderMap) -> Response {
             Json(json!({
                 "ok": false,
                 "error": { "code": "unauthorized", "message": "請先登入再繼續" },
-                "oauth": { "enabled": state.oidc.is_some() },
+                "oauth": crate::oidc::describe(&state).await,
                 "setup": setup_json(&state, false).await,
             })),
         )
@@ -655,7 +673,7 @@ mod tests {
             rustfs_endpoint: String::new(),
             auth: AuthConfig::for_tests(),
             setup: crate::setup::SetupConfig::for_tests(),
-            oidc: None,
+            oidc: tokio::sync::RwLock::new(crate::oidc::OidcCache::default()),
             mcp_rate_limiter: crate::ratelimit::RateLimiter::new(60),
             login_rate_limiter: crate::ratelimit::RateLimiter::new(LOGIN_ATTEMPTS_PER_MINUTE),
             setup_rate_limiter: crate::ratelimit::RateLimiter::new(

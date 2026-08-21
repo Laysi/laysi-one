@@ -17,10 +17,17 @@
 //! On a private network that window is uninteresting; on a public address it
 //! is not, and the operator is already editing `.env` before the first boot.
 //!
-//! The role is fixed to `boss` and cannot be chosen by the caller. A first
+//! The role is fixed to `admin` and cannot be chosen by the caller. A first
 //! account without the permission to grant permissions would leave the
 //! installation unusable, and an unauthenticated endpoint should not offer a
 //! degree of freedom that has no correct value other than one.
+//!
+//! The login name and display name are fixed for the same reason. This account
+//! stands for the installation, not for whoever ran the installer: it has no
+//! employee record, no address, and nothing to do once the owner account
+//! exists. Asking for an address here would only produce one that stops being
+//! true when that person leaves, and would put the one login that has to work
+//! when the IdP does not back onto an identity the IdP controls.
 
 use crate::auth::{
     attach_session_cookie, env_bool, error_response, issue_session, user_json_with_role,
@@ -42,6 +49,9 @@ use std::sync::Arc;
 /// salary. They create the owner account afterwards with
 /// `create_user_account`.
 const BOOTSTRAP_ROLE: &str = laysi_ops::ROLE_ADMIN;
+/// Shown wherever this account acts: the audit trail, the account bar. It
+/// names the role because that is all this account is.
+const BOOTSTRAP_DISPLAY_NAME: &str = "系統管理員";
 /// Recorded in `user_account.created_by`, so an account made this way is
 /// distinguishable from `laysi-admin`'s afterwards.
 const CREATED_BY: &str = "web-setup";
@@ -52,11 +62,6 @@ pub(crate) const ATTEMPTS_PER_MINUTE: u32 = 5;
 /// This endpoint is called once in the life of an installation and has no
 /// caller identity to bucket by, so every caller shares one bucket.
 const RATE_BUCKET: &str = "bootstrap";
-
-const USERNAME_MIN_CHARS: usize = 3;
-const USERNAME_MAX_CHARS: usize = 64;
-const DISPLAY_NAME_MAX_CHARS: usize = 64;
-const EMAIL_MAX_CHARS: usize = 254;
 
 /// Whether and how the browser may initialise this installation.
 #[derive(Clone)]
@@ -102,10 +107,6 @@ impl SetupConfig {
 
 #[derive(Deserialize)]
 pub struct BootstrapInput {
-    username: String,
-    display_name: String,
-    #[serde(default)]
-    email: String,
     password: String,
     #[serde(default)]
     setup_token: String,
@@ -114,40 +115,10 @@ pub struct BootstrapInput {
 /// A validated account request. Building one is the only way to reach the
 /// store, so no field can skip its check.
 struct FirstAccount {
-    username: String,
-    display_name: String,
-    email: String,
     password: String,
 }
 
 fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
-    let username = input.username.trim().to_string();
-    let count = username.chars().count();
-    if !(USERNAME_MIN_CHARS..=USERNAME_MAX_CHARS).contains(&count) {
-        return Err("登入名稱需要 3 到 64 個字元");
-    }
-    // Same rule as `create_user_account`: only control characters are refused.
-    if username.chars().any(char::is_control) {
-        return Err("登入名稱不能包含控制字元");
-    }
-
-    let display_name = input.display_name.trim().to_string();
-    if display_name.is_empty() {
-        return Err("顯示名稱為必填");
-    }
-    if display_name.chars().count() > DISPLAY_NAME_MAX_CHARS {
-        return Err("顯示名稱不可超過 64 個字元");
-    }
-
-    let email = input.email.trim().to_string();
-    if !email.is_empty()
-        && (email.chars().count() > EMAIL_MAX_CHARS
-            || !email.contains('@')
-            || email.chars().any(char::is_whitespace))
-    {
-        return Err("電子郵件格式不正確；此欄可以留空");
-    }
-
     // The same minimum as changing a password later. The account is created
     // with the password its owner chose, so unlike `laysi-admin create-user`
     // there is no temporary password to force a change from.
@@ -155,7 +126,7 @@ fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
         return Err("密碼至少需要 8 個字元");
     }
 
-    Ok(FirstAccount { username, display_name, email, password: input.password })
+    Ok(FirstAccount { password: input.password })
 }
 
 fn user_agent(headers: &HeaderMap) -> String {
@@ -199,10 +170,11 @@ pub async fn bootstrap(
     // Validation comes before the rate limit so that correcting a typo does
     // not spend the allowance; only attempts that reach the token check and
     // Argon2id do.
-    let FirstAccount { username, display_name, email, password } = match validate(input) {
+    let FirstAccount { password } = match validate(input) {
         Ok(account) => account,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_input", message),
     };
+    let username = laysi_ops::ADMIN_USERNAME;
 
     if !state.setup_rate_limiter.allow(RATE_BUCKET) {
         return error_response(
@@ -250,9 +222,11 @@ pub async fn bootstrap(
         .store
         .bootstrap_first_user(
             CreateUser {
-                username: &username,
-                display_name: &display_name,
-                email: &email,
+                username,
+                display_name: BOOTSTRAP_DISPLAY_NAME,
+                // Deliberately empty. See the module comment: an address here
+                // would let an external identity resolve onto this account.
+                email: "",
                 password_hash: Some(&password_hash),
                 role_code: BOOTSTRAP_ROLE,
                 employee_id: None,
@@ -335,7 +309,7 @@ mod tests {
     fn request<'a>(username: &'a str, password_hash: &'a str) -> CreateUser<'a> {
         CreateUser {
             username,
-            display_name: "初始化測試",
+            display_name: BOOTSTRAP_DISPLAY_NAME,
             email: "",
             password_hash: Some(password_hash),
             role_code: BOOTSTRAP_ROLE,
@@ -346,38 +320,29 @@ mod tests {
         }
     }
 
-    fn input(username: &str, password: &str) -> BootstrapInput {
-        BootstrapInput {
-            username: username.into(),
-            display_name: "負責人".into(),
-            email: String::new(),
-            password: password.into(),
-            setup_token: String::new(),
-        }
+    fn input(password: &str) -> BootstrapInput {
+        BootstrapInput { password: password.into(), setup_token: String::new() }
     }
 
     const GOOD_PASSWORD: &str = "一組夠長的系統初始化測試密碼";
 
     #[test]
-    fn a_well_formed_request_is_trimmed_and_accepted() {
-        let mut raw = input("  owner  ", GOOD_PASSWORD);
-        raw.display_name = "  負責人  ".into();
-        raw.email = "  owner@example.test  ".into();
-        let account = validate(raw).expect("合法輸入應通過驗證");
-        assert_eq!(account.username, "owner");
-        assert_eq!(account.display_name, "負責人");
-        assert_eq!(account.email, "owner@example.test");
+    fn a_well_formed_request_is_accepted() {
+        let account = validate(input(GOOD_PASSWORD)).expect("合法輸入應通過驗證");
+        assert_eq!(account.password, GOOD_PASSWORD);
     }
 
+    /// The caller supplies a password and nothing else. Everything that
+    /// identifies this account is fixed here, so no request can point it at a
+    /// person or give it an address an external identity could resolve onto.
     #[test]
-    fn usernames_are_bounded_by_length_and_refuse_only_control_characters() {
-        assert!(validate(input("ow", GOOD_PASSWORD)).is_err());
-        assert!(validate(input(&"o".repeat(65), GOOD_PASSWORD)).is_err());
-        assert!(validate(input("own\ter", GOOD_PASSWORD)).is_err());
-        assert!(validate(input("own.er_1-2", GOOD_PASSWORD)).is_ok());
-        assert!(validate(input("負責人", GOOD_PASSWORD)).is_ok());
-        assert!(validate(input("owner name", GOOD_PASSWORD)).is_ok());
-        assert!(validate(input("owner'--", GOOD_PASSWORD)).is_ok());
+    fn the_first_account_is_the_installation_not_a_person() {
+        let hash = "argon2-placeholder";
+        let created = request(laysi_ops::ADMIN_USERNAME, hash);
+        assert_eq!(created.username, "admin");
+        assert_eq!(created.email, "");
+        assert_eq!(created.role_code, laysi_ops::ROLE_ADMIN);
+        assert!(created.employee_id.is_none());
     }
 
     /// The password is chosen by its owner here, so it must meet the same
@@ -386,20 +351,9 @@ mod tests {
     #[test]
     fn the_password_minimum_matches_the_change_password_endpoint() {
         let short: String = "a".repeat(MIN_PASSWORD_CHARS - 1);
-        assert!(validate(input("owner", &short)).is_err());
+        assert!(validate(input(&short)).is_err());
         let exact: String = "a".repeat(MIN_PASSWORD_CHARS);
-        assert!(validate(input("owner", &exact)).is_ok());
-    }
-
-    #[test]
-    fn an_empty_email_is_allowed_but_a_malformed_one_is_not() {
-        let mut raw = input("owner", GOOD_PASSWORD);
-        raw.email = String::new();
-        assert!(validate(raw).is_ok());
-
-        let mut raw = input("owner", GOOD_PASSWORD);
-        raw.email = "not-an-address".into();
-        assert!(validate(raw).is_err());
+        assert!(validate(input(&exact)).is_ok());
     }
 
     #[test]

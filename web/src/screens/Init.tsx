@@ -5,9 +5,6 @@ import { AuthFailed, useAuth } from '../auth';
 export function Init() {
   const { setup, bootstrap } = useAuth();
 
-  const [username, setUsername] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [setupToken, setSetupToken] = useState('');
@@ -27,13 +24,7 @@ export function Init() {
     setMismatch(false);
     setBusy(true);
     try {
-      await bootstrap({
-        username: username.trim(),
-        display_name: displayName.trim(),
-        email: email.trim(),
-        password,
-        setup_token: setupToken,
-      });
+      await bootstrap({ password, setup_token: setupToken });
     } catch (err) {
       setFailure(
         err instanceof AuthFailed ? err : new AuthFailed({ code: 'network', message: String(err) }),
@@ -52,42 +43,12 @@ export function Init() {
           <BrandMark height={20} />
         </div>
 
-        <h1 className="login__title">建立系統管理員帳號</h1>
-        <p className="login__lede">
-          這個帳號管系統設定與帳號，看不到帳務與薪資。建好之後，第二步是在「帳號管理」建立負責人帳號。
-        </p>
+        <h1 className="login__title">設定系統管理員密碼</h1>
 
         <form onSubmit={(e) => void submit(e)}>
           <label className="login__field">
-            <span className="login__label">帳號（3 到 64 個字元）</span>
-            <input
-              className="entry-input"
-              type="text"
-              autoComplete="username"
-              value={username}
-              autoFocus
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </label>
-          <label className="login__field">
-            <span className="login__label">顯示名稱（其他人在系統裡看到的名字）</span>
-            <input
-              className="entry-input"
-              type="text"
-              autoComplete="name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-            />
-          </label>
-          <label className="login__field">
-            <span className="login__label">電子郵件（選填）</span>
-            <input
-              className="entry-input"
-              type="email"
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
+            <span className="login__label">登入名稱</span>
+            <input className="entry-input" type="text" autoComplete="username" value="admin" readOnly />
           </label>
           <label className="login__field">
             <span className="login__label">
@@ -105,6 +66,7 @@ export function Init() {
               type={showPassword ? 'text' : 'password'}
               autoComplete="new-password"
               value={password}
+              autoFocus
               onChange={(e) => setPassword(e.target.value)}
             />
           </label>
@@ -140,7 +102,7 @@ export function Init() {
 
           <div className="login__actions">
             <button className="btn" type="submit" disabled={busy}>
-              {busy ? '建立中…' : '建立帳號並進入系統'}
+              {busy ? '建立中…' : '設定密碼並進入系統'}
             </button>
           </div>
         </form>

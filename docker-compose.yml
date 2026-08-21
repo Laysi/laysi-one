@@ -82,10 +82,6 @@ services:
       # service needs these: mcp mounts no /v1 routes at all.
       SETUP_ALLOW_WEB: ${SETUP_ALLOW_WEB:-true}
       SETUP_TOKEN: ${SETUP_TOKEN:-}
-      OIDC_ISSUER: ${OIDC_ISSUER:-}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
-      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     depends_on:
       postgres:

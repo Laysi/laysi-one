@@ -31,6 +31,12 @@ pub mod ops;
 pub const ROLE_BOSS: &str = "boss";
 /// The role that owns the system: permissions, tokens, settings, logins.
 pub const ROLE_ADMIN: &str = "admin";
+/// Login name of the account the browser creates at first run. It stands for
+/// the installation rather than a person, so it is the one login that is not
+/// an email address and the one that keeps `email` empty: an address would
+/// let an external identity resolve onto it by `users_by_email`, which is the
+/// account that must stay reachable by password alone.
+pub const ADMIN_USERNAME: &str = "admin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -305,7 +311,7 @@ const MAX_AUDITED_STRING: usize = 512;
 /// A national ID is ten characters, so the length rule never reaches it, and
 /// it is personal data for life. Which employee a call was about is still
 /// answerable: `emp_no` travels in the same parameters.
-const REDACTED_FIELDS: [&str; 1] = ["id_no"];
+const REDACTED_FIELDS: [&str; 2] = ["id_no", "client_secret"];
 
 /// Parameters as the audit trail should hold them.
 ///
@@ -774,6 +780,8 @@ mod tests {
             include_str!("../../../migrations/0039_register_fixed_assets.sql"),
             include_str!("../../../migrations/0044_role_can_change_after_creation.sql"),
             include_str!("../../../migrations/0045_employees_ask_to_fix_their_own_punches.sql"),
+            include_str!("../../../migrations/0046_external_identity_can_be_unlinked.sql"),
+            include_str!("../../../migrations/0047_external_login_is_configured_on_screen.sql"),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {
@@ -892,11 +900,14 @@ mod tests {
                 "change_user_role",
                 "create_user_account",
                 "delete_user_account",
+                "get_oidc_setting",
                 "issue_api_token",
                 "list_user_accounts",
                 "reset_user_password",
                 "set_role_permission",
+                "unlink_user_identity",
                 "update_company_setting",
+                "update_oidc_setting",
                 "update_user_account",
             ]),
             "限系統管理員的操作集合變了"

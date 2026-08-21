@@ -5,6 +5,7 @@ import {
   type CompanySettingRow,
   type DimensionList,
   type NewUserAccount,
+  type OidcSetting,
   type UserAccountList,
 } from '../api/client';
 import { TimeField } from './TimeField';
@@ -15,7 +16,7 @@ interface Props {
   onExit: () => void;
 }
 
-type Step = 'company' | 'bank' | 'dept' | 'hours' | 'owner' | 'done';
+type Step = 'company' | 'bank' | 'dept' | 'hours' | 'sso' | 'owner' | 'done';
 
 type HourCode = 'work_start' | 'work_end' | 'late_grace_minutes';
 
@@ -24,9 +25,13 @@ const STEPS: { id: Step; label: string }[] = [
   { id: 'bank', label: '② 銀行帳戶' },
   { id: 'dept', label: '③ 部門' },
   { id: 'hours', label: '④ 上下班時間' },
-  { id: 'owner', label: '⑤ 負責人帳號' },
-  { id: 'done', label: '⑥ 完成' },
+  { id: 'sso', label: '⑤ 外部登入' },
+  { id: 'owner', label: '⑥ 負責人帳號' },
+  { id: 'done', label: '⑦ 完成' },
 ];
+
+const GOOGLE_ISSUER = 'https://accounts.google.com';
+const CALLBACK_PATH = '/v1/auth/oauth/callback';
 
 interface Account {
   code: string;
@@ -157,12 +162,77 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   const [savingHours, setSavingHours] = useState(false);
 
   const [ownerExists, setOwnerExists] = useState<boolean | null>(null);
-  const [ownerUsername, setOwnerUsername] = useState('');
   const [ownerDisplayName, setOwnerDisplayName] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
   const [ownerSecret, setOwnerSecret] = useState<NewUserAccount | null>(null);
   const [savingOwner, setSavingOwner] = useState(false);
   const [ownerCopied, setOwnerCopied] = useState(false);
+
+  const [oidc, setOidc] = useState<OidcSetting | null>(null);
+  const [ssoClientId, setSsoClientId] = useState('');
+  const [ssoSecret, setSsoSecret] = useState('');
+  const [ssoDomain, setSsoDomain] = useState('');
+  const [ssoRole, setSsoRole] = useState('');
+  const [ssoPasswordOff, setSsoPasswordOff] = useState(false);
+  const [savingSso, setSavingSso] = useState(false);
+
+  useEffect(() => {
+    if (step !== 'sso' || oidc) return;
+    callOp<OidcSetting>('get_oidc_setting')
+      .then((d) => {
+        setOidc(d);
+        setSsoClientId(d.client_id);
+        setSsoDomain(d.allowed_domain);
+        setSsoRole(d.provision_role || 'staff');
+        setSsoPasswordOff(d.password_login_disabled);
+      })
+      .catch(() => setOidc(null));
+  }, [step, oidc]);
+
+  const ssoRedirect = `${window.location.origin}${CALLBACK_PATH}`;
+  const ssoDomainReady = (oidc?.enabled ?? false) && oidc!.provision_role !== '' && oidc!.allowed_domain !== '';
+  const ownerInDomain =
+    ssoDomainReady && ownerEmail.trim().toLowerCase().endsWith(`@${oidc!.allowed_domain.toLowerCase()}`);
+  const passwordIsDead = (oidc?.password_login_disabled ?? false) && !ownerInDomain;
+
+  async function saveSso() {
+    if (!ssoClientId.trim() || !ssoDomain.trim()) {
+      onToast('用戶端 ID 與允許的網域都要填寫');
+      return;
+    }
+    if (!oidc?.has_client_secret && !ssoSecret.trim()) {
+      onToast('請貼上用戶端密鑰');
+      return;
+    }
+    setSavingSso(true);
+    try {
+      const input: Record<string, unknown> = {
+        issuer: GOOGLE_ISSUER,
+        client_id: ssoClientId.trim(),
+        redirect_url: ssoRedirect,
+        allowed_domain: ssoDomain.trim(),
+        provision_role: ssoRole,
+        enabled: true,
+        password_login_disabled: ssoPasswordOff,
+      };
+      if (ssoSecret.trim()) input.client_secret = ssoSecret.trim();
+      await callOp<unknown>('update_oidc_setting', input, '設定外部登入');
+      const fresh = await callOp<OidcSetting>('get_oidc_setting');
+      setOidc(fresh);
+      setSsoSecret('');
+      if (fresh.verify_error) {
+        onToast(fresh.verify_error);
+        return;
+      }
+      onToast(`已啟用外部登入，限 @${fresh.allowed_domain}`);
+      onProgress();
+      setStep('owner');
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingSso(false);
+    }
+  }
 
   const [dims, setDims] = useState<DimensionList | null>(null);
   const [deptCode, setDeptCode] = useState('');
@@ -207,8 +277,8 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   }, []);
 
   async function createOwner() {
-    if (ownerUsername.trim() === '' || ownerDisplayName.trim() === '') {
-      onToast('登入名稱與姓名都要填寫。');
+    if (ownerEmail.trim() === '' || ownerDisplayName.trim() === '') {
+      onToast('電子郵件與姓名都要填寫。');
       return;
     }
     setSavingOwner(true);
@@ -216,13 +286,13 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
       const d = await callOp<NewUserAccount>(
         'create_user_account',
         {
-          username: ownerUsername.trim(),
-          display_name: ownerDisplayName.trim(),
           email: ownerEmail.trim(),
+          display_name: ownerDisplayName.trim(),
           role_code: 'boss',
           employee_no: '',
+          external_login_only: ownerInDomain,
         },
-        `建立負責人帳號 ${ownerUsername.trim()}`,
+        `建立負責人帳號 ${ownerEmail.trim()}`,
       );
       setOwnerSecret(d);
       setOwnerCopied(false);
@@ -236,7 +306,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   }
 
   async function copyOwnerPassword() {
-    if (!ownerSecret) return;
+    if (!ownerSecret?.temporary_password) return;
     try {
       await navigator.clipboard.writeText(ownerSecret.temporary_password);
       setOwnerCopied(true);
@@ -263,7 +333,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
           ? '還沒填上下班時間，打卡不判定遲到；之後可在「基礎設定」補上。'
           : '上下班時間沒有變更。',
       );
-      setStep('owner');
+      setStep('sso');
       return;
     }
 
@@ -282,7 +352,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
           .join('、')}`,
       );
       onProgress();
-      setStep('owner');
+      setStep('sso');
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -510,11 +580,96 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
               ← 上一步
             </button>
             <span className="spacer" />
-            <button className="btn btn--ghost" onClick={() => setStep('owner')}>
+            <button className="btn btn--ghost" onClick={() => setStep('sso')}>
               略過此步
             </button>
             <button className="btn" disabled={savingHours} onClick={() => void saveHours()}>
               {savingHours ? '存檔中…' : '儲存並繼續'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 'sso' && (
+        <div className="card wizard-panel">
+          <h3 className="section-title">Google Workspace／Cloud Identity 登入</h3>
+          <div className="field-grid">
+            <label className="field field--full">
+              用戶端 ID
+              <input
+                className="input"
+                value={ssoClientId}
+                autoFocus
+                placeholder="…apps.googleusercontent.com"
+                onChange={(e) => setSsoClientId(e.target.value)}
+              />
+            </label>
+            <label className="field field--full">
+              用戶端密鑰
+              <input
+                className="input"
+                type="password"
+                value={ssoSecret}
+                placeholder={oidc?.has_client_secret ? '已設定，留空表示不變更' : 'GOCSPX-…'}
+                onChange={(e) => setSsoSecret(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              允許的網域
+              <input
+                className="input"
+                value={ssoDomain}
+                placeholder="example.com"
+                onChange={(e) => setSsoDomain(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              首次登入
+              <select className="input" value={ssoRole} onChange={(e) => setSsoRole(e.target.value)}>
+                <option value="">不自動建立帳號</option>
+                {(oidc?.roles ?? []).map((r) => (
+                  <option key={r.code} value={r.code}>
+                    自動建立帳號，角色為{r.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              帳號密碼登入
+              <select
+                className="input"
+                value={ssoPasswordOff ? 'off' : 'on'}
+                onChange={(e) => setSsoPasswordOff(e.target.value === 'off')}
+              >
+                <option value="on">開放</option>
+                <option value="off">停用</option>
+              </select>
+              <span className="field__hint">系統管理員仍可用密碼登入。</span>
+            </label>
+            <div className="field field--full">
+              轉址網址
+              <input className="input" value={ssoRedirect} readOnly />
+              <span className="field__hint">
+                <button
+                  className="link-cell"
+                  onClick={() => void navigator.clipboard.writeText(ssoRedirect)}
+                >
+                  複製
+                </button>
+                　貼進 Google Cloud console 的轉址白名單。
+              </span>
+            </div>
+          </div>
+          <div className="wizard-actions">
+            <button className="btn btn--ghost" onClick={() => setStep('hours')}>
+              ← 上一步
+            </button>
+            <span className="spacer" />
+            <button className="btn btn--ghost" onClick={() => setStep('owner')}>
+              略過此步
+            </button>
+            <button className="btn" disabled={savingSso} onClick={() => void saveSso()}>
+              {savingSso ? '存檔中…' : '啟用並繼續'}
             </button>
           </div>
         </div>
@@ -529,26 +684,44 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
 
           {ownerSecret ? (
             <>
-              <div className="card secret-card">
-                <div className="secret-card__head">
-                  <strong>
-                    <span className="num">{ownerSecret.user.username}</span> 的初始密碼
-                  </strong>
+              {ownerSecret.temporary_password === null ? (
+                <div className="card secret-card">
+                  <div className="secret-card__head">
+                    <strong>
+                      <span className="num">{ownerSecret.user.username}</span> 已建立
+                    </strong>
+                  </div>
+                  <div className="fact">
+                    <span className="fact__key">登入方式</span>
+                    <span className="fact__value">{oidc?.provider_label ?? 'Google'}</span>
+                  </div>
+                  <div className="fact">
+                    <span className="fact__key">密碼</span>
+                    <span className="fact__value">無</span>
+                  </div>
                 </div>
-                <code className="secret-card__value secret-card__value--lead num">
-                  {ownerSecret.temporary_password}
-                </code>
-                <p className="form-warn">
-                  離開這一步之後無法再查看，請立即交付{ownerSecret.user.display_name}本人。
-                  首次登入會要求變更密碼。
-                </p>
-                <button
-                  className="btn btn--compact btn--secondary"
-                  onClick={() => void copyOwnerPassword()}
-                >
-                  {ownerCopied ? '已複製' : '複製密碼'}
-                </button>
-              </div>
+              ) : (
+                <div className="card secret-card">
+                  <div className="secret-card__head">
+                    <strong>
+                      <span className="num">{ownerSecret.user.username}</span> 的初始密碼
+                    </strong>
+                  </div>
+                  <code className="secret-card__value secret-card__value--lead num">
+                    {ownerSecret.temporary_password}
+                  </code>
+                  <p className="form-warn">
+                    離開這一步之後無法再查看，請立即交付{ownerSecret.user.display_name}本人。
+                    首次登入會要求變更密碼。
+                  </p>
+                  <button
+                    className="btn btn--compact btn--secondary"
+                    onClick={() => void copyOwnerPassword()}
+                  >
+                    {ownerCopied ? '已複製' : '複製密碼'}
+                  </button>
+                </div>
+              )}
               <div className="wizard-actions">
                 <span className="spacer" />
                 <button className="btn" onClick={() => setStep('done')}>
@@ -573,12 +746,13 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
             <>
               <div className="field-grid">
                 <label className="field">
-                  登入名稱
+                  電子郵件（也是登入帳號）
                   <input
                     className="input"
-                    placeholder="chen.owner"
-                    value={ownerUsername}
-                    onChange={(e) => setOwnerUsername(e.target.value)}
+                    type="email"
+                    placeholder="chen@example.com"
+                    value={ownerEmail}
+                    onChange={(e) => setOwnerEmail(e.target.value)}
                   />
                 </label>
                 <label className="field">
@@ -590,29 +764,37 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                     onChange={(e) => setOwnerDisplayName(e.target.value)}
                   />
                 </label>
-                <label className="field field--full">
-                  電子郵件（選填）
+                <label className="field">
+                  登入方式
                   <input
-                    className="input"
-                    type="email"
-                    value={ownerEmail}
-                    onChange={(e) => setOwnerEmail(e.target.value)}
+                    className={`input${passwordIsDead ? ' input--dead' : ''}`}
+                    value={
+                      ownerInDomain
+                        ? (oidc?.provider_label ?? 'Google')
+                        : passwordIsDead
+                          ? '密碼（已停用）'
+                          : '密碼'
+                    }
+                    readOnly
                   />
+                  {ssoDomainReady && (
+                    <span className="field__hint">@{oidc!.allowed_domain} 的地址不必設密碼。</span>
+                  )}
                 </label>
               </div>
-              <p className="field__hint">
-                密碼由系統產生、只顯示一次，首次登入時由本人變更。名冊上會同時建立一筆
-                員工主檔，部門與薪資留給人資填。
-              </p>
               <div className="wizard-actions">
-                <button className="btn btn--ghost" onClick={() => setStep('hours')}>
+                <button className="btn btn--ghost" onClick={() => setStep('sso')}>
                   ← 上一步
                 </button>
                 <span className="spacer" />
                 <button className="btn btn--ghost" onClick={() => setStep('done')}>
                   略過此步
                 </button>
-                <button className="btn" disabled={savingOwner} onClick={() => void createOwner()}>
+                <button
+                  className="btn"
+                  disabled={savingOwner || passwordIsDead}
+                  onClick={() => void createOwner()}
+                >
                   {savingOwner ? '建立中…' : '建立帳號'}
                 </button>
               </div>

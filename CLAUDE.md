@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 規範
+用戶並不喜歡文字敘述，設計時以ui設計取代文字敘述，這可以大幅提升使用者體驗。
+
 ## 專案
 
 Laysi One 是台灣中小企業的財務＋人資正式產品。
@@ -191,7 +194,7 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、品牌完整性、
-RustFS 物件儲存，以及 **32 個畫面、105 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **32 個畫面、108 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -240,7 +243,11 @@ RustFS 物件儲存，以及 **32 個畫面、105 個操作**，分成三個分�
 **改不動的欄位不要畫成可以改的樣子**：帳號管理的編輯抽屜裡角色是唯讀文字加一顆
 「變更角色」（`update_user_account` 本來就不收 `role_code`），不是 `disabled` 的
 下拉——一顆看起來能按的控制項加上「存檔沒有訊息」就是「按下去看起來成功、其實什麼
-都沒發生」。沒有欄位變更時要說「沒有變更」，不要靜靜關掉抽屜。
+都沒發生」。沒有欄位變更時要說「沒有變更」，不要靜靜關掉抽屜。擋的是**選得動的樣子**
+（`disabled` 的下拉還列著其他選項），不是欄位本身：固定值仍然畫成 `readonly` 的輸入框
+（初始化頁的「登入名稱 admin」、帳號管理的「登入信箱」），因為那是憑證的一半，寫成
+散句瀏覽器與密碼管理程式都收不到。`readonly` 不用 `disabled`——`disabled` 的欄位不會
+隨表單送出，密碼管理程式就只存得到密碼、下次登入頁自動填不出帳號。
 
 **變更角色是獨立操作（0044）**：`change_user_role` 拒絕呼叫者自己的帳號（那是唯一
 會多出權限的方向；建帳號時本來就指定得了任何角色）、拒絕清空最後一個啟用中的系統
@@ -360,8 +367,65 @@ Token。三件事要一起做——session 查詢帶 `u.status = 'active'`，但
 REST 身分只由 HttpOnly session cookie 查回 `user_account`，請求標頭不能指定
 actor 或 role。MCP 身分由 Bearer token 所對應的 `api_token` 資料列決定，
 請求標頭同樣無法覆寫 actor 或 role；撤銷後下一次呼叫立刻失效。
-OIDC 四項設定齊全時採 discovery + Authorization Code + PKCE，且只接受管理員
-預先連結的 issuer／subject，不依 email 比對也不自動建立帳號。
+OIDC 四項設定齊全時採 discovery + Authorization Code + PKCE，登入的鑰匙永遠是
+`(issuer, sub)`。
+
+**外部登入的設定在畫面上，不在環境變數（0047）**：`oidc_setting` 單列表，安全與營運頁
+由系統管理員填；存檔推進 `updated_at`，伺服器以它當快取指紋重建 client，**不必重啟**。
+`client_secret` 不經任何操作回傳，且列在 `REDACTED_FIELDS`。建立成敗寫回
+`verified_at`／`verify_error`——discovery 是伺服器層的事，而按儲存的人要看得到能不能用；
+寫回前比對舊值，所以不會碰 `updated_at`。使用者看得到的錯誤訊息裡不出現 issuer、
+discovery 這類字眼。
+
+**Google Cloud Identity 的網域邊界看 `hd`，不看 email 網域**：允許的網域
+填了就要求 id_token 的 `hd` 相符，**claim 不存在一律拒絕**。個人 Google 帳號可以
+持有一個已驗證的公司網域 email——看字串的檢查放它進來，而人離職時公司關不掉它。
+`hd` 不是標準 claim，由 `oidc.rs` 的 `HostedDomainClaims` 以 `AdditionalClaims`
+接住，仍然由 `openidconnect` 驗完簽章才交出來。
+
+**「首次登入」選了角色就打開網域內自動建帳號**（選「不自動建立」維持原本的
+「只認預先連結」）。角色代碼與網域在存檔時驗，缺一個就存不進去——沒有網域的自動
+建帳號等於任何外部帳號都能在這裡開一個登入。解析順序：`user_identity` →
+`user_account.email`（不分大小寫，**只在自動建帳號開啟時用一次**，用來接上管理員
+已經建好的同一個人；不限啟用中的帳號，停用的要被找到並擋下）→ 都沒有才建。建的
+時候同一個交易寫**員工主檔**、帳號與身分，員工編號在交易內用 advisory lock 配號；
+少了員工主檔，自動建出來的帳號打不了卡、請不了假、報不了帳。密碼欄位是 NULL。
+代價是 `user_account.email` 從此是安全相關欄位，改得動它的就決定得了誰連到哪個帳號
+（`update_user_account` 是 `AdminOnly`，所以不是新權限，是新責任）。自動建帳號因此
+沒有名稱可推導，第 3 步直接用那個 email 當登入名稱——見下一條，本站已經沒有獨立於
+email 的登入名稱。
+
+**登入名稱＝email，`admin` 是唯一的例外**：`create_user_account` 與 OIDC 自動建帳號只收
+一個 email 欄位，`username` 建立當下就是那個 email（小寫化），兩處各自驗證格式、不共用
+函式。建立後 `username` 仍不可變，但 `email` 之後可由 `update_user_account` 獨立編輯，
+兩者從此可能分開——帳號管理的「登入信箱」（唯讀）與「電子郵件」（選填、可編輯）因此
+是兩個欄位；OIDC 依 email 找既有帳號的第 2 步找的正是「聯絡信箱等於這個地址」，不是
+「登入名稱」。`laysi-admin create-user --username` 不受影響，仍收任意字串——那是離線
+逃生門，不是要簡化的網頁流程。
+
+**網頁初始化建的是安裝本身的帳號，不是某個人的**：登入名稱固定 `admin`
+（`laysi_ops::ADMIN_USERNAME`）、顯示名稱固定「系統管理員」、`email` 留空、沒有員工
+主檔，呼叫端只送一個密碼。它是全站唯一不是 email 的登入名稱，而空 email 正是它成立的
+條件：`resolve_account` 的第 2 步用 `users_by_email` 認人，填了地址就等於讓外部身分連
+到系統管理員帳號並沿用它的角色。`update_user_account` 因此拒絕給 `admin` 設 email。
+留空還有兩個後果：裝機的人離職不會帶走這個帳號，而 `password_login_disabled` 的例外
+從此指著一個**本來就沒有 SSO 路徑**的帳號——那顆例外是它唯一的門，不是多開的第二道。
+登入頁的欄位所以是 `type="text"`；`type="email"` 會讓瀏覽器擋下 `admin` 這個值。
+第二個帳號起才是人：精靈第五步用 `create_user_account` 建負責人。
+
+**`password_login_disabled`（0048）讓帳號密碼登入整個關掉，系統管理員例外**：
+判斷點不在寫入端而在讀取端——`auth::login` 不直接讀這個欄位，而是問 `oidc::current()`
+現在建不建得出可用 client，只有真的建得出來才擋。IdP 掛掉或設定有誤，`current()` 回
+`None`，密碼登入立刻對所有人恢復，不必有人發現並手動把開關關回去；這與 `verified_at`
+是同一份自我修復機制的另一個消費端。只在密碼**已驗證正確之後**才判斷，不會變成第二個
+帳號列舉管道。登入頁對稱地收起密碼欄位，改畫一顆「系統管理員改用密碼登入」的展開連結。
+
+**解除連結與刪除是兩件事（0046）**：`unlink_user_identity` 同一交易刪 `user_identity`
+並撤銷未過期的 session（不撤等於沒解），拒絕 `password_hash IS NULL` 的帳號——解完
+沒有人登得進去，而畫面上補不回密碼，那條路只剩主機上的 `laysi-admin reset-password`。
+`delete_user_account` 拒絕還連著外部身分的帳號：自動建帳號讓刪除自己撤銷自己，下一次
+登入又建一個新的。解除連結本身也不擋登入（同一個 email 會由第 2 步重新連上），要擋
+就停用帳號。帳號管理在連著外部帳號的那一列不畫「刪除」，改畫「解除連結」。
 
 **第一個帳號可以在網頁上建立（`POST /v1/auth/bootstrap`，畫面 `screens/Init.tsx`）**，
 它是 `/v1/auth/*` 例外的下一層：連要被檢查的身分都還不存在，所以守門條件是安裝
@@ -369,12 +433,13 @@ OIDC 四項設定齊全時採 discovery + Authorization Code + PKCE，且只接�
 `bootstrap_first_user` 在同一個交易裡先 `INSERT ... WHERE NOT EXISTS (帳號)
 ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事後清空
 `user_account` 也不會重新打開。角色寫死 `admin`（`laysi_ops::ROLE_ADMIN`）**不是
-`boss`**、密碼由本人設定（沒有 `must_change_password`），呼叫端不能指定任何其他欄位。
+`boss`**、登入名稱與顯示名稱同樣寫死（見上一條）、密碼由本人設定（沒有
+`must_change_password`），呼叫端只送一個密碼，不能指定任何其他欄位。
 負責人與其他成員的帳號之後由系統管理員用 `create_user_account` 在「帳號管理」建立；
 那個操作不收密碼，密碼由系統產生、只回一次、強制首次登入變更。`SETUP_ALLOW_WEB=false`
 關掉整條路，`SETUP_TOKEN` 非空時要求輸入代碼（行程內只留 BLAKE3 雜湊）。
 未登入的判斷資料來自 `/v1/auth/me` 的 `setup` 欄位。**這不是 Registry 操作，
-也不是導覽畫面**，所以不計入 101 個操作與 32 個畫面。
+也不是導覽畫面**，所以不計入 108 個操作與 32 個畫面。
 
 **忘記密碼由 `reset_user_password`（0029）重發一組臨時密碼**，它同時撤銷該帳號所有
 登入工作階段——不撤等於沒換。兩個拒絕：`password_hash IS NULL` 的帳號只用外部身分
@@ -424,12 +489,37 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 之後也要收得回來。其餘設定仍必填。首次設定精靈第四步問上下班時間——跑精靈的就是唯一
 改得動這一項的人。
 
-**首次設定精靈第五步就建負責人帳號**：`create_user_account` 是 `AdminOnly`，跑精靈的
-本來就叫得動它，所以沒有理由把它留到精靈結束後才用一句話指過去——那等於讓人填完四步
+**首次設定精靈第六步就建負責人帳號**：`create_user_account` 是 `AdminOnly`，跑精靈的
+本來就叫得動它，所以沒有理由把它留到精靈結束後才用一句話指過去——那等於讓人填完五步
 才發現剛剛登入的不是自己要用的帳號。角色寫死 `boss`，臨時密碼在同一步顯示一次並附
 複製鈕，離開該步就看不到。已經有啟用中的負責人帳號時這一步只說已經有了。這一步可以
 略過，所以「基礎設定」那張 `ownerMissing` 提示留著當退路，而完成頁只在真的沒有負責人
 帳號時才提它。
+
+**外部登入排在負責人帳號的前一步（第五步）**：順序就是相依關係——負責人要不要密碼，
+由外部登入設好了沒有決定。這一步問 Google 需要的四件事（用戶端 ID、密鑰、允許的
+網域、首次登入建不建帳號）加上要不要停用帳號密碼登入，issuer 與轉址網址由程式填；
+轉址網址是 `readonly` 欄位加一顆複製鈕，不是一句叫人去複製的話。停用的開關放在這裡
+而不是留給事後的安全營運頁，是因為它和下一步是同一個決定：關掉密碼登入卻給負責人一組
+密碼，等於建一個永遠登不進去的帳號。
+
+**`create_user_account` 的 `external_login_only` 建立沒有密碼的帳號**：`password_hash`
+是 NULL、`must_change_password` 為 false、回應的 `temporary_password` 是 `null`。三個
+前提缺一不可，寫入前就擋下——外部登入已啟用、設為自動建立帳號、地址在允許的網域內。
+理由是 `resolve_account` 的第 2 步（依 email 認既有帳號）**只在自動建帳號開啟時才會
+執行**，所以少了任一個前提，這個帳號沒有密碼也沒有任何外部身分連得上，而事後沒有
+任何操作補得回密碼（`reset_user_password` 拒絕 `password_hash IS NULL`）。精靈的
+「登入方式」欄位即時反映這三個前提：地址落在網域內就顯示供應商名稱，否則顯示「密碼」。
+
+**反過來也要擋**：`password_login_disabled` 開著時，`create_user_account` 拒絕建立
+沒有 `external_login_only` 的非 `admin` 帳號——那個帳號只有一組它永遠用不到的密碼。
+`admin` 是例外，理由與登入端的例外相同。精靈在這個狀態下把「登入方式」寫成
+「密碼（已停用）」並把建立鈕關掉，不另外印一段話解釋。
+
+**外部登入成功後要清掉 `must_change_password`**：系統管理員代建的帳號帶著一組產生的
+密碼與這個旗標，而從 IdP 進來的人從來沒拿到那組密碼——變更密碼表單會先跟他要「目前的
+密碼」，於是一次成功的登入被擋在自己的畫面外。只清旗標不動雜湊：那組密碼還在，之後
+真的想用密碼登入時 `reset_user_password` 仍叫得動。
 
 **漏打卡由本人送出補登申請（0045）**：`submit_my_punch_correction` 不收任何指定
 對象的欄位，對象由 `ctx.employee_id` 決定；申請寫在 `punch_correction`，**核准才

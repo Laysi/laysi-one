@@ -2508,10 +2508,20 @@ impl Store {
                     e.emp_no, e.name AS employee_name, e.status AS employee_status,
                     u.status, u.must_change_password,
                     u.password_hash IS NOT NULL AS has_password,
+                    i.provider AS identity_provider,
+                    i.email_at_link AS identity_email,
+                    i.linked_at AS identity_linked_at,
                     u.created_at, u.created_by, u.last_login_at
                FROM user_account u
                LEFT JOIN role r ON r.code = u.role_code
                LEFT JOIN employee e ON e.id = u.employee_id
+               LEFT JOIN LATERAL (
+                    SELECT provider, email_at_link, linked_at
+                      FROM user_identity
+                     WHERE user_id = u.id
+                     ORDER BY linked_at DESC, id DESC
+                     LIMIT 1
+               ) i ON true
               ORDER BY u.username",
         )
         .fetch_all(&self.pool)
@@ -2529,6 +2539,14 @@ impl Store {
             status: r.get("status"),
             must_change_password: r.get("must_change_password"),
             has_password: r.get("has_password"),
+            identity_label: r
+                .get::<Option<String>, _>("identity_provider")
+                .as_deref()
+                .map(provider_label),
+            identity_email: r
+                .get::<Option<String>, _>("identity_email")
+                .filter(|email| !email.is_empty()),
+            identity_linked_at: r.get("identity_linked_at"),
             created_at: r.get("created_at"),
             created_by: r.get("created_by"),
             last_login_at: r.get("last_login_at"),
@@ -2752,6 +2770,18 @@ impl Store {
         .ok_or(StoreError::UserNotFound { id: user_id })?;
         Ok(row_to_user_account(&row))
     }
+    /// Drop the "change this password before continuing" flag without
+    /// touching the hash. Set when an administrator generates a temporary
+    /// password, it has no meaning for someone who signed in through the
+    /// identity provider instead: they never received that password, and the
+    /// change-password form asks for it before it will let them past.
+    pub async fn clear_must_change_password(&self, user_id: i32) -> Result<()> {
+        sqlx::query("UPDATE user_account SET must_change_password = false WHERE id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
     /// Link an IdP subject to an existing account. A unique constraint stops
     /// the same external identity being claimed twice.
     pub async fn link_identity(
@@ -2781,6 +2811,248 @@ impl Store {
             linked_at: row.get("linked_at"),
         })
     }
+    /// The external sign-in settings. Carries the client secret, so like
+    /// [`UserAccount`] it deliberately does not implement `Serialize`.
+    pub async fn oidc_setting(&self) -> Result<OidcSetting> {
+        let row = sqlx::query(
+            "SELECT enabled, issuer, client_id, client_secret, redirect_url,
+                    allowed_domain, provision_role, password_login_disabled,
+                    updated_at, updated_by, verified_at, verify_error
+               FROM oidc_setting
+              WHERE id = 1",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(OidcSetting {
+            enabled: row.get("enabled"),
+            issuer: row.get("issuer"),
+            client_id: row.get("client_id"),
+            client_secret: row.get("client_secret"),
+            redirect_url: row.get("redirect_url"),
+            allowed_domain: row.get("allowed_domain"),
+            provision_role: row.get("provision_role"),
+            password_login_disabled: row.get("password_login_disabled"),
+            updated_at: row.get("updated_at"),
+            updated_by: row.get("updated_by"),
+            verified_at: row.get("verified_at"),
+            verify_error: row.get("verify_error"),
+        })
+    }
+
+    /// Edit the external sign-in settings. Every field is three-state: absent
+    /// keeps the stored value, and an empty string clears it — including the
+    /// client secret, which no screen can display and therefore cannot send
+    /// back unchanged.
+    ///
+    /// Any change clears the verification result, because the server has not
+    /// tried these values yet and the previous answer was about other ones.
+    pub async fn update_oidc_setting(&self, req: WriteOidcSetting<'_>) -> Result<OidcSetting> {
+        sqlx::query(
+            "UPDATE oidc_setting
+                SET enabled                 = COALESCE($1, enabled),
+                    issuer                  = COALESCE($2, issuer),
+                    client_id               = COALESCE($3, client_id),
+                    client_secret           = COALESCE($4, client_secret),
+                    redirect_url            = COALESCE($5, redirect_url),
+                    allowed_domain          = COALESCE($6, allowed_domain),
+                    provision_role          = COALESCE($7, provision_role),
+                    password_login_disabled = COALESCE($8, password_login_disabled),
+                    updated_at              = now(),
+                    updated_by              = $9,
+                    verified_at             = NULL,
+                    verify_error            = ''
+              WHERE id = 1",
+        )
+        .bind(req.enabled)
+        .bind(req.issuer)
+        .bind(req.client_id)
+        .bind(req.client_secret)
+        .bind(req.redirect_url)
+        .bind(req.allowed_domain)
+        .bind(req.provision_role)
+        .bind(req.password_login_disabled)
+        .bind(req.updated_by)
+        .execute(&self.pool)
+        .await?;
+        self.oidc_setting().await
+    }
+
+    /// Record what happened the last time the server built a client from
+    /// these settings. Written by the server, not by an operation: discovery
+    /// is the server's job and its answer is what the settings screen has to
+    /// show.
+    pub async fn record_oidc_verification(&self, error: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE oidc_setting
+                SET verified_at  = CASE WHEN $1 = '' THEN now() ELSE NULL END,
+                    verify_error = $1
+              WHERE id = 1",
+        )
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every external identity linked to an account. One is the normal case;
+    /// the table allows several, and unlinking removes all of them.
+    pub async fn user_identities(&self, user_id: i32) -> Result<Vec<UserIdentity>> {
+        Ok(sqlx::query(
+            "SELECT id, user_id, provider, subject, email_at_link, linked_at
+               FROM user_identity
+              WHERE user_id = $1
+              ORDER BY linked_at DESC, id DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| UserIdentity {
+            id: r.get("id"),
+            user_id: r.get("user_id"),
+            provider: r.get("provider"),
+            subject: r.get("subject"),
+            email_at_link: r.get("email_at_link"),
+            linked_at: r.get("linked_at"),
+        })
+        .collect())
+    }
+
+    /// Remove every external identity from an account and end its live
+    /// sessions in the same transaction. A session opened through the IdP
+    /// outlives the link otherwise, and the account would stay signed in on a
+    /// credential it no longer accepts.
+    pub async fn unlink_identities(
+        &self,
+        user_id: i32,
+        actor: &str,
+    ) -> Result<UnlinkedIdentities> {
+        let mut tx = self.pool.begin().await?;
+        let removed = sqlx::query("DELETE FROM user_identity WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let revoked_sessions = sqlx::query(
+            "UPDATE user_session
+                SET revoked_at = now(), revoked_by = $2
+              WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(user_id)
+        .bind(actor)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(UnlinkedIdentities { removed, revoked_sessions })
+    }
+
+    /// Accounts holding an address, compared without case. The column has no
+    /// unique constraint, so more than one match is possible and the caller
+    /// decides what it means; an empty address matches nothing.
+    pub async fn users_by_email(&self, email: &str) -> Result<Vec<UserAccount>> {
+        let email = email.trim();
+        if email.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(sqlx::query(
+            "SELECT id, username, display_name, email, password_hash, role_code,
+                    employee_id, status, must_change_password, created_at, created_by,
+                    last_login_at
+               FROM user_account
+              WHERE email <> '' AND lower(email) = lower($1)
+              ORDER BY id",
+        )
+        .bind(email)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(row_to_user_account)
+        .collect())
+    }
+
+    /// Create an account, its roster entry and its external identity in one
+    /// transaction, for a first sign-in the server has already decided to
+    /// accept.
+    ///
+    /// The roster entry is not optional. An account without one cannot punch
+    /// in, take leave or claim an expense, so a login created without it is a
+    /// login created broken; `create_user_account` writes one for the same
+    /// reason. Amounts and department stay HR's to fill in.
+    ///
+    /// The password hash is left NULL: nobody chose a password here, and a
+    /// generated one would be a second way in that no one is holding.
+    pub async fn provision_external_user(
+        &self,
+        req: ProvisionExternalUser<'_>,
+    ) -> Result<ProvisionedUser> {
+        let mut tx = self.pool.begin().await?;
+        // Two sign-ins at once would otherwise read the same highest employee
+        // number and the second insert would fail on the unique constraint.
+        // The lock is held to the end of this transaction only.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(PROVISION_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+
+        let highest: Option<i32> = sqlx::query(
+            "SELECT MAX((NULLIF(regexp_replace(emp_no, '^E0*', ''), ''))::int) AS highest
+               FROM employee
+              WHERE emp_no ~ '^E[0-9]+$'",
+        )
+        .fetch_one(&mut *tx)
+        .await?
+        .get("highest");
+        let emp_no = format!("E{:03}", highest.unwrap_or(0) + 1);
+
+        let employee_id: i32 = sqlx::query(
+            "INSERT INTO employee
+                (emp_no, name, dept_id, title, employment_type,
+                 hired_on, left_on, status, base_salary, labor_insured_salary,
+                 health_insured_salary, pension_wage, id_no, bank_account,
+                 note, created_by)
+             VALUES ($1,$2,NULL,'','full_time',$3,NULL,'active',0,0,0,0,'','','',$4)
+             RETURNING id",
+        )
+        .bind(&emp_no)
+        .bind(req.display_name)
+        .bind(req.hired_on)
+        .bind(req.created_by)
+        .fetch_one(&mut *tx)
+        .await?
+        .get("id");
+
+        let user = insert_user(
+            &mut tx,
+            CreateUser {
+                username: req.username,
+                display_name: req.display_name,
+                email: req.email,
+                password_hash: None,
+                role_code: req.role_code,
+                employee_id: Some(employee_id),
+                status: "active",
+                must_change_password: false,
+                created_by: req.created_by,
+            },
+        )
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO user_identity (user_id, provider, subject, email_at_link)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(user.id)
+        .bind(req.provider)
+        .bind(req.subject)
+        .bind(req.email)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(ProvisionedUser { user, employee_no: emp_no })
+    }
+
     /// Point a login at a roster row, or clear the link with `None`.
     ///
     /// Needed for accounts created before the person had an employee record,
@@ -6123,6 +6395,12 @@ pub struct UserAccountRow {
     /// `false` means the account can only sign in through a linked external
     /// identity.
     pub has_password: bool,
+    /// Screen name of the external identity this account signs in with, and
+    /// the address it was linked under. Which login methods an account has is
+    /// the question this screen exists to answer.
+    pub identity_label: Option<String>,
+    pub identity_email: Option<String>,
+    pub identity_linked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
     pub last_login_at: Option<DateTime<Utc>>,
@@ -6165,6 +6443,98 @@ pub struct CreateUser<'a> {
     pub status: &'a str,
     pub must_change_password: bool,
     pub created_by: &'a str,
+}
+
+/// External sign-in settings, including the client secret. Never serialized:
+/// the secret has to be stored to call the token endpoint, and nothing may
+/// hand it back out.
+#[derive(Debug, Clone)]
+pub struct OidcSetting {
+    pub enabled: bool,
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+    /// Required `hd` claim; empty accepts any account the IdP authenticates.
+    pub allowed_domain: String,
+    /// Role for accounts created on a first sign-in; empty creates none.
+    pub provision_role: String,
+    /// When true, only the system administrator role may still sign in with
+    /// a password; everyone else is turned back to external sign-in.
+    pub password_login_disabled: bool,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+    /// When the server last built a working client from these values.
+    pub verified_at: Option<DateTime<Utc>>,
+    /// Why it could not, empty when it could.
+    pub verify_error: String,
+}
+
+/// Edit to the external sign-in settings. `None` keeps the stored value.
+#[derive(Debug, Clone, Default)]
+pub struct WriteOidcSetting<'a> {
+    pub enabled: Option<bool>,
+    pub issuer: Option<&'a str>,
+    pub client_id: Option<&'a str>,
+    pub client_secret: Option<&'a str>,
+    pub redirect_url: Option<&'a str>,
+    pub allowed_domain: Option<&'a str>,
+    pub provision_role: Option<&'a str>,
+    pub password_login_disabled: Option<bool>,
+    pub updated_by: &'a str,
+}
+
+/// Advisory lock guarding employee number allocation while an account is
+/// created from an external sign-in.
+const PROVISION_LOCK_KEY: i64 = 4801;
+
+/// An account, its roster entry and its external identity, created together.
+#[derive(Debug, Clone)]
+pub struct ProvisionExternalUser<'a> {
+    pub username: &'a str,
+    pub display_name: &'a str,
+    pub email: &'a str,
+    pub role_code: &'a str,
+    /// Normalised issuer, as `user_identity.provider` stores it.
+    pub provider: &'a str,
+    /// The IdP's stable subject.
+    pub subject: &'a str,
+    pub hired_on: NaiveDate,
+    pub created_by: &'a str,
+}
+
+/// What an external sign-in created.
+#[derive(Debug, Clone)]
+pub struct ProvisionedUser {
+    pub user: UserAccount,
+    pub employee_no: String,
+}
+
+/// What unlinking removed.
+#[derive(Debug, Clone, Copy)]
+pub struct UnlinkedIdentities {
+    pub removed: u64,
+    pub revoked_sessions: u64,
+}
+
+/// Screen name for an issuer.
+///
+/// The issuer URL is a configuration value and reads as one; the host is what
+/// the person signing in recognises. Google's directory products all sign
+/// through the same issuer, so they all show the one name.
+pub fn provider_label(provider: &str) -> String {
+    let host = provider
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    if host == "accounts.google.com" {
+        "Google".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 /// A link between an external IdP subject and a local account.
@@ -8022,6 +8392,157 @@ mod tests {
 
         let fresh = sample_token(Utc::now() - chrono::Duration::days(1), Some(30));
         assert!(!fresh.is_expired(Utc::now()), "建立後 1 天、輪替 30 天的 token 不該過期");
+    }
+
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// oidc_settings_round_trip -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn oidc_settings_round_trip() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let fresh = store.oidc_setting().await.expect("應查得到設定列");
+        assert!(!fresh.enabled, "全新安裝的外部登入應該是關的");
+
+        let saved = store
+            .update_oidc_setting(WriteOidcSetting {
+                enabled: Some(true),
+                issuer: Some("https://accounts.google.com"),
+                client_id: Some("test.apps.googleusercontent.com"),
+                client_secret: Some("s3cret"),
+                redirect_url: Some("https://laysi.test/v1/auth/oauth/callback"),
+                allowed_domain: Some("example.test"),
+                provision_role: Some("staff"),
+                password_login_disabled: Some(false),
+                updated_by: "測試",
+            })
+            .await
+            .expect("應可存下設定");
+        assert!(saved.enabled);
+        assert_eq!(saved.client_secret, "s3cret");
+        assert!(saved.verified_at.is_none(), "存檔後尚未驗證");
+
+        // Absent means unchanged: the screen cannot display the secret, so it
+        // has nothing to send back, and an edit to another field must not
+        // wipe it.
+        let kept = store
+            .update_oidc_setting(WriteOidcSetting {
+                allowed_domain: Some("other.test"),
+                updated_by: "測試",
+                ..WriteOidcSetting::default()
+            })
+            .await
+            .expect("應可只改一個欄位");
+        assert_eq!(kept.client_secret, "s3cret");
+        assert_eq!(kept.allowed_domain, "other.test");
+        assert!(kept.enabled);
+
+        // Recording the verification must not move `updated_at`, or the
+        // server would see its own write as a new configuration and rebuild
+        // for ever.
+        store
+            .record_oidc_verification("")
+            .await
+            .expect("應可寫入驗證結果");
+        let verified = store.oidc_setting().await.expect("應查得到設定列");
+        assert_eq!(verified.updated_at, kept.updated_at);
+        assert!(verified.verified_at.is_some());
+        assert_eq!(verified.verify_error, "");
+
+        let cleared = store
+            .update_oidc_setting(WriteOidcSetting {
+                enabled: Some(false),
+                client_secret: Some(""),
+                updated_by: "測試",
+                ..WriteOidcSetting::default()
+            })
+            .await
+            .expect("應可清除密鑰");
+        assert_eq!(cleared.client_secret, "", "空字串代表清除");
+        assert!(cleared.verified_at.is_none(), "設定變更後驗證結果要作廢");
+    }
+
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// provisioning_writes_an_account_a_roster_row_and_an_identity -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn provisioning_writes_an_account_a_roster_row_and_an_identity() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let username = format!("ext{}", &suffix[..10]);
+        let email = format!("{username}@example.test");
+        let provider = format!("https://issuer.invalid/{suffix}");
+
+        let provisioned = store
+            .provision_external_user(ProvisionExternalUser {
+                username: &username,
+                display_name: "外部登入測試",
+                email: &email,
+                role_code: "staff",
+                provider: &provider,
+                subject: &suffix,
+                hired_on: NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
+                created_by: "外部登入",
+            })
+            .await
+            .expect("應可由外部身分建立帳號");
+
+        assert!(
+            provisioned.user.password_hash.is_none(),
+            "外部身分建立的帳號不該有密碼雜湊"
+        );
+        // A login with no roster row cannot punch in, take leave or claim an
+        // expense, so an account created without one is created broken.
+        let employee_id = provisioned
+            .user
+            .employee_id
+            .expect("自動建立的帳號一定要連結員工主檔");
+        let employee = store
+            .employee(&provisioned.employee_no)
+            .await
+            .expect("應查得到剛建立的員工主檔");
+        assert_eq!(employee.id, employee_id);
+
+        let by_identity = store
+            .user_by_identity(&provider, &suffix)
+            .await
+            .expect("應可依 subject 查帳號")
+            .expect("剛建立的 subject 應查得到帳號");
+        assert_eq!(by_identity.id, provisioned.user.id);
+
+        let by_email = store
+            .users_by_email(&email.to_uppercase())
+            .await
+            .expect("應可依電子郵件查帳號");
+        assert_eq!(by_email.len(), 1, "電子郵件比對不分大小寫");
+        assert_eq!(by_email[0].id, provisioned.user.id);
+
+        let unlinked = store
+            .unlink_identities(provisioned.user.id, "測試")
+            .await
+            .expect("應可解除連結");
+        assert_eq!(unlinked.removed, 1);
+        assert!(
+            store
+                .user_by_identity(&provider, &suffix)
+                .await
+                .expect("應可依 subject 查帳號")
+                .is_none(),
+            "解除連結後同一個 subject 不該再指向任何帳號"
+        );
     }
 
     /// Run with:

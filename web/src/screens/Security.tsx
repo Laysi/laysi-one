@@ -7,13 +7,45 @@ import {
   OpFailed,
   type ApiTokenList,
   type Healthz,
+  type OidcSetting,
   type SecurityPolicy,
   type SystemHealth,
+  type UpdatedOidcSetting,
 } from '../api/client';
 
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
+}
+
+const GOOGLE_ISSUER = 'https://accounts.google.com';
+const CALLBACK_PATH = '/v1/auth/oauth/callback';
+
+interface OidcForm {
+  provider: string;
+  issuer: string;
+  client_id: string;
+  client_secret: string;
+  redirect_url: string;
+  allowed_domain: string;
+  provision_role: string;
+  enabled: string;
+  password_login_disabled: boolean;
+}
+
+function formFrom(setting: OidcSetting): OidcForm {
+  const google = setting.issuer === '' || setting.issuer === GOOGLE_ISSUER;
+  return {
+    provider: google ? 'google' : 'other',
+    issuer: setting.issuer || GOOGLE_ISSUER,
+    client_id: setting.client_id,
+    client_secret: '',
+    redirect_url: setting.redirect_url || `${window.location.origin}${CALLBACK_PATH}`,
+    allowed_domain: setting.allowed_domain,
+    provision_role: setting.provision_role,
+    enabled: setting.enabled ? 'on' : 'off',
+    password_login_disabled: setting.password_login_disabled,
+  };
 }
 
 export function Security({ onToast, reloadKey }: Props) {
@@ -24,8 +56,13 @@ export function Security({ onToast, reloadKey }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [issued, setIssued] = useState<{ name: string; secret: string } | null>(null);
+  const [oidc, setOidc] = useState<OidcSetting | null>(null);
+  const [oidcForm, setOidcForm] = useState<OidcForm | null>(null);
+  const [savingOidc, setSavingOidc] = useState(false);
 
   const me = useCurrentUser();
+  const canReadOidc = me.permissions.includes('get_oidc_setting');
+  const canEditOidc = me.permissions.includes('update_oidc_setting');
 
   const load = useCallback(() => {
     setError(null);
@@ -42,7 +79,13 @@ export function Security({ onToast, reloadKey }: Props) {
       .catch((e: Error) => setError(e.message));
 
     getHealthz().then(setHz).catch(() => setHz(null));
-  }, []);
+
+    if (canReadOidc) {
+      callOp<OidcSetting>('get_oidc_setting')
+        .then(setOidc)
+        .catch(() => setOidc(null));
+    }
+  }, [canReadOidc]);
 
   useEffect(load, [load, reloadKey]);
 
@@ -56,6 +99,61 @@ export function Security({ onToast, reloadKey }: Props) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
       setBusy(null);
+    }
+  }
+
+  function setOidcField<K extends keyof OidcForm>(key: K, value: OidcForm[K]) {
+    setOidcForm((f) => (f ? { ...f, [key]: value } : f));
+  }
+
+  async function copyRedirect() {
+    if (!oidcForm) return;
+    try {
+      await navigator.clipboard.writeText(oidcForm.redirect_url);
+      onToast('已複製轉址網址');
+    } catch {
+      onToast('這個瀏覽器不允許代為複製，請手動選取網址');
+    }
+  }
+
+  async function saveOidc() {
+    if (!oidc || !oidcForm) return;
+    const issuer = oidcForm.provider === 'google' ? GOOGLE_ISSUER : oidcForm.issuer.trim();
+    const input: Record<string, string | boolean> = {};
+    if (issuer !== oidc.issuer) input.issuer = issuer;
+    if (oidcForm.client_id.trim() !== oidc.client_id) input.client_id = oidcForm.client_id.trim();
+    if (oidcForm.client_secret.trim()) input.client_secret = oidcForm.client_secret.trim();
+    if (oidcForm.redirect_url.trim() !== oidc.redirect_url) {
+      input.redirect_url = oidcForm.redirect_url.trim();
+    }
+    if (oidcForm.allowed_domain.trim() !== oidc.allowed_domain) {
+      input.allowed_domain = oidcForm.allowed_domain.trim();
+    }
+    if (oidcForm.provision_role !== oidc.provision_role) {
+      input.provision_role = oidcForm.provision_role;
+    }
+    if ((oidcForm.enabled === 'on') !== oidc.enabled) input.enabled = oidcForm.enabled === 'on';
+    if (oidcForm.password_login_disabled !== oidc.password_login_disabled) {
+      input.password_login_disabled = oidcForm.password_login_disabled;
+    }
+    if (Object.keys(input).length === 0) {
+      onToast('沒有變更');
+      setOidcForm(null);
+      return;
+    }
+
+    setSavingOidc(true);
+    try {
+      const d = await callOp<UpdatedOidcSetting>('update_oidc_setting', input, '設定外部登入');
+      onToast(`已儲存：${d.changed.join('、')}`);
+      setOidcForm(null);
+      const fresh = await callOp<OidcSetting>('get_oidc_setting');
+      setOidc(fresh);
+      if (fresh.verify_error) onToast(fresh.verify_error);
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingOidc(false);
     }
   }
 
@@ -192,7 +290,202 @@ export function Security({ onToast, reloadKey }: Props) {
           </section>
 
           <section>
-            <h3 className="section-title">Token 與連線</h3>
+            {oidc && (
+              <>
+                <h3 className="section-title">外部登入</h3>
+                {oidcForm ? (
+                  <div className="card">
+                    <div className="field-grid">
+                      <label className="field">
+                        供應商
+                        <select
+                          className="input"
+                          value={oidcForm.provider}
+                          onChange={(e) => setOidcField('provider', e.target.value)}
+                        >
+                          <option value="google">Google Workspace／Cloud Identity</option>
+                          <option value="other">其他</option>
+                        </select>
+                        <span className="field__hint">
+                          在 Google Cloud console 建立「網頁應用程式」類型的用戶端，
+                          同意畫面選 Internal。
+                        </span>
+                      </label>
+                      {oidcForm.provider === 'other' && (
+                        <label className="field">
+                          供應商網址
+                          <input
+                            className="input"
+                            value={oidcForm.issuer}
+                            placeholder="https://login.example.com"
+                            onChange={(e) => setOidcField('issuer', e.target.value)}
+                          />
+                        </label>
+                      )}
+                      <label className="field field--full">
+                        用戶端 ID
+                        <input
+                          className="input"
+                          value={oidcForm.client_id}
+                          placeholder="…apps.googleusercontent.com"
+                          onChange={(e) => setOidcField('client_id', e.target.value)}
+                        />
+                      </label>
+                      <label className="field field--full">
+                        用戶端密鑰
+                        <input
+                          className="input"
+                          type="password"
+                          value={oidcForm.client_secret}
+                          placeholder={
+                            oidc.has_client_secret ? '已設定，留空表示不變更' : '貼上供應商給的密鑰'
+                          }
+                          onChange={(e) => setOidcField('client_secret', e.target.value)}
+                        />
+                        <span className="field__hint">存入後無法再顯示。</span>
+                      </label>
+                      <label className="field">
+                        允許的網域
+                        <input
+                          className="input"
+                          value={oidcForm.allowed_domain}
+                          placeholder="example.com"
+                          onChange={(e) => setOidcField('allowed_domain', e.target.value)}
+                        />
+                        <span className="field__hint">留空代表不限網域。</span>
+                      </label>
+                      <label className="field">
+                        首次登入
+                        <select
+                          className="input"
+                          value={oidcForm.provision_role}
+                          onChange={(e) => setOidcField('provision_role', e.target.value)}
+                        >
+                          <option value="">不自動建立帳號</option>
+                          {oidc.roles.map((r) => (
+                            <option key={r.code} value={r.code}>
+                              自動建立帳號，角色為{r.name}
+                            </option>
+                          ))}
+                        </select>
+                        <span className="field__hint">自動建立帳號需要先填允許的網域。</span>
+                      </label>
+                      <div className="field field--full">
+                        轉址網址
+                        <input
+                          className="input"
+                          value={oidcForm.redirect_url}
+                          onChange={(e) => setOidcField('redirect_url', e.target.value)}
+                        />
+                        <span className="field__hint">
+                          這個網址要一字不差地填進供應商的轉址白名單。{' '}
+                          <button className="link-cell" onClick={() => void copyRedirect()}>
+                            複製
+                          </button>
+                        </span>
+                      </div>
+                      <label className="field">
+                        狀態
+                        <select
+                          className="input"
+                          value={oidcForm.enabled}
+                          onChange={(e) => setOidcField('enabled', e.target.value)}
+                        >
+                          <option value="off">未啟用</option>
+                          <option value="on">啟用，登入頁出現按鈕</option>
+                        </select>
+                      </label>
+                      {oidcForm.enabled === 'on' && (
+                        <label className="field">
+                          帳號密碼登入
+                          <select
+                            className="input"
+                            value={oidcForm.password_login_disabled ? 'off' : 'on'}
+                            onChange={(e) =>
+                              setOidcField('password_login_disabled', e.target.value === 'off')
+                            }
+                          >
+                            <option value="on">開放</option>
+                            <option value="off">停用</option>
+                          </select>
+                          <span className="field__hint">系統管理員仍可用密碼登入。</span>
+                        </label>
+                      )}
+                    </div>
+                    <div className="toolbar doc-card__actions">
+                      <button
+                        className="btn btn--compact btn--ghost"
+                        onClick={() => setOidcForm(null)}
+                      >
+                        取消
+                      </button>
+                      <span className="spacer" />
+                      <button
+                        className={`btn btn--compact${savingOidc ? ' btn--off' : ''}`}
+                        disabled={savingOidc}
+                        onClick={() => void saveOidc()}
+                      >
+                        {savingOidc ? '儲存中…' : '儲存'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="card fact-card">
+                      <div className="fact">
+                        <span className="fact__key">狀態</span>
+                        <span className="fact__value">
+                          {!oidc.enabled
+                            ? '未啟用，目前只用密碼登入'
+                            : oidc.verify_error
+                              ? '設定有問題，登入頁不會出現按鈕'
+                              : `已啟用 · ${oidc.provider_label}`}
+                          {oidc.verify_error && (
+                            <span className="fact__note">{oidc.verify_error}</span>
+                          )}
+                        </span>
+                      </div>
+                      {oidc.enabled && (
+                        <>
+                          <div className="fact">
+                            <span className="fact__key">允許的網域</span>
+                            <span className="fact__value">
+                              {oidc.allowed_domain ? `@${oidc.allowed_domain}` : '不限網域'}
+                            </span>
+                          </div>
+                          <div className="fact">
+                            <span className="fact__key">首次登入</span>
+                            <span className="fact__value">
+                              {oidc.provision_role_name
+                                ? `自動建立帳號，角色為${oidc.provision_role_name}`
+                                : '需由系統管理員先建立帳號'}
+                            </span>
+                          </div>
+                          <div className="fact">
+                            <span className="fact__key">帳號密碼登入</span>
+                            <span className="fact__value">
+                              {oidc.password_login_disabled ? '僅系統管理員' : '開放'}
+                            </span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                    {canEditOidc && (
+                      <div className="toolbar doc-card__actions">
+                        <button
+                          className="btn btn--compact"
+                          onClick={() => setOidcForm(formFrom(oidc))}
+                        >
+                          {oidc.enabled ? '變更設定' : '設定外部登入'}
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            <h3 className={`section-title${oidc ? ' section-title--spaced' : ''}`}>Token 與連線</h3>
             <p className="section-note">{tokens.storage_note}</p>
             <div className="card fact-card">
               {tokens.tokens.map((t) => (

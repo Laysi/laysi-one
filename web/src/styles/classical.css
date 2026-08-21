@@ -1846,6 +1846,11 @@ textarea {
   font-size: var(--text-lg);
 }
 
+.input--dead {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
 .input--date {
   width: var(--date-input-col);
   font-variant-numeric: tabular-nums;
@@ -1955,6 +1960,13 @@ textarea {
   color: var(--color-ink);
   font-size: var(--text-md);
   width: 100%;
+}
+
+.entry-input[readonly],
+.entry-input[readonly]:hover {
+  color: var(--color-neutral-500);
+  background: var(--wash-ink-faint);
+  cursor: default;
 }
 
 .entry-input--code {

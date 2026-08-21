@@ -28,21 +28,34 @@ export interface SetupState {
 }
 
 export interface BootstrapInput {
-  username: string;
-  display_name: string;
-  email: string;
   password: string;
   setup_token: string;
 }
 
 const CLOSED_SETUP: SetupState = { bootstrap_available: false, token_required: false };
 
+export interface OauthState {
+  enabled: boolean;
+  label: string;
+  domain: string | null;
+  creates_accounts: boolean;
+  password_login_disabled: boolean;
+}
+
+const OAUTH_OFF: OauthState = {
+  enabled: false,
+  label: '',
+  domain: null,
+  creates_accounts: false,
+  password_login_disabled: false,
+};
+
 export type AuthStatus = 'loading' | 'signed-out' | 'signed-in';
 
 export interface AuthValue {
   status: AuthStatus;
   user: SessionUser | null;
-  oauthEnabled: boolean;
+  oauth: OauthState;
   setup: SetupState;
   signIn: (username: string, password: string) => Promise<SessionUser>;
   signOut: () => Promise<void>;
@@ -72,7 +85,7 @@ interface Envelope<T> {
   ok?: boolean;
   error?: ApiError;
   user?: T;
-  oauth?: { enabled: boolean };
+  oauth?: Partial<OauthState>;
   setup?: SetupState;
 }
 
@@ -98,22 +111,22 @@ const JSON_HEADERS: HeadersInit = { 'content-type': 'application/json' };
 
 async function fetchMe(): Promise<{
   user: SessionUser | null;
-  oauthEnabled: boolean;
+  oauth: OauthState;
   setup: SetupState;
 }> {
   const res = await fetch('/v1/auth/me', { headers: JSON_HEADERS });
   const envelope = await readEnvelope(res);
-  const oauthEnabled = envelope.oauth?.enabled ?? false;
+  const oauth: OauthState = { ...OAUTH_OFF, ...envelope.oauth };
   const setup = envelope.setup ?? CLOSED_SETUP;
-  if (res.status === 401) return { user: null, oauthEnabled, setup };
+  if (res.status === 401) return { user: null, oauth, setup };
   if (!res.ok || !envelope.user) throw failure(res, envelope);
-  return { user: envelope.user, oauthEnabled, setup };
+  return { user: envelope.user, oauth, setup };
 }
 
 export function useAuthSession(): AuthValue {
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [user, setUser] = useState<SessionUser | null>(null);
-  const [oauthEnabled, setOauthEnabled] = useState(false);
+  const [oauth, setOauth] = useState<OauthState>(OAUTH_OFF);
   const [setup, setSetup] = useState<SetupState>(CLOSED_SETUP);
 
   useEffect(() => {
@@ -129,7 +142,7 @@ export function useAuthSession(): AuthValue {
     fetchMe()
       .then((session) => {
         if (!live) return;
-        setOauthEnabled(session.oauthEnabled);
+        setOauth(session.oauth);
         setSetup(session.setup);
         setUser(session.user);
         setStatus(session.user ? 'signed-in' : 'signed-out');
@@ -195,5 +208,5 @@ export function useAuthSession(): AuthValue {
     return envelope.user;
   }, []);
 
-  return { status, user, oauthEnabled, setup, signIn, signOut, changePassword, bootstrap };
+  return { status, user, oauth, setup, signIn, signOut, changePassword, bootstrap };
 }

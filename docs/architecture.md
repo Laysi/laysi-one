@@ -332,19 +332,213 @@ session 同時受兩個可調上限限制：`SESSION_IDLE_MINUTES` 以 `last_see
 `actor_role` 與 `employee_id` 都來自 session 查回的 `user_account`。登入失敗
 不區分帳號不存在、沒有本機密碼、停權或密碼錯誤，避免提供帳號列舉訊號。
 
-OIDC 是選用入口：`OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET` 與
-`OIDC_REDIRECT_URL` 四個都非空才啟用；未設定或只設一部分時，兩個 OAuth
+OIDC 是選用入口，**設定在畫面上而不在環境變數裡**（0047）：安全與營運頁的「外部
+登入」由系統管理員填供應商、用戶端 ID 與密鑰、轉址網址、允許的網域，以及網域內首次
+登入要不要自動建帳號。理由是拿得到 IdP 用戶端資料的就是裝機的人，而要他為了開啟自己
+的登入方式去改容器環境變數再重啟，等於把這件事鎖在他構不到的地方。未啟用時兩個 OAuth
 端點都回 404。啟用時先用 issuer discovery 取得 authorization、token 與 JWKS，
 不綁定 Google 或 Entra ID 的固定網址。流程採 Authorization Code + PKCE，
 state、nonce 與 code verifier 放在 API 行程內有 10 分鐘 TTL 的一次性 map；
 callback 由後端交換授權碼並以 `openidconnect` 驗證 id_token、簽章、issuer、
-audience 與 nonce，授權碼與 token 都不進瀏覽器 JavaScript。
+audience 與 nonce，授權碼與 token 都不進瀏覽器 JavaScript。授權請求帶
+`email`、`profile` 兩個 scope 與 `prompt=select_account`。
 
-OIDC 登入只拿 discovery issuer 與 id_token 的 `sub` 查
-`user_identity(provider, subject)`；email 不參與比對。查不到既有連結就回
-「本帳號尚未連結至任何使用者，請先由管理員完成連結」，而且不建立
-`user_account`。記憶體 map 適合目前單一 API 行程：重啟只會要求重新登入，也不留
-永久敏感殘跡；未來若水平擴充多個 replica，必須換成共用短期儲存。
+Google Cloud Identity 與 Workspace 走的就是這條路：issuer 是
+`https://accounts.google.com`，OAuth client 選「Web application」、同意畫面選
+Internal，Google 那側就只提供組織帳號。Google 的 discovery 沒有
+`end_session_endpoint`，所以登出只結束本站 session，Google 那邊仍登著。
+
+### 設定怎麼生效
+
+`oidc_setting` 是單列表，`client_secret` 原樣保存（token endpoint 需要它），
+**任何操作都不回傳它**，稽核紀錄依欄位名遮蔽（`REDACTED_FIELDS`）。
+`get_oidc_setting` 回的是 `has_client_secret` 布林值。
+
+伺服器把建好的 client 快取在 `AppState.oidc`（`RwLock<OidcCache>`），指紋是那一列的
+`updated_at`。存檔會推進 `updated_at`，下一個請求就重建一次，**不必重新啟動**。
+discovery 是網路呼叫，所以只在指紋變動時付這個成本。
+
+建立成敗寫回同一列的 `verified_at`／`verify_error`：discovery 屬於伺服器層，
+而按下儲存的人需要知道設定能不能用，設定畫面自己跑不了 discovery。寫回時比對舊值，
+一樣就不寫，所以它永遠不會碰 `updated_at`、不會自己追自己的尾巴。
+`call_op` 在 `update_oidc_setting` 成功後立刻重建一次，畫面隨後重讀就看得到結果。
+
+### 網域邊界：允許的網域
+
+設了就要求 id_token 的 `hd` claim 與它相符（不分大小寫，前面的 `@` 會去掉），
+**claim 不存在一律拒絕**。判準是 `hd` 而不是 email 網域：受目錄管理的 Google 帳號
+才帶 `hd`，而個人帳號可以持有一個已驗證的公司網域 email——它通得過看字串的檢查，
+但人離職時公司關不掉它。`hd` 不是標準 claim，所以 `oidc.rs` 自訂
+`HostedDomainClaims` 當 `AdditionalClaims`，值仍由 `openidconnect` 在驗完簽章後
+交出來，這個模組不自己解 JWT。授權請求也帶一個 `hd` 參數，那只是收窄 Google 的
+帳號選單，安全性由回程那次比對負責。
+
+### 自動建帳號：首次登入的角色
+
+留空時維持原本的規則：只認管理員預先連結的 `(issuer, sub)`，查不到就回「本帳號
+尚未連結至任何使用者」，不建 `user_account`。填了角色代碼，網域內的首次登入就自己
+建帳號。角色代碼查不到 `role` 表、或沒有填網域，設定存不進去（`update_oidc_setting`
+擋下），就算繞過操作直接改資料庫，client 也建不起來並把理由寫進 `verify_error`，
+而不是等到有人登入才發現。
+
+解析順序是三步，每一步的鑰匙都不同：
+
+1. `user_identity(provider, sub)` — 登入的唯一鑰匙，永遠先查。
+2. `user_account.email`（不分大小寫）— **只在自動建帳號開啟時**用一次，用途是認出
+   管理員已經替同一個人建好的帳號，讓首次登入接上去而不是在旁邊多開一個。比對不限
+   啟用中的帳號：停用的帳號必須被找到並擋下，不是被一個全新的帳號取代。對到多筆就
+   拒絕，請系統管理員先整理。
+3. 都沒有才建帳號。同一個交易寫員工主檔、`user_account` 與 `user_identity`；員工
+   編號在交易內用 advisory lock 配號，兩個人同時首次登入不會撞號。
+
+自動建的帳號 `password_hash` 是 NULL（沒有人選過密碼，發一組等於多一條沒人在拿的
+路），`created_by` 記「外部登入」。登入名稱就是那個 email 本身——本站不再有獨立於
+email 的登入名稱概念（見下方「登入名稱＝email」），所以第 3 步沒有名稱可推導，只需
+驗證格式。格式不合法、或那個位址已被別的帳號用掉，就拒絕並請系統管理員建帳號——
+帳號建好後，下一次登入會由第 2 步自己接上。
+
+第 2 步的代價要說清楚：`user_account.email` 從此是安全相關欄位，改得動它的人就決定得了
+誰的 Google 帳號連到哪個本站帳號。改它的 `update_user_account` 是 `AdminOnly`，
+而系統管理員本來就建得出任何角色的帳號，所以這不是新的權限，但它是新的責任。
+
+記憶體 map 適合目前單一 API 行程：重啟只會要求重新登入，也不留永久敏感殘跡；未來若
+水平擴充多個 replica，必須換成共用短期儲存。
+
+### 登入名稱＝email
+
+`create_user_account` 與 OIDC 自動建帳號兩個入口，現在都只收一個 email 欄位；
+`user_account.username` 在建立當下就是那個 email（小寫化），不再是另外打一個獨立
+的登入名稱。兩處各自驗證格式（非空、含 `@`、網域部分含 `.`、長度上限 254），不共用
+函式——`setup.rs` 與 `laysi-ops` 之間本來就各自一份的既有作法，兩個 crate 沒有自然
+的共用模組可放。
+
+`username` 建立後仍然不可變（既有規則沒變），但 `email` 欄位本身在那之後可以由
+`update_user_account` 獨立編輯——聯絡方式會換，登入名稱不必跟著換，兩者從此可能
+不同，畫面上帳號管理的「登入信箱」（固定唯讀）與「電子郵件」（選填、可編輯）因此
+是兩個欄位。OIDC 依 email 尋找既有帳號的第 2 步（見上）也因此仍然必要：那步找的是
+「聯絡信箱等於這個地址」的帳號，不是「登入名稱等於這個地址」，兩者在帳號建立後可
+能已經分開。
+
+`laysi-admin create-user --username` 這支主機 CLI 不受影響，仍收任意字串：它是離線
+時的逃生門，不是這裡要簡化的網頁流程。
+
+### 系統管理員帳號是安裝本身，不是一個人
+
+網頁初始化（`POST /v1/auth/bootstrap`）是這條規則唯一的例外，而且是往反方向的例外：
+它**完全不收** email。登入名稱固定 `admin`（`laysi_ops::ADMIN_USERNAME`）、顯示名稱
+固定「系統管理員」、`user_account.email` 留空、`employee_id` 為 NULL，呼叫端只送一個
+密碼。
+
+空的 email 不是省略，是這個設計的支點。`resolve_account` 的第 2 步用
+`users_by_email` 認人並**沿用該帳號既有的角色**，所以只要系統管理員帳號上有一個位址，
+持有那個位址的 Google 帳號首次登入就會連上它、拿到 `admin`。`users_by_email` 本來就
+以 `email <> ''` 排除空值，於是「不給它位址」同時關掉了這條路；`update_user_account`
+另外拒絕替 `admin` 設 email，避免事後有人把它補回去。
+
+其餘兩個後果同樣重要：
+
+- 裝機的人離職時不會連帶帶走這個帳號。用私人或個人公司信箱當第一個登入名稱，等於
+  讓破窗用的鑰匙掛在一個會被 IdP 停用的身分上。
+- `password_login_disabled` 的系統管理員例外從此指著一個**本來就沒有 SSO 路徑**的
+  帳號。在此之前那顆例外是多開的第二道門（同一個人既能 SSO 也能打密碼）；現在它是
+  那個帳號唯一的門，而其他人一道也沒有。
+
+第二個帳號起才是人：首次設定精靈第五步用 `create_user_account` 建負責人，走的是
+email 當登入名稱的正常路徑。`create_user_account` 仍然建得出其他 `admin` 角色的帳號
+給真人用（那些帳號有 email、連得了 SSO），「最後一個啟用中的系統管理員」的既有保護
+因此不必改成「唯一那一列」。
+
+前端的對應約束：登入頁的帳號欄是 `type="text"`、`autoComplete="username"`。
+`type="email"` 會讓瀏覽器在送出前擋下 `admin` 這個值，而那正是密碼登入被關掉時唯一
+能用的帳號。按下「系統管理員改用密碼登入」時欄位預填 `admin`、標籤換成「登入名稱」。
+
+### 沒有密碼的帳號：`create_user_account` 的 `external_login_only`
+
+負責人不必有密碼。`create_user_account` 帶上 `external_login_only` 時，帳號的
+`password_hash` 是 NULL、`must_change_password` 為 false，回應的 `temporary_password`
+是 `null`，這個人只能從 IdP 進來。
+
+三個前提在寫入任何一列之前就檢查，缺一即拒絕：
+
+1. 外部登入已啟用（`oidc_setting.enabled`）；
+2. 設為自動建立帳號（`provision_role` 非空）；
+3. 地址的網域等於 `allowed_domain`。
+
+第 2 點才是關鍵，而且不直覺：`resolve_account` 的第 2 步——依 email 找既有帳號並把
+外部身分連上去——寫在 `let Some(provision) = oidc.provision.as_ref() else { ... }`
+之後，**只有自動建帳號開啟時才會執行**。關掉它，這個預先建好的帳號永遠不會被首次
+登入認出來，而它沒有密碼；`reset_user_password` 又拒絕 `password_hash IS NULL`，
+所以那是一個誰也打不開、事後也補不回來的帳號。第 3 點同理：`hd` 對不上允許的網域，
+登入在更早的地方就被擋下。
+
+精靈把這三個前提畫成一個唯讀的「登入方式」欄位，跟著 email 即時變動：落在網域內顯示
+供應商名稱，否則顯示「密碼」。判斷寫在畫面上，不寫成一句要讀者自己套用的規則。
+
+對稱的第四道檢查在另一個方向：`password_login_disabled` 開著時，
+`create_user_account` 拒絕建立**沒有** `external_login_only` 的非 `admin` 帳號。那樣的
+帳號只會拿到一組登入端永遠會擋下的密碼。`admin` 角色是例外，與 `auth::login` 的例外
+同一個理由。此處讀的是 `oidc_setting` 的欄位本身，不是 `oidc::current()`——建立帳號
+問的是「這個安裝打算怎麼登入」，不是「此刻 IdP 通不通」；IdP 壞掉時的逃生門是建一個
+`admin` 帳號，那條路沒有被擋。
+
+精靈在這個狀態下把「登入方式」寫成「密碼（已停用）」、欄位轉成強調色並把建立鈕關掉，
+同一個判斷因此在按下去之前就看得見。停用的開關本身也放在精靈第五步，而不是留到事後的
+安全與營運頁：它與第六步是同一個決定，分開問就會出現「關掉密碼登入，然後發一組密碼給
+負責人」這種走得完、但結果沒有人登得進去的路徑。
+
+### 外部登入會清掉 `must_change_password`
+
+系統管理員用 `create_user_account` 建的帳號帶著一組產生的密碼與這個旗標。從 IdP 進來
+的人沒拿過那組密碼，而變更密碼表單會先要求「目前的密碼」，於是旗標會把一次成功的
+登入擋在自己的畫面外。`oauth_callback` 因此在發 session 之前清掉旗標。
+
+只清旗標，不動 `password_hash`：那組密碼仍在，本人之後真想改用密碼登入時
+`reset_user_password` 還叫得動。清掉雜湊會讓帳號變成只有外部身分進得來，而
+`unlink_user_identity` 拒絕沒有密碼的帳號，等於把一個可逆的狀態換成不可逆的。
+
+### 帳號密碼登入可關閉：`password_login_disabled`
+
+`oidc_setting` 多一欄 `password_login_disabled`（0048）。開啟後除系統管理員角色外，
+密碼登入一律被 `POST /v1/auth/login` 拒絕，訊息指向外部登入按鈕。只有在密碼**已經
+驗證正確之後**才做這個判斷（緊接在 `!verified` 的檢查之後），所以它不會變成第二個
+帳號列舉管道——問到這裡的人已經證明知道正確密碼。
+
+保留系統管理員例外是刻意的：開了這個開關又遇到 IdP 設定壞掉，一般帳號與系統管理員
+一起被鎖在外面就沒有人能回設定頁把它關掉。網頁初始化建的 `admin` 帳號沒有 email、
+連不上任何外部身分（見〈系統管理員帳號是安裝本身，不是一個人〉），所以這顆例外對它
+不是多一道門，而是它唯一的門。存檔時只驗證「開啟必須先啟用外部登入」
+（`update_oidc_setting`），不驗證「外部登入目前真的可用」，因為此請求可能同時在改
+issuer 等其他欄位，驗證結果本來就會被同一次寫入清空。
+
+真正的安全網在讀取端，而非寫入端的驗證：`auth::login` 不直接讀 `password_login_disabled`
+欄位，而是呼叫 `oidc::current()`，只有在**目前這一刻**能建出一個可用 client（discovery
+成功、四個必填欄位齊全）時才會執行這個限制。IdP 掛掉、client secret 過期、或設定本身
+有錯，`current()` 回 `None`，密碼登入立刻對所有人恢復——不必有人注意到並手動把開關關
+回去。這與 `verified_at`／`verify_error` 是同一份自我修復機制，此處只是多一個消費端。
+
+登入頁對稱地讀 `/v1/auth/me` 的 `oauth.password_login_disabled`：為真時預設不畫密碼
+欄位，只畫 SSO 按鈕與一顆「系統管理員改用密碼登入」的連結，按下去才展開密碼表單並
+把帳號欄預填成 `admin`——畫面在看到憑證之前同樣不知道訪客是不是系統管理員，所以入口
+本身不能消失，只能收起來。帳號欄一律 `type="text"`：`type="email"` 會讓瀏覽器擋下
+`admin`，而那正是這條路上唯一能用的帳號。
+
+### 解除連結與刪除帳號
+
+`unlink_user_identity`（`AdminOnly`，0046）在同一個交易裡刪掉 `user_identity` 並
+撤銷該帳號未過期的 session——OIDC 開出來的 session 不會因為連結消失而失效，不撤等於
+沒解。它拒絕 `password_hash IS NULL` 的帳號：解完就沒有人登得進去，而畫面上沒有任何
+操作能補一組密碼回去（`reset_user_password` 同樣拒絕外部登入專用的帳號），那條路只剩
+主機上的 `laysi-admin reset-password`。畫面因此在那種帳號上請人改用停用。
+
+`delete_user_account` 現在拒絕還連著外部身分的帳號。理由是自動建帳號讓刪除自己撤銷
+自己：人還在網域裡，下一次登入又建一個新的。先解除連結是那個刻意的步驟。仍要注意
+解除連結本身不等於擋住登入——自動建帳號開啟時，同一個 email 再登入就會由第 2 步重新
+連上，真正擋住登入的是停用帳號，或在 Cloud Identity 那側停用該帳號。離職流程照舊走
+0043：結案那一步停用登入帳號並撤銷 session 與 MCP Token，那才是本站這側的關門動作。
+
+`list_user_accounts` 回連結的顯示名稱（issuer 的 host，`accounts.google.com` 顯示為
+「Google」）、連結當下的 email 與連結時間，帳號管理因此看得出誰用外部帳號登入；連著外部
+帳號的那一列不畫「刪除」，改畫「解除連結」，因為前者必定被拒。
 
 帳號與員工名冊刻意分開：事務所會計師可以有帳號而沒有 `employee`，名冊上的
 員工也不一定需要帳號。外部身分以 `(provider, subject)` 唯一識別，email 只留
@@ -370,7 +564,10 @@ laysi-admin list-users
 只存 Argon2id PHC 字串，並設定 `must_change_password = true`。`--role` 每次查
 `role` 表，不存在時列出目前所有合法代碼；`--employee-no` 只在需要員工自助時
 連到既有員工主檔。`link-oauth` 不建立帳號，provider 應填 discovery issuer
-（尾端 `/` 會正規化），subject 填 IdP 的 `sub`。
+（尾端 `/` 會正規化），subject 填 IdP 的 `sub`。自動建帳號開啟後這支指令很少用得上，
+但它仍是唯一能在本人登入之前就把身分綁定的方式。`reset-password` 是唯一能給
+外部登入專用帳號（`password_hash IS NULL`）一組密碼的入口，兩個操作層的密碼路徑
+都擋住那種帳號。
 
 資料庫完全沒有 `user_account` 時，帳密登入回 503 與「請先完成初始化」；這是唯一會
 揭露「帳號總數為零」的 bootstrap 狀態。訊息本身不印指令——看到登入畫面的人未必有
@@ -398,8 +595,15 @@ Rust 那側的 `bootstrap_open()` 只是為了給出比違反約束更好的錯�
 角色寫死 `admin`（`laysi_ops::ROLE_ADMIN`），呼叫端不能指定。第一個帳號如果沒有
 授權他人的權限，整套系統就沒有人能再開權限；未登入端點也不該提供一個只有唯一正確值
 的自由度。**它不是 `boss`**：裝機的人不該因此看得到全公司薪資，理由見〈兩道風險
-底線〉。同理不收 `employee_id`、不收 `status`、不收 `must_change_password`——密碼是
-本人當場設的，沒有暫時密碼要強迫更換，這點與 `laysi-admin create-user` 相反。
+底線〉。登入名稱、顯示名稱與空 email 同樣寫死，理由見〈系統管理員帳號是安裝本身，
+不是一個人〉。同理不收 `employee_id`、不收 `status`、不收 `must_change_password`——
+密碼是本人當場設的，沒有暫時密碼要強迫更換，這點與 `laysi-admin create-user` 相反。
+整個請求因此只有 `password` 與選填的 `setup_token` 兩個欄位。
+
+畫面（`screens/Init.tsx`）仍然畫出「登入名稱」欄位，值固定 `admin`、`readonly`，不隨
+請求送出。它不是輸入，是憑證的另外一半：寫成散句的話瀏覽器與密碼管理程式收不到，使用者
+存下的會是一組沒有帳號的密碼，下一次在登入頁自動填不出來。用 `readonly` 而非 `disabled`
+正是為此——`disabled` 的欄位不參與表單，密碼管理程式一樣讀不到。
 
 兩個環境變數：`SETUP_ALLOW_WEB`（預設 `true`）為 `false` 時端點一律回 403；
 `SETUP_TOKEN` 非空時必須在畫面上輸入相同代碼。設定值在行程內只保存 BLAKE3

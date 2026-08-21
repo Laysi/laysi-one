@@ -48,8 +48,11 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(UpdateUserAccount),
         Box::new(ChangeUserRole),
         Box::new(ResetUserPassword),
+        Box::new(UnlinkUserIdentity),
         Box::new(DeleteUserAccount),
         Box::new(ListUserAccounts),
+        Box::new(GetOidcSetting),
+        Box::new(UpdateOidcSetting),
         Box::new(ListApprovalRules),
     ]
 }
@@ -606,26 +609,44 @@ async fn link_employee(
 
 /// Login name rules, shared with the web bootstrap endpoint so the two
 /// entry points cannot drift.
-const USERNAME_MIN_CHARS: usize = 3;
-const USERNAME_MAX_CHARS: usize = 64;
 const DISPLAY_NAME_MAX_CHARS: usize = 64;
 const EMAIL_MAX_CHARS: usize = 254;
 
+/// The address doubles as the login name, so it has to be one somebody can
+/// actually be reached at, not just a string with an \`@\` in it: a login
+/// nobody can receive a password reset or an OIDC match at is a login that
+/// only \`laysi-admin\` can recover.
+fn valid_login_email(value: &str) -> bool {
+    let count = value.chars().count();
+    if !(3..=EMAIL_MAX_CHARS).contains(&count) || value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct CreateUserAccountInput {
-    /// Login name: any 3 to 64 printable characters, control characters aside.
-    pub username: String,
+    /// Also the login name: accounts sign in with their address, so there is
+    /// no separate username to invent or remember.
+    pub email: String,
     /// Name shown on screen and in the audit trail.
     pub display_name: String,
-    /// Optional; may be empty.
-    #[serde(default)]
-    pub email: String,
     /// Role code from the role table, e.g. `acct`.
     pub role_code: String,
     /// Employee number this login belongs to. An unknown number, or none at
     /// all, writes a roster entry; the number is allocated when empty.
     #[serde(default)]
     pub employee_no: String,
+    /// Create the account with no password, to be reached only through the
+    /// external identity provider. Accepted while external login is on, is
+    /// set to create accounts, and the address is inside the allowed domain —
+    /// the three conditions under which a first sign-in resolves onto this
+    /// account instead of building a second one.
+    #[serde(default)]
+    pub external_login_only: bool,
 }
 
 struct CreateUserAccount;
@@ -640,7 +661,7 @@ impl Operation for CreateUserAccount {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更。員工編號指不到既有的人時會一併建立員工主檔，留空則自動配號。"
+        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；改用外部登入時不產生密碼。員工編號指不到既有的人時會一併建立員工主檔，留空則自動配號。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateUserAccountInput>()
@@ -649,18 +670,11 @@ impl Operation for CreateUserAccount {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: CreateUserAccountInput = parse(input)?;
 
-        let username = i.username.trim();
-        let count = username.chars().count();
-        if !(USERNAME_MIN_CHARS..=USERNAME_MAX_CHARS).contains(&count) {
-            return Err(OpError::BadInput("登入名稱需要 3 到 64 個字元".into()));
+        let email = i.email.trim().to_ascii_lowercase();
+        if !valid_login_email(&email) {
+            return Err(OpError::BadInput("電子郵件格式不正確".into()));
         }
-        // Only control characters are refused. They cannot be typed at a login
-        // prompt and they would break the audit trail's alignment, while a
-        // symbol or a Chinese name is a login name the account's owner can read
-        // back. `username` has no CHECK in SQL, so this is the only filter.
-        if username.chars().any(char::is_control) {
-            return Err(OpError::BadInput("登入名稱不能包含控制字元".into()));
-        }
+        let username = email.as_str();
 
         let display_name = i.display_name.trim();
         if display_name.is_empty() {
@@ -668,15 +682,6 @@ impl Operation for CreateUserAccount {
         }
         if display_name.chars().count() > DISPLAY_NAME_MAX_CHARS {
             return Err(OpError::BadInput("顯示名稱不可超過 64 個字元".into()));
-        }
-
-        let email = i.email.trim();
-        if !email.is_empty()
-            && (email.chars().count() > EMAIL_MAX_CHARS
-                || !email.contains('@')
-                || email.chars().any(char::is_whitespace))
-        {
-            return Err(OpError::BadInput("電子郵件格式不正確；此欄可以留空".into()));
         }
 
         let role_code = i.role_code.trim();
@@ -690,7 +695,41 @@ impl Operation for CreateUserAccount {
         };
 
         if ctx.store.user_by_username(username).await?.is_some() {
-            return Err(OpError::BadInput(format!("登入名稱「{username}」已被使用")));
+            return Err(OpError::BadInput(format!("「{username}」已經是登入帳號")));
+        }
+
+        // Refused before anything is written: an account with no password that
+        // the provider cannot resolve onto is an account nobody can ever open,
+        // and no operation here can give it one afterwards.
+        if i.external_login_only {
+            let oidc = ctx.store.oidc_setting().await?;
+            if !oidc.enabled {
+                return Err(OpError::BadInput(
+                    "請先設定外部登入，才能建立不用密碼的帳號".into(),
+                ));
+            }
+            if oidc.provision_role.trim().is_empty() {
+                return Err(OpError::BadInput(
+                    "外部登入目前設為不自動建立帳號，請改設一個角色".into(),
+                ));
+            }
+            let domain = oidc.allowed_domain.trim().to_ascii_lowercase();
+            if domain.is_empty() || !email.ends_with(&format!("@{domain}")) {
+                return Err(OpError::BadInput(format!(
+                    "外部登入只接受 @{domain} 的地址，這個帳號要自己的密碼"
+                )));
+            }
+        } else if role_code != crate::ROLE_ADMIN {
+            // The mirror image: with password sign-in turned off, a password is
+            // the one thing this account will never be able to use. Only the
+            // system administrator role is still let in that way.
+            let oidc = ctx.store.oidc_setting().await?;
+            if oidc.password_login_disabled {
+                return Err(OpError::BadInput(format!(
+                    "本站已停用帳號密碼登入，請改用 @{} 的地址建立外部登入帳號",
+                    oidc.allowed_domain
+                )));
+            }
         }
 
         let employee = link_employee(ctx, i.employee_no.trim(), display_name).await?;
@@ -698,28 +737,37 @@ impl Operation for CreateUserAccount {
         // The administrator never sets a lasting password. A generated one is
         // returned once and must be changed at first login, so the person who
         // creates the account cannot keep using it.
-        let temporary = laysi_store::password::temporary_password();
-        let password_hash = laysi_store::password::hash_password(&temporary)
-            .map_err(|e| OpError::BadInput(format!("無法建立密碼雜湊：{e}")))?;
+        let temporary = (!i.external_login_only).then(laysi_store::password::temporary_password);
+        let password_hash = match &temporary {
+            Some(value) => Some(
+                laysi_store::password::hash_password(value)
+                    .map_err(|e| OpError::BadInput(format!("無法建立密碼雜湊：{e}")))?,
+            ),
+            None => None,
+        };
 
         let user = ctx
             .store
             .create_user(laysi_store::CreateUser {
                 username,
                 display_name,
-                email,
-                password_hash: Some(&password_hash),
+                email: &email,
+                password_hash: password_hash.as_deref(),
                 role_code,
                 employee_id: Some(employee.id),
                 status: "active",
-                must_change_password: true,
+                must_change_password: temporary.is_some(),
                 created_by: &ctx.actor,
             })
             .await?;
 
         let summary = format!(
-            "建立帳號 · {}（{}）角色{}，連結員工 {}",
-            user.username, user.display_name, role.name, employee.emp_no
+            "建立帳號 · {}（{}）角色{}，連結員工 {}{}",
+            user.username,
+            user.display_name,
+            role.name,
+            employee.emp_no,
+            if temporary.is_some() { "" } else { "，外部登入" }
         );
         Ok(OpOutcome::new(
             json!({
@@ -734,8 +782,9 @@ impl Operation for CreateUserAccount {
                     "employee_name": employee.name,
                 },
                 // Shown once and never retrievable: only the hash is stored.
+                // Null when the account has no password at all.
                 "temporary_password": temporary,
-                "must_change_password": true,
+                "must_change_password": temporary.is_some(),
             }),
             summary,
         ))
@@ -810,6 +859,15 @@ impl Operation for UpdateUserAccount {
                         || email.chars().any(char::is_whitespace))
                 {
                     return Err(OpError::BadInput("電子郵件格式不正確；此欄可以留空".into()));
+                }
+                // An address on this account would let an external identity
+                // resolve onto it by `users_by_email`, and it is the account
+                // that has to stay reachable when the identity provider is
+                // not.
+                if !email.is_empty() && current.username == crate::ADMIN_USERNAME {
+                    return Err(OpError::BadInput(
+                        "系統管理員帳號不能設定電子郵件".into(),
+                    ));
                 }
                 Some(email)
             }
@@ -1137,6 +1195,84 @@ impl Operation for ResetUserPassword {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct UnlinkUserIdentityInput {
+    /// Login name of the account to unlink.
+    pub username: String,
+    /// Must be `true`. The account's sessions end at once.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+struct UnlinkUserIdentity;
+
+#[async_trait]
+impl Operation for UnlinkUserIdentity {
+    fn name(&self) -> &'static str {
+        "unlink_user_identity"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "解除一個登入帳號的外部帳號連結。該帳號的登入工作階段立刻失效，之後只能用密碼登入。沒有密碼的帳號解不掉，請改為停用。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<UnlinkUserIdentityInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: UnlinkUserIdentityInput = parse(input)?;
+        if !i.confirm {
+            return Err(OpError::BadInput(
+                "解除連結會讓該帳號登出，請帶入 confirm".into(),
+            ));
+        }
+
+        let username = i.username.trim();
+        let Some(target) = ctx.store.user_by_username(username).await? else {
+            return Err(OpError::BadInput(format!("查無登入名稱「{username}」")));
+        };
+        let identities = ctx.store.user_identities(target.id).await?;
+        if identities.is_empty() {
+            return Err(OpError::BadInput(format!(
+                "「{username}」沒有連結外部帳號"
+            )));
+        }
+        // Unlinking an account with no password hash leaves a login nobody
+        // can use, and no operation on this screen can give it one back.
+        if target.password_hash.is_none() {
+            return Err(OpError::BadInput(format!(
+                "「{username}」只能用外部帳號登入，解除後就沒有人能登入它；請改為停用這個帳號"
+            )));
+        }
+
+        let removed = ctx.store.unlink_identities(target.id, &ctx.actor).await?;
+        let labels: Vec<String> = identities
+            .iter()
+            .map(|identity| laysi_store::provider_label(&identity.provider))
+            .collect();
+        let summary = format!(
+            "解除連結 · {}（{}）不再以{}登入，登出 {} 個工作階段",
+            target.username,
+            target.display_name,
+            labels.join("、"),
+            removed.revoked_sessions
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "user": {
+                    "username": target.username,
+                    "display_name": target.display_name,
+                },
+                "removed": removed.removed,
+                "revoked_sessions": removed.revoked_sessions,
+            }),
+            summary,
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct DeleteUserAccountInput {
     /// Login name of the account to remove.
     pub username: String,
@@ -1156,7 +1292,7 @@ impl Operation for DeleteUserAccount {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "刪除一個登入帳號，連同它的登入工作階段與外部帳號連結。無法復原，稽核紀錄上的既有紀錄不受影響。最後一個帳號與最後一個啟用中的系統管理員刪不掉。"
+        "刪除一個登入帳號與它的登入工作階段。無法復原，稽核紀錄上的既有紀錄不受影響。連著外部帳號的要先解除連結；最後一個帳號與最後一個啟用中的系統管理員刪不掉。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<DeleteUserAccountInput>()
@@ -1196,6 +1332,15 @@ impl Operation for DeleteUserAccount {
                     "至少要保留一個啟用中的系統管理員帳號；請先建立另一個管理員帳號".into(),
                 ));
             }
+        }
+
+        // Where an external directory provisions accounts, the next
+        // sign-in builds a deleted one again. Breaking the link is the
+        // deliberate step that makes the deletion mean something.
+        if !ctx.store.user_identities(target.id).await?.is_empty() {
+            return Err(OpError::BadInput(format!(
+                "「{username}」連著外部帳號，請先解除連結再刪除；只是要擋住登入的話，停用就夠了"
+            )));
         }
 
         let removed = ctx
@@ -1240,7 +1385,7 @@ impl Operation for ListUserAccounts {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "讀登入帳號清單：登入名稱、角色、連結的員工、狀態與最後登入時間。密碼與密碼雜湊不在回應內，也無法從這裡取回。"
+        "讀登入帳號清單：登入名稱、角色、連結的員工、外部帳號、狀態與最後登入時間。密碼與密碼雜湊不在回應內，也無法從這裡取回。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -1251,6 +1396,283 @@ impl Operation for ListUserAccounts {
         let pending = accounts.iter().filter(|a| a.must_change_password).count();
         let summary = format!("讀取登入帳號 · {} 個，其中 {pending} 個尚未變更初始密碼", accounts.len());
         Ok(OpOutcome::new(json!({ "accounts": accounts }), summary))
+    }
+}
+
+/// Settings the sign-in screen and the server both read. The client secret is
+/// not among them: it goes in, it never comes back.
+struct GetOidcSetting;
+
+#[async_trait]
+impl Operation for GetOidcSetting {
+    fn name(&self) -> &'static str {
+        "get_oidc_setting"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "讀外部登入設定：供應商、用戶端 ID、允許的網域、自動建立帳號的角色、是否停用帳號密碼登入與上次驗證結果。用戶端密鑰不在回應內，設定後也無法取回。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<crate::Empty>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
+        let setting = ctx.store.oidc_setting().await?;
+        let roles = ctx.store.roles().await?;
+        let role_name = roles
+            .iter()
+            .find(|role| role.code == setting.provision_role)
+            .map(|role| role.name.clone());
+        let summary = if setting.enabled {
+            format!(
+                "讀外部登入設定 · 已啟用{}",
+                if setting.verify_error.is_empty() { "" } else { "，但設定有問題" }
+            )
+        } else {
+            "讀外部登入設定 · 未啟用".to_string()
+        };
+        Ok(OpOutcome::new(
+            json!({
+                "enabled": setting.enabled,
+                "issuer": setting.issuer,
+                "provider_label": laysi_store::provider_label(&setting.issuer),
+                "client_id": setting.client_id,
+                "has_client_secret": !setting.client_secret.is_empty(),
+                "redirect_url": setting.redirect_url,
+                "allowed_domain": setting.allowed_domain,
+                "provision_role": setting.provision_role,
+                "provision_role_name": role_name,
+                "password_login_disabled": setting.password_login_disabled,
+                "updated_at": setting.updated_at,
+                "updated_by": setting.updated_by,
+                "verified_at": setting.verified_at,
+                "verify_error": setting.verify_error,
+                "roles": roles,
+            }),
+            summary,
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateOidcSettingInput {
+    /// Whether the sign-in button appears at all. Turning it on needs the
+    /// issuer, the client id, the redirect URL and a stored secret.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// The IdP's issuer, e.g. `https://accounts.google.com` for Google
+    /// Workspace and Cloud Identity.
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Write only. Leave the field out to keep the stored secret; an empty
+    /// string clears it.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Where the IdP returns to, ending in `/v1/auth/oauth/callback`. It has
+    /// to be registered with the IdP exactly as written here.
+    #[serde(default)]
+    pub redirect_url: Option<String>,
+    /// The domain accounts must belong to. An empty string accepts any
+    /// account the IdP authenticates.
+    #[serde(default)]
+    pub allowed_domain: Option<String>,
+    /// Role for accounts created on a first sign-in from that domain. An
+    /// empty string creates none.
+    #[serde(default)]
+    pub provision_role: Option<String>,
+    /// Turns off the password form for every role except the system
+    /// administrator. Only settable while `enabled` is (or is becoming) true.
+    #[serde(default)]
+    pub password_login_disabled: Option<bool>,
+}
+
+struct UpdateOidcSetting;
+
+/// The only path the server answers a sign-in on.
+const OAUTH_CALLBACK_PATH: &str = "/v1/auth/oauth/callback";
+
+fn is_web_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
+}
+
+/// Domains compare without case, and a leading `@` is what people type.
+fn normalize_login_domain(value: &str) -> String {
+    value.trim().trim_start_matches('@').to_ascii_lowercase()
+}
+
+#[async_trait]
+impl Operation for UpdateOidcSetting {
+    fn name(&self) -> &'static str {
+        "update_oidc_setting"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "設定外部登入：供應商、用戶端 ID 與密鑰、轉址網址、允許的網域，以及網域內首次登入要不要自動建立帳號。存檔後立即生效，不必重新啟動。用戶端密鑰留空表示沿用已存的那一組。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<UpdateOidcSettingInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: UpdateOidcSettingInput = parse(input)?;
+        let current = ctx.store.oidc_setting().await?;
+
+        let issuer = i
+            .issuer
+            .as_deref()
+            .map(|value| value.trim().trim_end_matches('/').to_string());
+        if let Some(issuer) = issuer.as_deref() {
+            if !issuer.is_empty() && !is_web_url(issuer) {
+                return Err(OpError::BadInput(
+                    "供應商網址要以 https:// 開頭，例如 https://accounts.google.com".into(),
+                ));
+            }
+        }
+
+        let redirect_url = i.redirect_url.as_deref().map(|value| value.trim().to_string());
+        if let Some(redirect) = redirect_url.as_deref() {
+            if !redirect.is_empty()
+                && (!is_web_url(redirect) || !redirect.ends_with(OAUTH_CALLBACK_PATH))
+            {
+                return Err(OpError::BadInput(format!(
+                    "轉址網址要是本系統的網址加上 {OAUTH_CALLBACK_PATH}"
+                )));
+            }
+        }
+
+        let client_id = i.client_id.as_deref().map(|value| value.trim().to_string());
+        let client_secret = i.client_secret.as_deref().map(str::trim);
+        let allowed_domain = i.allowed_domain.as_deref().map(normalize_login_domain);
+        let provision_role = i.provision_role.as_deref().map(|value| value.trim().to_string());
+
+        let next_domain = allowed_domain.as_deref().unwrap_or(&current.allowed_domain);
+        if let Some(role_code) = provision_role.as_deref() {
+            if !role_code.is_empty() {
+                let roles = ctx.store.roles().await?;
+                if !roles.iter().any(|role| role.code == role_code) {
+                    let known: Vec<&str> = roles.iter().map(|role| role.code.as_str()).collect();
+                    return Err(OpError::BadInput(format!(
+                        "查無角色「{role_code}」；可用的角色是 {}",
+                        known.join("、")
+                    )));
+                }
+                if next_domain.is_empty() {
+                    return Err(OpError::BadInput(
+                        "要自動建立帳號請先填允許的網域，否則任何外部帳號都能在這裡開一個登入".into(),
+                    ));
+                }
+            }
+        }
+
+        let next_enabled = i.enabled.unwrap_or(current.enabled);
+        let next_password_disabled =
+            i.password_login_disabled.unwrap_or(current.password_login_disabled);
+        if next_password_disabled && !next_enabled {
+            return Err(OpError::BadInput(
+                "要停用帳號密碼登入請先啟用外部登入".into(),
+            ));
+        }
+        if next_enabled {
+            let next_issuer = issuer.as_deref().unwrap_or(&current.issuer);
+            let next_client_id = client_id.as_deref().unwrap_or(&current.client_id);
+            let next_redirect = redirect_url.as_deref().unwrap_or(&current.redirect_url);
+            let has_secret = match client_secret {
+                Some(secret) => !secret.is_empty(),
+                None => !current.client_secret.is_empty(),
+            };
+            let missing: Vec<&str> = [
+                ("供應商網址", next_issuer.is_empty()),
+                ("用戶端 ID", next_client_id.is_empty()),
+                ("用戶端密鑰", !has_secret),
+                ("轉址網址", next_redirect.is_empty()),
+            ]
+            .into_iter()
+            .filter_map(|(label, missing)| missing.then_some(label))
+            .collect();
+            if !missing.is_empty() {
+                return Err(OpError::BadInput(format!(
+                    "要啟用外部登入還缺 {}",
+                    missing.join("、")
+                )));
+            }
+        }
+
+        let mut changed: Vec<String> = Vec::new();
+        let mut changed_field = |label: &str, differs: bool| {
+            if differs {
+                changed.push(label.to_string());
+            }
+            differs
+        };
+        let write_enabled = i
+            .enabled
+            .filter(|value| changed_field("啟用狀態", *value != current.enabled));
+        let write_issuer = issuer
+            .as_deref()
+            .filter(|value| changed_field("供應商網址", *value != current.issuer));
+        let write_client_id = client_id
+            .as_deref()
+            .filter(|value| changed_field("用戶端 ID", *value != current.client_id));
+        let write_secret =
+            client_secret.filter(|value| changed_field("用戶端密鑰", *value != current.client_secret));
+        let write_redirect = redirect_url
+            .as_deref()
+            .filter(|value| changed_field("轉址網址", *value != current.redirect_url));
+        let write_domain = allowed_domain
+            .as_deref()
+            .filter(|value| changed_field("允許的網域", *value != current.allowed_domain));
+        let write_role = provision_role
+            .as_deref()
+            .filter(|value| changed_field("自動建立帳號", *value != current.provision_role));
+        let write_password_disabled = i
+            .password_login_disabled
+            .filter(|value| changed_field("帳號密碼登入", *value != current.password_login_disabled));
+
+        if changed.is_empty() {
+            return Ok(OpOutcome::new(
+                json!({ "changed": changed, "enabled": current.enabled }),
+                "設定外部登入 · 沒有變更".to_string(),
+            ));
+        }
+
+        let updated = ctx
+            .store
+            .update_oidc_setting(laysi_store::WriteOidcSetting {
+                enabled: write_enabled,
+                issuer: write_issuer,
+                client_id: write_client_id,
+                client_secret: write_secret,
+                redirect_url: write_redirect,
+                allowed_domain: write_domain,
+                provision_role: write_role,
+                password_login_disabled: write_password_disabled,
+                updated_by: &ctx.actor,
+            })
+            .await?;
+
+        let summary = format!(
+            "設定外部登入 · {}（{}）",
+            if updated.enabled { "已啟用" } else { "未啟用" },
+            changed.join("、")
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "changed": changed,
+                "enabled": updated.enabled,
+                "issuer": updated.issuer,
+                "provider_label": laysi_store::provider_label(&updated.issuer),
+                "allowed_domain": updated.allowed_domain,
+                "provision_role": updated.provision_role,
+                "password_login_disabled": updated.password_login_disabled,
+            }),
+            summary,
+        ))
     }
 }
 

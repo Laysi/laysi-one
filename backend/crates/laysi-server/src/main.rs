@@ -100,7 +100,10 @@ pub struct AppState {
     pub auth: auth::AuthConfig,
     /// Whether the browser may create the installation's first account.
     pub setup: setup::SetupConfig,
-    pub oidc: Option<oidc::OidcState>,
+    /// External sign-in, rebuilt from `oidc_setting` whenever that row
+    /// changes. Not built once at startup: the settings are edited on screen
+    /// and a restart is not something their owner should have to arrange.
+    pub oidc: tokio::sync::RwLock<oidc::OidcCache>,
     /// RustFS client. `None` when the configuration is incomplete, which
     /// `/healthz` reports as such.
     pub objects: Option<ObjectStore>,
@@ -212,12 +215,11 @@ async fn main() -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let oidc = oidc::OidcState::from_env().await?;
-    tracing::info!(enabled = oidc.is_some(), "OIDC discovery 與登入設定完成");
     // 2. Database
     let store = Store::connect(&database_url, 8).await?;
     store.migrate().await?;
     tracing::info!(version = ?store.migration_version().await?, "migrations 完成");
+
 
     // 3. Ruleset projection
     let n = store.sync_regulations().await?;
@@ -264,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
         brand,
         auth,
         setup,
-        oidc,
+        oidc: tokio::sync::RwLock::new(oidc::OidcCache::default()),
         objects,
         rustfs_endpoint,
         mcp_rate_limiter: ratelimit::RateLimiter::new(mcp_rate_limit),
@@ -272,6 +274,14 @@ async fn main() -> anyhow::Result<()> {
         login_rate_limiter: ratelimit::RateLimiter::new(auth::LOGIN_ATTEMPTS_PER_MINUTE),
         mcp_allowed_origins,
     });
+
+    // Building the client now turns a broken configuration into a line in the
+    // log at boot, rather than into a sign-in button that fails for the first
+    // person who presses it.
+    if serve_role.serves_rest() {
+        let enabled = oidc::current(&state).await.is_some();
+        tracing::info!(enabled, "外部登入設定已讀取");
+    }
 
     // `/healthz` is mounted in all three roles: the compose healthcheck relies
     // on it whether the process is full, REST-only or MCP-only.
@@ -452,10 +462,7 @@ async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
         "actor": identity.actor,
         "actor_role": identity.actor_role,
         "employee_id": identity.employee_id,
-        "oauth": {
-            "enabled": s.oidc.is_some(),
-            "provider": s.oidc.as_ref().map(oidc::OidcState::provider),
-        },
+        "oauth": oidc::describe(&s).await,
         "version": env!("CARGO_PKG_VERSION"),
         "licence": "BSL",
         "brand_build": s.brand.fingerprint,
@@ -550,7 +557,16 @@ async fn call_op(
     let ctx = ctx_from(&s, &verified.identity(), body.prompt, laysi_ops::Channel::Ui);
 
     match s.registry.dispatch(&ctx, &name, body.input).await {
-        Ok(data) => Json(json!({ "ok": true, "data": data })).into_response(),
+        Ok(data) => {
+            // Discovery belongs to this layer, so the settings screen would
+            // otherwise show the previous answer until something else
+            // happened to ask. Rebuilding here means the next read of the
+            // settings already says whether they work.
+            if name == "update_oidc_setting" {
+                oidc::current(&s).await;
+            }
+            Json(json!({ "ok": true, "data": data })).into_response()
+        }
         Err(e) => {
             let code = match e {
                 laysi_ops::OpError::UnknownTool(_) => StatusCode::NOT_FOUND,
