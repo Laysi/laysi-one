@@ -6,6 +6,7 @@ import {
   type ChangedUserRole,
   type DeletedUserAccount,
   type NewUserAccount,
+  type OidcSetting,
   type RoleMatrix,
   type UnlinkedUserIdentity,
   type UpdatedUserAccount,
@@ -65,6 +66,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
   const [saving, setSaving] = useState(false);
   const [secret, setSecret] = useState<Secret | null>(null);
   const [copied, setCopied] = useState(false);
+  const [oidc, setOidc] = useState<OidcSetting | null>(null);
 
   const load = useCallback(() => {
     setError(null);
@@ -82,7 +84,20 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
       .catch(() => setMatrix(null));
   }, [drawer, matrix]);
 
+  useEffect(() => {
+    if (!drawer || oidc || !me.permissions.includes('get_oidc_setting')) return;
+    callOp<OidcSetting>('get_oidc_setting')
+      .then(setOidc)
+      .catch(() => setOidc(null));
+  }, [drawer, oidc, me.permissions]);
+
   const canUnlink = me.permissions.includes('unlink_user_identity');
+
+  const ssoDomain = oidc?.enabled && oidc.provision_role ? oidc.allowed_domain.toLowerCase() : '';
+  const externalOnly =
+    ssoDomain !== '' && form.email.trim().toLowerCase().endsWith(`@${ssoDomain}`);
+  const passwordIsDead =
+    (oidc?.password_login_disabled ?? false) && !externalOnly && form.role_code !== 'admin';
 
   function roleName(code: string) {
     return (matrix?.roles ?? []).find((r) => r.code === code)?.name ?? code;
@@ -137,6 +152,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
           display_name: form.display_name.trim(),
           role_code: form.role_code,
           employee_no: form.employee_no.trim(),
+          external_login_only: externalOnly,
         },
         `建立帳號 ${form.email.trim()}`,
       );
@@ -148,6 +164,8 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
           password: d.temporary_password,
           recipient: d.user.display_name,
         });
+      } else {
+        onToast(`已建立 ${d.user.username}，改用${oidc?.provider_label ?? '外部'}登入`);
       }
       setCopied(false);
       close();
@@ -673,6 +691,26 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                       onChange={(e) => setField('email', e.target.value)}
                     />
                   </label>
+
+                  {drawer === 'create' && (
+                    <label className="field">
+                      登入方式
+                      <input
+                        className={`input${passwordIsDead ? ' input--dead' : ''}`}
+                        value={
+                          externalOnly
+                            ? (oidc?.provider_label ?? '外部登入')
+                            : passwordIsDead
+                              ? '密碼（已停用）'
+                              : '密碼'
+                        }
+                        readOnly
+                      />
+                      {ssoDomain && (
+                        <span className="field__hint">@{ssoDomain} 的地址不必設密碼。</span>
+                      )}
+                    </label>
+                  )}
                 </div>
               )}
             </div>
@@ -726,7 +764,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                   <span className="spacer" />
                   <button
                     className={`btn${saving ? ' btn--off' : ''}`}
-                    disabled={saving}
+                    disabled={saving || (drawer === 'create' && passwordIsDead)}
                     onClick={() => void (drawer === 'edit' ? saveEdit() : createAccount())}
                   >
                     {saving ? '儲存中…' : drawer === 'edit' ? '存檔' : '建立帳號'}
