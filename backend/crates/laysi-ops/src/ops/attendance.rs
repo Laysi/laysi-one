@@ -28,7 +28,7 @@ use crate::ops::employees::service_months;
 use crate::ops::insurance::ruleset_json;
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use laysi_domain::{business_offset, business_time, Money};
 use laysi_regulation::Ruleset;
 use laysi_store::{AttendancePunch, AttendanceRow, LeaveRequest, PunchCorrection};
@@ -325,6 +325,46 @@ pub(crate) fn punch_days(punches: &[AttendancePunch]) -> Vec<PunchDay> {
         }
     }
     days
+}
+
+/// Every day of `month` between `first` and `last`, with the days that have
+/// punches in place.
+///
+/// `punch_days` only knows the days that produced a punch, so a day nobody
+/// clocked in on has no row at all — and that is exactly the day a correction
+/// is asked for. `first` and `last` keep the range inside the employment and
+/// out of the future.
+pub(crate) fn month_days(
+    punched: Vec<PunchDay>,
+    month: &str,
+    first: NaiveDate,
+    last: NaiveDate,
+) -> Vec<PunchDay> {
+    let mut by_date: BTreeMap<NaiveDate, PunchDay> =
+        punched.into_iter().map(|day| (day.date, day)).collect();
+    if let Ok(start) = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d") {
+        let end = start
+            .checked_add_months(Months::new(1))
+            .and_then(|next| next.pred_opt())
+            .unwrap_or(start);
+        let mut date = start.max(first);
+        let stop = end.min(last);
+        while date <= stop {
+            by_date.entry(date).or_insert_with(|| PunchDay {
+                date,
+                arrived: None,
+                left: None,
+                arrived_source: None,
+                left_source: None,
+                note: String::new(),
+            });
+            match date.succ_opt() {
+                Some(next) => date = next,
+                None => break,
+            }
+        }
+    }
+    by_date.into_values().collect()
 }
 
 /// What a month of punches adds up to.
@@ -1380,6 +1420,43 @@ mod tests {
         assert_eq!(stats.open_days, 1);
         assert_eq!(stats.late_days, Some(1), "9:20 超過 9:00 加五分鐘");
         assert_eq!(stats.overtime_seconds, Some(90 * 60), "19:30 比 18:00 晚 90 分鐘");
+    }
+
+    /// A day nobody clocked in on still needs a row: it is the day a
+    /// correction is asked for. The range stops at employment and at today,
+    /// and a punch outside that range is kept rather than dropped.
+    #[test]
+    fn a_month_lists_every_day_not_only_the_days_with_punches() {
+        let day = |text: &str| NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap();
+        let punched = punch_days(&[
+            punch("2026-08-01", "in", "09:00", "self"),
+            punch("2026-08-05", "in", "09:00", "self"),
+            punch("2026-08-05", "out", "18:00", "self"),
+        ]);
+        let days = month_days(punched, "2026-08", day("2026-08-03"), day("2026-08-07"));
+
+        let dates: Vec<String> = days.iter().map(|d| d.date.to_string()).collect();
+        assert_eq!(
+            dates,
+            [
+                "2026-08-01",
+                "2026-08-03",
+                "2026-08-04",
+                "2026-08-05",
+                "2026-08-06",
+                "2026-08-07"
+            ],
+            "到職前的打卡留著，到職日到今天之間每天都有一列，今天之後沒有"
+        );
+        let fifth = days.iter().find(|d| d.date == day("2026-08-05")).unwrap();
+        assert_eq!(fifth.worked_seconds(), Some(9 * 3600));
+        let sixth = days.iter().find(|d| d.date == day("2026-08-06")).unwrap();
+        assert!(sixth.arrived.is_none() && sixth.left.is_none());
+        assert!(!sixth.open(), "沒有上班卡的一天不是未打下班");
+
+        let stats = summarise(&days, &schedule(Some("09:00"), Some("18:00"), 0));
+        assert_eq!(stats.complete_days, 1, "空白的日子不算工作日");
+        assert_eq!(stats.open_days, 1, "只有 08-01 那天是未打下班");
     }
 
     /// Punches never overwrite the imported monthly row. When they disagree

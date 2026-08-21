@@ -1,17 +1,16 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  businessDate,
   callOp,
   OpFailed,
   type MyPunchCorrectionList,
   type MyPunchList,
+  type PunchCorrection,
   type PunchCorrectionResult,
   type PunchDay,
   type PunchReconciliation,
   type PunchResult,
   type WorkSchedule,
 } from '../api/client';
-import { DateField } from '../components/DateField';
 import { TimeField } from '../components/TimeField';
 
 interface Props {
@@ -76,8 +75,15 @@ function nowClock(): string {
   return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
 }
 
+function shiftMonth(month: string, by: number): string {
+  const parts = month.split('-');
+  const d = new Date(Number(parts[0]), Number(parts[1]) - 1 + by, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
 export function Clock({ onToast, reloadKey, onChanged }: Props) {
   const [data, setData] = useState<MyPunchList | null>(null);
+  const [month, setMonth] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -92,14 +98,13 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<MyPunchList>('list_my_punches')
+    callOp<MyPunchList>('list_my_punches', month ? { month } : {})
       .then(setData)
       .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
-  }, []);
+  }, [month]);
 
   const [fixes, setFixes] = useState<MyPunchCorrectionList | null>(null);
-  const [fixOn, setFixOn] = useState('');
-  const [fixKind, setFixKind] = useState<'in' | 'out'>('in');
+  const [editing, setEditing] = useState<{ date: string; kind: 'in' | 'out' } | null>(null);
   const [fixAt, setFixAt] = useState('');
   const [fixReason, setFixReason] = useState('');
   const [fixBusy, setFixBusy] = useState(false);
@@ -111,16 +116,34 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
   }, []);
 
   useEffect(loadFixes, [loadFixes, reloadKey]);
+  useEffect(load, [load, reloadKey]);
+
+  const bySlot = useMemo(() => {
+    const map = new Map<string, PunchCorrection>();
+    for (const c of fixes?.corrections ?? []) {
+      const key = `${c.punched_on}|${c.kind}`;
+      if (!map.has(key)) map.set(key, c);
+    }
+    return map;
+  }, [fixes]);
+
+  function startFix(date: string, kind: 'in' | 'out', at: string | null) {
+    setEditing({ date, kind });
+    setFixAt(at ? at.slice(0, 5) : '');
+    setFixReason('');
+    setFormError(null);
+  }
 
   async function submitFix() {
+    if (!editing) return;
     setFixBusy(true);
     setFormError(null);
     try {
       const d = await callOp<PunchCorrectionResult>(
         'submit_my_punch_correction',
         {
-          punched_on: fixOn,
-          kind: fixKind,
+          punched_on: editing.date,
+          kind: editing.kind,
           at: fixAt,
           ...(fixReason.trim() ? { reason: fixReason.trim() } : {}),
         },
@@ -131,7 +154,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
           ? `${d.correction.punched_on} 的${d.correction.kind_label}卡已補上 ${d.correction.at}`
           : `${d.correction.punched_on} 的${d.correction.kind_label}卡補登申請已送出，等人資決定`,
       );
-      setFixOn('');
+      setEditing(null);
       setFixAt('');
       setFixReason('');
       onChanged();
@@ -145,8 +168,6 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
       setFixBusy(false);
     }
   }
-
-  useEffect(load, [load, reloadKey]);
 
   async function punch(kind: 'in' | 'out') {
     setBusy(true);
@@ -187,6 +208,40 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
 
   const today = data.today_punches;
   const s = data.summary;
+  const thisMonth = data.today.slice(0, 7);
+  const monthLabel = data.month === thisMonth ? '本月' : data.month;
+  const otherPending = (fixes?.corrections ?? []).filter(
+    (c) => c.status === 'submitted' && !c.punched_on.startsWith(data.month),
+  );
+  const earliestPending = otherPending
+    .map((c) => c.punched_on.slice(0, 7))
+    .sort()
+    .at(0);
+
+  function slotCell(d: PunchDay, kind: 'in' | 'out') {
+    const at = kind === 'in' ? d.in_at : d.out_at;
+    const asked = bySlot.get(`${d.date}|${kind}`);
+    if (asked?.status === 'submitted') {
+      return (
+        <>
+          <span className="num">{at ?? '—'}</span>
+          <span className="tag tag--warn tag--static">審核中 {asked.at.slice(0, 5)}</span>
+        </>
+      );
+    }
+    return (
+      <>
+        <button className="link-cell num" onClick={() => startFix(d.date, kind, at)}>
+          {at ?? '—'}
+        </button>
+        {asked?.status === 'rejected' && (
+          <span className="cell-hint cell-hint--block">
+            補登已駁回{asked.decision_note ? ` · ${asked.decision_note}` : ''}
+          </span>
+        )}
+      </>
+    );
+  }
 
   return (
     <div>
@@ -270,12 +325,12 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
 
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">
-          <div className="stat-card__kicker">本月出勤</div>
+          <div className="stat-card__kicker">{monthLabel} 出勤</div>
           <div className="stat-card__value num">{s.complete_days}</div>
           <div className="stat-card__note num">日 · 共 {s.worked_hours} 小時</div>
         </div>
         <div className="card stat-card">
-          <div className="stat-card__kicker">遲到</div>
+          <div className="stat-card__kicker">{monthLabel} 遲到</div>
           <div className="stat-card__value num">{s.late_days ?? '—'}</div>
           <div className="stat-card__note num">
             {s.late_days == null ? '未設定上班時間' : `日 · 未打下班 ${s.open_days} 日`}
@@ -286,7 +341,33 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
       <ScheduleNote schedule={data.schedule} />
 
       <section>
-        <h3 className="section-title section-title--spaced">{data.month} 逐日明細</h3>
+        <div className="toolbar">
+          <h3 className="section-title section-title--spaced">{data.month} 逐日明細</h3>
+          <span className="spacer" />
+          <button
+            className="btn btn--compact btn--secondary"
+            onClick={() => {
+              setEditing(null);
+              setMonth(shiftMonth(data.month, -1));
+            }}
+          >
+            上個月
+          </button>
+          <button
+            className="btn btn--compact btn--secondary"
+            disabled={data.month >= thisMonth}
+            onClick={() => {
+              setEditing(null);
+              setMonth(shiftMonth(data.month, 1));
+            }}
+          >
+            下個月
+          </button>
+        </div>
+        <p className="section-note">
+          點時間或空格可以補登或調整。
+          {fixes?.auto_approve ? '送出即寫進紀錄。' : '由人資決定後才寫進紀錄。'}
+        </p>
         <div className="table-scroll">
           <table className="table">
             <thead>
@@ -301,34 +382,88 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
             <tbody>
               {data.days.map((d) => {
                 const tag = dayTag(d);
+                const rest = d.weekday === '六' || d.weekday === '日';
+                const blank = !d.in_at && !d.out_at;
                 return (
-                  <tr key={d.date} className={d.open ? 'row--pending' : undefined}>
-                    <td className="num cell-nowrap">
-                      {d.date.slice(5)}
-                      <span className="cell-hint">（{d.weekday}）</span>
-                    </td>
-                    <td className="num align-right">{d.in_at ?? '—'}</td>
-                    <td className="num align-right">{d.out_at ?? '—'}</td>
-                    <td className="num align-right">{d.worked_hours ?? '—'}</td>
-                    <td>
-                      {tag && <span className={tag.className}>{tag.label}</span>}
+                  <Fragment key={d.date}>
+                    <tr
+                      className={
+                        d.open ? 'row--pending' : rest && blank ? 'row--rest' : undefined
+                      }
+                    >
+                      <td className="num cell-nowrap">
+                        {d.date.slice(5)}
+                        <span className="cell-hint">（{d.weekday}）</span>
+                      </td>
+                      <td className="num align-right">{slotCell(d, 'in')}</td>
+                      <td className="num align-right">{slotCell(d, 'out')}</td>
+                      <td className="num align-right">{d.worked_hours ?? '—'}</td>
+                      <td>
+                        {tag && <span className={tag.className}>{tag.label}</span>}
 
-                      {d.manual && <span className="tag tag--pale tag--static">補登</span>}
-                      {d.note && <span className="cell-hint cell-hint--block">{d.note}</span>}
-                    </td>
-                  </tr>
+                        {d.manual && <span className="tag tag--pale tag--static">補登</span>}
+                        {d.note && <span className="cell-hint cell-hint--block">{d.note}</span>}
+                      </td>
+                    </tr>
+                    {editing?.date === d.date && (
+                      <tr className="row--pending">
+                        <td colSpan={5}>
+                          <div className="punch-fix">
+                            <span className="punch-fix__slot num">
+                              {d.date.slice(5)} {editing.kind === 'in' ? '上班' : '下班'}
+                            </span>
+                            <TimeField label="補登時間" value={fixAt} onChange={setFixAt} />
+                            <input
+                              className="entry-input"
+                              placeholder="事由，選填"
+                              value={fixReason}
+                              onChange={(e) => setFixReason(e.target.value)}
+                            />
+                            <button
+                              className="btn btn--compact"
+                              disabled={fixBusy || fixAt === ''}
+                              onClick={() => void submitFix()}
+                            >
+                              {fixBusy ? '送出中…' : '送出'}
+                            </button>
+                            <button
+                              className="btn btn--compact btn--secondary"
+                              onClick={() => setEditing(null)}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
               {data.days.length === 0 && (
                 <tr>
                   <td colSpan={5} className="cell-muted">
-                    本月尚無打卡紀錄。
+                    {data.month} 沒有可補登的日子。
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+
+        {earliestPending && (
+          <p className="section-note">
+            其他月份還有 {otherPending.length} 張待審核的補登申請。
+            <button
+              className="link-cell"
+              onClick={() => {
+                setEditing(null);
+                setMonth(earliestPending);
+              }}
+            >
+              看 {earliestPending}
+            </button>
+          </p>
+        )}
 
         <Reconciliation recon={data.reconciliation} />
         {s.overtime_hours != null && (
@@ -337,107 +472,6 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
           </p>
         )}
       </section>
-
-      {fixes && (
-        <section>
-          <h3 className="section-title section-title--spaced">補登申請</h3>
-          <p className="section-note">
-            漏打或打錯的那一格，填上時間送出。
-            {fixes.auto_approve ? '送出即寫進紀錄。' : '由人資決定後才寫進紀錄。'}
-          </p>
-
-          <div className="card form-card">
-            <div className="field-row">
-              <label className="field field--date">
-                日期
-                <DateField
-                  className="input input--date"
-                  value={fixOn}
-                  onChange={setFixOn}
-                  max={data.today}
-                />
-              </label>
-              <label className="field field--date">
-                時間
-                <TimeField label="補登時間" value={fixAt} onChange={setFixAt} />
-              </label>
-            </div>
-            <label className="field">
-              上班或下班
-              <select
-                className="input"
-                value={fixKind}
-                onChange={(e) => setFixKind(e.target.value as 'in' | 'out')}
-              >
-                <option value="in">上班</option>
-                <option value="out">下班</option>
-              </select>
-            </label>
-            <label className="field">
-              事由
-              <input
-                className="input"
-                placeholder="選填，例如忘記打卡"
-                value={fixReason}
-                onChange={(e) => setFixReason(e.target.value)}
-              />
-            </label>
-            <button
-              className="btn"
-              disabled={fixBusy || fixOn === '' || fixAt === ''}
-              onClick={() => void submitFix()}
-            >
-              {fixBusy ? '送出中…' : '送出申請'}
-            </button>
-          </div>
-
-          {fixes.corrections.length > 0 && (
-            <div className="table-scroll">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>日期</th>
-                    <th>格</th>
-                    <th className="align-right">時間</th>
-                    <th>狀態</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {fixes.corrections.map((c) => (
-                    <tr key={c.id} className={c.status === 'submitted' ? 'row--pending' : undefined}>
-                      <td className="num cell-nowrap">{c.punched_on.slice(5)}</td>
-                      <td>{c.kind_label}</td>
-                      <td className="num align-right">{c.at}</td>
-                      <td>
-                        <span
-                          className={
-                            c.status === 'rejected'
-                              ? 'tag tag--bad tag--static'
-                              : c.status === 'approved'
-                                ? 'tag tag--static'
-                                : 'tag tag--warn tag--static'
-                          }
-                        >
-                          {c.status_label}
-                        </span>
-                        {c.decided_at && (
-                          <span className="cell-hint cell-hint--block num">
-                            {businessDate(c.decided_at)}
-                            {c.decided_by ? ` · ${c.decided_by}` : ' · 自動通過'}
-                          </span>
-                        )}
-                        {c.decision_note && (
-                          <span className="cell-hint cell-hint--block">{c.decision_note}</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
     </div>
   );
 }

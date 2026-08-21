@@ -952,6 +952,27 @@ textarea {
   background: var(--wash-accent-faint);
 }
 
+.table tr.row--rest td {
+  color: var(--color-neutral-500);
+}
+
+.punch-fix {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.punch-fix__slot {
+  color: var(--color-ink-muted);
+  white-space: nowrap;
+}
+
+.punch-fix .entry-input {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
 .cell-muted {
   color: var(--color-ink-muted);
 }

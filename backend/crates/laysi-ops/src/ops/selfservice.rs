@@ -31,9 +31,10 @@
 //! cannot derive it from a date range.
 
 use crate::ops::attendance::{
-    business_instant, correction_auto_approves, leave_kind_label, leave_status_label, punch_days,
-    punch_correction_json, punch_correction_status_label, punch_kind_label, reconciliation,
-    summarise, valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
+    business_instant, correction_auto_approves, leave_kind_label, leave_status_label, month_days,
+    punch_correction_json, punch_correction_status_label, punch_days, punch_kind_label,
+    reconciliation, summarise, valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS,
+    PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
@@ -1070,8 +1071,8 @@ impl Operation for ListMyPunches {
 
         let employee = actor_employee(ctx).await?;
         let schedule = WorkSchedule::load(ctx).await?;
-        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?);
-        let stats = summarise(&days, &schedule);
+        let punched = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?);
+        let stats = summarise(&punched, &schedule);
         let imported = ctx
             .store
             .attendance(&month)
@@ -1079,14 +1080,36 @@ impl Operation for ListMyPunches {
             .into_iter()
             .find(|row| row.employee_id == employee.id);
 
+        let local_today = laysi_domain::business_time(Utc::now()).date();
+        // Days without a punch are rows too: they are the ones a correction is
+        // asked for, and the screen offers the correction on the day itself.
+        let days = month_days(
+            punched,
+            &month,
+            employee.hired_on,
+            employee.left_on.unwrap_or(local_today).min(local_today),
+        );
+
+        // The card at the top is always about today, so browsing an earlier
+        // month must not answer "what next" from a month today is not in.
+        let this_month = local_today.format("%Y-%m").to_string();
+        let elsewhere = match this_month == month {
+            true => None,
+            false => punch_days(&ctx.store.punches(&this_month, Some(employee.id)).await?)
+                .into_iter()
+                .find(|d| d.date == local_today),
+        };
+
         // What the button on screen should offer next. Derived here so the
         // frontend does not have to reimplement the one-per-day rule.
-        let local_today = laysi_domain::business_time(Utc::now()).date();
-        let today = days.iter().find(|d| d.date == local_today);
+        let today = elsewhere
+            .as_ref()
+            .or_else(|| days.iter().find(|d| d.date == local_today));
         let next_kind = match today {
-            None => Some("in"),
+            Some(day) if day.arrived.is_none() => Some("in"),
             Some(day) if day.left.is_none() => Some("out"),
             Some(_) => None,
+            None => Some("in"),
         };
 
         let summary = format!(

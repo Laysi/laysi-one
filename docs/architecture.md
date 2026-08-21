@@ -1272,7 +1272,7 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `punch_clock` | NeedsConfirm | `{ kind, note? }` | 本人上／下班卡，時間取伺服器時鐘 |
-| `list_my_punches` | ReadOnly | `{ month? }` | 本人逐日明細、月統計、與 `attendance` 對帳 |
+| `list_my_punches` | ReadOnly | `{ month? }` | 本人逐日明細（該月每一天）、月統計、與 `attendance` 對帳 |
 | `list_attendance_punches` | ReadOnly | `{ month?, emp_no? }` | 全公司逐人統計與對帳；帶 `emp_no` 另附逐日明細 |
 | `correct_punch` | NeedsConfirm | `{ emp_no, punched_on, kind, at, note? }` | 補登，`source = manual` |
 | `submit_my_punch_correction` | NeedsConfirm | `{ punched_on, kind, at, reason? }` | 本人送出補登申請；公司設定為自動通過時同一交易寫入打卡 |
@@ -1378,6 +1378,22 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 **申請人不得決定本人送出的申請。** 與休假、報支同一條規則，鍵是
 `employee_id` 不是姓名。`list_punch_corrections` 逐列回 `can_decide` 與
 `decide_blocked_reason`，畫面在 `false` 的那一列不畫按鈕、改印原因。
+
+**申請在明細的那一格提出，不在另一張表單。** 表單要人重填一次日期與上下班，
+而那兩件事就寫在他正在看的那一列上；漏打、打錯時間、整天忘記三種情況也只有第一種
+在表單裡是明顯的。畫面因此把逐日明細的上班與下班兩格做成可按的：空的按下去是補登，
+有時間的按下去是調整（帶入原值），待審核的那一格印出申請時間且不能再按——同一格
+只能有一張未決的申請，亮著一顆按下去必定被拒的按鈕等於把規則講兩次。
+
+**所以 `list_my_punches` 回該月的每一天，不只是有打卡的那些。** `punch_days` 由
+打卡列推導，整天忘記打卡的那一天因此沒有列，而那正是最需要補登的一天；
+`month_days` 在它之上補齊空白日，範圍以到職日與今天為界（離職日更早時以離職日
+為界），空白日不影響 `summarise` 的任何一個數字。日期範圍不再由申請表單的日期欄
+決定，所以畫面改以月份前後翻——少了它，月份一換就補不了上個月最後一天。
+
+**今天那一列不從查詢的月份推導。** `next_kind` 是打卡鈕要顯示上班還是下班，
+翻到過去的月份時那個月裡沒有今天，只看查詢結果會回頭要人再打一次上班卡。
+月份不是本月時另查今天所屬月份的打卡列。
 
 **`correct_punch` 留著。** 不是每個在薪資冊上的人都有登入帳號——0028 允許一筆
 只有姓名與到職日的員工主檔——而那個人一樣會漏打卡。
