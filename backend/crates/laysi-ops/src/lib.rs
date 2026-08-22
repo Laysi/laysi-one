@@ -108,6 +108,20 @@ impl Risk {
         Risk::AdminOnly,
     ];
 
+    /// Whether this tier lets `role` through at all.
+    ///
+    /// The two floors sit outside the permission matrix, so every place that
+    /// decides what a role may reach — `dispatch`, the permission list on
+    /// `/v1/auth/me`, the MCP tool list — has to apply them, and has to apply
+    /// the same ones. A second copy of this match is a copy that drifts.
+    pub fn allows_role(&self, role: &str) -> bool {
+        match self {
+            Risk::BossOnly => role == ROLE_BOSS,
+            Risk::AdminOnly => role == ROLE_ADMIN,
+            _ => true,
+        }
+    }
+
     pub fn label_zh(&self) -> &'static str {
         match self {
             Risk::ReadOnly => "唯讀",
@@ -291,7 +305,78 @@ pub(crate) fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, OpError
     // Empty input means all defaults: MCP clients often send null, or omit
     // arguments entirely.
     let v = if v.is_null() { json!({}) } else { v };
-    serde_json::from_value(v).map_err(|e| OpError::BadInput(e.to_string()))
+    serde_path_to_error::deserialize(v).map_err(|e| {
+        let path = e.path().to_string();
+        let message = e.into_inner().to_string();
+        tracing::debug!(%path, %message, "輸入解析失敗");
+        OpError::BadInput(describe_input_error(&path, &message))
+    })
+}
+
+/// The text between `open` and the next `close`, if both are there.
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    text.split_once(open)?.1.split_once(close).map(|(inside, _)| inside)
+}
+
+/// A serde type name as the screens would say it.
+fn type_zh(raw: &str) -> &'static str {
+    let raw = raw.trim();
+    let raw = raw.strip_prefix("a ").or_else(|| raw.strip_prefix("an ")).unwrap_or(raw);
+    match raw.split([' ', ',']).next().unwrap_or(raw) {
+        "string" | "str" | "&str" | "character" | "char" => "文字",
+        "integer" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
+        | "u64" | "u128" | "usize" => "整數",
+        "float" | "floating" | "f32" | "f64" => "數字",
+        "boolean" | "bool" => "是或否",
+        "map" | "struct" => "物件",
+        "sequence" | "seq" | "array" | "tuple" => "陣列",
+        "null" | "unit" | "none" => "空值",
+        other => {
+            tracing::debug!(type_name = other, "沒有對應中文名稱的型別");
+            "其他型別"
+        }
+    }
+}
+
+/// A parameter error in the language the rest of the product speaks.
+///
+/// serde's own messages are English and name Rust types (`expected i64`),
+/// which is the wrong register for something an MCP client relays to a person
+/// and a screen prints verbatim. The shapes handled here are the ones
+/// `serde_json` and the field types in use actually produce; anything else
+/// still says which field is wrong, because that is what the reader needs in
+/// order to fix it.
+fn describe_input_error(path: &str, message: &str) -> String {
+    if let Some(name) = between(message, "missing field `", "`") {
+        return format!("缺少必填欄位「{name}」");
+    }
+    if let Some(name) = between(message, "unknown field `", "`") {
+        return format!("沒有「{name}」這個欄位");
+    }
+
+    // Reads as a noun in every sentence below, so a missing path does not
+    // turn 「的內容不正確」 into 「的內容的內容不正確」.
+    let subject =
+        if path.is_empty() || path == "." { "輸入".to_string() } else { format!("欄位「{path}」") };
+
+    if let Some((got, want)) =
+        message.strip_prefix("invalid type: ").and_then(|rest| rest.split_once(", expected "))
+    {
+        return format!("{subject}的型別不符：預期{}，收到{}", type_zh(want), type_zh(got));
+    }
+    if message.to_ascii_lowercase().contains("decimal") {
+        return format!("{subject}不是有效的金額，請填數字，例如 10500 或 10500.00");
+    }
+    if message.contains("premature end of input") {
+        return format!("{subject}不完整");
+    }
+    if message.contains("input contains invalid characters") {
+        return format!("{subject}含有不接受的字元");
+    }
+    if message.contains("out of range") {
+        return format!("{subject}超出可接受的範圍");
+    }
+    format!("{subject}的內容不正確")
 }
 
 /// Thousands-separated string for display.
@@ -554,6 +639,42 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parameter errors are read by a person, through the screen or through
+    /// whatever the MCP client says next. None of them may arrive in English
+    /// or name a Rust type.
+    #[test]
+    fn input_errors_are_written_in_the_language_of_the_screens() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Sample {
+            #[allow(dead_code)]
+            name: String,
+            #[serde(default)]
+            #[allow(dead_code)]
+            limit: Option<i64>,
+        }
+
+        let missing = parse::<Sample>(serde_json::json!({})).unwrap_err().to_string();
+        assert_eq!(missing, "缺少必填欄位「name」");
+
+        let wrong_type =
+            parse::<Sample>(serde_json::json!({ "name": "甲", "limit": "很多" })).unwrap_err().to_string();
+        assert_eq!(wrong_type, "欄位「limit」的型別不符：預期整數，收到文字");
+
+        for message in [&missing, &wrong_type] {
+            assert!(!message.is_ascii(), "訊息應為中文，收到「{message}」");
+            assert!(!message.contains("i64"), "訊息不該出現 Rust 型別：{message}");
+        }
+    }
+
+    #[test]
+    fn the_field_that_is_wrong_is_named_even_when_the_reason_is_not_recognised() {
+        assert_eq!(describe_input_error("due_on", "input contains invalid characters"), "欄位「due_on」含有不接受的字元");
+        assert_eq!(describe_input_error("amount", "Invalid decimal: unknown character"), "欄位「amount」不是有效的金額，請填數字，例如 10500 或 10500.00");
+        assert_eq!(describe_input_error("lines[0].debit", "something new"), "欄位「lines[0].debit」的內容不正確");
+        // No path at all still has to produce a sentence, not an empty one.
+        assert_eq!(describe_input_error("", "something new"), "輸入的內容不正確");
+    }
 
     /// An uploaded file must not land in the audit table a second time, and
     /// everything a person reads the audit for must survive that.

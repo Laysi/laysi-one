@@ -1509,7 +1509,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | GET | `/v1/brand/mark.svg?h=28` | 字標，`Content-Type: image/svg+xml` |
 | GET | `/v1/brand/monogram.svg?h=64` | 組合標記 |
 | GET | `/v1/ops` | registry 清單：`[{name, risk, summary, enabled, input_schema}]` |
-| POST | `/v1/ops/{name}` | body 即 input；回 `{ ok: true, data }` 或 `{ ok: false, error: {code, message} }` |
+| POST | `/v1/ops/{name}` | body 是 `{ input, prompt }`（兩者皆可省略）；回 `{ ok: true, data }` 或 `{ ok: false, error: {code, message} }` |
 | POST | `/mcp` | MCP streamable HTTP，Bearer token |
 
 `/healthz` 與 `/v1/brand/*.svg` 是公開端點。`/v1/meta`、`/v1/ops*` 必須有
@@ -1537,7 +1537,15 @@ bootstrap 訊號，不會自行建立任何公司資料或示範資料。
 
 `POST /mcp`，JSON-RPC 2.0，實作 `initialize`、`tools/list`、`tools/call`。
 protocol version `2025-06-18`。`tools/list` 的 `inputSchema` 直接取
-`Operation::input_schema()`。`tools/call` 走 `Registry::dispatch`，回傳
+`Operation::input_schema()`。
+
+**`tools/list` 列的是這組 Token 真的叫得動的工具**，三個條件與 `dispatch` 相同：
+工具開關開著、通得過風險底線、角色權限有它。只看工具開關的話，一般職員的 Token
+會看到全部開著的工具而其中九成必定被拒——讓模型看到、呼叫、被拒絕是白跑一趟，
+還會把對話變成跟權限系統吵架，而那正是不列出關閉工具的理由，對角色權限一樣成立。
+查詢失敗時列空清單而不是全部：這裡不是強制點（`dispatch` 才是），但不能在資料庫
+連不上時反而放寬。風險底線的判斷是 `Risk::allows_role`，`dispatch`、
+`/v1/auth/me` 的 `permissions` 與這裡共用同一份，多一份就是多一份會漂走的副本。`tools/call` 走 `Registry::dispatch`，回傳
 `{ content: [{ type: "text", text: <JSON 字串> }] }`；被擋下時
 `isError: true`。認證：`Authorization: Bearer <api_token 明文>`；伺服器只保存
 BLAKE3 雜湊，且 Token 必須是未撤銷、未過期的 `kind = mcp` 資料列。認證先於

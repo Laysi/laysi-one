@@ -588,11 +588,7 @@ fn user_json(user: &UserAccount) -> Value {
 /// and the registry are kept equal by a test, so a mismatch is a bug to see
 /// rather than a row to hide.
 fn callable_by(registry: &laysi_ops::Registry, name: &str, role: &str) -> bool {
-    match registry.get(name).map(|op| op.risk()) {
-        Some(laysi_ops::Risk::BossOnly) => role == laysi_ops::ROLE_BOSS,
-        Some(laysi_ops::Risk::AdminOnly) => role == laysi_ops::ROLE_ADMIN,
-        _ => true,
-    }
+    registry.get(name).is_none_or(|op| op.risk().allows_role(role))
 }
 
 /// `user_json` plus the role's display name.

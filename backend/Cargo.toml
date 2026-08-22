@@ -52,6 +52,9 @@ rust_decimal_macros = "1"
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Deserialisation errors have to name the field that is wrong; serde alone
+# reports the type mismatch without the path to it.
+serde_path_to_error = "0.1"
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "postgres",

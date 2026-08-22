@@ -304,15 +304,26 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
         "ping" => ok(id, json!({})),
 
         "tools/list" => {
-            // Disabled tools are not listed. Letting the model see one, call it
-            // and be refused wastes a round trip and turns the conversation into
-            // an argument with the permission system.
+            // What this token can actually call, which is the same three
+            // questions `dispatch` asks: the tool switch, the risk floor and
+            // the role's permissions. Listing a tool the model will be refused
+            // wastes a round trip and turns the conversation into an argument
+            // with the permission system — and a staff token would otherwise
+            // see sixty tools it cannot use.
+            //
+            // A failed lookup lists nothing rather than everything: the tool
+            // list is not the enforcement point, but it must not widen when
+            // the database is unreachable.
             let grants = s.store.tool_grants().await.unwrap_or_default();
+            let permitted = s.store.permitted_ops(&identity.actor_role).await.unwrap_or_default();
             let tools: Vec<Value> = s
                 .registry
                 .iter()
                 .filter(|op| {
                     grants.iter().find(|(n, _)| n == op.name()).map(|(_, e)| *e).unwrap_or(false)
+                })
+                .filter(|op| {
+                    op.risk().allows_role(&identity.actor_role) && permitted.contains(op.name())
                 })
                 .map(|op| {
                     json!({
