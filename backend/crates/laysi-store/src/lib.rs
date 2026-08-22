@@ -3096,9 +3096,9 @@ impl Store {
             "INSERT INTO employee
                 (emp_no, name, dept_id, title, employment_type,
                  hired_on, left_on, status, base_salary, labor_insured_salary,
-                 health_insured_salary, pension_wage, id_no, bank_account,
+                 health_insured_salary, pension_wage, id_no,
                  note, created_by)
-             VALUES ($1,$2,NULL,'','full_time',$3,NULL,'active',0,0,0,0,'','','',$4)
+             VALUES ($1,$2,NULL,'','full_time',$3,NULL,'active',0,0,0,0,'','',$4)
              RETURNING id",
         )
         .bind(&emp_no)
