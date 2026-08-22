@@ -1073,6 +1073,11 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
+.punch-card .form-warn {
+  margin: 0;
+  text-align: left;
+}
+
 .punch-note {
   display: flex;
   align-items: center;

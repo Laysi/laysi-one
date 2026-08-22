@@ -28,8 +28,10 @@ use crate::ops::employees::service_months;
 use crate::ops::insurance::ruleset_json;
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use laysi_domain::{business_offset, business_time, Money};
+use chrono::{
+    DateTime, Datelike, FixedOffset, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
+};
+use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
 use laysi_store::{AttendancePunch, AttendanceRow, LeaveRequest, PunchCorrection};
 use rust_decimal::Decimal;
@@ -75,10 +77,10 @@ pub(crate) const PUNCH_TIME: &str = "%H:%M:%S";
 
 /// Turn a wall-clock time on a working day into the instant it names.
 ///
-/// The offset is fixed rather than looked up, so this never returns an
-/// ambiguous or missing local time the way a daylight-saving zone would.
-pub fn business_instant(day: NaiveDate, at: NaiveTime) -> DateTime<Utc> {
-    business_offset()
+/// The offset is a fixed one rather than a named zone, so this never returns
+/// an ambiguous or missing local time the way a daylight-saving zone would.
+pub fn business_instant(day: NaiveDate, at: NaiveTime, offset: FixedOffset) -> DateTime<Utc> {
+    offset
         .from_local_datetime(&day.and_time(at))
         .single()
         .expect("固定時區的本地時間必然唯一對應一個瞬間")
@@ -295,10 +297,10 @@ fn hours(seconds: i64) -> Decimal {
 ///
 /// The rows arrive ordered by day and then by kind, so an arrival is always
 /// seen before the departure it belongs to.
-pub(crate) fn punch_days(punches: &[AttendancePunch]) -> Vec<PunchDay> {
+pub(crate) fn punch_days(punches: &[AttendancePunch], offset: FixedOffset) -> Vec<PunchDay> {
     let mut days: Vec<PunchDay> = Vec::new();
     for punch in punches {
-        let local = business_time(punch.punched_at);
+        let local = business_time(punch.punched_at, offset);
         if days.last().map(|d| d.date) != Some(punch.punched_on) {
             days.push(PunchDay {
                 date: punch.punched_on,
@@ -455,7 +457,7 @@ pub(crate) fn reconciliation(summary: &PunchSummary, imported: Option<&Attendanc
         "matches": worked_gap.is_zero()
             && late_gap.is_none_or(|g| g == 0)
             && overtime_gap.is_none_or(|g| g.is_zero()),
-        "note": "打卡與匯入的月統計互不覆蓋。兩邊不同時照實回報差額，由人資決定哪一邊要更正。",
+        "note": "打卡與匯入的月統計互不覆蓋。兩者不同時照實回報差額，由人資決定更正何者。",
     })
 }
 
@@ -719,7 +721,7 @@ impl Operation for ListAttendancePunches {
         let mut rows = Vec::new();
         let mut detail = Value::Null;
         for (employee_id, punches) in &by_employee {
-            let days = punch_days(punches);
+            let days = punch_days(punches, ctx.offset);
             let summary = summarise(&days, &schedule);
             let row = imported.iter().find(|r| r.employee_id == *employee_id);
             let first = &punches[0];
@@ -744,7 +746,7 @@ impl Operation for ListAttendancePunches {
             .filter(|r| r["reconciliation"]["matches"] == json!(false))
             .count();
         let summary = format!(
-            "讀 {month} 打卡 · {} 人有紀錄 · {open_days} 天只打上班沒打下班 · {mismatched} 人與匯入的月統計對不上",
+            "讀 {month} 打卡 · {} 人有紀錄 · {open_days} 天只打上班沒打下班 · {mismatched} 人與匯入的月統計不相符",
             rows.len()
         );
 
@@ -797,7 +799,7 @@ impl Operation for CorrectPunch {
     }
 
     fn summary(&self) -> &'static str {
-        "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。已存在的同一格會被覆蓋。漏打卡沒有其他更正管道。"
+        "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。同一時段已有紀錄時會覆蓋原值。漏打卡沒有其他更正管道。"
     }
 
     fn input_schema(&self) -> Value {
@@ -819,7 +821,7 @@ impl Operation for CorrectPunch {
                 OpError::BadInput(format!("時間要寫成 HH:MM:SS 或 HH:MM，收到的是「{}」", i.at))
             })?;
         if i.punched_on > ctx.today {
-            return Err(OpError::BadInput("不能替未來的日期補登打卡".into()));
+            return Err(OpError::BadInput("不能為未來的日期補登打卡".into()));
         }
 
         let employee = ctx.store.employee(&i.emp_no).await?;
@@ -829,11 +831,12 @@ impl Operation for CorrectPunch {
                 laysi_store::NewPunch {
                     employee_id: employee.id,
                     punched_on: i.punched_on,
-                    punched_at: business_instant(i.punched_on, at),
+                    punched_at: business_instant(i.punched_on, at, ctx.offset),
                     kind: &i.kind,
                     source: "manual",
                     note: i.note.as_deref().unwrap_or("").trim(),
                     actor: &ctx.actor,
+                    offset: ctx.offset,
                 },
                 true,
             )
@@ -841,7 +844,7 @@ impl Operation for CorrectPunch {
 
         let schedule = WorkSchedule::load(ctx).await?;
         let month = i.punched_on.format("%Y-%m").to_string();
-        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?);
+        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
         let day = days.iter().find(|d| d.date == i.punched_on);
 
         let summary = format!(
@@ -849,7 +852,7 @@ impl Operation for CorrectPunch {
             employee.emp_no,
             i.punched_on,
             punch_kind_label(&i.kind),
-            business_time(punch.punched_at).format(PUNCH_TIME),
+            business_time(punch.punched_at, ctx.offset).format(PUNCH_TIME),
             ctx.actor
         );
 
@@ -943,7 +946,7 @@ impl Operation for ListLeaveRequests {
                 row["can_decide"] = json!(request.status == "pending" && !own);
                 row["decide_blocked_reason"] = json!(own.then(|| {
                     format!(
-                        "{} 由你本人送出，要由另一個帳號簽核。公司還沒有其他可簽核的帳號時，請系統管理員在「帳號管理」建立。",
+                        "{} 由本人送出，要由另一個帳號簽核。目前沒有其他可簽核的帳號，請系統管理員在「帳號管理」建立。",
                         request.leave_no
                     )
                 }));
@@ -1069,7 +1072,7 @@ pub(crate) fn punch_correction_status_label(status: &str) -> &'static str {
     }
 }
 
-pub(crate) fn punch_correction_json(c: &PunchCorrection) -> Value {
+pub(crate) fn punch_correction_json(c: &PunchCorrection, offset: FixedOffset) -> Value {
     json!({
         "id": c.id,
         "emp_no": c.emp_no,
@@ -1078,7 +1081,7 @@ pub(crate) fn punch_correction_json(c: &PunchCorrection) -> Value {
         "punched_on": c.punched_on,
         "kind": c.kind,
         "kind_label": punch_kind_label(&c.kind),
-        "at": business_time(c.punched_at).format(PUNCH_TIME).to_string(),
+        "at": business_time(c.punched_at, offset).format(PUNCH_TIME).to_string(),
         "reason": c.reason,
         "status": c.status,
         "status_label": punch_correction_status_label(&c.status),
@@ -1127,7 +1130,7 @@ impl Operation for ListPunchCorrections {
     }
 
     fn summary(&self) -> &'static str {
-        "讀打卡補登申請：誰、哪一天的哪一格、申請的時間與理由，以及目前的狀態。核准後才會寫進打卡紀錄。"
+        "讀打卡補登申請：申請人、日期與時段、申請時間、理由與目前狀態。核准後才寫入打卡紀錄。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1145,11 +1148,11 @@ impl Operation for ListPunchCorrections {
         let rows = corrections
             .iter()
             .map(|c| {
-                let mut row = punch_correction_json(c);
+                let mut row = punch_correction_json(c, ctx.offset);
                 let own = ctx.employee_id.is_some() && ctx.employee_id == Some(c.employee_id);
                 row["can_decide"] = json!(c.status == "submitted" && !own);
                 row["decide_blocked_reason"] = json!(own.then(|| {
-                    "這張由你本人送出，要由另一個帳號決定。公司還沒有其他可決定的帳號時，請系統管理員在「帳號管理」建立。"
+                    "這張申請由本人送出，要由另一個帳號決定。目前沒有其他可決定的帳號，請系統管理員在「帳號管理」建立。"
                         .to_string()
                 }));
                 row
@@ -1168,8 +1171,8 @@ impl Operation for ListPunchCorrections {
                 "waiting_count": waiting,
                 "auto_approve": auto,
                 "policy_note": match auto {
-                    true => "目前設定為送出即通過，這裡只留紀錄。要改回逐張審核，請系統管理員到「基礎設定」變更補登申請。",
-                    false => "核准會把時間寫進打卡紀錄，來源標示為補登。要改成送出即通過，請系統管理員到「基礎設定」變更補登申請。",
+                    true => "目前設定為送出即通過，只留紀錄。要改回逐張審核，請系統管理員在「基礎設定」變更補登申請。",
+                    false => "核准後會把時間寫進打卡紀錄，來源標示為補登。要改成送出即通過，請系統管理員在「基礎設定」變更補登申請。",
                 },
             }),
             summary,
@@ -1212,14 +1215,15 @@ impl Operation for DecidePunchCorrection {
         let i: DecidePunchCorrectionInput = parse(input)?;
         let decided = ctx
             .store
-            .decide_punch_correction(
-                i.id,
-                i.approve,
-                &ctx.actor,
-                &ctx.actor_role,
-                ctx.employee_id,
-                i.note.as_deref().unwrap_or("").trim(),
-            )
+            .decide_punch_correction(laysi_store::DecidePunchCorrection {
+                id: i.id,
+                approve: i.approve,
+                actor: &ctx.actor,
+                actor_role: &ctx.actor_role,
+                actor_employee_id: ctx.employee_id,
+                note: i.note.as_deref().unwrap_or("").trim(),
+                offset: ctx.offset,
+            })
             .await?;
 
         let summary = format!(
@@ -1232,7 +1236,7 @@ impl Operation for DecidePunchCorrection {
         );
         Ok(OpOutcome::new(
             json!({
-                "correction": punch_correction_json(&decided),
+                "correction": punch_correction_json(&decided, ctx.offset),
                 "punch_written": i.approve,
             }),
             summary,
@@ -1244,6 +1248,12 @@ impl Operation for DecidePunchCorrection {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// The offset the tests are written against. The numbers below are wall
+    /// clock times in it, so it has to be the one the install ships on.
+    fn tz() -> FixedOffset {
+        laysi_domain::default_business_offset()
+    }
 
     fn punch(day: &str, kind: &str, at: &str, source: &str) -> AttendancePunch {
         let punched_on = NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap();
@@ -1257,7 +1267,7 @@ mod tests {
             name: "黃柏叡".into(),
             dept_label: Some("業務部".into()),
             punched_on,
-            punched_at: business_instant(punched_on, time),
+            punched_at: business_instant(punched_on, time, tz()),
             kind: kind.into(),
             source: source.into(),
             note: String::new(),
@@ -1290,7 +1300,7 @@ mod tests {
     /// flexitime changes when the day is expected to end.
     #[test]
     fn flexitime_moves_the_day_where_grace_only_forgives() {
-        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at);
+        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at, tz());
         let day = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
         let arrived = at("09:45:00");
 
@@ -1316,7 +1326,7 @@ mod tests {
     /// arriving early never shortens the day.
     #[test]
     fn the_flex_window_caps_lateness_but_early_arrival_earns_nothing() {
-        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at);
+        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at, tz());
         let day = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
         let flex = flex_schedule(Some("09:00"), Some("18:00"), 5, 60);
 
@@ -1354,7 +1364,7 @@ mod tests {
     fn a_punch_reads_back_at_the_time_it_was_made() {
         let day = punch("2026-08-06", "in", "08:55:37", "self");
         assert_eq!(
-            business_time(day.punched_at).format(PUNCH_TIME).to_string(),
+            business_time(day.punched_at, tz()).format(PUNCH_TIME).to_string(),
             "08:55:37"
         );
         assert_eq!(day.punched_at.format(PUNCH_TIME).to_string(), "00:55:37", "存的是 UTC 瞬間");
@@ -1365,7 +1375,7 @@ mod tests {
     #[test]
     fn the_second_decides_a_borderline_arrival() {
         let sched = schedule(Some("09:00"), Some("18:00"), 5);
-        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at);
+        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at, tz());
         assert_eq!(sched.late(at("09:05:00")), Some(false), "剛好等於寬限不算遲到");
         assert_eq!(sched.late(at("09:05:01")), Some(true), "多一秒就是遲到");
         assert_eq!(sched.late_by_seconds(at("09:05:01")), Some(1));
@@ -1374,7 +1384,7 @@ mod tests {
         let days = punch_days(&[
             punch("2026-08-06", "in", "09:00:00", "self"),
             punch("2026-08-06", "out", "18:00:30", "self"),
-        ]);
+        ], tz());
         assert_eq!(days[0].worked_seconds(), Some(9 * 3600 + 30));
         assert_eq!(sched.overtime_seconds(days[0].arrived, days[0].left.unwrap()), Some(30));
     }
@@ -1383,7 +1393,7 @@ mod tests {
     /// has said when the day starts. `None` is not `false`.
     #[test]
     fn lateness_is_unanswered_rather_than_false_without_a_start_time() {
-        let arrived = business_time(punch("2026-08-06", "in", "10:30", "self").punched_at);
+        let arrived = business_time(punch("2026-08-06", "in", "10:30", "self").punched_at, tz());
         assert_eq!(schedule(None, None, 0).late(arrived), None);
         assert_eq!(schedule(Some("09:00"), None, 0).late(arrived), Some(true));
     }
@@ -1392,7 +1402,7 @@ mod tests {
     /// late at one company and not at another with no change here.
     #[test]
     fn the_grace_period_decides_a_borderline_arrival() {
-        let arrived = business_time(punch("2026-08-06", "in", "09:05", "self").punched_at);
+        let arrived = business_time(punch("2026-08-06", "in", "09:05", "self").punched_at, tz());
         assert_eq!(schedule(Some("09:00"), None, 0).late(arrived), Some(true));
         assert_eq!(schedule(Some("09:00"), None, 5).late(arrived), Some(false), "剛好等於寬限不算遲到");
         assert_eq!(schedule(Some("09:00"), None, 10).late(arrived), Some(false));
@@ -1407,7 +1417,7 @@ mod tests {
             punch("2026-08-05", "in", "08:58", "self"),
             punch("2026-08-05", "out", "19:30", "self"),
             punch("2026-08-06", "in", "09:20", "self"),
-        ]);
+        ], tz());
         assert_eq!(days.len(), 2);
         assert_eq!(days[0].worked_seconds(), Some(632 * 60));
         assert!(!days[0].open());
@@ -1432,7 +1442,7 @@ mod tests {
             punch("2026-08-01", "in", "09:00", "self"),
             punch("2026-08-05", "in", "09:00", "self"),
             punch("2026-08-05", "out", "18:00", "self"),
-        ]);
+        ], tz());
         let days = month_days(punched, "2026-08", day("2026-08-03"), day("2026-08-07"));
 
         let dates: Vec<String> = days.iter().map(|d| d.date.to_string()).collect();
@@ -1467,7 +1477,7 @@ mod tests {
         let days = punch_days(&[
             punch("2026-08-05", "in", "08:58", "self"),
             punch("2026-08-05", "out", "18:00", "self"),
-        ]);
+        ], tz());
         let stats = summarise(&days, &sched);
 
         let imported = AttendanceRow {

@@ -204,15 +204,15 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
           <p className={`recon${data.reconciled ? '' : ' recon--off'}`}>
             {data.reconciled ? (
               <>
-                成本合計 <span className="num">{money(data.cost_total)}</span> 就是總帳{' '}
+                成本合計 <span className="num">{money(data.cost_total)}</span> 等於總帳{' '}
                 <span className="num">{data.cost_accounts_label}</span> 的餘額，累計折舊{' '}
-                <span className="num">{money(data.accumulated_total)}</span> 就是{' '}
+                <span className="num">{money(data.accumulated_total)}</span> 等於{' '}
                 <span className="num">{data.accum_accounts_label}</span> 的餘額，帳面淨額{' '}
                 <span className="num">{money(data.book_total)}</span> 因此與總帳一致。
               </>
             ) : (
               <>
-                對不上：成本合計 <span className="num">{money(data.cost_total)}</span> 對{' '}
+                不相符：成本合計 <span className="num">{money(data.cost_total)}</span> 對{' '}
                 <span className="num">{data.cost_accounts_label}</span> 的{' '}
                 <span className="num">{money(data.gl_cost)}</span>
                 （差 <span className="num">{money(data.cost_difference)}</span>），累計折舊{' '}
@@ -507,7 +507,7 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
               <span className="drawer__foot-note">
                 {paidFrom
                   ? '同時產生待過帳傳票（借資產科目與 1284 進項稅額／貸付款科目）'
-                  : '賒購請先在「應付帳款」以 1601 為借方科目開單，再把那張傳票號填進來'}
+                  : '賒購請先在「應付帳款」以 1601 為借方科目開單，再填入該傳票號'}
               </span>
               <button
                 className={`btn${saving ? ' btn--off' : ''}`}

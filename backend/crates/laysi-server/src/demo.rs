@@ -105,6 +105,7 @@ fn ctx_for(
         // grants exist to limit what AI may call.
         channel: Channel::Ui,
         today,
+        offset: laysi_ops::business_offset(),
     }
 }
 
@@ -715,7 +716,7 @@ async fn seed_punches(
                 )
                 .bind(employee.id)
                 .bind(day)
-                .bind(business_instant(day, time))
+                .bind(business_instant(day, time, laysi_ops::business_offset()))
                 .bind(kind)
                 .bind(&employee.name)
                 .execute(store.pool())

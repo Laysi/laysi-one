@@ -232,7 +232,7 @@ impl Operation for GetHrCompliance {
                     "health_employee": health_employee.to_string(),
                     "pension_employer": pension_employer.to_string(),
                 },
-                "scope_note": "逐人以現行費率重算保費。檢查的是申報值算不算得出保費，級距本身是否正確另行核對。",
+                "scope_note": "逐人以現行費率重算保費。檢查申報值算不算得出保費；級距本身是否正確另行核對。",
             }),
             json!({
                 "name": "特休額度與已核准天數",
@@ -586,10 +586,10 @@ impl Operation for ListWithholdingStatements {
                         payroll_withheld_difference.map(|amount| amount.to_string()),
                     "salary_withheld_complete": salary_withheld_complete,
                     "reconciled": payroll_reconciled,
-                    "note": "薪資模組與扣繳紀錄分開計算，這裡只作對帳，差異照實列出。",
+                    "note": "薪資模組與扣繳紀錄分開計算，本項只作對帳，差異照實列出。",
                 },
                 "table_note": "依扣繳稅額表的項目，稅額採用來源系統帶入的金額；來源沒有帶就留空。",
-                "source_note": "是否認得到個人，以來源紀錄帶的統一編號或身分證號為準。來源只給合併總額時照實保留。",
+                "source_note": "以來源紀錄帶的統一編號或身分證號辨識個人；來源只給合併總額時照實保留。",
             }),
             summary,
         ))

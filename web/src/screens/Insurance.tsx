@@ -97,7 +97,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
 
           <h3 className="section-title section-title--spaced">逐人投保級距與保費</h3>
           <p className="section-note">
-            投保級距是公司替員工<strong>申報</strong>的數字；高於規則上限時按上限計費，
+            投保級距是公司為員工<strong>申報</strong>的數字；高於規則上限時按上限計費，
             目前有 {data.capped_count} 位。
           </p>
 
@@ -231,7 +231,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
           </div>
 
           <p className="hint">
-            這一頁的費率、上限與平均眷口數全部來自勞保{' '}
+            本頁的費率、上限與平均眷口數都來自勞保{' '}
             <span className="num">{data.rulesets.labor.version}</span>、健保{' '}
             <span className="num">{data.rulesets.health.version}</span>、勞退{' '}
             <span className="num">{data.rulesets.pension.version}</span> 規則。

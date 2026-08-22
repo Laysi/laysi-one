@@ -1,7 +1,9 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  businessClock,
   callOp,
   OpFailed,
+  serverClockGapMs,
   type MyPunchCorrectionList,
   type MyPunchList,
   type PunchCorrection,
@@ -69,10 +71,14 @@ function ScheduleNote({ schedule }: { schedule: WorkSchedule }) {
   );
 }
 
-function nowClock(): string {
-  const d = new Date();
-  const two = (n: number) => String(n).padStart(2, '0');
-  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+const CLOCK_GAP_WARN_MS = 5 * 60_000;
+
+function gapLabel(ms: number): string {
+  const minutes = Math.round(Math.abs(ms) / 60_000);
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours === 0) return `${minutes} 分`;
+  return rest === 0 ? `${hours} 小時` : `${hours} 小時 ${rest} 分`;
 }
 
 function shiftMonth(month: string, by: number): string {
@@ -89,10 +95,11 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
   const [formError, setFormError] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [noteOpen, setNoteOpen] = useState(false);
-  const [clock, setClock] = useState(nowClock);
+  const [clock, setClock] = useState(businessClock);
+  const clockGap = serverClockGapMs();
 
   useEffect(() => {
-    const id = window.setInterval(() => setClock(nowClock()), 1000);
+    const id = window.setInterval(() => setClock(businessClock()), 1000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -198,7 +205,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
         <h1 className="page-title">打卡</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          你的帳號尚未對應員工編號，請管理員完成連結後再打卡。
+          本帳號尚未對應員工編號，請管理員完成連結後再打卡。
         </p>
       </div>
     );
@@ -253,6 +260,13 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
           <div className="punch-now__clock num">{clock}</div>
           <div className="punch-now__date num">{data.today}</div>
         </div>
+
+        {Math.abs(clockGap) >= CLOCK_GAP_WARN_MS && (
+          <p className="form-warn">
+            伺服器時間與本機時間相差 <span className="num">{gapLabel(clockGap)}</span>
+            。打卡記下的是伺服器時間，請系統管理員校正伺服器時鐘。
+          </p>
+        )}
 
         <div className="punch-actions">
           {data.next_kind ? (

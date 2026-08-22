@@ -20,6 +20,14 @@ interface Props {
 }
 
 const CLOCK_SETTINGS = new Set(['work_start', 'work_end']);
+const TIMEZONE_SETTING = 'business_utc_offset';
+const UTC_OFFSETS = [
+  '-12:00', '-11:00', '-10:00', '-09:30', '-09:00', '-08:00', '-07:00', '-06:00',
+  '-05:00', '-04:00', '-03:30', '-03:00', '-02:00', '-01:00', '+00:00', '+01:00',
+  '+02:00', '+03:00', '+03:30', '+04:00', '+04:30', '+05:00', '+05:30', '+05:45',
+  '+06:00', '+06:30', '+07:00', '+08:00', '+08:45', '+09:00', '+09:30', '+10:00',
+  '+10:30', '+11:00', '+12:00', '+12:45', '+13:00', '+14:00',
+];
 
 const ACCOUNT_KINDS: { value: string; label: string }[] = [
   { value: 'asset', label: '資產' },
@@ -139,6 +147,7 @@ function emptyAccountForm(): AccountForm {
 export function Setup({ onGo, onToast, reloadKey }: Props) {
   const me = useCurrentUser();
   const canEditSettings = me.permissions.includes('update_company_setting');
+  const canSetTimezone = me.permissions.includes('set_company_timezone');
   const showBalances = me.permissions.includes('list_chart_of_accounts');
   const [settings, setSettings] = useState<CompanySettingRow[] | null>(null);
   const [coa, setCoa] = useState<ChartOfAccounts | null>(null);
@@ -192,6 +201,13 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
 
   async function save(code: string) {
     try {
+      if (code === TIMEZONE_SETTING) {
+        await callOp<unknown>('set_company_timezone', { offset: draft });
+        onToast(`記帳時區已改成 UTC${draft}`);
+        setEditing(null);
+        load();
+        return;
+      }
       await callOp<unknown>('update_company_setting', { code, value: draft });
       onToast(`已更新「${settings?.find((s) => s.code === code)?.label ?? code}」`);
       setEditing(null);
@@ -344,7 +360,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
       {ownerMissing && (
         <div className="placeholder placeholder--inline">
           <div className="placeholder__title">下一步：建立負責人帳號</div>
-          <p>帳務、薪資與簽核門檻歸負責人，這個帳號看不到，也不能把自己改成負責人。</p>
+          <p>帳務、薪資與簽核門檻屬負責人權限，本帳號無法查看，也不能將自己變更為負責人。</p>
           <button className="btn" onClick={() => onGo('acc')}>
             前往帳號管理
           </button>
@@ -364,7 +380,20 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                     <span className="fact__key">{s.label}</span>
                     {editing === s.code ? (
                       <span className="fact__edit">
-                        {CLOCK_SETTINGS.has(s.code) ? (
+                        {s.code === TIMEZONE_SETTING ? (
+                          <select
+                            className="entry-input"
+                            value={draft}
+                            autoFocus
+                            onChange={(e) => setDraft(e.target.value)}
+                          >
+                            {UTC_OFFSETS.map((o) => (
+                              <option key={o} value={o}>
+                                UTC{o}
+                              </option>
+                            ))}
+                          </select>
+                        ) : CLOCK_SETTINGS.has(s.code) ? (
                           <TimeField label={s.label} value={draft} onChange={setDraft} />
                         ) : (
                           <input
@@ -387,13 +416,16 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                       </span>
                     ) : (
                       <span className="fact__value">
-                        {s.value || '（尚未設定）'}
+                        {s.code === TIMEZONE_SETTING
+                          ? `UTC${s.value}`
+                          : s.value || '（尚未設定）'}
                         {s.source === 'regulation' && (
                           <span className="tag tag--pale tag--static">
                             來自法規 {s.ruleset?.version}
                           </span>
                         )}
-                        {s.editable && canEditSettings && (
+                        {((s.editable && canEditSettings) ||
+                          (s.code === TIMEZONE_SETTING && canSetTimezone)) && (
                           <button
                             className="btn--icon fact__pencil"
                             title="編輯此項"
@@ -473,7 +505,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
               <section>
                 <h3 className="section-title">會計科目表</h3>
                 <p className="section-note">
-                  每個科目都要指定它在報表中的段落，以及在現金流量表中的活動別。缺少這兩欄的科目不會出現在報表上。
+                  每個科目都要指定報表段落與現金流量活動別。缺少這兩欄的科目不會出現在報表上。
                 </p>
                 <div className="toolbar">
                   {showBalances && (
@@ -560,7 +592,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                 <div className="drawer__title">
                   {accountDrawer === 'edit' ? `編輯科目 ${accountForm.code}` : '新增科目'}
                 </div>
-                <div className="drawer__subtitle">報表分組與現金流量活動別為必填，決定科目出現在報表的哪一段</div>
+                <div className="drawer__subtitle">報表分組與現金流量活動別為必填，決定科目在報表中的段落</div>
               </div>
               <button className="btn btn--close" onClick={() => setAccountDrawer(null)} aria-label="關閉">
                 ×

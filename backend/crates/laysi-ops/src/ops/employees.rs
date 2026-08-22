@@ -216,7 +216,7 @@ impl Operation for GetHrDashboard {
         if open_movements > 0 {
             todos.push(json!({
                 "count": open_movements.to_string(),
-                "label": "張異動單還沒走完",
+                "label": "張異動單尚未結案",
                 "due": "到離職與異動",
                 "screen": "hr_mv",
             }));
@@ -224,7 +224,7 @@ impl Operation for GetHrDashboard {
         if !in_transit.is_zero() {
             todos.push(json!({
                 "count": "1",
-                "label": "期薪資傳票還沒過帳",
+                "label": "期薪資傳票尚未過帳",
                 "due": money(in_transit),
                 "screen": "gl",
             }));
@@ -232,7 +232,7 @@ impl Operation for GetHrDashboard {
         if ctx.store.payroll_run(&month).await?.is_none() {
             todos.push(json!({
                 "count": "1",
-                "label": format!("{month} 還沒算薪資"),
+                "label": format!("{month} 尚未計算薪資"),
                 "due": "薪資作業",
                 "screen": "hr_pay",
             }));
@@ -277,7 +277,7 @@ impl Operation for GetHrDashboard {
                 "implemented": false,
                 "detail": match latest {
                     Some(r) => format!(
-                        "{} 公司負擔 {}，總帳裡還沒有這筆金額。要入帳請先在「基礎設定」新增保險費科目，再開一張借保險費／貸應付費用的傳票。",
+                        "{} 公司負擔 {}，總帳尚無這筆金額。要入帳請先在「基礎設定」新增保險費科目，再開立借保險費／貸應付費用的傳票。",
                         r.period,
                         money(r.employer_total)
                     ),
@@ -449,7 +449,7 @@ impl Operation for ListEmployeeMovements {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀到離職與異動單：每一張走到哪一關、還差哪幾關。流程本身（到職四步、離職四步…）為公司設定。"
+        "讀到離職與異動單：每一張目前的關卡與剩餘關卡。流程本身（到職四步、離職四步…）為公司設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::LimitInput>()
@@ -523,7 +523,7 @@ impl Operation for RecordEmployeeMovement {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "開立到職／離職／調薪／調部門的異動單。開立離職單時，員工即標示為「離職中」並記錄預定離職日，名冊與薪資作業立即反映，不待最後一關完成。"
+        "開立到職／離職／調薪／調部門的異動單。開立離職單時，員工就標示為「離職中」並記錄預定離職日，名冊與薪資作業立即反映，不等最後一關完成。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RecordMovementInput>()
@@ -534,7 +534,7 @@ impl Operation for RecordEmployeeMovement {
         let flow = ctx.store.hr_flow_steps().await?;
         if !flow.iter().any(|s| s.kind == i.kind) {
             return Err(OpError::BadInput(format!(
-                "「{}」不是認得的異動種類。目前有：{}",
+                "「{}」不是有效的異動種類。目前有：{}",
                 i.kind,
                 flow.iter()
                     .map(|s| s.kind.clone())
@@ -603,7 +603,7 @@ impl Operation for CompleteMovementStep {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "將異動單的某一關標記為完成。全部關卡完成時異動單自動結案。離職流程走完最後一關，員工即變成「已離職」，他的登入帳號一併停用、登入工作階段結束、MCP Token 全數撤銷，不等生效日；帳號要再開，由系統管理員在「帳號管理」啟用。"
+        "將異動單的某一關標記為完成。全部關卡完成時異動單自動結案。離職流程完成最後一關後，員工會標示為「已離職」，登入帳號一併停用、登入工作階段結束、MCP Token 全數撤銷，不等生效日；要重新啟用帳號，由系統管理員在「帳號管理」處理。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CompleteMovementStepInput>()
@@ -649,7 +649,7 @@ impl Operation for CompleteMovementStep {
             closed_note.push_str(&format!(" · 停用登入帳號 {}", done.closed.logins.join("、")));
         }
         if done.closed.tokens > 0 {
-            closed_note.push_str(&format!(" · 撤銷 {} 把 MCP Token", done.closed.tokens));
+            closed_note.push_str(&format!(" · 撤銷 {} 組 MCP Token", done.closed.tokens));
         }
         let summary = format!(
             "{} {} {} · 完成第 {step_no} 關「{label}」（{}/{total}）{}{closed_note}",

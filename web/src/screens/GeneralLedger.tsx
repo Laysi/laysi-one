@@ -318,7 +318,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
 
             <div className="drawer__foot">
               {correction.kind === null ? (
-                <span className="drawer__foot-note">選擇後仍要再次確認才會送出</span>
+                <span className="drawer__foot-note">選擇後仍要再次確認才送出</span>
               ) : (
                 <>
                   <button

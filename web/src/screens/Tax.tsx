@@ -85,12 +85,12 @@ export function Tax({ reloadKey }: Props) {
                 本期尚無已過帳的銷項或進項，各欄皆為零。
                 {vat.pending_vouchers > 0 ? (
                   <>
-                    {' '}把那 <span className="num">{vat.pending_vouchers}</span> 張待過帳傳票過帳，
+                    {' '}將該 <span className="num">{vat.pending_vouchers}</span> 張待過帳傳票過帳，
                     銷項 <span className="num">{money(vat.pending_sales)}</span> 與稅額{' '}
-                    <span className="num">{money(vat.pending_output_tax)}</span> 即會列入。
+                    <span className="num">{money(vat.pending_output_tax)}</span> 就會列入。
                   </>
                 ) : (
-                  ' 開立發票並將傳票過帳後即會產生數字。'
+                  ' 開立發票並把傳票過帳後就會有數字。'
                 )}
               </p>
             )}
@@ -163,7 +163,7 @@ export function Tax({ reloadKey }: Props) {
           <p className={`recon${vat.reconciled ? '' : ' recon--off'}`}>
             {vat.reconciled ? (
               <>
-                申報書的銷項稅額 <span className="num">{money(vat.output_tax)}</span> 就是總帳{' '}
+                申報書的銷項稅額 <span className="num">{money(vat.output_tax)}</span> 等於總帳{' '}
                 <span className="num">2211 代收營業稅</span> 在{' '}
                 <span className="num">{vat.period_from}</span> 到{' '}
                 <span className="num">{vat.period_to}</span> 的發生額；用{' '}
@@ -172,7 +172,7 @@ export function Tax({ reloadKey }: Props) {
               </>
             ) : (
               <>
-                對不上：<span className="num">4111</span> 的{' '}
+                不相符：<span className="num">4111</span> 的{' '}
                 <span className="num">{money(vat.sales)}</span> 乘 {vat.ruleset.rate_percent}% 應該是{' '}
                 <span className="num">{money(vat.expected_output_tax)}</span>，但{' '}
                 <span className="num">2211</span> 的當期發生額是{' '}

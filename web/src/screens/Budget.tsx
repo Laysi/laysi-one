@@ -177,7 +177,7 @@ export function Budget({ onToast, reloadKey }: Props) {
             <div className="card form-card">
               <h3 className="section-title">編列科目預算</h3>
               <p className="section-note">
-                {status.version_label}。已編列過的科目再選一次即為修改。
+                {status.version_label}。已編列過的科目再選一次就是修改。
               </p>
               <div className="field-row">
                 <label className="field field--grow">
@@ -375,7 +375,7 @@ export function Budget({ onToast, reloadKey }: Props) {
                 {pl.rows.length === 0 && (
                   <tr>
                     <td colSpan={5} className="cell-muted">
-                      本期間尚無可歸屬部門的收入或成本。
+                      這段期間沒有可歸屬部門的收入或成本。
                     </td>
                   </tr>
                 )}
@@ -386,12 +386,12 @@ export function Budget({ onToast, reloadKey }: Props) {
           <p className={`recon${pl.reconciled ? '' : ' recon--off'}`}>
             {pl.reconciled ? (
               <>
-                各部門合計 <span className="num">{money(pl.total_profit)}</span> 即損益表的
+                各部門合計 <span className="num">{money(pl.total_profit)}</span> 等於損益表的
                 本期損益，兩者分開計算，結果相符。
               </>
             ) : (
               <>
-                對不上：部門合計 <span className="num">{money(pl.total_profit)}</span>，損益表{' '}
+                不相符：部門合計 <span className="num">{money(pl.total_profit)}</span>，損益表{' '}
                 <span className="num">{money(pl.statement_profit)}</span>，差{' '}
                 <span className="num">{money(pl.difference)}</span> 元。
               </>

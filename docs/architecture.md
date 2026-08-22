@@ -1144,7 +1144,7 @@ impl Registry {
 
 `approve_expense_claim`、`commit_import`、`set_budget`、`create_budget_version` 在
 `mcp_tool_grant` 中**預設關閉**：自己送自己簽等於沒有簽核流程；一次寫進幾百張傳票，
-而回滾只救得了未過帳的；預算是老闆定的，AI 不該改掉自己的比較基準。
+而復原只救得了未過帳的；預算是老闆定的，AI 不該改掉自己的比較基準。
 `rollback_import` 維持開啟，理由與 `revoke_api_token` 相同。
 
 **0034 補上 `create_budget_version`，因為空狀態原本沒有出口**：一版都還沒建時
@@ -1792,6 +1792,52 @@ history fallback，所以重新整理與直接貼網址都會落在同一個畫�
 用 `businessTime()` 印出來的登入時間、稽核時間、打卡時間全都是對的，於是同一頁上
 兩種時間互相矛盾。後端的 `today()` 早就改用 `laysi_domain::business_today()`；
 前端漏掉的是同一件事的另一半。
+
+**「現在幾點」也是同一件事**：畫面上會走動的時鐘與各種預設日期原本讀
+`new Date().getHours()` 與 `getFullYear()`，也就是**瀏覽器的時鐘與瀏覽器的時區**，
+而記下來的時間是**伺服器的時鐘、固定換算成 +08:00**。兩個來源之間沒有任何一處
+互相比對，所以瀏覽器的時區不是 +08:00（容器、遠端桌面、TZ 沒設好的工作階段）時，
+打卡卡片會用一種時間往前數、記錄另一種時間，而畫面上沒有任何跡象。差幾小時
+就整整差幾小時，拿去算遲到、加班與出勤全部是錯的。
+
+正解是把第二個來源拿掉，不是加一段警告：`callOp`、`getMeta` 與 `/v1/auth/me` 會把
+回應的 HTTP `Date` 標頭記成 `serverSkewMs`，`serverNow()` 因此回伺服器的時刻，
+`businessClock()` 與 `businessToday()` 再把它換算到 +08:00。**讀到的那個數字就是
+按下去會被記下來的那個數字**。標頭只到秒，所以差距小於兩秒時不更新，時鐘才不會
+每次請求就跳一秒。用它的有打卡卡片的時鐘、記帳抽屜與請款申請的日期預設，以及
+`docNumberHint` 的單據編號範例。
+
+伺服器自己的時鐘走錯時，系統裡沒有任何東西比對得出來——那是主機要修的事。
+
+### 記帳時區是設定，不是常數
+
+`+08:00` 原本同時寫死在三個地方：`laysi_domain`、`api/client.ts`，以及
+`attendance_punch` 與 `punch_correction` 的 CHECK。其中兩個裝機的人看不到，所以
+跑在別的時區的安裝沒有辦法說出這件事，也沒有辦法發現自己說不出來。
+
+現在住在 `company_setting.business_utc_offset`，值就是 PostgreSQL 在
+`AT TIME ZONE INTERVAL` 收的那串文字，設定、兩條 CHECK 與畫面因此讀同一個字串。
+`laysi_domain::business_time`／`business_today` 改成**收** offset（與計算子收
+`&Ruleset` 同一個道理：沒有「當前時區」，只有「這次呼叫用的時區」），
+`laysi_ops::business_offset()` 持有行程層的那一份，啟動時由
+`load_business_offset` 讀出來，`OpCtx.offset` 帶著它走完一次呼叫——它就在
+`today` 旁邊，因為 `today` 正是用它推導的。前端由 `/v1/meta` 的 `utc_offset`
+設定 `client.ts` 的偏移量，不再自帶常數。
+
+**改時區不是顯示層的事**。`attendance_punch.punched_on` 與
+`punch_correction.punched_on` 是**由 `punched_at` 推導後存下來的日期**，而且是
+`UNIQUE (employee_id, punched_on, kind)` 的一部分：+08:00 的 23:30 那筆打卡，在
++09:00 底下屬於另一天，於是同時違反 CHECK 並換到另一個鍵。`set_company_timezone`
+因此在同一個交易裡改寫兩條 CHECK 再寫設定，並在兩張表任一有資料時拒絕——時區在
+還沒有人打卡之前就該定案。設定列種成 `editable = false`，`update_company_setting`
+因此碰不到它：只寫文字不改 CHECK，會讓資料庫檢查一個偏移量而程式用另一個。
+
+offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），所以
+`parse_business_offset` 只收六個字元的 `±HH:MM`，`set_business_timezone` 進去
+之後再解析一次，不信任呼叫端解過了。
+
+伺服器時鐘走錯**不是時區問題**，改時區也修不掉：錯的是那個瞬間本身，換一個
+偏移量只是換一個一樣錯的顯示，而存進去的 `timestamptz` 照樣是錯的。
 
 ### 落地在「我的」，不是「財務」
 

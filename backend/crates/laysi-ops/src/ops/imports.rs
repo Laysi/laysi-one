@@ -250,7 +250,7 @@ pub fn parse_vouchers(csv: &str, look: &Lookups) -> Parsed {
             continue;
         };
         if debit < Money::ZERO || credit < Money::ZERO {
-            out.error(row_no, "金額是負數", "沖銷請把金額寫到相反的那一欄，不要寫負號");
+            out.error(row_no, "金額是負數", "沖銷請將金額填入相反的欄位，不要使用負號");
             continue;
         }
         if (debit > Money::ZERO) == (credit > Money::ZERO) {
@@ -323,7 +323,7 @@ pub fn parse_vouchers(csv: &str, look: &Lookups) -> Parsed {
                     money(cr),
                     money((dr - cr).abs())
                 ),
-                "這一張的每一行都要檢查；借貸不平的傳票資料庫也會擋下來",
+                "每一行都會檢查；借貸不平的傳票資料庫也會擋下",
             );
             continue;
         }
@@ -390,7 +390,7 @@ impl Operation for ListImports {
                     "歷史傳票 CSV 的欄位順序：傳票號、日期、摘要、科目代號、借方、貸方、部門代碼。\
                      同一個傳票號的列會併成一張傳票；民國年日期會自動轉換並留下提醒。",
                 "commit_note":
-                    "匯入產生的是待過帳傳票，不會自動過帳。回滾僅適用於尚未過帳的批次；\
+                    "匯入產生的是待過帳傳票，不會自動過帳。復原只適用於尚未過帳的批次；\
                      已過帳的更正只能開反向分錄。",
             }),
             summary,
@@ -423,7 +423,7 @@ impl Operation for PreviewImport {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "匯入預覽：解析 CSV、逐列驗證科目與借貸並列出問題，不寫入任何傳票。解析結果會保存，確認匯入時採用的就是這一份。"
+        "匯入預覽：解析 CSV、逐列驗證科目與借貸並列出問題，不寫入任何傳票。解析結果會保留，確認匯入時採用同一份。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<PreviewImportInput>()
@@ -439,7 +439,7 @@ impl Operation for PreviewImport {
             .ok_or_else(|| OpError::BadInput(format!("查無匯入來源「{}」", i.source_code)))?;
         if !source.supported {
             return Err(OpError::BadInput(format!(
-                "「{}」尚未支援匯入（{}）。目前只有歷史傳票 CSV 匯得進來。",
+                "「{}」尚未支援匯入（{}）。目前只支援歷史傳票 CSV。",
                 source.label, source.note
             )));
         }
@@ -587,7 +587,7 @@ impl Operation for RollbackImport {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "回滾一批匯入，刪除其產生的傳票。僅在整批均未過帳時可回滾；已過帳的要用反向分錄更正。"
+        "復原一批匯入，刪除其產生的傳票。整批都沒過帳才能復原；已過帳的要用反向分錄更正。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<BatchInput>()
@@ -599,7 +599,7 @@ impl Operation for RollbackImport {
         let batch = ctx.store.rollback_import_batch(&i.batch_no, &ctx.actor).await?;
 
         let summary = format!(
-            "回滾 {} · 刪掉 {} 張待過帳傳票",
+            "復原 {} · 刪除 {} 張待過帳傳票",
             batch.batch_no,
             before.voucher_nos.len()
         );

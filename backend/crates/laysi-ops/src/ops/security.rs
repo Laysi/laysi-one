@@ -241,13 +241,13 @@ impl Operation for ListApiTokens {
             .collect();
 
         let live = tokens.iter().filter(|t| t.revoked_at.is_none() && !t.is_expired(now)).count();
-        let summary = format!("讀取 Token 清單 · {} 把有效、共 {} 筆", live, rows.len());
+        let summary = format!("讀取 Token 清單 · {} 組有效、共 {} 筆", live, rows.len());
         Ok(OpOutcome::new(
             json!({
                 "tokens": rows,
                 "live_count": live,
                 "storage_note": "明文只在核發時顯示一次。",
-                "wiring_note": "設定輪替天數後，期限一到就無法連線。",
+                "wiring_note": "設定輪替天數後，超過期限就不能連線。",
             }),
             summary,
         ))
@@ -303,7 +303,7 @@ impl Operation for IssueApiToken {
             )));
         }
         if i.name.trim().is_empty() {
-            return Err(OpError::BadInput("Token 要有名字，否則清單上認不出是哪一把".into()));
+            return Err(OpError::BadInput("Token 要有名稱，否則清單上分不出是哪一組".into()));
         }
         if let Some(d) = i.rotate_days {
             if d <= 0 {
@@ -348,7 +348,7 @@ impl Operation for IssueApiToken {
                 "token": issued.token,
                 "secret": issued.secret,
                 "secret_note":
-                    "明文僅顯示這一次，請立即複製保存。",
+                    "明文只顯示一次，請立即複製保存。",
             }),
             summary,
         ))
@@ -375,7 +375,7 @@ impl Operation for RevokeApiToken {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "撤銷一把 Token。撤銷之後不能復原，要用就重發一把。"
+        "撤銷一組 Token。撤銷後不能復原，需要時重新核發。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RevokeApiTokenInput>()
@@ -384,7 +384,7 @@ impl Operation for RevokeApiToken {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: RevokeApiTokenInput = parse(input)?;
         let t = ctx.store.revoke_api_token(i.id, &ctx.actor).await?;
-        let summary = format!("撤銷 Token · {}（{}…）· {} 就連不進來了", t.name, t.prefix, t.actor);
+        let summary = format!("撤銷 Token · {}（{}…）· {} 之後無法連線", t.name, t.prefix, t.actor);
         Ok(OpOutcome::new(json!({ "token": t }), summary))
     }
 }
@@ -430,7 +430,7 @@ impl Operation for GetSystemHealth {
         let stale = rulesets.iter().filter(|r| r["applicable"] == json!(false)).count();
 
         let summary = format!(
-            "讀取系統現況 · migration {} · 已過帳 {} 張 · 稽核 {} 筆 · Token {} 把",
+            "讀取系統現況 · migration {} · 已過帳 {} 張 · 稽核 {} 筆 · Token {} 組",
             migration.map(|v| v.to_string()).unwrap_or_else(|| "未知".into()),
             stats.posted_vouchers,
             stats.audit_entries,

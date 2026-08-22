@@ -61,7 +61,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
         `核發我的 MCP Token「${name.trim()}」`,
       );
       setIssued(d);
-      onToast(`「${d.token.name}」已核發，明文只顯示這一次`);
+      onToast(`「${d.token.name}」已核發，明文只顯示一次`);
       setName('');
       setScope('');
       load();
@@ -78,7 +78,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
     setBusy(id);
     try {
       await callOp<unknown>('revoke_my_api_token', { id }, `撤銷我的 MCP Token「${label}」`);
-      onToast(`「${label}」已撤銷，使用它的連線立即失效`);
+      onToast(`「${label}」已撤銷，使用該 Token 的連線立即失效`);
       load();
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
@@ -93,7 +93,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
         <h1 className="page-title">我的 MCP</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          你的帳號尚未對應員工編號，請管理員完成連結後再核發 Token。
+          本帳號尚未對應員工編號，請管理員完成連結後再核發 Token。
         </p>
       </div>
     );
@@ -108,19 +108,19 @@ export function MyMcp({ onToast, reloadKey }: Props) {
     <div>
       <h1 className="page-title">我的 MCP</h1>
       <p className="page-lede">
-        核發一把代表你自己的 Token，讓 AI 助理以你的身分連進來。
+        核發一組代表本人的 Token，讓 AI 助理以本人的身分連線。
       </p>
 
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">
           <div className="stat-card__kicker">有效 Token</div>
           <div className="stat-card__value num">{data.live_count}</div>
-          <div className="stat-card__note num">把 · 累計核發 {data.tokens.length} 把</div>
+          <div className="stat-card__note num">組 · 累計核發 {data.tokens.length} 組</div>
         </div>
         <div className="card stat-card">
           <div className="stat-card__kicker">可用工具</div>
           <div className="stat-card__value num">{tools.usable.length}</div>
-          <div className="stat-card__note num">項 · 你的角色為{tools.role_name}</div>
+          <div className="stat-card__note num">項 · 角色為{tools.role_name}</div>
         </div>
       </div>
 
@@ -181,7 +181,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
             </button>
             {formError && <p className="state-note state-note--error">{formError}</p>}
             <p className="form-note">
-              代表對象與角色取自你的登入身分。撤銷後下一次呼叫立即失效。
+              代表對象與角色取自本人的登入身分。撤銷後下一次呼叫立即失效。
             </p>
           </div>
 
@@ -205,7 +205,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
             </div>
             <div className="fact">
               <span className="fact__key">認證標頭</span>
-              <span className="fact__value num">Authorization: Bearer 你的 Token</span>
+              <span className="fact__value num">Authorization: Bearer 〈Token〉</span>
             </div>
           </div>
           <p className="hint">
@@ -241,14 +241,14 @@ export function MyMcp({ onToast, reloadKey }: Props) {
               </div>
             ))}
             {data.tokens.length === 0 && (
-              <p className="form-note">你還沒有核發過 Token。</p>
+              <p className="form-note">還沒核發過 Token。</p>
             )}
           </div>
           <p className="hint">{data.storage_note}</p>
         </section>
 
         <section>
-          <h3 className="section-title">你的 AI 能呼叫的工具</h3>
+          <h3 className="section-title">AI 可呼叫的工具</h3>
           <div className="card fact-card">
             {tools.usable.map((t) => (
               <div className="fact fact--stacked" key={t}>
@@ -260,7 +260,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
             ))}
             {tools.usable.length === 0 && (
               <p className="form-note">
-                目前沒有任何工具同時符合你的角色權限與 MCP 開關。
+                目前沒有任何工具同時符合本人的角色權限與 MCP 開關。
               </p>
             )}
           </div>
@@ -272,7 +272,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
                   className={`chip${showBlocked ? ' chip--on' : ''}`}
                   onClick={() => setShowBlocked((v) => !v)}
                 >
-                  你有權限但對 AI 關閉的 {tools.blocked_for_ai.length} 項
+                  本人有權限但對 AI 關閉的 {tools.blocked_for_ai.length} 項
                 </button>
               </div>
               {showBlocked && (

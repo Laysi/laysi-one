@@ -427,7 +427,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     onChange={(e) => setField('name', e.target.value)}
                   />
                   {missing.includes('name') && (
-                    <span className="field__hint field__hint--missing">還沒填</span>
+                    <span className="field__hint field__hint--missing">未填</span>
                   )}
                 </label>
 
@@ -478,7 +478,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     onChange={(v) => setField('hired_on', v)}
                   />
                   {missing.includes('hired_on') && (
-                    <span className="field__hint field__hint--missing">還沒填</span>
+                    <span className="field__hint field__hint--missing">未填</span>
                   )}
                 </label>
                 <label className="field">
@@ -515,7 +515,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     onChange={(e) => setField('id_no', e.target.value)}
                   />
                   <span className="field__hint">
-                    勞保申報與扣繳憑單要用；還沒收到可以留空。
+                    勞保申報與扣繳憑單都要用到；還沒收到可以留空。
                   </span>
                 </label>
               </div>

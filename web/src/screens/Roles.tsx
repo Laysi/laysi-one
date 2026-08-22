@@ -159,7 +159,7 @@ export function Roles({ onToast, reloadKey }: Props) {
         level: g.to,
       });
       setPending(null);
-      onToast(`${g.roleName}的「${g.permLabel}」已設為「${LEVEL_NOTE[g.to]}」，下一次呼叫即適用`);
+      onToast(`${g.roleName}的「${g.permLabel}」已設為「${LEVEL_NOTE[g.to]}」，下一次呼叫就適用`);
       load();
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
@@ -171,7 +171,7 @@ export function Roles({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">角色與核准</h1>
-      <p className="page-lede">權限矩陣由系統管理員維護，簽核流程由負責人維護。</p>
+      <p className="page-lede">權限對照表由系統管理員維護，簽核流程由負責人維護。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!matrix && !error && <p className="state-note">讀取中…</p>}
@@ -187,7 +187,7 @@ export function Roles({ onToast, reloadKey }: Props) {
                 pending.permCode === 'manage_access' &&
                 pending.to !== 'full' && (
                   <p className="form-warn">
-                    這是你自己的角色。改完之後你就進不了這一頁，也不能改回來，
+                    這是目前登入帳號的角色。改完就進不了本頁，也改不回來，
                     要另找一位系統管理員或用 <span className="num">laysi-admin</span> 還原。
                   </p>
                 )}
@@ -208,7 +208,7 @@ export function Roles({ onToast, reloadKey }: Props) {
               className={`chip${tab === 'matrix' ? ' chip--on' : ''}`}
               onClick={() => setTab('matrix')}
             >
-              權限矩陣
+              權限對照表
             </button>
             <button
               className={`chip${tab === 'flow' ? ' chip--on' : ''}`}
@@ -295,10 +295,10 @@ export function Roles({ onToast, reloadKey }: Props) {
 
           <p className="hint">
             關閉後立即生效，
-            <strong>包含關閉管理權限這一項本身</strong>。
+            <strong>包含管理權限本身</strong>。
           </p>
           <p className="hint">
-            本矩陣只管人員；
+            本表格只管人員；
             <span className="num">AI</span> 能呼叫哪些操作在「MCP 與 AI」設定。
           </p>
           <p className="hint">帳號與角色在「帳號管理」建立。</p>
@@ -363,7 +363,7 @@ export function Roles({ onToast, reloadKey }: Props) {
                   : '新增一關'}
               </h3>
               <p className="section-note">
-                沿用既有編號即為編輯，填入新編號即為新增。
+                沿用既有編號就是編輯，填入新編號就是新增。
               </p>
               <div className="field-grid">
                 <label className="field">

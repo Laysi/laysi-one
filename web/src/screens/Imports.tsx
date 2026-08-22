@@ -17,7 +17,7 @@ interface Props {
 const BATCH_LABEL: Record<ImportBatchRow['status'], string> = {
   preview: '預覽，尚未寫入',
   committed: '已匯入',
-  rolled_back: '已回滾',
+  rolled_back: '已復原',
   discarded: '已放棄',
 };
 
@@ -66,7 +66,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
     try {
       const r = await callOp<{ batch: ImportBatchRow }>('commit_import', { batch_no: batchNo });
       onToast(
-        `${batchNo} 已寫入 ${r.batch.voucher_nos.length} 張傳票，狀態均為待過帳；過帳前不列入報表`,
+        `${batchNo} 已寫入 ${r.batch.voucher_nos.length} 張傳票，狀態都是待過帳；過帳前不列入報表`,
       );
       setPreview(null);
       onChanged();
@@ -82,7 +82,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
     setBusy(true);
     try {
       const r = await callOp<{ removed: string[] }>('rollback_import', { batch_no: batchNo });
-      onToast(`${batchNo} 已回滾，刪除 ${r.removed.length} 張待過帳傳票`);
+      onToast(`${batchNo} 已復原，刪除 ${r.removed.length} 張待過帳傳票`);
       onChanged();
       load();
     } catch (e) {
@@ -270,7 +270,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
                             disabled={busy}
                             onClick={() => void rollback(b.batch_no)}
                           >
-                            回滾
+                            復原
                           </button>
                         ) : (
                           <span className="cell-muted">—</span>

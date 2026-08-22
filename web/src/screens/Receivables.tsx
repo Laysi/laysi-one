@@ -193,12 +193,12 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
           <p className={`recon${aging.reconciled ? '' : ' recon--off'}`}>
             {aging.reconciled ? (
               <>
-                這裡的合計就是總帳 <span className="num">1131 應收帳款</span> 的餘額{' '}
+                本頁合計等於總帳 <span className="num">1131 應收帳款</span> 的餘額{' '}
                 <span className="num">{money(aging.gl_balance)}</span>，兩者分開計算，結果相符。
               </>
             ) : (
               <>
-                對不上：明細合計 <span className="num">{money(aging.total)}</span>，總帳{' '}
+                不相符：明細合計 <span className="num">{money(aging.total)}</span>，總帳{' '}
                 <span className="num">1131</span> 是 <span className="num">{money(aging.gl_balance)}</span>
                 ，差額 <span className="num">{money(aging.difference)}</span> 元，請先暫緩出具帳齡表。
               </>
@@ -313,7 +313,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                   客戶名稱
                   <input className="input" value={customer} onChange={(e) => setCustomer(e.target.value)} />
                   {missing.includes('customer') && (
-                    <span className="field__hint field__hint--missing">還沒填</span>
+                    <span className="field__hint field__hint--missing">未填</span>
                   )}
                 </label>
                 <label className="field">
@@ -325,7 +325,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                     onChange={(e) => setInvoiceNo(e.target.value)}
                   />
                   {missing.includes('invoiceNo') && (
-                    <span className="field__hint field__hint--missing">還沒填</span>
+                    <span className="field__hint field__hint--missing">未填</span>
                   )}
                 </label>
                 <TaxAmountFields
@@ -345,7 +345,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                     onChange={(v) => setDueOn(v)}
                   />
                   {missing.includes('dueOn') && (
-                    <span className="field__hint field__hint--missing">還沒填</span>
+                    <span className="field__hint field__hint--missing">未填</span>
                   )}
                 </label>
                 <label className="field field--full">
@@ -362,7 +362,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                     ))}
                   </select>
                   {missing.includes('revenue') && (
-                    <span className="field__hint field__hint--missing">還沒填</span>
+                    <span className="field__hint field__hint--missing">未填</span>
                   )}
                 </label>
                 <label className="field field--full">

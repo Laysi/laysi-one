@@ -104,7 +104,7 @@ export function Reports({ reloadKey }: Props) {
                     <span className="num">{money(bs.liabilities)}</span> ＋ 權益{' '}
                     <span className="num">{money(bs.equity)}</span>，兩者分開計算，結果相等。
                     權益裡含尚未結轉的本期損益{' '}
-                    <span className="num">{money(bs.profit)}</span>；未計入即無法平衡。
+                    <span className="num">{money(bs.profit)}</span>；沒計入就不會平衡。
                   </>
                 ) : (
                   <>
@@ -146,7 +146,7 @@ export function Reports({ reloadKey }: Props) {
                   </>
                 ) : (
                   <>
-                    對不上：三段活動推出 <span className="num">{money(cf.closing)}</span>，現金科目
+                    不相符：三段活動推出 <span className="num">{money(cf.closing)}</span>，現金科目
                     的分錄算出 <span className="num">{money(cf.ledger_closing)}</span>（差{' '}
                     <span className="num">{money(cf.difference)}</span>），各資金帳戶合計{' '}
                     <span className="num">{money(cf.cash_accounts_total)}</span>（差{' '}

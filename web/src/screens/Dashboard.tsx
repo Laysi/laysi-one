@@ -57,7 +57,7 @@ export function Dashboard({ onGo, reloadKey }: Props) {
         </div>
       ) : (
         <div className="placeholder">
-          <div className="placeholder__title">帳上還沒有已過帳的傳票</div>
+          <div className="placeholder__title">帳上沒有已過帳的傳票</div>
           <p>請先在「傳票 · 總帳」記一筆並過帳。</p>
           <div className="placeholder__actions">
             <button className="btn" onClick={() => onGo('gl')}>

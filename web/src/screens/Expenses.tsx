@@ -60,7 +60,7 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
         );
         onToast(
           d.voucher
-            ? `${c.claim_no} 已完成全部簽核，產生傳票 ${d.voucher.no}（待過帳）；過帳後才會進總帳`
+            ? `${c.claim_no} 已完成全部簽核，產生傳票 ${d.voucher.no}（待過帳）；過帳後才進總帳`
             : `${c.claim_no} 本關已簽核，尚待 ${d.claim.step_label}`,
         );
       } else {

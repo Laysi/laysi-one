@@ -191,19 +191,19 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
           <p className={`recon${data.reconciled ? '' : ' recon--off'}`}>
             {data.reconciled ? (
               <>
-                未付合計 <span className="num">{money(data.total)}</span> 就是總帳{' '}
+                未付合計 <span className="num">{money(data.total)}</span> 等於總帳{' '}
                 <span className="num">2101 應付帳款</span> 的餘額，兩者分開計算，結果相符。
               </>
             ) : (
               <>
-                對不上：明細合計 <span className="num">{money(data.total)}</span>，總帳{' '}
+                不相符：明細合計 <span className="num">{money(data.total)}</span>，總帳{' '}
                 <span className="num">2101</span> 是 <span className="num">{money(data.gl_balance)}</span>
                 ，差 <span className="num">{money(data.difference)}</span> 元。
               </>
             )}
             {!isZero(data.not_yet_posted) && (
               <>
-                {' '}另有 <span className="num">{money(data.not_yet_posted)}</span> 的帳單，來源傳票還沒過帳。
+                {' '}另有 <span className="num">{money(data.not_yet_posted)}</span> 的帳單，來源傳票尚未過帳。
               </>
             )}
           </p>

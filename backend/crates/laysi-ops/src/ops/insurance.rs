@@ -235,7 +235,7 @@ impl Operation for GetInsuranceSummary {
             {
                 "title": "勞退全額由雇主提繳",
                 "body": format!(
-                    "提繳率 {}%，全額提繳至員工個人專戶，列為公司成本，薪資單的代扣欄沒有這一項。",
+                    "提繳率 {}%，全額提繳至員工個人專戶，列為公司成本，不列入薪資單的代扣項目。",
                     percent(pension_rs.decimal("employer_rate")?),
                 ),
                 "source": pension_rs.source_note,
@@ -313,7 +313,7 @@ impl Operation for ComputeInsurance {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "試算一個投保級距的勞保、健保與勞退各要出多少，並回報依哪一版規則、公司與員工各分攤多少比例。換一個適用日期就換一套費率。"
+        "試算一個投保級距的勞保、健保與勞退金額，並回報依哪一版規則，以及公司與員工各分攤多少。費率依適用日期解析。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ComputeInsuranceInput>()

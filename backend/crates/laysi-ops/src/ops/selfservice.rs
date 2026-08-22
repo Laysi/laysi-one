@@ -440,7 +440,7 @@ impl Operation for ListMyLeaveRequests {
     }
 
     fn summary(&self) -> &'static str {
-        "讀目前呼叫者自己的全部休假單與本年度特休額度、已休、剩餘。額度由查詢日適用的特休規則與年資現算，不逐人設定。"
+        "讀本人的全部休假單與本年度特休額度、已休、剩餘。額度由查詢日適用的特休規則與年資現算，不逐人設定。"
     }
 
     fn input_schema(&self) -> Value {
@@ -520,7 +520,7 @@ impl Operation for RequestLeave {
     }
 
     fn summary(&self) -> &'static str {
-        "替目前登入帳號所連結的員工送一張待簽核休假單。申請人與建立者都由登入身分決定，輸入不能指定他人。"
+        "以目前登入帳號所連結的員工身分送出待簽核休假單。申請人與建立者都由登入身分決定，輸入不能指定他人。"
     }
 
     fn input_schema(&self) -> Value {
@@ -536,7 +536,7 @@ impl Operation for RequestLeave {
                 .collect::<Vec<_>>()
                 .join("、");
             return Err(OpError::BadInput(format!(
-                "「{}」不是認得的假別。目前有：{values}",
+                "「{}」不是有效的假別。目前有：{values}",
                 i.kind
             )));
         }
@@ -703,7 +703,7 @@ impl Operation for SubmitMyExpenseClaim {
     }
 
     fn summary(&self) -> &'static str {
-        "以目前登入帳號所連結的員工身分送一張費用報支單。申請人姓名與部門取自該員工主檔，輸入不能指定申請人；費用科目留給會計那一關決定，本操作不接受科目與收據文件編號。不產生任何分錄。"
+        "以目前登入帳號所連結的員工身分送一張費用報支單。申請人姓名與部門取自該員工主檔，輸入不能指定申請人；費用科目由會計關卡決定，本操作不接受科目與收據文件編號。不產生任何分錄。"
     }
 
     fn input_schema(&self) -> Value {
@@ -756,7 +756,7 @@ impl Operation for SubmitMyExpenseClaim {
         Ok(OpOutcome::new(
             json!({
                 "claim": claim_json(&claim, &rules),
-                "account_note": "費用科目由會計在「會計確認科目」那一關決定。",
+                "account_note": "費用科目由會計在「會計確認科目」關卡決定。",
                 "scope_note": "claimant 取自已驗證 session 的 ctx.employee_id 所對應的員工姓名，部門取自同一筆員工主檔；輸入不含可指定他人的欄位。",
             }),
             summary,
@@ -951,7 +951,7 @@ impl Operation for PunchClock {
     }
 
     fn summary(&self) -> &'static str {
-        "替目前登入帳號所連結的員工打上班或下班卡。時間一律取伺服器當下的時刻並記錄到秒，輸入不能指定時間，也不能指定員工。一天只記一次上班與一次下班；漏打或打錯只能由人資以 correct_punch 補登。"
+        "以目前登入帳號所連結的員工身分打上班或下班卡。時間一律取伺服器當下的時刻並記錄到秒，輸入不能指定時間，也不能指定員工。一天只記一次上班與一次下班；漏打或打錯只能由人資以 correct_punch 補登。"
     }
 
     fn input_schema(&self) -> Value {
@@ -971,7 +971,7 @@ impl Operation for PunchClock {
         // actually happened, so `LAYSI_TODAY` must not move it; the database
         // also checks that the day and the timestamp agree.
         let now = Utc::now();
-        let local = laysi_domain::business_time(now);
+        let local = laysi_domain::business_time(now, ctx.offset);
         let employee = actor_employee(ctx).await?;
         let punch = ctx
             .store
@@ -984,6 +984,7 @@ impl Operation for PunchClock {
                     source: "self",
                     note: i.note.as_deref().unwrap_or("").trim(),
                     actor: &ctx.actor,
+                    offset: ctx.offset,
                 },
                 false,
             )
@@ -991,7 +992,7 @@ impl Operation for PunchClock {
 
         let schedule = WorkSchedule::load(ctx).await?;
         let month = local.date().format("%Y-%m").to_string();
-        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?);
+        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
         let today = days.iter().find(|d| d.date == local.date());
         let late = today
             .and_then(|d| d.arrived)
@@ -1071,7 +1072,7 @@ impl Operation for ListMyPunches {
 
         let employee = actor_employee(ctx).await?;
         let schedule = WorkSchedule::load(ctx).await?;
-        let punched = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?);
+        let punched = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
         let stats = summarise(&punched, &schedule);
         let imported = ctx
             .store
@@ -1080,7 +1081,7 @@ impl Operation for ListMyPunches {
             .into_iter()
             .find(|row| row.employee_id == employee.id);
 
-        let local_today = laysi_domain::business_time(Utc::now()).date();
+        let local_today = laysi_domain::business_time(Utc::now(), ctx.offset).date();
         // Days without a punch are rows too: they are the ones a correction is
         // asked for, and the screen offers the correction on the day itself.
         let days = month_days(
@@ -1095,7 +1096,7 @@ impl Operation for ListMyPunches {
         let this_month = local_today.format("%Y-%m").to_string();
         let elsewhere = match this_month == month {
             true => None,
-            false => punch_days(&ctx.store.punches(&this_month, Some(employee.id)).await?)
+            false => punch_days(&ctx.store.punches(&this_month, Some(employee.id)).await?, ctx.offset)
                 .into_iter()
                 .find(|d| d.date == local_today),
         };
@@ -1185,7 +1186,7 @@ async fn my_mcp_tools(ctx: &OpCtx) -> Result<Value, OpError> {
         // administrator's, and the tool switches have no operation behind
         // them. Naming any of the three would send the reader somewhere that
         // cannot help.
-        "note": "可用工具是你的角色權限與 MCP 工具開關的交集。",
+        "note": "可用工具為本人角色權限與 MCP 工具開關的交集。",
     }))
 }
 
@@ -1218,7 +1219,7 @@ impl Operation for IssueMyApiToken {
     }
 
     fn summary(&self) -> &'static str {
-        "以目前登入者本人的身分核發一把 MCP Token。輸入只有名稱、用途與輪替天數，不能指定代表對象與角色，兩者都取自 session，因此這把 Token 能做的事與本人完全相同，不會更多。明文僅回傳一次。"
+        "以目前登入者本人的身分核發一組 MCP Token。輸入只有名稱、用途與輪替天數，不能指定代表對象與角色，兩者都取自 session，因此這組 Token 能做的事與本人完全相同。明文僅回傳一次。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1228,7 +1229,7 @@ impl Operation for IssueMyApiToken {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: IssueMyApiTokenInput = parse(input)?;
         if i.label.trim().is_empty() {
-            return Err(OpError::BadInput("Token 要有名稱，否則清單上認不出是哪一把".into()));
+            return Err(OpError::BadInput("Token 要有名稱，否則清單上分不出是哪一組".into()));
         }
         if i.rotate_days.is_some_and(|d| d <= 0) {
             return Err(OpError::BadInput("輪替天數要大於零".into()));
@@ -1264,8 +1265,8 @@ impl Operation for IssueMyApiToken {
                 "token": issued.token,
                 "secret": issued.secret,
                 "tools": my_mcp_tools(ctx).await?,
-                "secret_note": "明文僅顯示這一次，請立即複製保存；系統僅保留雜湊，無法回查。",
-                "scope_note": "代表對象與角色取自已驗證 session，輸入無法指定；這把 Token 的權限就是你的權限。",
+                "secret_note": "明文只顯示一次，請立即複製保存；系統只留雜湊，無法回查。",
+                "scope_note": "代表對象與角色取自已驗證 session，輸入無法指定；這組 Token 的權限與本人相同。",
             }),
             summary,
         ))
@@ -1335,7 +1336,7 @@ impl Operation for ListMyApiTokens {
 
         let tools = my_mcp_tools(ctx).await?;
         let summary = format!(
-            "讀 {} 自助核發的 MCP Token · {live} 把有效、共 {} 筆 · 可用工具 {} 項",
+            "讀 {} 自助核發的 MCP Token · {live} 組有效、共 {} 筆 · 可用工具 {} 項",
             employee.name,
             rows.len(),
             tools["usable"].as_array().map_or(0, Vec::len)
@@ -1377,7 +1378,7 @@ impl Operation for RevokeMyApiToken {
     }
 
     fn summary(&self) -> &'static str {
-        "撤銷一把本人自助核發的 MCP Token。只能撤銷本人核發的 Token，別人的一律查無此筆。撤銷後不可復原。"
+        "撤銷一組本人自助核發的 MCP Token。只能撤銷本人核發的 Token，別人核發的一律查無此筆。撤銷後不可復原。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1392,7 +1393,7 @@ impl Operation for RevokeMyApiToken {
             .revoke_own_api_token(i.id, employee.id, &ctx.actor)
             .await?;
         let summary = format!(
-            "{} 撤銷自己的 MCP Token · {}（{}…）· 下一次呼叫立即失效",
+            "{} 撤銷本人的 MCP Token · {}（{}…）· 下一次呼叫立即失效",
             employee.name, token.name, token.prefix
         );
         Ok(OpOutcome::new(
@@ -1442,7 +1443,7 @@ impl Operation for SubmitMyPunchCorrection {
     }
 
     fn summary(&self) -> &'static str {
-        "替目前登入帳號所連結的員工送一張打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為送出即通過時，同一個交易就寫進打卡紀錄。"
+        "以目前登入帳號所連結的員工身分送出打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為送出即通過時，在同一個交易寫進打卡紀錄。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1464,7 +1465,7 @@ impl Operation for SubmitMyPunchCorrection {
                 OpError::BadInput(format!("時間要寫成 HH:MM:SS 或 HH:MM，收到的是「{}」", i.at))
             })?;
         if i.punched_on > ctx.today {
-            return Err(OpError::BadInput("不能替未來的日期送補登申請".into()));
+            return Err(OpError::BadInput("不能為未來的日期送出補登申請".into()));
         }
 
         let employee = actor_employee(ctx).await?;
@@ -1476,9 +1477,10 @@ impl Operation for SubmitMyPunchCorrection {
                     employee_id: employee.id,
                     punched_on: i.punched_on,
                     kind: &i.kind,
-                    punched_at: business_instant(i.punched_on, at),
+                    punched_at: business_instant(i.punched_on, at, ctx.offset),
                     reason: i.reason.as_deref().unwrap_or("").trim(),
                     actor: &ctx.actor,
+                    offset: ctx.offset,
                 },
                 auto,
             )
@@ -1489,16 +1491,16 @@ impl Operation for SubmitMyPunchCorrection {
             employee.emp_no,
             saved.punched_on,
             punch_kind_label(&saved.kind),
-            business_time(saved.punched_at).format(PUNCH_TIME),
+            business_time(saved.punched_at, ctx.offset).format(PUNCH_TIME),
             punch_correction_status_label(&saved.status)
         );
         Ok(OpOutcome::new(
             json!({
-                "correction": punch_correction_json(&saved),
+                "correction": punch_correction_json(&saved, ctx.offset),
                 "punch_written": auto,
                 "next_note": match auto {
                     true => "已寫進打卡紀錄，來源標示為補登。",
-                    false => "人資決定之後才會寫進打卡紀錄。",
+                    false => "人資決定後才會寫進打卡紀錄。",
                 },
                 "scope_note": "employee_id 由已驗證 session 的 ctx.employee_id 決定，輸入不含可指定他人的欄位。",
             }),
@@ -1539,7 +1541,10 @@ impl Operation for ListMyPunchCorrections {
         );
         Ok(OpOutcome::new(
             json!({
-                "corrections": corrections.iter().map(punch_correction_json).collect::<Vec<_>>(),
+                "corrections": corrections
+                    .iter()
+                    .map(|c| punch_correction_json(c, ctx.offset))
+                    .collect::<Vec<_>>(),
                 "waiting_count": waiting,
                 "auto_approve": auto,
                 "scope_note": "僅查詢已驗證 session 的 ctx.employee_id；輸入不含可指定他人的欄位。",

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   addDecimals,
+  businessToday,
   callOp,
   isZero,
   money,
@@ -51,12 +52,6 @@ function fmt(v: string): string {
   return `${grouped}${rest}`;
 }
 
-function today(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -67,7 +62,7 @@ interface Props {
 export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [depts, setDepts] = useState<{ code: string; label: string }[]>([]);
-  const [date, setDate] = useState(today);
+  const [date, setDate] = useState(businessToday);
   const [memo, setMemo] = useState('');
   const [rows, setRows] = useState<Row[]>(EMPTY);
   const [saving, setSaving] = useState(false);
@@ -155,7 +150,7 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
         <div className="drawer__head">
           <div>
             <div className="drawer__title">建立傳票</div>
-            <div className="drawer__subtitle">儲存後狀態為待過帳，過帳後才會列入報表</div>
+            <div className="drawer__subtitle">儲存後狀態為待過帳，過帳後才列入報表</div>
           </div>
           <button className="btn btn--close" onClick={onClose} aria-label="關閉">
             ×

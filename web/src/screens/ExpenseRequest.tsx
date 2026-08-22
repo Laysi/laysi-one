@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  businessToday,
   callOp,
   fileSizeLabel,
   MAX_UPLOAD_BYTES,
@@ -21,12 +22,6 @@ interface Props {
   onChanged: () => void;
 }
 
-function today(): string {
-  const d = new Date();
-  const two = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
-}
-
 export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   const [data, setData] = useState<MyExpenseClaimList | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +31,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
 
   const [title, setTitle] = useState('');
   const [amount, setAmount] = useState('');
-  const [spentOn, setSpentOn] = useState(today);
+  const [spentOn, setSpentOn] = useState(businessToday);
   const [payMethod, setPayMethod] = useState('reimburse');
   const [memo, setMemo] = useState('');
   const [files, setFiles] = useState<File[]>([]);
@@ -119,7 +114,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
       );
       setTitle('');
       setAmount('');
-      setSpentOn(today());
+      setSpentOn(businessToday());
       setPayMethod('reimburse');
       setMemo('');
       setFiles([]);
@@ -140,7 +135,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         <h1 className="page-title">請款申請</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          你的帳號尚未對應員工編號，請管理員完成連結後再送出請款單。
+          本帳號尚未對應員工編號，請管理員完成連結後再送出請款單。
         </p>
       </div>
     );
@@ -316,7 +311,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
               </button>
             </>
           ) : (
-            <p className="state-note">送出後，單號與要經過的關卡會顯示在這裡。</p>
+            <p className="state-note">送出後在本頁顯示單號與要經過的關卡。</p>
           )}
         </section>
       </div>

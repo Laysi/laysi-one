@@ -95,7 +95,7 @@ fn may_decide(
 ) -> Result<(), OpError> {
     if actor == claim.claimant {
         return Err(OpError::BadInput(format!(
-            "{} 由 {} 本人送出，要由另一個帳號簽核。公司還沒有其他可簽核的帳號時，請系統管理員在「帳號管理」建立。",
+            "{} 由 {} 本人送出，要由另一個帳號簽核。目前沒有其他可簽核的帳號，請系統管理員在「帳號管理」建立。",
             claim.claim_no, claim.claimant
         )));
     }
@@ -331,7 +331,7 @@ impl Operation for SubmitExpenseClaimOp {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "送一張費用報支單（申請人上傳那一關）。可帶 AI 建議的科目與收據文件編號。不產生任何分錄。"
+        "送出費用報支單（申請人送件關卡）。可帶入 AI 建議的科目與收據文件編號。不產生任何分錄。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<SubmitExpenseClaimInput>()
@@ -554,7 +554,7 @@ impl Operation for RejectExpenseClaim {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "退回一張報支單，由申請人補件；整張作廢重送。單據內容變更後，先前關卡的簽核即不再有效。"
+        "退回一張報支單，由申請人補件；整張作廢重送。單據內容變更後，先前關卡的簽核就不再有效。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RejectExpenseClaimInput>()

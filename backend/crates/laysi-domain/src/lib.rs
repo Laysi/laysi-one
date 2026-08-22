@@ -28,20 +28,52 @@ use serde::{Deserialize, Serialize};
 /// agrees with this constant.
 pub const BUSINESS_UTC_OFFSET_HOURS: i32 = 8;
 
-/// The business time zone as a chrono offset.
-pub fn business_offset() -> FixedOffset {
+/// The offset an install starts on, and the one the `attendance_punch` and
+/// `punch_correction` CHECK constraints are seeded with.
+pub fn default_business_offset() -> FixedOffset {
     FixedOffset::east_opt(BUSINESS_UTC_OFFSET_HOURS * 3600)
         .expect("BUSINESS_UTC_OFFSET_HOURS 必須在 chrono 接受的範圍內")
 }
 
+/// Parse the stored form of the business time zone (`+08:00`, `-05:30`).
+///
+/// The stored form is the same text PostgreSQL takes in `AT TIME ZONE
+/// INTERVAL`, so the setting, the CHECK constraints and the screen all read
+/// the same string and none of them has to reconstruct it from minutes.
+pub fn parse_business_offset(v: &str) -> Option<FixedOffset> {
+    let bytes = v.as_bytes();
+    if bytes.len() != 6 || bytes[3] != b':' {
+        return None;
+    }
+    let sign = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let hours: i32 = v.get(1..3)?.parse().ok()?;
+    let minutes: i32 = v.get(4..6)?.parse().ok()?;
+    if minutes > 59 {
+        return None;
+    }
+    FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
+}
+
+/// Render an offset back into the stored form.
+pub fn format_business_offset(offset: FixedOffset) -> String {
+    let total = offset.local_minus_utc() / 60;
+    let sign = if total < 0 { '-' } else { '+' };
+    let abs = total.abs();
+    format!("{sign}{:02}:{:02}", abs / 60, abs % 60)
+}
+
 /// Wall-clock date and time of an instant, as a person here would read it.
-pub fn business_time(at: DateTime<Utc>) -> NaiveDateTime {
-    at.with_timezone(&business_offset()).naive_local()
+pub fn business_time(at: DateTime<Utc>, offset: FixedOffset) -> NaiveDateTime {
+    at.with_timezone(&offset).naive_local()
 }
 
 /// Today's date in the business time zone.
-pub fn business_today() -> NaiveDate {
-    business_time(Utc::now()).date()
+pub fn business_today(offset: FixedOffset) -> NaiveDate {
+    business_time(Utc::now(), offset).date()
 }
 
 /// Money type.
@@ -400,8 +432,28 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(early.date_naive().to_string(), "2026-08-06");
-        assert_eq!(business_time(early).date().to_string(), "2026-08-07");
-        assert_eq!(business_time(early).time().to_string(), "07:50:00");
+        assert_eq!(business_time(early, default_business_offset()).date().to_string(), "2026-08-07");
+        assert_eq!(business_time(early, default_business_offset()).time().to_string(), "07:50:00");
+    }
+
+    /// The stored form goes into DDL, so anything the parser accepts has to be
+    /// exactly six characters the constraint can hold. A value that parses but
+    /// renders differently would leave the setting and the CHECK disagreeing.
+    #[test]
+    fn a_stored_offset_survives_a_round_trip() {
+        for text in ["+08:00", "-05:30", "+00:00", "+05:45", "-12:00", "+14:00"] {
+            let parsed = parse_business_offset(text).expect(text);
+            assert_eq!(format_business_offset(parsed), text);
+        }
+    }
+
+    /// Anything that is not six characters of `±HH:MM` is refused rather than
+    /// coerced: the value reaches `ALTER TABLE` as text.
+    #[test]
+    fn a_malformed_offset_is_refused_not_guessed() {
+        for text in ["8", "+8:00", "08:00", "+08:0", "Asia/Taipei", "+08:60", "'; DROP"] {
+            assert!(parse_business_offset(text).is_none(), "{text} 不該被接受");
+        }
     }
 
     /// Amounts must be strings in JSON, or the frontend will read them as

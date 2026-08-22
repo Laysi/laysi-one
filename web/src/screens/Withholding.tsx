@@ -300,7 +300,7 @@ export function Withholding({ onToast, reloadKey }: Props) {
                   </>
                 ) : (
                   <>
-                    對不上：薪資模組全年給付{' '}
+                    不相符：薪資模組全年給付{' '}
                     <span className="num">
                       {money(statements.payroll_reconciliation.payroll_gross)}
                     </span>

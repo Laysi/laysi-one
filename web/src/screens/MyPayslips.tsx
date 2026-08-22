@@ -37,7 +37,7 @@ export function MyPayslips({ reloadKey }: Props) {
         <h1 className="page-title">我的薪資單</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          你的帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
+          本帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
         </p>
       </div>
     );
@@ -68,7 +68,7 @@ export function MyPayslips({ reloadKey }: Props) {
 
       {slips.length === 0 ? (
         <p className="state-note">
-          尚無任何期別的薪資紀錄。薪資按期計算，完成計算後才會產生薪資單。
+          尚無任何期別的薪資紀錄。薪資按期計算，算完才會產生薪資單。
         </p>
       ) : (
         <>

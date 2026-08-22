@@ -80,7 +80,7 @@ impl Operation for GetDashboard {
         if drafts > 0 {
             todos.push(json!({
                 "count": drafts.to_string(), "label": "張 AI 草稿待確認會計科目",
-                "due": "確認後才會進帳", "screen": "gl"
+                "due": "確認後才入帳", "screen": "gl"
             }));
         }
 
@@ -102,7 +102,7 @@ impl Operation for GetDashboard {
             // reads as something impersonating them.
             "recent": audit.iter().map(|a| json!({
                 "what": a.result_summary,
-                "time": laysi_domain::business_time(a.at).format("%m/%d %H:%M").to_string(),
+                "time": laysi_domain::business_time(a.at, ctx.offset).format("%m/%d %H:%M").to_string(),
                 "who": a.actor,
                 "channel": a.channel,
                 "channel_label": if a.channel == "mcp" { "AI" } else { "人員" },
@@ -163,7 +163,7 @@ impl Operation for GetCashPosition {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀各銀行帳戶與零用金的現金水位。合計等於總帳的現金餘額；還沒指定資金帳戶的金額另列一筆。"
+        "讀各銀行帳戶與零用金的現金水位。合計等於總帳的現金餘額；尚未指定資金帳戶的金額另列一筆。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<Empty>()

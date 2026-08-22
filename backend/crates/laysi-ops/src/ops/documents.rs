@@ -133,7 +133,7 @@ impl Operation for ListDocuments {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。OCR 狀態一律為 pending，尚未接上辨識引擎。"
+        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。文件的辨識狀態一律為待處理。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListDocumentsInput>()
@@ -393,7 +393,7 @@ impl Operation for GetDocument {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才把內容以 base64 帶回來。雜湊對不上就回錯誤，不交出內容。"
+        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容。雜湊不符會回報錯誤，不回傳內容。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<GetDocumentInput>()

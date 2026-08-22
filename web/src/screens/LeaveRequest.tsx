@@ -83,7 +83,7 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         <h1 className="page-title">休假申請</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          你的帳號尚未對應員工編號，請管理員完成連結後再送出休假單。
+          本帳號尚未對應員工編號，請管理員完成連結後再送出休假單。
         </p>
       </div>
     );

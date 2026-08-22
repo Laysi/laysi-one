@@ -341,7 +341,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
               </div>
 
               <p className="recon">
-                打卡與匯入的月統計分開列出，兩邊不同時由人資決定更正哪一邊。
+                打卡與匯入的月統計分開列出，兩者不同時由人資決定更正何者。
               </p>
 
               {picked && punches.days && (
@@ -554,7 +554,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                     {fixes.corrections.length === 0 && (
                       <tr>
                         <td colSpan={6} className="cell-muted">
-                          {fixDone ? '還沒有任何補登申請。' : '沒有待審核的補登申請。'}
+                          {fixDone ? '沒有補登申請。' : '沒有待審核的補登申請。'}
                         </td>
                       </tr>
                     )}

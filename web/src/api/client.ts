@@ -40,6 +40,7 @@ export async function callOp<T>(name: OpName, input?: unknown, prompt?: string):
     headers: headers(),
     body: JSON.stringify({ input: input ?? {}, prompt: prompt ?? null }),
   });
+  noteServerTime(res);
   if (res.status === 401) throw sessionExpired();
   const body: unknown = await res.json().catch(() => null);
 
@@ -86,6 +87,7 @@ export interface Meta {
     domain?: string | null;
     creates_accounts?: boolean;
   };
+  utc_offset: string;
   version: string;
   licence: string;
   brand_build: string;
@@ -93,9 +95,12 @@ export interface Meta {
 
 export async function getMeta(): Promise<Meta> {
   const res = await fetch('/v1/meta', { headers: headers() });
+  noteServerTime(res);
   if (res.status === 401) throw sessionExpired();
   if (!res.ok) throw new Error(`讀不到系統資訊（HTTP ${res.status}）`);
-  return (await res.json()) as Meta;
+  const meta = (await res.json()) as Meta;
+  setBusinessOffset(meta.utc_offset);
+  return meta;
 }
 
 export interface Stat {
@@ -1920,15 +1925,58 @@ export function signedMoney(v: string): string {
   return v.startsWith('-') ? money(v) : `+${money(v)}`;
 }
 
-const BUSINESS_UTC_OFFSET_HOURS = 8;
+const DEFAULT_UTC_OFFSET_MINUTES = 8 * 60;
+
+let businessOffsetMinutes = DEFAULT_UTC_OFFSET_MINUTES;
+
+export function setBusinessOffset(v: string | null | undefined): void {
+  if (!v) return;
+  const m = /^([+-])(\d{2}):(\d{2})$/.exec(v);
+  if (!m) return;
+  const minutes = Number(m[2]) * 60 + Number(m[3]);
+  businessOffsetMinutes = m[1] === '-' ? -minutes : minutes;
+}
+
+let serverSkewMs = 0;
+
+export function noteServerTime(res: Response): void {
+  const header = res.headers.get('date');
+  if (!header) return;
+  const stated = Date.parse(header);
+  if (Number.isNaN(stated)) return;
+  const skew = stated + 500 - Date.now();
+  if (Math.abs(skew - serverSkewMs) > 2000) serverSkewMs = skew;
+}
+
+export function serverNow(): Date {
+  return new Date(Date.now() + serverSkewMs);
+}
+
+export function serverClockGapMs(): number {
+  return serverSkewMs;
+}
+
+function atBusinessOffset(at: Date): Date {
+  return new Date(at.getTime() + businessOffsetMinutes * 60_000);
+}
 
 function shiftToBusiness(v: string): Date | null {
   const t = new Date(v);
   if (Number.isNaN(t.getTime())) return null;
-  return new Date(t.getTime() + BUSINESS_UTC_OFFSET_HOURS * 3600_000);
+  return atBusinessOffset(t);
 }
 
 const two = (n: number) => String(n).padStart(2, '0');
+
+export function businessClock(): string {
+  const at = atBusinessOffset(serverNow());
+  return `${two(at.getUTCHours())}:${two(at.getUTCMinutes())}:${two(at.getUTCSeconds())}`;
+}
+
+export function businessToday(): string {
+  const at = atBusinessOffset(serverNow());
+  return `${at.getUTCFullYear()}-${two(at.getUTCMonth() + 1)}-${two(at.getUTCDate())}`;
+}
 
 export function businessTime(v: string | null | undefined, fallback = '—'): string {
   if (!v) return fallback;
@@ -1940,8 +1988,7 @@ export function businessTime(v: string | null | undefined, fallback = '—'): st
 }
 
 export function docNumberHint(prefix: string): string {
-  const now = shiftToBusiness(new Date().toISOString());
-  if (!now) return `例如 ${prefix}001`;
+  const now = atBusinessOffset(serverNow());
   return `例如 ${prefix}${String(now.getUTCFullYear()).slice(2)}${two(
     now.getUTCMonth() + 1,
   )}-001`;

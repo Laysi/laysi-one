@@ -40,6 +40,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
     vec![
         Box::new(GetCompanySettings),
         Box::new(UpdateCompanySetting),
+        Box::new(SetCompanyTimezone),
         Box::new(ListChartOfAccounts),
         Box::new(ListDimensions),
         Box::new(ListRoles),
@@ -112,7 +113,7 @@ impl Operation for GetCompanySettings {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀公司與帳務設定：公司名稱、統編、會計年度、本位幣。本期會計期間與單據編號規則是現算的，營業稅那一列則是從法規規則庫依生效日算出來的。"
+        "讀公司與帳務設定：公司名稱、統編、會計年度、本位幣。本期會計期間與單據編號規則為現算；營業稅依生效日由法規規則庫解析。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -280,7 +281,7 @@ impl Operation for UpdateCompanySetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "變更一項公司設定。僅標示為可編輯的項目可以修改；統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班時間收 HH:MM 且可以留空表示不判定遲到；法規決定的值由規則檔決定，不在這裡。"
+        "變更一項公司設定。只有標示為可編輯的項目能改；統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班時間收 HH:MM 且可以留空表示不判定遲到；法規決定的數值由規則檔提供，不在這個操作變更。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateCompanySettingInput>()
@@ -304,6 +305,53 @@ impl Operation for UpdateCompanySetting {
     }
 }
 
+// Business time zone
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SetCompanyTimezoneInput {
+    /// Hours and minutes east of UTC, as `+08:00` or `-05:30`.
+    pub offset: String,
+}
+
+struct SetCompanyTimezone;
+
+#[async_trait]
+impl Operation for SetCompanyTimezone {
+    fn name(&self) -> &'static str {
+        "set_company_timezone"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "變更記帳時區。出勤日期與單據日期以這個時區判定，格式 +08:00。已經有打卡或補登申請時拒絕變更：出勤日期是由打卡時刻依時區推導後存下來的，換一個時區會把晚間的打卡改記到另一天。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<SetCompanyTimezoneInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: SetCompanyTimezoneInput = parse(input)?;
+        let raw = i.offset.trim();
+        let Some(offset) = laysi_domain::parse_business_offset(raw) else {
+            return Err(OpError::BadInput(format!(
+                "時區格式為 +08:00 或 -05:30，收到「{raw}」"
+            )));
+        };
+        let stored = laysi_domain::format_business_offset(offset);
+        ctx.store.set_business_timezone(&stored, &ctx.actor).await?;
+        crate::set_business_offset(offset);
+
+        Ok(OpOutcome::new(
+            json!({
+                "offset": stored,
+                "today": laysi_domain::business_today(offset),
+            }),
+            format!("改設定 · 記帳時區改成 UTC{stored}"),
+        ))
+    }
+}
+
 // Chart of accounts
 
 #[derive(Deserialize, JsonSchema, Default)]
@@ -324,7 +372,7 @@ impl Operation for ListChartOfAccounts {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀會計科目表：代號、名稱、類別、正常餘額方向，以及它在資產負債表哪一段、在現金流量表屬於哪一種活動，還有目前的餘額"
+        "讀會計科目表：代號、名稱、類別、正常餘額方向，以及所屬報表分組、現金流量活動別與目前餘額"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListChartOfAccountsInput>()
@@ -416,7 +464,7 @@ impl Operation for ListRoles {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀角色權限矩陣：哪個角色有哪些權限、完整還是有限。每次呼叫都會即時強制檢查。"
+        "讀角色權限對照表：哪個角色有哪些權限、完整還是有限。每次呼叫都會即時強制檢查。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -480,7 +528,7 @@ impl Operation for ListRoles {
             .collect();
 
         let summary = format!(
-            "讀取權限矩陣 · {} 個角色 × {} 條權限 · {} 格有授權",
+            "讀取權限對照表 · {} 個角色 × {} 條權限 · {} 格有授權",
             roles.len(),
             permissions.len(),
             cells.len()
@@ -491,7 +539,7 @@ impl Operation for ListRoles {
                 "permissions": perms,
                 "grants": cells,
                 "enforced": true,
-                "enforcement_note": "「限負責人」是矩陣之外的額外限制。",
+                "enforcement_note": "「限負責人」是對照表之外的額外限制。",
                 "actor_role": ctx.actor_role,
             }),
             summary,
@@ -521,7 +569,7 @@ impl Operation for SetRolePermission {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "設定或收回權限矩陣的一格。權限層級用 full／limited／none；改動會從下一次操作呼叫起立即生效。"
+        "設定或收回權限對照表的一格。權限層級用 full／limited／none；改動會從下一次操作呼叫起立即生效。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<SetRolePermissionInput>()
@@ -661,7 +709,7 @@ impl Operation for CreateUserAccount {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；改用外部登入時不產生密碼。員工編號指不到既有的人時會一併建立員工主檔，留空則自動配號。"
+        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；改用外部登入時不產生密碼。員工編號找不到對應的人時會一併建立員工主檔，留空則自動配號。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateUserAccountInput>()
@@ -705,7 +753,7 @@ impl Operation for CreateUserAccount {
             let oidc = ctx.store.oidc_setting().await?;
             if !oidc.enabled {
                 return Err(OpError::BadInput(
-                    "請先設定外部登入，才能建立不用密碼的帳號".into(),
+                    "請先設定外部登入，才能建立免密碼帳號".into(),
                 ));
             }
             if oidc.provision_role.trim().is_empty() {
@@ -716,7 +764,7 @@ impl Operation for CreateUserAccount {
             let domain = oidc.allowed_domain.trim().to_ascii_lowercase();
             if domain.is_empty() || !email.ends_with(&format!("@{domain}")) {
                 return Err(OpError::BadInput(format!(
-                    "外部登入只接受 @{domain} 的地址，這個帳號要自己的密碼"
+                    "外部登入只接受 @{domain} 的地址，這個帳號要設定密碼"
                 )));
             }
         } else if role_code != crate::ROLE_ADMIN {
@@ -822,7 +870,7 @@ impl Operation for UpdateUserAccount {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "改一個登入帳號的顯示名稱、電子郵件、啟用狀態與連結的員工。員工編號指不到既有的人時會一併建立員工主檔。角色請用變更角色的操作，密碼只能由本人變更。"
+        "改一個登入帳號的顯示名稱、電子郵件、啟用狀態與連結的員工。員工編號找不到對應的人時會一併建立員工主檔。角色請用變更角色的操作，密碼只能由本人變更。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateUserAccountInput>()
@@ -1001,7 +1049,7 @@ impl Operation for ChangeUserRole {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "變更一個登入帳號的角色。該帳號目前的登入工作階段與本人核發的 MCP Token 立刻失效，本人重新登入後才會拿到新的權限。不能變更自己的角色。"
+        "變更一個登入帳號的角色。該帳號目前的登入工作階段與本人核發的 MCP Token 立刻失效，本人重新登入後才有新的權限。不能變更自己的角色。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ChangeUserRoleInput>()
@@ -1088,7 +1136,7 @@ impl Operation for ChangeUserRole {
             .ok_or_else(|| OpError::BadInput(format!("查無登入名稱「{username}」")))?;
 
         let summary = format!(
-            "變更角色 · {}（{}）由{}改為{}，登出 {} 個工作階段，撤銷 {} 把 Token",
+            "變更角色 · {}（{}）由{}改為{}，登出 {} 個工作階段，撤銷 {} 組 Token",
             changed.user.username,
             changed.user.display_name,
             was,
@@ -1214,7 +1262,7 @@ impl Operation for UnlinkUserIdentity {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "解除一個登入帳號的外部帳號連結。該帳號的登入工作階段立刻失效，之後只能用密碼登入。沒有密碼的帳號解不掉，請改為停用。"
+        "解除一個登入帳號的外部帳號連結。該帳號的登入工作階段立刻失效，之後只能用密碼登入。沒有密碼的帳號無法解除連結，請改為停用。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UnlinkUserIdentityInput>()
@@ -1242,7 +1290,7 @@ impl Operation for UnlinkUserIdentity {
         // can use, and no operation on this screen can give it one back.
         if target.password_hash.is_none() {
             return Err(OpError::BadInput(format!(
-                "「{username}」只能用外部帳號登入，解除後就沒有人能登入它；請改為停用這個帳號"
+                "「{username}」只能用外部帳號登入，解除後沒有人能登入；請改為停用這個帳號"
             )));
         }
 
@@ -1292,7 +1340,7 @@ impl Operation for DeleteUserAccount {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "刪除一個登入帳號與它的登入工作階段。無法復原，稽核紀錄上的既有紀錄不受影響。連著外部帳號的要先解除連結；最後一個帳號與最後一個啟用中的系統管理員刪不掉。"
+        "刪除一個登入帳號及其登入工作階段。無法復原，稽核紀錄上的既有紀錄不受影響。連著外部帳號的要先解除連結；最後一個帳號與最後一個啟用中的系統管理員不能刪除。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<DeleteUserAccountInput>()
@@ -1315,7 +1363,7 @@ impl Operation for DeleteUserAccount {
         // from a shell.
         if accounts.len() == 1 {
             return Err(OpError::BadInput(
-                "這是最後一個帳號，刪掉就沒有人能登入；請先建立另一個帳號".into(),
+                "這是最後一個帳號，刪除後將無人能登入；請先建立另一個帳號".into(),
             ));
         }
         if target.role_code == crate::ROLE_ADMIN {
@@ -1385,7 +1433,7 @@ impl Operation for ListUserAccounts {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "讀登入帳號清單：登入名稱、角色、連結的員工、外部帳號、狀態與最後登入時間。密碼與密碼雜湊不在回應內，也無法從這裡取回。"
+        "讀登入帳號清單：登入名稱、角色、連結的員工、外部帳號、狀態與最後登入時間。密碼與密碼雜湊不在回應內，也無法取回。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -1513,7 +1561,7 @@ impl Operation for UpdateOidcSetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "設定外部登入：供應商、用戶端 ID 與密鑰、轉址網址、允許的網域，以及網域內首次登入要不要自動建立帳號。存檔後立即生效，不必重新啟動。用戶端密鑰留空表示沿用已存的那一組。"
+        "設定外部登入：供應商、用戶端 ID 與密鑰、轉址網址、允許的網域，以及網域內首次登入是否自動建立帳號。存檔後立即生效，不必重新啟動。用戶端密鑰留空表示沿用原設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateOidcSettingInput>()
@@ -1541,7 +1589,7 @@ impl Operation for UpdateOidcSetting {
                 && (!is_web_url(redirect) || !redirect.ends_with(OAUTH_CALLBACK_PATH))
             {
                 return Err(OpError::BadInput(format!(
-                    "轉址網址要是本系統的網址加上 {OAUTH_CALLBACK_PATH}"
+                    "轉址網址要填本系統的網址加上 {OAUTH_CALLBACK_PATH}"
                 )));
             }
         }
@@ -1564,7 +1612,7 @@ impl Operation for UpdateOidcSetting {
                 }
                 if next_domain.is_empty() {
                     return Err(OpError::BadInput(
-                        "要自動建立帳號請先填允許的網域，否則任何外部帳號都能在這裡開一個登入".into(),
+                        "要自動建立帳號請先填允許的網域，否則任何外部帳號都能建立登入".into(),
                     ));
                 }
             }
@@ -1687,7 +1735,7 @@ impl Operation for ListApprovalRules {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀費用報支的簽核流程：幾關、每一關是誰、超過多少錢才需要。金額門檻可隨時調整。"
+        "讀費用報支的簽核流程：關卡數、各關卡簽核角色與金額門檻。金額門檻可隨時調整。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()

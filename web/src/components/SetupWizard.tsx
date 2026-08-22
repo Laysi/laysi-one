@@ -424,7 +424,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                     </option>
                   ))}
                 </select>
-                <span className="field__hint">財務報表的預設期間跟著它走。</span>
+                <span className="field__hint">財務報表的預設期間依此設定。</span>
               </label>
 
               <div className="wizard-actions">
@@ -520,7 +520,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                 onChange={(e) => setDeptCode(e.target.value)}
               />
               <span className="field__hint">
-                報表與匯入檔用它對應部門，建立後不再更動；名稱之後可以改。
+                報表與匯入檔以此對應部門，建立後不再更動；名稱之後可修改。
               </span>
             </label>
             <label className="field">
@@ -552,7 +552,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         <div className="card wizard-panel">
           <h3 className="section-title">上下班時間</h3>
           <p className="section-note">
-            打卡要有這兩個時間才判定遲到、才計加班時數。留空就只記錄打卡時間。這一項只有系統管理員改得動，之後在「基礎設定」。
+            填了上下班時間才判定遲到、才計加班時數；留空只記錄打卡時間。這一項只有系統管理員能改，之後可在「基礎設定」變更。
           </p>
           <div className="field-grid">
             <label className="field">
@@ -572,7 +572,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                 placeholder="10"
                 onChange={(e) => setGraceMinutes(e.target.value)}
               />
-              <span className="field__hint">寬限原諒遲到，下班時間不跟著往後。</span>
+              <span className="field__hint">寬限僅免除遲到判定，下班時間不順延。</span>
             </label>
           </div>
           <div className="wizard-actions">
@@ -679,7 +679,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         <div className="card wizard-panel">
           <h3 className="section-title">負責人帳號</h3>
           <p className="section-note">
-            帳務、薪資與簽核門檻歸負責人，你現在這個帳號看不到，也不能把自己改成負責人。
+            帳務、薪資與簽核門檻屬負責人權限，目前帳號無法查看，也不能將自己變更為負責人。
           </p>
 
           {ownerSecret ? (
@@ -711,7 +711,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                     {ownerSecret.temporary_password}
                   </code>
                   <p className="form-warn">
-                    離開這一步之後無法再查看，請立即交付{ownerSecret.user.display_name}本人。
+                    離開本步驟後無法再查看，請立即交付{ownerSecret.user.display_name}本人。
                     首次登入會要求變更密碼。
                   </p>
                   <button
@@ -808,7 +808,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
           <h3 className="section-title">首次設定完成</h3>
           {ownerExists === false && (
             <p className="section-note">
-              還沒有負責人帳號。帳務、薪資與簽核門檻歸負責人，你現在這個帳號看不到；
+              還沒有負責人帳號。帳務、薪資與簽核門檻屬負責人權限，目前帳號無法查看；
               之後在「帳號管理」建立。
             </p>
           )}

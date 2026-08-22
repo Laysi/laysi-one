@@ -433,7 +433,7 @@ impl Operation for GetDepartmentPl {
                 "reconciled": gap.is_zero(),
                 "unallocated_cost": unallocated.map(|r| r.cost.to_string()),
                 "unallocated_note":
-                    "折舊等共用支出沒有指定部門。要讓它進到某個部門，請在傳票的分錄上填部門。",
+                    "折舊等共用支出未指定部門。要歸屬到部門，請在傳票的分錄上填寫部門。",
             }),
             summary,
         ))
@@ -563,7 +563,7 @@ impl Operation for CreateBudgetVersion {
         Risk::BossOnly
     }
     fn summary(&self) -> &'static str {
-        "建立一版年度預算。每個年度只能有一版是現行版，指定新的現行版會把原本那版改為非現行。金額另以 set_budget 逐科目設定。"
+        "建立一版年度預算。每個年度只能有一版是現行版，指定新的現行版時，原現行版改為非現行。金額另以 set_budget 逐科目設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateBudgetVersionInput>()

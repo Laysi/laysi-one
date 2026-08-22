@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use laysi_domain::{LineInput, Money, TrialBalanceRow};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -23,6 +23,11 @@ pub mod storage;
 pub use storage::{ObjectStore, StorageError};
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// Code of the `company_setting` row holding the business time zone. Defined
+/// here because the store writes it together with the CHECK constraints it has
+/// to stay consistent with.
+pub const TIMEZONE_SETTING: &str = "business_utc_offset";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -44,7 +49,7 @@ pub enum StoreError {
     #[error("傳票 {no} 目前是「{status}」，只有已過帳傳票可以沖銷")]
     NotReversible { no: String, status: String },
 
-    #[error("傳票 {no} 已經被 {reversed_by} 沖銷，不能重複沖銷")]
+    #[error("傳票 {no} 已由 {reversed_by} 沖銷，不能重複沖銷")]
     AlreadyReversed { no: String, reversed_by: String },
 
     #[error("科目 {code} 不存在，或不是可入帳科目")]
@@ -56,7 +61,7 @@ pub enum StoreError {
     #[error("找不到父科目 {code}")]
     ParentAccountNotFound { code: String },
 
-    #[error("科目 {code} 不能把自己或自己的子科目設成父科目")]
+    #[error("科目 {code} 不能拿自己或自己的子科目當父科目")]
     AccountParentCycle { code: String },
 
     #[error("科目 {code} 已有子科目，父科目必須維持不可入帳")]
@@ -77,40 +82,40 @@ pub enum StoreError {
     #[error("找不到資產 {code}")]
     FixedAssetNotFound { code: String },
 
-    #[error("{no} 由本人送出，要由另一個帳號簽核。公司還沒有其他可簽核的帳號時，請系統管理員在「帳號管理」建立。")]
+    #[error("{no} 由本人送出，要由另一個帳號簽核。目前沒有其他可簽核的帳號，請系統管理員在「帳號管理」建立。")]
     LeaveDecidedByRequester { no: String },
 
     /// The subsidiary ledger recognises posted vouchers only. While the
     /// source voucher is unposted the entry has not reached the ledger, and
     /// settling it now would put the subsidiary ledger ahead.
-    #[error("{no} 的來源傳票 {voucher} 還沒過帳，先過帳才能登記收付")]
+    #[error("{no} 的來源傳票 {voucher} 還沒過帳，過帳後才能登記收付")]
     SourceNotPosted { no: String, voucher: String },
 
-    #[error("{no} 已經沒有未結餘額了")]
+    #[error("{no} 已無未結餘額")]
     NothingLeft { no: String },
 
     #[error("{no} 只剩 {left} 元未結，登記 {amount} 元會超收")]
     AmountOutOfRange { no: String, left: Money, amount: Money },
 
-    #[error("一張都沒勾，沒有付款單可以送")]
+    #[error("未勾選任何帳單，無法送出付款單")]
     NothingSelected,
 
     #[error("找不到銀行交易 #{id}")]
     BankTxnNotFound { id: i32 },
 
-    #[error("銀行交易 #{id} 已經核銷過了，不能再核銷一次")]
+    #[error("銀行交易 #{id} 已核銷，不能重複核銷")]
     AlreadyMatched { id: i32 },
 
-    #[error("傳票 {no} 已經被銀行交易 #{txn_id} 認領了")]
+    #[error("傳票 {no} 已由銀行交易 #{txn_id} 核銷")]
     VoucherTaken { no: String, txn_id: i32 },
 
-    #[error("傳票 {no} 已作廢，不能拿來核銷")]
+    #[error("傳票 {no} 已作廢，不能用來核銷")]
     VoucherVoided { no: String },
 
-    #[error("{period} 的折舊已經提過了（傳票 {voucher}），同一期不能提兩次")]
+    #[error("{period} 的折舊已提列（傳票 {voucher}），同一期不能重複提列")]
     PeriodAlreadyDepreciated { period: String, voucher: String },
 
-    #[error("這一期沒有需要提列折舊的資產")]
+    #[error("本期沒有需要提列折舊的資產")]
     NothingToDepreciate,
 
     #[error("沒有「{code}」這項設定")]
@@ -122,14 +127,17 @@ pub enum StoreError {
     #[error("找不到簽核流程第 {step_no} 關")]
     ApprovalRuleNotFound { step_no: i32 },
 
-    #[error("簽核流程至少要留一關，不能刪除最後一關")]
+    #[error("簽核流程至少保留一關，不能刪除最後一關")]
     LastApprovalRule,
 
     #[error("沒有「{code}」這個角色")]
     RoleNotFound { code: String },
 
-    #[error("「{code}」不能在此處變更，要重跑期初")]
+    #[error("「{code}」不能在此處變更，要重新執行期初作業")]
     SettingNotEditable { code: String },
+
+    #[error("已經有 {punches} 筆打卡與 {corrections} 筆補登申請以 UTC{current} 記錄，時區不能再變更")]
+    TimezoneHasAttendance { punches: i64, corrections: i64, current: String },
 
     #[error("沒有這個角色或權限：{role} / {permission}")]
     UnknownRoleOrPermission { role: String, permission: String },
@@ -146,10 +154,10 @@ pub enum StoreError {
     #[error("找不到報支單 {no}")]
     ClaimNotFound { no: String },
 
-    #[error("報支單 {no} 目前是「{status}」，這一關已經走完了")]
+    #[error("報支單 {no} 目前是「{status}」，這一關已經完成")]
     ClaimNotPending { no: String, status: String },
 
-    #[error("報支單 {no} 的第 {step} 關已經簽過了")]
+    #[error("報支單 {no} 的第 {step} 關已簽核")]
     StepAlreadyDecided { no: String, step: i32 },
 
     #[error("沒有「{code}」這個部門")]
@@ -173,13 +181,13 @@ pub enum StoreError {
     #[error("匯入批次 {no} 目前是「{status}」，只有預覽中的批次可以確認匯入")]
     ImportNotPreview { no: String, status: String },
 
-    #[error("匯入批次 {no} 目前是「{status}」，只有已匯入的批次可以回滾")]
+    #[error("匯入批次 {no} 目前是「{status}」，只有已匯入的批次可以復原")]
     ImportNotCommitted { no: String, status: String },
 
-    #[error("匯入批次 {no} 有 {count} 張傳票已經過帳（{vouchers}），不能回滾。已過帳的更正只能開反向分錄。")]
+    #[error("匯入批次 {no} 有 {count} 張傳票已經過帳（{vouchers}），不能復原。已過帳的更正只能開反向分錄。")]
     ImportHasPostedVouchers { no: String, count: usize, vouchers: String },
 
-    #[error("「{name}」已經撤銷過了")]
+    #[error("「{name}」已撤銷")]
     TokenAlreadyRevoked { name: String },
 
     #[error("沒有這位員工：{no}")]
@@ -191,42 +199,42 @@ pub enum StoreError {
     #[error("「{kind}」的流程只有 {total} 關，沒有第 {step_no} 關")]
     NoSuchFlowStep { kind: String, step_no: i32, total: i64 },
 
-    #[error("異動單 {no} 的第 {step} 關已經完成過了")]
+    #[error("異動單 {no} 的第 {step} 關已完成")]
     MovementStepAlreadyDone { no: String, step: i32 },
 
     /// Completing a leaving flow closes the person's login, and no operation
     /// grants the administrator role, so the last one has to keep it.
-    #[error("{name} 的登入帳號「{username}」是唯一啟用中的系統管理員，離職結案會停用它。請先在「帳號管理」建立另一個系統管理員帳號。")]
+    #[error("{name} 的登入帳號「{username}」是唯一啟用中的系統管理員，離職結案將停用該帳號。請先在「帳號管理」建立另一個系統管理員帳號。")]
     LastAdministratorLeaving { name: String, username: String },
 
     #[error("找不到休假單 {no}")]
     LeaveNotFound { no: String },
 
-    #[error("{date} 已經打過{kind}卡（{at}），一天只記一次；如需更正請由人資補登")]
+    #[error("{date} 已有{kind}卡紀錄（{at}），一天只記一次；如需更正請由人資補登")]
     PunchAlreadyRecorded { date: String, kind: String, at: String },
 
-    #[error("{date} 還沒有上班卡，不能只打下班卡")]
+    #[error("{date} 還沒有上班卡，不能單獨打下班卡")]
     PunchOutWithoutIn { date: String },
 
     #[error("下班時間 {out} 不能早於上班時間 {in_at}")]
     PunchOutBeforeIn { out: String, in_at: String },
 
-    #[error("休假單 {no} 已經是「{status}」了，簽過的不能再簽一次")]
+    #[error("休假單 {no} 已為「{status}」，不能重複簽核")]
     LeaveAlreadyDecided { no: String, status: String },
 
-    #[error("找不到這張補登申請")]
+    #[error("找不到補登申請")]
     PunchCorrectionNotFound,
 
-    #[error("這張補登申請已經是「{status}」了，決定過的不能再決定一次")]
+    #[error("補登申請已為「{status}」，不能重複決定")]
     PunchCorrectionAlreadyDecided { status: String },
 
-    #[error("這張補登申請由本人送出，要由另一個帳號決定。公司還沒有其他可決定的帳號時，請系統管理員在「帳號管理」建立。")]
+    #[error("這張補登申請由本人送出，要由另一個帳號決定。目前沒有其他可決定的帳號，請系統管理員在「帳號管理」建立。")]
     PunchCorrectionDecidedByRequester,
 
-    #[error("{date} 的{kind}卡已經送出過一張補登申請，等它有結果再送下一張")]
+    #[error("{date} 的{kind}卡已經有一張補登申請等著決定，決定後才能再送一張")]
     PunchCorrectionAlreadyOpen { date: String, kind: String },
 
-    #[error("{period} 的薪資已經算過了（傳票 {voucher}），同一期不能發兩次")]
+    #[error("{period} 的薪資已計算（傳票 {voucher}），同一期不能重複計算")]
     PeriodAlreadyPaid { period: String, voucher: String },
 
     #[error("{period} 沒有任何一位在職員工需要計薪")]
@@ -2187,6 +2195,18 @@ impl Store {
         })
         .collect())
     }
+    /// One setting's raw value, `None` when the row does not exist.
+    ///
+    /// Used for settings read outside a request, where the whole table would
+    /// be waste: the business time zone at start-up.
+    pub async fn company_setting(&self, code: &str) -> Result<Option<String>> {
+        Ok(sqlx::query("SELECT value FROM company_setting WHERE code = $1")
+            .bind(code)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|r| r.get("value")))
+    }
+
     /// Month the fiscal year starts in, from `company_setting.fiscal_year`.
     ///
     /// Anything outside 1 to 12 — including the blank a fresh installation
@@ -2203,6 +2223,73 @@ impl Store {
             .and_then(|v| v.trim().parse::<u32>().ok())
             .filter(|m| (1..=12).contains(m))
             .unwrap_or(1))
+    }
+
+    /// Move the whole install to another business time zone.
+    ///
+    /// Three things have to agree afterwards: the setting, the two CHECK
+    /// constraints, and the `punched_on` values already stored. The first two
+    /// are rewritten here in one transaction; the third is why the operation
+    /// refuses once either table holds a row. `punched_on` is derived from
+    /// `punched_at` and then stored, so a different offset silently reassigns
+    /// late-evening punches to another day and moves them to another key.
+    ///
+    /// `offset` is interpolated into DDL, which a bind parameter cannot carry.
+    /// It is safe only because callers pass a value that round-tripped through
+    /// `laysi_domain::parse_business_offset`, which accepts nothing but six
+    /// characters of `±HH:MM`; this re-parses it rather than trusting that.
+    pub async fn set_business_timezone(&self, offset: &str, actor: &str) -> Result<String> {
+        if laysi_domain::parse_business_offset(offset).is_none() {
+            return Err(StoreError::SettingNotFound { code: offset.to_string() });
+        }
+        let mut tx = self.pool.begin().await?;
+
+        let punches: i64 = sqlx::query("SELECT count(*) AS n FROM attendance_punch")
+            .fetch_one(&mut *tx)
+            .await?
+            .get("n");
+        let corrections: i64 = sqlx::query("SELECT count(*) AS n FROM punch_correction")
+            .fetch_one(&mut *tx)
+            .await?
+            .get("n");
+        if punches > 0 || corrections > 0 {
+            let current: String =
+                sqlx::query("SELECT value FROM company_setting WHERE code = $1")
+                    .bind(TIMEZONE_SETTING)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(|r| r.get("value"))
+                    .unwrap_or_else(|| "+08:00".to_string());
+            return Err(StoreError::TimezoneHasAttendance { punches, corrections, current });
+        }
+
+        for (table, constraint) in [
+            ("attendance_punch", "attendance_punch_day_matches_time"),
+            ("punch_correction", "punch_correction_day_matches_time"),
+        ] {
+            sqlx::query(&format!(
+                "ALTER TABLE {table}
+                   DROP CONSTRAINT {constraint},
+                   ADD CONSTRAINT {constraint}
+                       CHECK (punched_on = (punched_at AT TIME ZONE INTERVAL '{offset}')::date)"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            "UPDATE company_setting
+                SET value = $2, updated_at = now(), updated_by = $3
+              WHERE code = $1",
+        )
+        .bind(TIMEZONE_SETTING)
+        .bind(offset)
+        .bind(actor)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(offset.to_string())
     }
 
     /// Update one setting. Non-editable entries are refused here: the currency
@@ -5477,6 +5564,7 @@ impl Store {
                     source: "manual",
                     note: n.reason,
                     actor: n.actor,
+                    offset: n.offset,
                 },
                 true,
             )
@@ -5530,13 +5618,10 @@ impl Store {
     /// can never be marked approved without the punch it promised.
     pub async fn decide_punch_correction(
         &self,
-        id: i32,
-        approve: bool,
-        actor: &str,
-        actor_role: &str,
-        actor_employee_id: Option<i32>,
-        note: &str,
+        d: DecidePunchCorrection<'_>,
     ) -> Result<PunchCorrection> {
+        let DecidePunchCorrection { id, approve, actor, actor_role, actor_employee_id, note, offset } =
+            d;
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
@@ -5572,6 +5657,7 @@ impl Store {
                     source: "manual",
                     note: &reason,
                     actor,
+                    offset,
                 },
                 true,
             )
@@ -7309,6 +7395,9 @@ pub struct NewPunch<'a> {
     pub source: &'a str,
     pub note: &'a str,
     pub actor: &'a str,
+    /// Business time zone, carried in so the clash messages ("已於 09:02 打過
+    /// 上班卡") read the same wall-clock time the caller is looking at.
+    pub offset: FixedOffset,
 }
 
 /// One employee's request to have a punch entered or corrected. It is not a
@@ -7337,6 +7426,19 @@ pub struct PunchCorrection {
 /// A correction request to be written. `employee_id` and `actor` are
 /// resolved from the session by the self-service operation and never appear
 /// as API input.
+/// One decision on a correction request. A struct rather than seven
+/// parameters: four of them are strings and two are optional, which is the
+/// shape where an argument silently ends up in the wrong slot.
+pub struct DecidePunchCorrection<'a> {
+    pub id: i32,
+    pub approve: bool,
+    pub actor: &'a str,
+    pub actor_role: &'a str,
+    pub actor_employee_id: Option<i32>,
+    pub note: &'a str,
+    pub offset: FixedOffset,
+}
+
 pub struct NewPunchCorrection<'a> {
     pub employee_id: i32,
     pub punched_on: NaiveDate,
@@ -7344,6 +7446,9 @@ pub struct NewPunchCorrection<'a> {
     pub punched_at: DateTime<Utc>,
     pub reason: &'a str,
     pub actor: &'a str,
+    /// Same reason as on `NewPunch`: approving one writes a punch, and the
+    /// message it may fail with is a wall-clock time.
+    pub offset: FixedOffset,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -8051,7 +8156,8 @@ replace: bool,
             .find(|row| row.get::<String, _>("kind") == kind)
             .map(|row| row.get("punched_at"))
     };
-    let local = |at: DateTime<Utc>| laysi_domain::business_time(at).format("%H:%M:%S").to_string();
+    let local =
+        |at: DateTime<Utc>| laysi_domain::business_time(at, p.offset).format("%H:%M:%S").to_string();
 
     if !replace {
         if let Some(at) = at_of(p.kind) {

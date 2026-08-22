@@ -409,7 +409,7 @@ impl Operation for CreateFixedAsset {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "登記固定資產並產生取得傳票（借資產科目與 1284 進項稅額／貸付款科目）。成本填未稅金額，營業稅依取得日適用的稅率拆出，免稅填 0；賒購則改在應付帳款開單、以 1601 為借方科目，再把那張傳票號填進來。耐用年數查自耐用年數表，不逐筆設定。"
+        "登記固定資產並產生取得傳票（借資產科目與 1284 進項稅額／貸付款科目）。成本填未稅金額，營業稅依取得日適用的稅率拆出，免稅填 0；賒購則改在應付帳款開單、以 1601 為借方科目，再填入該傳票號。耐用年數查自耐用年數表，不逐筆設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateFixedAssetInput>()
@@ -449,7 +449,7 @@ impl Operation for CreateFixedAsset {
         match (paid_from, origin) {
             (None, None) => {
                 return Err(OpError::BadInput(
-                    "請填付款科目；賒購請先在應付帳款開單，再填那張帳單的傳票號".into(),
+                    "請填付款科目；賒購請先在應付帳款開單，再填入該帳單的傳票號".into(),
                 ))
             }
             (Some(_), Some(_)) => {

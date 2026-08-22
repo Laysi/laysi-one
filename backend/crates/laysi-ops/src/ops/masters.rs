@@ -530,7 +530,7 @@ impl Operation for CreateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立員工主檔。員工編號留空就自動配號；身分證字號會驗檢查碼，勞保申報與扣繳憑單都要用到；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號由系統管理員另行建立。"
+        "建立員工主檔。員工編號留空會自動配號；身分證字號會驗檢查碼，勞保申報與扣繳憑單都要用到；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號由系統管理員另行建立。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -574,7 +574,7 @@ impl Operation for UpdateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "更新員工主檔。本薪與三項投保級距不帶就不動、帶 0 表示尚未設定；身分證字號會驗檢查碼；狀態為待離職或已離職時必須填離職日。"
+        "更新員工主檔。本薪與三項投保級距沒帶就不變更，帶 0 表示尚未設定；身分證字號會驗檢查碼；狀態為待離職或已離職時必須填離職日。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -624,7 +624,7 @@ fn validate_bank_account(input: &CreateBankAccountInput) -> Result<(), OpError> 
     }
     if input.gl_code.trim().is_empty() {
         return Err(OpError::BadInput(
-            "綁定的總帳科目必填：銀行收付款與核銷必須知道要寫進哪個科目".into(),
+            "綁定的總帳科目必填：銀行收付款與核銷要指定入帳科目".into(),
         ));
     }
     Ok(())
@@ -764,7 +764,7 @@ fn validate_approval_rule(input: &SetApprovalRuleInput) -> Result<(), OpError> {
         return Err(OpError::BadInput("金額門檻不能是負數；不填代表一律要經過這一關".into()));
     }
     if !input.delete && input.label.as_deref().is_none_or(|label| label.trim().is_empty()) {
-        return Err(OpError::BadInput("這一關要有名稱，簽核流程上才認得出是哪一關".into()));
+        return Err(OpError::BadInput("關卡要有名稱，簽核流程上才分得出是哪一關".into()));
     }
     Ok(())
 }
@@ -1048,7 +1048,7 @@ mod tests {
         assert!(SetApprovalRule.summary().contains("至少保留一關"));
         assert_eq!(
             laysi_store::StoreError::LastApprovalRule.to_string(),
-            "簽核流程至少要留一關，不能刪除最後一關"
+            "簽核流程至少保留一關，不能刪除最後一關"
         );
     }
 

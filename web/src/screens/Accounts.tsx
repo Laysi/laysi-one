@@ -271,7 +271,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
       );
       onToast(
         `${d.user.username} 由${d.user.previous_role_name}改為${d.user.role_name}，` +
-          `登出 ${d.revoked_sessions} 個工作階段、撤銷 ${d.revoked_tokens} 把 Token`,
+          `登出 ${d.revoked_sessions} 個工作階段、撤銷 ${d.revoked_tokens} 組 Token`,
       );
       close();
       load();
@@ -359,7 +359,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">帳號管理</h1>
-      <p className="page-lede">變更角色會讓該帳號登出，本人重新登入後才會拿到新的權限。</p>
+      <p className="page-lede">變更角色會讓該帳號登出，本人重新登入後才有新的權限。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!list && !error && <p className="state-note">讀取中…</p>}
@@ -631,12 +631,12 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                     )}
                     <span className="field__hint">
                       {(matrix?.roles ?? []).find((r) => r.code === form.role_code)?.note ??
-                        '選一個角色，下面會說明它能做什麼。'}
+                        '選擇角色後，下方顯示該角色的權限說明。'}
                       {drawer === 'create' && (
                         <>
                           {' '}
                           <button className="link-cell" onClick={() => onGo('roles')}>
-                            看完整權限矩陣
+                            看完整權限對照表
                           </button>
                         </>
                       )}

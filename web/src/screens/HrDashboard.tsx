@@ -88,7 +88,7 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
           <p className={`recon${data.payroll_reconciled ? '' : ' recon--off'}`}>
             {data.payroll_reconciled ? (
               <>
-                人資這邊已過帳的應發合計，跟總帳 <span className="num">6111 薪資支出</span>{' '}
+                人資已過帳的應發合計與總帳 <span className="num">6111 薪資支出</span>{' '}
                 的餘額相符，兩者分開計算。
               </>
             ) : (

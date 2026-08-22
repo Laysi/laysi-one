@@ -83,7 +83,7 @@ export function TaxAmountFields({
           value={value.total}
           onChange={(e) => change('total', e.target.value)}
         />
-        {missing && <span className="field__hint field__hint--missing">還沒填</span>}
+        {missing && <span className="field__hint field__hint--missing">未填</span>}
       </label>
       <label className="field">
         未稅金額

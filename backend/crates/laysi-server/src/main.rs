@@ -218,6 +218,10 @@ async fn main() -> anyhow::Result<()> {
     // 2. Database
     let store = Store::connect(&database_url, 8).await?;
     store.migrate().await?;
+    // Before anything can date a document. `today()` reads it, and the
+    // constant it falls back to is the one the CHECK constraints hold.
+    let offset = laysi_ops::load_business_offset(&store).await;
+    tracing::info!(offset = %laysi_domain::format_business_offset(offset), "記帳時區");
     tracing::info!(version = ?store.migration_version().await?, "migrations 完成");
 
 
@@ -342,7 +346,7 @@ pub fn today() -> chrono::NaiveDate {
     std::env::var("LAYSI_TODAY")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(laysi_domain::business_today)
+        .unwrap_or_else(|| laysi_domain::business_today(laysi_ops::business_offset()))
 }
 
 pub fn ctx_from(
@@ -361,6 +365,7 @@ pub fn ctx_from(
         prompt,
         channel,
         today: today(),
+        offset: laysi_ops::business_offset(),
     }
 }
 
@@ -458,6 +463,9 @@ async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
         // with, so first-run setup has not been completed.
         "setup_required": company_setup_required(company),
         "period": today().format("%Y / %m").to_string(),
+        // The screen turns instants into wall-clock times with this, so it
+        // must be the same one the server dated `period` with.
+        "utc_offset": laysi_domain::format_business_offset(laysi_ops::business_offset()),
         "period_state": "未結帳",
         "actor": identity.actor,
         "actor_role": identity.actor_role,

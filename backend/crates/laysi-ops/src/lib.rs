@@ -15,7 +15,7 @@
 //! attempt is the entry most worth keeping.
 
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{FixedOffset, NaiveDate};
 use laysi_domain::Money;
 use laysi_store::Store;
 use schemars::JsonSchema;
@@ -37,6 +37,49 @@ pub const ROLE_ADMIN: &str = "admin";
 /// let an external identity resolve onto it by `users_by_email`, which is the
 /// account that must stay reachable by password alone.
 pub const ADMIN_USERNAME: &str = "admin";
+
+/// Code of the `company_setting` row holding the business time zone.
+pub use laysi_store::TIMEZONE_SETTING;
+
+/// Business time zone of this install, in minutes east of UTC.
+///
+/// Single-tenant and effectively fixed once attendance exists, so it is read
+/// once at start-up rather than on every request. `set_company_timezone`
+/// writes the setting and then updates this, so REST and MCP both follow the
+/// change without a restart. The initial value is the one the CHECK
+/// constraints ship with, which is also what an install that predates the
+/// setting is on.
+static BUSINESS_OFFSET_MINUTES: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(laysi_domain::BUSINESS_UTC_OFFSET_HOURS * 60);
+
+/// The business time zone as a chrono offset.
+pub fn business_offset() -> FixedOffset {
+    let minutes = BUSINESS_OFFSET_MINUTES.load(std::sync::atomic::Ordering::Relaxed);
+    FixedOffset::east_opt(minutes * 60).unwrap_or_else(laysi_domain::default_business_offset)
+}
+
+/// Publish a newly resolved business time zone to the whole process.
+pub fn set_business_offset(offset: FixedOffset) {
+    BUSINESS_OFFSET_MINUTES.store(
+        offset.local_minus_utc() / 60,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Read the business time zone out of the settings table and publish it.
+///
+/// Called once at start-up. An unreadable or malformed value leaves the
+/// default in place rather than failing the boot: the offset the CHECK
+/// constraints hold is always a usable answer.
+pub async fn load_business_offset(store: &Store) -> FixedOffset {
+    if let Ok(Some(v)) = store.company_setting(TIMEZONE_SETTING).await {
+        if let Some(offset) = laysi_domain::parse_business_offset(&v) {
+            set_business_offset(offset);
+            return offset;
+        }
+    }
+    business_offset()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,6 +180,10 @@ pub struct OpCtx {
     pub prompt: Option<String>,
     pub channel: Channel,
     pub today: NaiveDate,
+    /// Business time zone in force for this call. Carried beside `today`
+    /// because it is what `today` was derived from: an operation that turns
+    /// an instant into a wall-clock time has to use the same one.
+    pub offset: FixedOffset,
 }
 
 impl OpCtx {
@@ -783,6 +830,7 @@ mod tests {
             include_str!("../../../migrations/0045_employees_ask_to_fix_their_own_punches.sql"),
             include_str!("../../../migrations/0046_external_identity_can_be_unlinked.sql"),
             include_str!("../../../migrations/0047_external_login_is_configured_on_screen.sql"),
+            include_str!("../../../migrations/0052_the_business_time_zone_is_a_setting.sql"),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {
@@ -905,6 +953,7 @@ mod tests {
                 "issue_api_token",
                 "list_user_accounts",
                 "reset_user_password",
+                "set_company_timezone",
                 "set_role_permission",
                 "unlink_user_identity",
                 "update_company_setting",

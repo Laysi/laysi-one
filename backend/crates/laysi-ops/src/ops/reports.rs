@@ -241,7 +241,7 @@ impl Operation for GetBalanceSheet {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀資產負債表：某一天的資產、負債與權益，全部由已過帳分錄現算。本期損益滾進權益，並回報「資產＝負債＋權益」的差額。"
+        "讀資產負債表：某一天的資產、負債與權益，全部由已過帳分錄現算。本期損益結轉權益，並回報「資產＝負債＋權益」的差額。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<BalanceSheetInput>()

@@ -78,7 +78,7 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
         <h1 className="page-title">我的請款</h1>
         <p className="state-note state-note--error">{error}</p>
         <p className="hint">
-          你的帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
+          本帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
         </p>
       </div>
     );
@@ -98,7 +98,7 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
         <span className="spacer" />
         <div className="pay-bar__note">
           {data.employee.name}（{data.employee.emp_no}）累計送出 {data.claims.length} 張，
-          其中 {data.waiting_count} 張流程進行中。完成最後一關後才會開立傳票，狀態為待過帳。
+          其中 {data.waiting_count} 張流程進行中。完成最後一關才會開立傳票，狀態為待過帳。
         </div>
       </div>
 

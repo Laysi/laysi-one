@@ -61,7 +61,7 @@ impl Operation for ListPayables {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀應付明細：要付給誰、付什麼、什麼時候到期，並與 2101 應付帳款的總帳餘額對帳"
+        "讀應付明細：付款對象、內容與到期日，並與 2101 應付帳款的總帳餘額對帳"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListPayablesInput>()

@@ -23,7 +23,7 @@ function closedNote(closed: ClosedAccess | undefined): string {
   if (!closed) return '';
   const parts: string[] = [];
   if (closed.logins.length > 0) parts.push(`停用登入帳號 ${closed.logins.join('、')}`);
-  if (closed.tokens > 0) parts.push(`撤銷 ${closed.tokens} 把 MCP Token`);
+  if (closed.tokens > 0) parts.push(`撤銷 ${closed.tokens} 組 MCP Token`);
   return parts.length > 0 ? `，並${parts.join('、')}` : '';
 }
 
@@ -211,7 +211,7 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
             </div>
 
             <p className="hint">
-              開立離職單時，該員工在名冊與薪資作業即標示為「離職中」並記錄預定離職日；
+              開立離職單時，該員工在名冊與薪資作業就標示為「離職中」並記錄預定離職日；
               完成最後一關後變成「已離職」，登入帳號同時停用、MCP Token 一併撤銷，
               要再開由系統管理員在「帳號管理」啟用。
             </p>

@@ -149,13 +149,13 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 {summary.reconciled ? (
                   <>
                     人資已過帳的應發合計{' '}
-                    <span className="num">{money(summary.hr_posted_total)}</span> 就是總帳{' '}
+                    <span className="num">{money(summary.hr_posted_total)}</span> 等於總帳{' '}
                     <span className="num">6111 薪資支出</span> 的餘額，
                     兩者分開計算，結果相符。
                   </>
                 ) : (
                   <>
-                    對不上：人資這邊已過帳的應發合計{' '}
+                    不相符：人資已過帳的應發合計{' '}
                     <span className="num">{money(summary.hr_posted_total)}</span>，總帳{' '}
                     <span className="num">6111</span> 是{' '}
                     <span className="num">{money(summary.gl_balance)}</span>，差{' '}
@@ -323,7 +323,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
               )}
               <p className="form-note">
                 保費依<strong>期末日</strong>、扣繳依<strong>給付日</strong>認定。
-                兩者通常同月，跨月發薪時才會分開。
+                兩者通常同月，跨月發薪時才分開。
               </p>
               <p className="form-note">
                 本操作一次決定全公司當月薪資並產生傳票，同一期僅能計算一次，

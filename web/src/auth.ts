@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { setUnauthorizedHandler, type ApiError } from './api/client';
+import { noteServerTime, setUnauthorizedHandler, type ApiError } from './api/client';
 
 export interface SessionUser {
   id: number;
@@ -115,6 +115,7 @@ async function fetchMe(): Promise<{
   setup: SetupState;
 }> {
   const res = await fetch('/v1/auth/me', { headers: JSON_HEADERS });
+  noteServerTime(res);
   const envelope = await readEnvelope(res);
   const oauth: OauthState = { ...OAUTH_OFF, ...envelope.oauth };
   const setup = envelope.setup ?? CLOSED_SETUP;

@@ -294,7 +294,7 @@ impl Operation for GetPayrollSummary {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀某一期的薪資彙總：應發、代扣、實發、公司負擔，以及它跟總帳 6111 薪資支出對不對得起來。不含任何個人金額。"
+        "讀某一期的薪資彙總：應發、代扣、實發、公司負擔，並與總帳 6111 薪資支出對帳。不含任何個人金額。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<PayrollPeriodInput>()
@@ -388,7 +388,7 @@ impl Operation for ListPayslips {
         Risk::BossOnly
     }
     fn summary(&self) -> &'static str {
-        "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司替他負擔的勞健保與勞退。限負責人。會用同一份規則重算一次跟存下來的數字比對。"
+        "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司負擔的勞健保與勞退。限負責人。以同一份規則重算一次，再與存下來的數字比對。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<PayrollPeriodInput>()
@@ -514,7 +514,7 @@ impl Operation for RunPayroll {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。同一期只能算一次。"
+        "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。同一期只能計算一次。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RunPayrollInput>()
@@ -544,7 +544,7 @@ impl Operation for RunPayroll {
                 skipped.push(json!({
                     "emp_no": e.emp_no,
                     "name": e.name,
-                    "reason": if e.hired_on > to { "這一期還沒到職" } else { "這一期已經離職" },
+                    "reason": if e.hired_on > to { "本期尚未到職" } else { "本期已離職" },
                 }));
                 continue;
             }
