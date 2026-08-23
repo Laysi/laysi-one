@@ -514,7 +514,7 @@ impl Operation for RunPayroll {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。同一期只能計算一次。"
+        "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。已計薪的人不會再算一次，同一期可以為後來到職或漏算的人補算，各自產生一張傳票。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RunPayrollInput>()
@@ -525,11 +525,11 @@ impl Operation for RunPayroll {
         let (period, from, to) = resolve_period(i.period, ctx.today)?;
         let pay_on = i.pay_on.unwrap_or(ctx.today);
 
-        if ctx.store.payroll_run(&period).await?.is_some() {
-            return Err(OpError::BadInput(format!(
-                "{period} 的薪資已經算過了，同一期不能發兩次。要更正請開反向分錄。"
-            )));
-        }
+        // A period can be paid more than once (0054). What may not happen is
+        // paying one person twice, so the people already holding a payslip for
+        // this period are the ones this run leaves alone.
+        let already_paid = ctx.store.payroll_paid_employee_ids(&period).await?;
+        let supplementary = !already_paid.is_empty();
 
         let staff = ctx.store.employees(true, None).await?;
         let attendance = ctx.store.attendance(&period).await?;
@@ -540,6 +540,14 @@ impl Operation for RunPayroll {
         let mut versions: Option<(String, String, String, String)> = None;
 
         for e in &staff {
+            if already_paid.contains(&e.id) {
+                skipped.push(json!({
+                    "emp_no": e.emp_no,
+                    "name": e.name,
+                    "reason": "本期已計薪",
+                }));
+                continue;
+            }
             if !in_service(e, from, to) {
                 skipped.push(json!({
                     "emp_no": e.emp_no,
@@ -578,7 +586,11 @@ impl Operation for RunPayroll {
         }
 
         let (labor_v, health_v, pension_v, wht_v) = versions.ok_or_else(|| {
-            OpError::BadInput(format!("{period} 無在職員工需計薪"))
+            OpError::BadInput(if supplementary {
+                format!("{period} 在職員工都已計薪，沒有需要補算的人。")
+            } else {
+                format!("{period} 無在職員工需計薪")
+            })
         })?;
 
         let bank_account_id = match i.bank_account_id {

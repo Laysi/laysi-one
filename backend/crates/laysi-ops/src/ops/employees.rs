@@ -14,13 +14,16 @@
 //! require lives in `hr_flow_step`. This module only compares completed steps
 //! against that table to determine where a movement is stuck.
 //!
-//! Completing a leaving flow marks the employee `left` and closes their
-//! access in the same transaction. The two are one event: the roster says the
-//! company has stopped employing this person, and nothing checks the
-//! effective date afterwards, so a login left open is open for good. The last
-//! remaining administrator is the exception, because no operation grants a
-//! role and the installation would have nobody able to open the accounts
-//! screen.
+//! Closing a movement writes its change to the employee record in the same
+//! transaction. Completing a leaving flow marks the employee `left` and closes
+//! their access: the two are one event, because the roster says the company
+//! has stopped employing this person, and nothing checks the effective date
+//! afterwards, so a login left open is open for good. The last remaining
+//! administrator is the exception, because no operation grants a role and the
+//! installation would have nobody able to open the accounts screen. A pay
+//! change writes `base_salary` and a transfer writes `dept_id`, both read from
+//! `to_value`, which is why that field is checked when the movement is raised
+//! rather than only at the last step.
 //!
 //! Each of the four HR-to-finance links on the dashboard carries an
 //! `implemented` flag: the ones that are wired report their evidence (voucher
@@ -302,6 +305,10 @@ impl Operation for GetHrDashboard {
                 "flow_kinds": flow.iter().map(|s| s.kind.clone()).collect::<Vec<_>>(),
                 "payroll_reconciled": gap.is_zero(),
                 "payroll_not_yet_posted": in_transit.to_string(),
+                // Both sides of the reconciliation, so the screen can print the
+                // numbers rather than only claiming they agree.
+                "payroll_posted_total": posted.to_string(),
+                "payroll_gl_total": gl.to_string(),
             }),
             summary,
         ))
@@ -459,6 +466,7 @@ impl Operation for ListEmployeeMovements {
         let i: crate::LimitInput = parse(input)?;
         let flow = ctx.store.hr_flow_steps().await?;
         let movements = ctx.store.employee_movements(i.limit.unwrap_or(50)).await?;
+        let departments = ctx.store.departments().await?;
 
         let mut kinds: Vec<Value> = Vec::new();
         for kind in ["hire", "leave", "salary_change", "transfer"] {
@@ -486,6 +494,12 @@ impl Operation for ListEmployeeMovements {
                 "movements": movements.iter().map(|m| movement_json(m, &flow)).collect::<Vec<_>>(),
                 "flows": kinds,
                 "open_count": open,
+                // A transfer names its destination department, so the screen
+                // can offer the list instead of asking for a code from memory.
+                "departments": departments.iter()
+                    .filter(|d| d.active)
+                    .map(|d| json!({ "code": d.code, "label": d.label }))
+                    .collect::<Vec<_>>(),
             }),
             summary,
         ))
@@ -506,6 +520,9 @@ pub struct RecordMovementInput {
     /// Pay and department changes must show what changed from what.
     #[serde(default)]
     pub from_value: Option<String>,
+    /// The new monthly base salary for `salary_change`, the destination
+    /// department for `transfer`. Closing the movement writes it to the
+    /// employee record, so it is checked here.
     #[serde(default)]
     pub to_value: Option<String>,
     #[serde(default)]
@@ -523,7 +540,7 @@ impl Operation for RecordEmployeeMovement {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "開立到職／離職／調薪／調部門的異動單。開立離職單時，員工就標示為「離職中」並記錄預定離職日，名冊與薪資作業立即反映，不等最後一關完成。"
+        "開立到職／離職／調薪／調部門的異動單。調薪填調整後的月底薪，調部門填調任部門，最後一關完成時寫入員工主檔。開立離職單時，員工就標示為「離職中」並記錄預定離職日，名冊與薪資作業立即反映，不等最後一關完成。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RecordMovementInput>()
@@ -554,14 +571,38 @@ impl Operation for RecordEmployeeMovement {
             )));
         }
 
+        // The last step of a pay change writes `base_salary` and the last step
+        // of a transfer writes `dept_id`. Reading `to_value` here means an
+        // unusable target is refused now, not after four approvals.
+        let to_value = i.to_value.as_deref().unwrap_or("").trim();
+        match i.kind.as_str() {
+            "salary_change" if laysi_store::movement_salary_target(to_value).is_none() => {
+                return Err(OpError::BadInput(
+                    "調整後月底薪要填金額，例如 45000。".to_string(),
+                ));
+            }
+            "transfer" => {
+                let departments = ctx.store.departments().await?;
+                if laysi_store::match_department(&departments, to_value).is_none() {
+                    let hint = laysi_store::department_hint(&departments);
+                    return Err(OpError::BadInput(if to_value.is_empty() {
+                        format!("調任部門要選一個部門。{hint}")
+                    } else {
+                        format!("調任部門「{to_value}」不是現有部門。{hint}")
+                    }));
+                }
+            }
+            _ => {}
+        }
+
         let m = ctx
             .store
             .record_employee_movement(laysi_store::RecordMovement {
                 emp_no: &i.emp_no,
                 kind: &i.kind,
                 effective_on: i.effective_on.unwrap_or(ctx.today),
-                from_value: i.from_value.as_deref().unwrap_or(""),
-                to_value: i.to_value.as_deref().unwrap_or(""),
+                from_value: i.from_value.as_deref().unwrap_or("").trim(),
+                to_value,
                 reason: i.reason.as_deref().unwrap_or(""),
                 actor: &ctx.actor,
             })
@@ -603,7 +644,7 @@ impl Operation for CompleteMovementStep {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "將異動單的某一關標記為完成。全部關卡完成時異動單自動結案。離職流程完成最後一關後，員工會標示為「已離職」，登入帳號一併停用、登入工作階段結束、MCP Token 全數撤銷，不等生效日；要重新啟用帳號，由系統管理員在「帳號管理」處理。"
+        "將異動單的某一關標記為完成。全部關卡完成時異動單自動結案，並把異動寫入員工主檔：調薪寫入本薪，下一期薪資作業採用新的數字；調部門寫入部門歸屬；離職標示為「已離職」，登入帳號一併停用、登入工作階段結束、MCP Token 全數撤銷，不等生效日。要重新啟用帳號，由系統管理員在「帳號管理」處理。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CompleteMovementStepInput>()
@@ -645,6 +686,16 @@ impl Operation for CompleteMovementStep {
             .unwrap_or_default();
         let total = flow.iter().filter(|s| s.kind == updated.kind).count();
         let mut closed_note = String::new();
+        if let Some(pay) = &done.applied.base_salary {
+            closed_note.push_str(&format!(" · 本薪 {} → {}", money(pay.from), money(pay.to)));
+        }
+        if let Some(dept) = &done.applied.department {
+            closed_note.push_str(&format!(
+                " · 部門 {} → {}",
+                dept.from.as_deref().unwrap_or("未指定"),
+                dept.to
+            ));
+        }
         if !done.closed.logins.is_empty() {
             closed_note.push_str(&format!(" · 停用登入帳號 {}", done.closed.logins.join("、")));
         }
@@ -665,6 +716,18 @@ impl Operation for CompleteMovementStep {
                 "step_taken": step_no,
                 "finished": updated.status == "done",
                 "closed_access": done.closed,
+                // What the close actually wrote to the employee record, so the
+                // screen can say it instead of only "已結案".
+                "applied": {
+                    "base_salary": done.applied.base_salary.map(|p| json!({
+                        "from": p.from.to_string(),
+                        "to": p.to.to_string(),
+                    })),
+                    "department": done.applied.department.map(|d| json!({
+                        "from": d.from,
+                        "to": d.to,
+                    })),
+                },
             }),
             summary,
         ))

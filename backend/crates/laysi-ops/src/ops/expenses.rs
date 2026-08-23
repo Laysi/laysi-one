@@ -16,6 +16,12 @@
 //! receipts, payments and depreciation. The expense line carries the
 //! claimant's department so departmental P&L sees the cost.
 //!
+//! Steps can be deleted while a claim is in flight, which leaves a claim with
+//! every rule it must pass already recorded and no step to approve. The
+//! voucher is then the only thing outstanding, so approving such a claim goes
+//! straight to it rather than reporting that there is nothing left to do:
+//! there is, and no other operation creates it.
+//!
 //! A claim repaid at month end credits 2101 and therefore also becomes an
 //! `ap_bill` in that same transaction. Payables reconciles its detail against
 //! the 2101 balance, so a credit with no bill puts the two permanently apart,
@@ -86,8 +92,17 @@ fn next_step<'a>(claim: &ExpenseClaim, steps: &[&'a ApprovalRule]) -> Option<&'a
 ///
 /// `role_label` is the role as the screens name it; the role code never
 /// reaches the message.
+///
+/// `step` is `None` once every rule the claim must pass is recorded and only
+/// the voucher is left. There is then no role to compare against: the step
+/// that named one may have been deleted while the claim was in flight, and
+/// demanding some other role here would enforce a rule that appears in no row
+/// of `approval_rule` — which is how the claim got stuck in the first place.
+/// Who may call this operation at all is still decided by the role matrix in
+/// `dispatch`, and the separation-of-duties rule below does not come from the
+/// table, so it holds either way.
 fn may_decide(
-    step: &ApprovalRule,
+    step: Option<&ApprovalRule>,
     claim: &ExpenseClaim,
     actor: &str,
     role: &str,
@@ -99,6 +114,9 @@ fn may_decide(
             claim.claim_no, claim.claimant
         )));
     }
+    let Some(step) = step else {
+        return Ok(());
+    };
     let wanted = step.role_code.as_deref().unwrap_or("");
     if role == wanted || role == crate::ROLE_BOSS {
         return Ok(());
@@ -110,6 +128,16 @@ fn may_decide(
         step.role_name.as_deref().unwrap_or(wanted),
         role_label
     )))
+}
+
+/// Which step the approval record is written on when no step is pending.
+///
+/// One past the highest this claim has signed. 0053 dropped the foreign key
+/// into `approval_rule`, so the number is an ordinal and need not name a rule
+/// that still exists — which is the point, because the case this covers is a
+/// flow whose remaining steps were deleted while the claim was in it.
+fn finalise_step_no(claim: &ExpenseClaim) -> i32 {
+    claim.steps.iter().map(|s| s.step_no).max().unwrap_or(0) + 1
 }
 
 /// Plain-language description of where a claim is waiting.
@@ -240,12 +268,17 @@ impl Operation for ListExpenseClaims {
                 let mut row = claim_json(c, &rules);
                 let steps = required_steps(&rules, c.amount);
                 let next = next_step(c, &steps);
-                let blocked = next.and_then(|step| {
-                    may_decide(step, c, &ctx.actor, &ctx.actor_role, &role_label)
-                        .err()
-                        .map(|e| e.to_string())
-                });
-                row["can_approve"] = json!(next.is_some() && blocked.is_none());
+                // A claim still in flight always has something to do, even
+                // with no step left: the voucher. Settled claims have none.
+                let in_flight = c.status == "submitted" || c.status == "approving";
+                let blocked = in_flight
+                    .then(|| {
+                        may_decide(next, c, &ctx.actor, &ctx.actor_role, &role_label)
+                            .err()
+                            .map(|e| e.to_string())
+                    })
+                    .flatten();
+                row["can_approve"] = json!(in_flight && blocked.is_none());
                 row["approve_blocked_reason"] = json!(blocked);
                 row
             })
@@ -440,25 +473,42 @@ impl Operation for ApproveExpenseClaim {
         let rules = ctx.store.approval_rules().await?;
         let steps = required_steps(&rules, claim.amount);
 
-        let step = next_step(&claim, &steps).ok_or_else(|| {
-            OpError::BadInput(format!("{} 已完成全部簽核", claim.claim_no))
-        })?;
+        match claim.status.as_str() {
+            "approved" => {
+                return Err(OpError::BadInput(format!(
+                    "{} 已入帳，如需更正請開立反向分錄",
+                    claim.claim_no
+                )))
+            }
+            "rejected" => {
+                return Err(OpError::BadInput(format!(
+                    "{} 已退回，要由申請人重新送出",
+                    claim.claim_no
+                )))
+            }
+            _ => {}
+        }
+
+        // None here is the deleted-step case described at the top of this
+        // module: the claim is in flight with every applicable rule recorded.
+        let step = next_step(&claim, &steps);
         may_decide(step, &claim, &ctx.actor, &ctx.actor_role, &crate::role_name(ctx).await)?;
 
         // Confirming the account is what the accounting step is for, so that
         // step cannot be approved without one.
         let account_code = i.account_code.clone().or_else(|| claim.account_code.clone());
-        let is_accounting_step = step.role_code.as_deref() == Some("acct");
-        if is_accounting_step && account_code.is_none() {
-            return Err(OpError::BadInput(format!(
-                "第 {} 關為「{}」，要先指定費用科目才能簽核（AI 建議 {}）",
-                step.step_no,
-                step.label,
-                claim
-                    .suggested_account_code
-                    .clone()
-                    .unwrap_or_else(|| "（無建議）".into())
-            )));
+        if let Some(step) = step.filter(|s| s.role_code.as_deref() == Some("acct")) {
+            if account_code.is_none() {
+                return Err(OpError::BadInput(format!(
+                    "第 {} 關為「{}」，要先指定費用科目才能簽核（AI 建議 {}）",
+                    step.step_no,
+                    step.label,
+                    claim
+                        .suggested_account_code
+                        .clone()
+                        .unwrap_or_else(|| "（無建議）".into())
+                )));
+            }
         }
         if let Some(code) = &i.account_code {
             let accounts = ctx.store.accounts().await?;
@@ -470,8 +520,12 @@ impl Operation for ApproveExpenseClaim {
         }
 
         // Was that the last step? If so, create the voucher in the same
-        // transaction.
-        let last = steps.last().map(|s| s.step_no) == Some(step.step_no);
+        // transaction. With no step left the voucher is all that remains, so
+        // this call creates it.
+        let last = match step {
+            Some(s) => steps.last().map(|l| l.step_no) == Some(s.step_no),
+            None => true,
+        };
         if last && account_code.is_none() {
             return Err(OpError::BadInput(format!(
                 "{} 尚未確定費用科目，無法開立傳票",
@@ -479,37 +533,49 @@ impl Operation for ApproveExpenseClaim {
             )));
         }
 
+        // The approval record has to name a step. A pending step names
+        // itself; otherwise the number is the next ordinal and the note says
+        // what the record stands for, since no step of that number was ever
+        // waiting on this claim.
+        let (step_no, default_note) = match step {
+            Some(s) => (s.step_no, ""),
+            None => (finalise_step_no(&claim), "簽核關卡已變更，補開費用傳票"),
+        };
+
         let updated = ctx
             .store
             .approve_expense_step(laysi_store::ApproveExpenseStep {
                 claim_no: &i.claim_no,
-                step_no: step.step_no,
+                step_no,
                 actor: &ctx.actor,
                 actor_role: &ctx.actor_role,
-                note: i.note.as_deref().unwrap_or(""),
+                note: i.note.as_deref().unwrap_or(default_note),
                 account_code: i.account_code.as_deref(),
                 finalise: last,
                 posted_on: None,
             })
             .await?;
 
+        let step_note = match step {
+            Some(s) => format!("通過第 {} 關「{}」", s.step_no, s.label),
+            None => "應經的關卡都已簽核".to_string(),
+        };
         let summary = match &updated.voucher_no {
             Some(no) => format!(
-                "{} {} {} 核准完成（第 {} 關）· 產生 {} 待過帳{}",
+                "{} {} {} {} · 產生 {} 待過帳{}",
                 updated.claim_no,
                 updated.title,
                 money(updated.amount),
-                step.step_no,
+                step_note,
                 no,
                 if updated.pay_method == "petty_cash" { "" } else { "，並列入應付帳款" }
             ),
             None => format!(
-                "{} {} {} 通過第 {} 關「{}」· 下一關 {}",
+                "{} {} {} {} · 下一關 {}",
                 updated.claim_no,
                 updated.title,
                 money(updated.amount),
-                step.step_no,
-                step.label,
+                step_note,
                 next_step(&updated, &steps).map(|s| s.label.clone()).unwrap_or_default()
             ),
         };
@@ -521,7 +587,7 @@ impl Operation for ApproveExpenseClaim {
                     Some(no) => Some(ctx.store.voucher_by_no(no).await?),
                     None => None,
                 },
-                "step_taken": step.step_no,
+                "step_taken": step_no,
                 "finished": updated.status == "approved",
             }),
             summary,
@@ -568,7 +634,7 @@ impl Operation for RejectExpenseClaim {
         let step = next_step(&claim, &steps).ok_or_else(|| {
             OpError::BadInput(format!("{} 已完成全部簽核，如需更正請開立反向分錄", claim.claim_no))
         })?;
-        may_decide(step, &claim, &ctx.actor, &ctx.actor_role, &crate::role_name(ctx).await)?;
+        may_decide(Some(step), &claim, &ctx.actor, &ctx.actor_role, &crate::role_name(ctx).await)?;
 
         let note = i.note.as_deref().unwrap_or("請補資料");
         let updated = ctx
@@ -722,7 +788,7 @@ mod tests {
         let steps = required_steps(&rules, c.amount);
         let step = next_step(&c, &steps).unwrap();
 
-        let err = may_decide(step, &c, "申請人甲", "boss", "負責人").unwrap_err();
+        let err = may_decide(Some(step), &c, "申請人甲", "boss", "負責人").unwrap_err();
         assert!(
             err.to_string().contains("要由另一個帳號簽核"),
             "連負責人都不能簽自己的單"
@@ -733,15 +799,15 @@ mod tests {
         );
 
         assert!(
-            may_decide(step, &c, "會計人員", "acct", "會計").is_ok(),
+            may_decide(Some(step), &c, "會計人員", "acct", "會計").is_ok(),
             "會計簽會計那一關"
         );
         assert!(
-            may_decide(step, &c, "負責人", "boss", "負責人").is_ok(),
+            may_decide(Some(step), &c, "負責人", "boss", "負責人").is_ok(),
             "負責人可以代任何一關"
         );
 
-        let err = may_decide(step, &c, "出納人員", "cashier", "出納").unwrap_err();
+        let err = may_decide(Some(step), &c, "出納人員", "cashier", "出納").unwrap_err();
         assert!(
             err.to_string().contains("會計確認科目"),
             "擋下來時要說清楚該誰簽：{err}"
@@ -750,6 +816,56 @@ mod tests {
             !err.to_string().contains("cashier"),
             "錯誤訊息不出現角色代號：{err}"
         );
+    }
+
+    /// Deleting the step a claim is waiting on must not strand it.
+    ///
+    /// A company with no manager deletes step 3 while a 12,000 claim sits
+    /// there. Every rule the claim must pass is then recorded, and the
+    /// voucher is the only thing left.
+    #[test]
+    fn deleting_the_pending_step_leaves_the_voucher_reachable() {
+        let rules = vec![
+            rule(1, None, "申請人上傳", None),
+            rule(2, Some("acct"), "會計確認科目", None),
+            rule(4, Some("boss"), "負責人簽核", Some("50000")),
+        ];
+        let c = claim("12000", &[1, 2]);
+        let steps = required_steps(&rules, c.amount);
+        let next = next_step(&c, &steps);
+        assert!(next.is_none(), "沒有關卡在等，剩下的是開傳票");
+
+        assert!(
+            may_decide(next, &c, "會計人員", "acct", "會計").is_ok(),
+            "沒有關卡可比對角色時不擋人，權限由角色對照表決定"
+        );
+        let err = may_decide(next, &c, "申請人甲", "boss", "負責人").unwrap_err();
+        assert!(
+            err.to_string().contains("要由另一個帳號簽核"),
+            "申請人不得核准本人送出的單據，沒有關卡也一樣：{err}"
+        );
+
+        assert_eq!(finalise_step_no(&c), 3, "補開傳票的紀錄接在已簽的關卡之後");
+    }
+
+    /// The whole rule set can also stop applying to a claim.
+    #[test]
+    fn a_claim_below_every_threshold_still_reaches_the_voucher() {
+        let rules = vec![rule(4, Some("boss"), "負責人簽核", Some("50000"))];
+        let c = claim("12000", &[1]);
+        let steps = required_steps(&rules, c.amount);
+        assert!(steps.is_empty(), "一萬二不到門檻，一關都不用經過");
+        assert!(next_step(&c, &steps).is_none());
+        assert_eq!(finalise_step_no(&c), 2, "只簽過第 1 關");
+    }
+
+    /// Every rule the claim has signed can be gone by the time it finalises.
+    /// 0053 dropped the foreign key so the ordinal no longer has to match one.
+    #[test]
+    fn a_claim_that_used_every_number_still_records_its_finalisation() {
+        let c = claim("12000", &[1, 2]);
+        assert_eq!(finalise_step_no(&c), 3);
+        assert_eq!(finalise_step_no(&claim("12000", &[])), 1, "一關都沒簽過就從 1 開始");
     }
 
     /// The wording shown on screen is derived, not stored.

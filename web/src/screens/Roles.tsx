@@ -50,6 +50,7 @@ interface PendingGrant {
 export function Roles({ onToast, reloadKey }: Props) {
   const me = useCurrentUser();
   const [pending, setPending] = useState<PendingGrant | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ApprovalStep | null>(null);
   const [matrix, setMatrix] = useState<RoleMatrix | null>(null);
   const [flow, setFlow] = useState<ApprovalRules | null>(null);
   const [flowError, setFlowError] = useState<string | null>(null);
@@ -136,6 +137,7 @@ export function Roles({ onToast, reloadKey }: Props) {
         `刪除簽核第 ${s.step_no} 關`,
       );
       onToast(`第 ${s.step_no} 關（${s.label}）已刪除`);
+      setPendingDelete(null);
       openNewStep();
       load();
     } catch (e) {
@@ -198,6 +200,28 @@ export function Roles({ onToast, reloadKey }: Props) {
           busy={busy === `${pending.roleCode}/${pending.permCode}`}
           onConfirm={() => void applyGrant(pending)}
           onCancel={() => setPending(null)}
+        />
+      )}
+
+      {pendingDelete && (
+        <ConfirmModal
+          title={`刪除第 ${pendingDelete.step_no} 關 · ${pendingDelete.label}`}
+          subtitle={
+            pendingDelete.min_amount
+              ? `${pendingDelete.role_name ?? '申請人本人'} · 超過 ${money(pendingDelete.min_amount)}`
+              : (pendingDelete.role_name ?? '申請人本人')
+          }
+          body={
+            <p className="form-warn">
+              這一關立刻從所有進行中的單據上消失，停在本關的單據直接往下走；
+              沒有下一關的，在「費用報支」按「產生傳票」結案。
+            </p>
+          }
+          confirmLabel="確認刪除本關"
+          busyLabel="刪除中…"
+          busy={savingStep}
+          onConfirm={() => void deleteStep(pendingDelete)}
+          onCancel={() => setPendingDelete(null)}
         />
       )}
 
@@ -342,7 +366,7 @@ export function Roles({ onToast, reloadKey }: Props) {
                         <button
                           className="btn btn--compact btn--secondary"
                           disabled={savingStep}
-                          onClick={() => void deleteStep(s)}
+                          onClick={() => setPendingDelete(s)}
                         >
                           刪除
                         </button>

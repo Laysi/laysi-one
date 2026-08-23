@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
   callOp,
   isZero,
@@ -22,6 +22,21 @@ function shift(v: VatReturn, direction: -1 | 1): string {
   return `${year}-${String(norm).padStart(2, '0')}-${String(Math.min(d ?? 15, 15)).padStart(2, '0')}`;
 }
 
+function pendingVat(v: VatReturn): ReactNode | null {
+  const parts: [string, string][] = [];
+  if (!isZero(v.pending_sales)) parts.push(['銷項', v.pending_sales]);
+  if (!isZero(v.pending_output_tax)) parts.push(['銷項稅額', v.pending_output_tax]);
+  if (!isZero(v.pending_input_tax)) parts.push(['進項稅額', v.pending_input_tax]);
+  if (parts.length === 0) return null;
+
+  return parts.map(([label, value], i) => (
+    <Fragment key={label}>
+      {i > 0 && '、'}
+      {label} <span className="num">{money(value)}</span>
+    </Fragment>
+  ));
+}
+
 export function Tax({ reloadKey }: Props) {
   const [asOf, setAsOf] = useState<string | undefined>(undefined);
   const [vat, setVat] = useState<VatReturn | null>(null);
@@ -42,6 +57,8 @@ export function Tax({ reloadKey }: Props) {
   }, [asOf]);
 
   useEffect(load, [load, reloadKey]);
+
+  const pending = vat ? pendingVat(vat) : null;
 
   return (
     <div>
@@ -83,11 +100,10 @@ export function Tax({ reloadKey }: Props) {
             {isZero(vat.output_tax) && isZero(vat.input_tax) && (
               <p className="hint">
                 本期尚無已過帳的銷項或進項，各欄皆為零。
-                {vat.pending_vouchers > 0 ? (
+                {pending ? (
                   <>
                     {' '}將該 <span className="num">{vat.pending_vouchers}</span> 張待過帳傳票過帳，
-                    銷項 <span className="num">{money(vat.pending_sales)}</span> 與稅額{' '}
-                    <span className="num">{money(vat.pending_output_tax)}</span> 就會列入。
+                    {pending} 就會列入。
                   </>
                 ) : (
                   ' 開立發票並把傳票過帳後就會有數字。'
@@ -183,10 +199,12 @@ export function Tax({ reloadKey }: Props) {
             )}
             {vat.pending_vouchers > 0 && (
               <>
-                {' '}另有 <span className="num">{vat.pending_vouchers}</span> 張傳票尚未過帳，
-                含銷項 <span className="num">{money(vat.pending_sales)}</span>、銷項稅額{' '}
-                <span className="num">{money(vat.pending_output_tax)}</span>；
-                總帳尚未異動，申報書也沒有計入。
+                {' '}另有 <span className="num">{vat.pending_vouchers}</span> 張傳票尚未過帳
+                {pending ? (
+                  <>，含 {pending}；過帳後才會列入申報書。</>
+                ) : (
+                  <>，不含銷項與進項。</>
+                )}
               </>
             )}
           </p>

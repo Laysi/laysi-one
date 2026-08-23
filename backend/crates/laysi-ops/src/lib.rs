@@ -952,6 +952,7 @@ mod tests {
             include_str!("../../../migrations/0046_external_identity_can_be_unlinked.sql"),
             include_str!("../../../migrations/0047_external_login_is_configured_on_screen.sql"),
             include_str!("../../../migrations/0052_the_business_time_zone_is_a_setting.sql"),
+            include_str!("../../../migrations/0055_a_draft_voucher_can_be_thrown_away.sql"),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {

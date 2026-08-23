@@ -22,6 +22,7 @@ interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
   onChanged: () => void;
+  canDiscard: boolean;
 }
 
 type CorrectionKind = 'void' | 'reverse';
@@ -31,13 +32,15 @@ interface Correction {
   kind: CorrectionKind | null;
 }
 
-export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
+export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [vouchers, setVouchers] = useState<Voucher[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [posting, setPosting] = useState<Voucher | null>(null);
   const [postBusy, setPostBusy] = useState(false);
+  const [discarding, setDiscarding] = useState<Voucher | null>(null);
+  const [discardBusy, setDiscardBusy] = useState(false);
   const [correction, setCorrection] = useState<Correction | null>(null);
   const [voidReason, setVoidReason] = useState('');
   const [reverseDate, setReverseDate] = useState('');
@@ -69,6 +72,20 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
       onToast(msg);
     } finally {
       setPostBusy(false);
+    }
+  }
+
+  async function discard(no: string) {
+    setDiscardBusy(true);
+    try {
+      await callOp<unknown>('discard_voucher', { no }, `刪除未過帳傳票 ${no}`);
+      setDiscarding(null);
+      onToast(`${no} 已刪除`);
+      onChanged();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setDiscardBusy(false);
     }
   }
 
@@ -193,9 +210,19 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
                   </td>
                   <td style={{ textAlign: 'right' }}>
                     {v.status === 'pending' || v.status === 'draft' ? (
-                      <button className="btn btn--compact" onClick={() => setPosting(v)}>
-                        過帳
-                      </button>
+                      <div className="flow__actions">
+                        <button className="btn btn--compact" onClick={() => setPosting(v)}>
+                          過帳
+                        </button>
+                        {canDiscard && (v.source === 'manual' || v.source === 'ai_draft') && (
+                          <button
+                            className="btn btn--compact btn--secondary"
+                            onClick={() => setDiscarding(v)}
+                          >
+                            刪除
+                          </button>
+                        )}
+                      </div>
                     ) : v.status === 'posted' ? (
                       <button className="btn btn--compact btn--secondary" onClick={() => openCorrection(v)}>
                         更正
@@ -216,6 +243,24 @@ export function GeneralLedger({ onToast, reloadKey, onChanged }: Props) {
             </tbody>
           </table>
         </div>
+      )}
+
+      {discarding && (
+        <ConfirmModal
+          title={`刪除 ${discarding.no}`}
+          subtitle={`${discarding.date} · ${discarding.memo}`}
+          body={
+            <p className="form-warn">
+              刪除 <span className="num">{money(discarding.amount)}</span> 這張未過帳傳票，
+              無法復原。總帳不受影響，這張傳票從未進入總帳。
+            </p>
+          }
+          confirmLabel={`確認刪除 ${discarding.no}`}
+          busyLabel="刪除中…"
+          busy={discardBusy}
+          onConfirm={() => void discard(discarding.no)}
+          onCancel={() => setDiscarding(null)}
+        />
       )}
 
       {posting && (

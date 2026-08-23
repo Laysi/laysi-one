@@ -9,7 +9,9 @@
 //! The bracket is a fact, the ceiling is a rule:
 //! `employee.labor_insured_salary` is what the company filed with the bureau,
 //! and [`laysi_regulation::labor_insurance`] always applies
-//! `min(filed_bracket, rule_ceiling)`.
+//! `min(filed_bracket, rule_ceiling)`. A bracket of zero is a bracket nobody
+//! filed rather than a premium of zero, so [`missing_brackets`] separates the
+//! two and the summary carries the count.
 //!
 //! The employer's health insurance share exceeds twice the employee's because
 //! the law apportions it by the average number of dependants across all
@@ -21,6 +23,7 @@ use async_trait::async_trait;
 use chrono::NaiveDate;
 use laysi_domain::Money;
 use laysi_regulation::{Contribution, Ruleset};
+use laysi_store::Employee;
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -96,6 +99,93 @@ pub(crate) fn premiums_on(
     })
 }
 
+/// Which of the three filed brackets one person has no figure for. The three
+/// are judged separately because only one of them may be missing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MissingBrackets {
+    pub labor: bool,
+    pub health: bool,
+    pub pension: bool,
+}
+
+impl MissingBrackets {
+    pub fn any(self) -> bool {
+        self.labor || self.health || self.pension
+    }
+
+    /// The missing brackets under the names the screens print, in the order
+    /// the roster lists them.
+    pub fn labels(self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.labor {
+            out.push("勞保投保薪資");
+        }
+        if self.health {
+            out.push("健保投保金額");
+        }
+        if self.pension {
+            out.push("勞退提繳工資");
+        }
+        out
+    }
+}
+
+/// Report the brackets an employed person has no filed figure for.
+///
+/// Zero is "not set", not "no premium": someone still working and drawing a
+/// salary has to be enrolled, so a zero bracket is an enrolment that was
+/// never filed, and a premium of zero computed from it is not a fact about
+/// the person. Two cases are therefore excluded: whoever has left is no
+/// longer enrolled here, and a base salary of zero means the pay is not
+/// agreed yet (0028), so there is nothing to file. `leaving` is employed
+/// until the leaving date and is judged like `active`.
+///
+/// This says nothing about what the bracket should be. The insured salary
+/// bracket table is not in the rule library, and a guessed figure would be
+/// worse than none.
+pub(crate) fn missing_brackets(e: &Employee) -> MissingBrackets {
+    if e.status == "left" || e.base_salary <= Money::ZERO {
+        return MissingBrackets::default();
+    }
+    MissingBrackets {
+        labor: e.labor_insured_salary.is_zero(),
+        health: e.health_insured_salary.is_zero(),
+        pension: e.pension_wage.is_zero(),
+    }
+}
+
+/// Fixture shared with the compliance tests, which judge the same rule from
+/// the other screen.
+#[cfg(test)]
+pub(crate) fn test_employee(
+    status: &str,
+    base_salary: Money,
+    labor_insured_salary: Money,
+    health_insured_salary: Money,
+    pension_wage: Money,
+) -> Employee {
+    Employee {
+        id: 1,
+        emp_no: "E001".into(),
+        name: "測試員工".into(),
+        dept_id: None,
+        dept_code: None,
+        dept_label: None,
+        title: "測試職稱".into(),
+        employment_type: "full_time".into(),
+        hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        left_on: None,
+        status: status.into(),
+        base_salary,
+        labor_insured_salary,
+        health_insured_salary,
+        pension_wage,
+        id_no: String::new(),
+        bank_accounts: Vec::new(),
+        note: String::new(),
+    }
+}
+
 /// Provenance of a ruleset, always included in the response so an audit can
 /// answer which version a figure was computed under.
 pub(crate) fn ruleset_json(rs: &Ruleset) -> Value {
@@ -143,9 +233,11 @@ impl Operation for GetInsuranceSummary {
         let mut health_ee = Money::ZERO;
         let mut pension_er = Money::ZERO;
         let mut capped = 0usize;
+        let mut unfiled = Vec::new();
         let mut sets: Option<(Value, Value, Value)> = None;
 
         for e in &staff {
+            let missing = missing_brackets(e);
             let p = premiums_on(
                 as_of,
                 e.labor_insured_salary,
@@ -159,6 +251,13 @@ impl Operation for GetInsuranceSummary {
             pension_er += p.pension;
             if p.labor_capped {
                 capped += 1;
+            }
+            if missing.any() {
+                unfiled.push(json!({
+                    "emp_no": e.emp_no,
+                    "name": e.name,
+                    "missing": missing.labels(),
+                }));
             }
             if sets.is_none() {
                 sets = Some((
@@ -177,6 +276,10 @@ impl Operation for GetInsuranceSummary {
                 "labor_insured_salary": e.labor_insured_salary.to_string(),
                 "labor_charged_on": p.labor_base.to_string(),
                 "labor_capped": p.labor_capped,
+                "labor_bracket_missing": missing.labor,
+                "health_bracket_missing": missing.health,
+                "pension_wage_missing": missing.pension,
+                "brackets_missing": missing.any(),
                 "labor_employer": p.labor.employer.to_string(),
                 "labor_employee": p.labor.employee.to_string(),
                 "labor_government": p.labor.government.to_string(),
@@ -243,8 +346,19 @@ impl Operation for GetInsuranceSummary {
             },
         ]);
 
+        // A count on its own reads as if everyone is enrolled, so the number
+        // of people with no filed bracket travels with it.
+        let unfiled_count = unfiled.len();
+        let unfiled_note = (unfiled_count > 0).then(|| {
+            format!("{unfiled_count} 位員工尚未設定投保級距，請在「員工名冊」的編輯抽屜填入。")
+        });
+        let unfiled_tag = match unfiled_count {
+            0 => String::new(),
+            n => format!("（{n} 人尚未設定投保級距）"),
+        };
+
         let summary = format!(
-            "讀勞健保與勞退 · {} 人 · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）· 依勞保 {}、健保 {}、勞退 {} 規則",
+            "讀勞健保與勞退 · {} 人{unfiled_tag} · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）· 依勞保 {}、健保 {}、勞退 {} 規則",
             rows.len(),
             money(employer_total),
             money(labor_er),
@@ -261,6 +375,9 @@ impl Operation for GetInsuranceSummary {
                 "rows": rows,
                 "headcount": rows.len(),
                 "capped_count": capped,
+                "missing_bracket_count": unfiled_count,
+                "missing_brackets": unfiled,
+                "missing_bracket_note": unfiled_note,
                 "labor_employer": labor_er.to_string(),
                 "labor_employee": labor_ee.to_string(),
                 "health_employer": health_er.to_string(),
@@ -477,6 +594,88 @@ mod tests {
         assert_eq!(percent(n("0.0517")), "5.17");
         assert_eq!(percent(n("0.06")), "6");
         assert_eq!(percent(n("0.70")), "70");
+    }
+
+    /// Working, paid, and no bracket on file: the enrolment was never filed,
+    /// and the three items are reported one by one.
+    #[test]
+    fn an_employed_person_on_pay_with_no_bracket_is_reported() {
+        let m = missing_brackets(&test_employee(
+            "active",
+            n("45000"),
+            Money::ZERO,
+            Money::ZERO,
+            Money::ZERO,
+        ));
+        assert!(m.any());
+        assert_eq!(m.labels(), vec!["勞保投保薪資", "健保投保金額", "勞退提繳工資"]);
+    }
+
+    /// One bracket can be filed and another not, so each is judged alone.
+    #[test]
+    fn only_the_bracket_left_at_zero_is_reported() {
+        let m = missing_brackets(&test_employee(
+            "active",
+            n("45000"),
+            n("45800"),
+            n("45800"),
+            Money::ZERO,
+        ));
+        assert!(!m.labor);
+        assert!(!m.health);
+        assert!(m.pension);
+        assert_eq!(m.labels(), vec!["勞退提繳工資"]);
+    }
+
+    #[test]
+    fn a_fully_filed_person_is_not_reported() {
+        let m = missing_brackets(&test_employee(
+            "active",
+            n("53000"),
+            n("45800"),
+            n("53000"),
+            n("53000"),
+        ));
+        assert!(!m.any());
+        assert!(m.labels().is_empty());
+    }
+
+    /// Someone who has left is no longer enrolled here; someone whose pay is
+    /// not agreed yet has nothing to file.
+    #[test]
+    fn a_departed_person_and_an_unset_salary_are_not_reported() {
+        let departed = missing_brackets(&test_employee(
+            "left",
+            n("45000"),
+            Money::ZERO,
+            Money::ZERO,
+            Money::ZERO,
+        ));
+        assert!(!departed.any());
+
+        let no_salary_yet = missing_brackets(&test_employee(
+            "active",
+            Money::ZERO,
+            Money::ZERO,
+            Money::ZERO,
+            Money::ZERO,
+        ));
+        assert!(!no_salary_yet.any());
+    }
+
+    /// Notice was given but the person is still on the payroll, so the
+    /// enrolment is still required.
+    #[test]
+    fn a_person_working_out_notice_is_still_reported() {
+        let m = missing_brackets(&test_employee(
+            "leaving",
+            n("45000"),
+            Money::ZERO,
+            n("45800"),
+            n("45800"),
+        ));
+        assert!(m.any());
+        assert_eq!(m.labels(), vec!["勞保投保薪資"]);
     }
 
     /// No applicable version is an error; premiums are never computed from a

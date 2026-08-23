@@ -362,7 +362,7 @@ export function Budget({ onToast, reloadKey }: Props) {
                       {r.label}
                       {r.unallocated && (
                         <span className="cell-hint cell-hint--block">
-                          款項已支出，但未歸屬任何部門
+                          分錄沒有指定部門
                         </span>
                       )}
                     </td>

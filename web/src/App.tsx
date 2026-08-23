@@ -440,7 +440,12 @@ function Workspace() {
             <>
               {screen === 'dash' && <Dashboard onGo={go} reloadKey={reloadKey} />}
               {screen === 'gl' && (
-                <GeneralLedger onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
+                <GeneralLedger
+                  onToast={showToast}
+                  reloadKey={reloadKey}
+                  onChanged={reload}
+                  canDiscard={permissions.includes('discard_voucher')}
+                />
               )}
               {screen === 'ar' && (
                 <Receivables onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
@@ -456,7 +461,12 @@ function Workspace() {
                 <FixedAssets onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
               )}
               {screen === 'exp' && (
-                <Expenses onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
+                <Expenses
+                  onToast={showToast}
+                  reloadKey={reloadKey}
+                  onChanged={reload}
+                  canSubmit={permissions.includes('submit_expense_claim')}
+                />
               )}
               {screen === 'budget' && <Budget onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'rep' && <Reports reloadKey={reloadKey} />}

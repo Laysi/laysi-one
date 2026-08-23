@@ -229,6 +229,12 @@ export interface PayablesResult {
   not_yet_posted: string;
   overdue_count: number;
   vat: VatInfo;
+  debit_accounts: AccountOption[];
+}
+
+export interface AccountOption {
+  code: string;
+  name: string;
 }
 
 export interface BankTxn {
@@ -1059,6 +1065,8 @@ export interface HrDashboard {
   flow_kinds: string[];
   payroll_reconciled: boolean;
   payroll_not_yet_posted: string;
+  payroll_posted_total: string;
+  payroll_gl_total: string;
 }
 
 export interface EmployeeBankAccountRow {
@@ -1154,6 +1162,17 @@ export interface MovementList {
   movements: MovementRow[];
   flows: MovementFlow[];
   open_count: number;
+  departments: DepartmentChoice[];
+}
+
+export interface DepartmentChoice {
+  code: string;
+  label: string;
+}
+
+export interface MovementApplied {
+  base_salary: { from: string; to: string } | null;
+  department: { from: string | null; to: string } | null;
 }
 
 export interface ClosedAccess {
@@ -1359,6 +1378,16 @@ export interface InsuranceRow {
   pension_employer: string;
   employer_total: string;
   employee_total: string;
+  labor_bracket_missing: boolean;
+  health_bracket_missing: boolean;
+  pension_wage_missing: boolean;
+  brackets_missing: boolean;
+}
+
+export interface MissingBracket {
+  emp_no: string;
+  name: string;
+  missing: string[];
 }
 
 export interface InsuranceNote {
@@ -1380,6 +1409,9 @@ export interface InsuranceSummary {
   pension_employer: string;
   employer_total: string;
   employee_total: string;
+  missing_bracket_count: number;
+  missing_brackets: MissingBracket[];
+  missing_bracket_note: string | null;
   notes: InsuranceNote[];
   rulesets: { labor: RulesetRef; health: RulesetRef; pension: RulesetRef };
   posted_to_ledger: boolean;
@@ -1454,6 +1486,7 @@ export interface HrCompliance {
   checks: ComplianceCheck[];
   available_domains: string[];
   coverage_note: string;
+  missing_bracket_count: number;
 }
 
 export interface WithholdingStatementRecord {

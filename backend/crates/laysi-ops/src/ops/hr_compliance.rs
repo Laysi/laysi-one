@@ -6,6 +6,11 @@
 //! ruleset attached. The full insured-salary brackets and overtime multipliers
 //! do not, so they return `checked = false` with a `not_checked_reason`.
 //!
+//! Whether a bracket was filed at all needs no ruleset: employment, pay and a
+//! bracket of zero answer it between them, so that item is checked and can
+//! fail. Recomputing the premiums cannot answer it, because zero recomputes
+//! to zero and reports no difference.
+//!
 //! Labour insurance, health insurance and pension all go through
 //! [`crate::ops::insurance::premiums_on`]; this module holds no rates,
 //! brackets or thresholds. If no ruleset applies to the query date the whole
@@ -20,13 +25,14 @@
 //! and never used to fill the gap.
 
 use crate::ops::employees::service_months;
-use crate::ops::insurance::{premiums_on, ruleset_json};
+use crate::ops::insurance::{missing_brackets, premiums_on, ruleset_json};
 use crate::ops::payroll::SALARY_INCOME_CODE;
 use crate::ops::tax::{code_rule, withhold};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{Datelike, NaiveDate};
 use laysi_domain::Money;
+use laysi_store::Employee;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -64,6 +70,35 @@ fn unchecked_check(
     check
 }
 
+/// Employees who are working and paid but have no filed insured bracket.
+///
+/// The finding is that nothing was filed, which the employment facts answer
+/// on their own, so this carries no ruleset. What the bracket should be is a
+/// different question, and the table that would answer it is still reported
+/// as not checked.
+fn unfiled_bracket_failures(staff: &[Employee]) -> Vec<Value> {
+    staff
+        .iter()
+        .filter_map(|employee| {
+            let missing = missing_brackets(employee);
+            if !missing.any() {
+                return None;
+            }
+            Some(json!({
+                "emp_no": employee.emp_no,
+                "name": employee.name,
+                "missing": missing.labels(),
+                "base_salary": employee.base_salary.to_string(),
+                "message": format!(
+                    "本薪 {}，{} 還沒設定，請在「員工名冊」的編輯抽屜填入",
+                    money(employee.base_salary),
+                    missing.labels().join("、"),
+                ),
+            }))
+        })
+        .collect()
+}
+
 fn coverage_counts(checks: &[Value]) -> (usize, usize) {
     let checked = checks
         .iter()
@@ -87,7 +122,7 @@ impl Operation for GetHrCompliance {
     }
 
     fn summary(&self) -> &'static str {
-        "讀人資法遵檢核表：逐人檢查最低工資、勞保計費上限、保費試算與特休餘額。完整投保級距與加班費倍數的規則不足時，明確標示為未檢查，不視為通過。"
+        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算與特休餘額。完整投保級距與加班費倍數的規則不足時，明確標示為未檢查，不視為通過。"
     }
 
     fn input_schema(&self) -> Value {
@@ -131,6 +166,9 @@ impl Operation for GetHrCompliance {
             }
         }
         let minimum_failure_count = minimum_failures.len();
+
+        let unfiled_failures = unfiled_bracket_failures(&staff);
+        let unfiled_failure_count = unfiled_failures.len();
 
         let mut labor_cap_failures = Vec::new();
         let mut labor_employer = Money::ZERO;
@@ -207,6 +245,14 @@ impl Operation for GetHrCompliance {
                 "scope_note": "逐人比對員工主檔的月薪與規則下限。中途到職當月的實發金額不列入比較。",
             }),
             json!({
+                "name": "在職員工的投保級距",
+                "checked": true,
+                "passed": unfiled_failures.is_empty(),
+                "rulesets": [],
+                "failures": unfiled_failures,
+                "scope_note": "逐人檢查在職且已設定本薪的員工，勞保投保薪資、健保投保金額與勞退提繳工資有沒有填。",
+            }),
+            json!({
                 "name": "勞保申報值與計費上限",
                 "checked": true,
                 "passed": labor_cap_failures.is_empty(),
@@ -232,7 +278,7 @@ impl Operation for GetHrCompliance {
                     "health_employee": health_employee.to_string(),
                     "pension_employer": pension_employer.to_string(),
                 },
-                "scope_note": "逐人以現行費率重算保費。檢查申報值算不算得出保費；級距本身是否正確另行核對。",
+                "scope_note": "逐人以現行費率重算保費，確認申報的級距算得出金額。",
             }),
             json!({
                 "name": "特休額度與已核准天數",
@@ -265,7 +311,10 @@ impl Operation for GetHrCompliance {
         let (checked_count, unchecked_count) = coverage_counts(&checks);
         let coverage_complete = unchecked_count == usize::default();
 
-        let failure_count = minimum_failure_count + labor_cap_failure_count + annual_failure_count;
+        let failure_count = minimum_failure_count
+            + unfiled_failure_count
+            + labor_cap_failure_count
+            + annual_failure_count;
         let checked_all_passed = failure_count == usize::default();
         let summary = format!(
             "人資法遵檢核 · {as_of} · 已檢查 {checked_count} 項，{} · {unchecked_count} 項因規則不足未檢查",
@@ -280,6 +329,7 @@ impl Operation for GetHrCompliance {
             json!({
                 "as_of": as_of,
                 "employee_count": staff.len(),
+                "missing_bracket_count": unfiled_failure_count,
                 "checked_all_passed": checked_all_passed,
                 "coverage_complete": coverage_complete,
                 "checked_count": checked_count,
@@ -599,6 +649,44 @@ impl Operation for ListWithholdingStatements {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::insurance::test_employee;
+
+    /// Recomputing premiums turns a zero bracket into a zero premium and
+    /// finds no difference, so the enrolment itself is a separate item that
+    /// names the person and the fields still empty.
+    #[test]
+    fn an_employed_person_on_pay_with_no_bracket_fails_the_check() {
+        let staff = vec![
+            test_employee(
+                "active",
+                Money::from(45000),
+                Money::ZERO,
+                Money::ZERO,
+                Money::ZERO,
+            ),
+            test_employee(
+                "active",
+                Money::from(53000),
+                Money::from(45800),
+                Money::from(53000),
+                Money::from(53000),
+            ),
+            test_employee(
+                "left",
+                Money::from(45000),
+                Money::ZERO,
+                Money::ZERO,
+                Money::ZERO,
+            ),
+        ];
+
+        let failures = unfiled_bracket_failures(&staff);
+        assert_eq!(failures.len(), 1, "只有在職有本薪而級距是 0 的那一位");
+        assert_eq!(failures[0]["missing"].as_array().unwrap().len(), 3);
+        let message = failures[0]["message"].as_str().unwrap();
+        assert!(message.contains("勞保投保薪資"), "要說出缺哪一項");
+        assert!(message.contains("員工名冊"), "要說出去哪裡補");
+    }
 
     /// Items the rule library does not cover must not count as passed, nor
     /// inflate checked_count. This is the structural guarantee that the

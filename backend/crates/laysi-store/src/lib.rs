@@ -29,10 +29,82 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// to stay consistent with.
 pub const TIMEZONE_SETTING: &str = "business_utc_offset";
 
+/// What a violated uniqueness rule means to the person who typed it.
+///
+/// Only the rules a person can reach by typing are listed. A collision on a
+/// system-generated number (a voucher, a claim, a batch) is a counter fault,
+/// not a typo, and falls through to the generic message: naming the column
+/// there would ask the reader to fix something they never entered.
+const DUPLICATE_MESSAGES: &[(&str, &str)] = &[
+    ("ap_bill_bill_no_key", "這個帳單號碼已經用過了，請換一個。"),
+    ("ar_invoice_invoice_no_key", "這個發票號碼已經用過了，請換一個。"),
+    ("employee_emp_no_key", "這個員工編號已經有人使用，請換一個。"),
+    ("fixed_asset_code_key", "這個資產編號已經用過了，請換一個。"),
+    ("dimension_value_dimension_code_code_key", "這個代碼已經存在，請換一個。"),
+    ("user_account_username_key", "這個登入信箱已經有帳號，請改用其他地址。"),
+    ("user_identity_provider_subject_key", "這個外部帳號已經連結到其他登入帳號。"),
+    (
+        "attendance_punch_employee_id_punched_on_kind_key",
+        "今天的這一筆打卡已經記錄過了。要更正請送出補登申請。",
+    ),
+    ("punch_correction_one_open_per_slot", "這個時段已經有一張未決的補登申請。"),
+    (
+        "employee_bank_account_employee_id_bank_name_account_no_key",
+        "這個銀行帳號已經登記過了。",
+    ),
+    ("employee_payroll_account_idx", "一位員工只能有一個薪轉帳戶，請先取消原本的標記。"),
+    ("budget_version_code_account_code_dept_id_key", "這個科目在本版預算已經編過了，請改用編輯。"),
+    ("attendance_employee_id_month_key", "這位員工這個月的出勤彙總已經存在。"),
+    ("bank_txn_external_ref_key", "這筆銀行明細已經匯入過了。"),
+];
+
+/// The message for a violated constraint, or `None` to let the caller keep the
+/// generic wording.
+fn duplicate_message(constraint: &str) -> Option<&'static str> {
+    DUPLICATE_MESSAGES.iter().find(|(name, _)| *name == constraint).map(|(_, msg)| *msg)
+}
+
+/// Turn the two database rules a person can actually break into sentences they
+/// can act on.
+///
+/// Without this the raw driver message reaches the screen: English, with the
+/// table and index names in it, and no statement of what to do. Both codes are
+/// mapped here rather than at each call site because every insert can raise
+/// them and a per-site check would cover only the ones somebody remembered.
+impl From<sqlx::Error> for StoreError {
+    fn from(err: sqlx::Error) -> Self {
+        if let Some(db) = err.as_database_error() {
+            let constraint = db.constraint().unwrap_or_default().to_string();
+            match db.code().as_deref() {
+                Some("23505") => {
+                    return StoreError::Duplicate {
+                        message: duplicate_message(&constraint)
+                            .unwrap_or("這筆資料已經存在，請確認是否重複建立。")
+                            .to_string(),
+                    }
+                }
+                Some("23503") => {
+                    return StoreError::StillReferenced {
+                        message: "這筆資料還被其他紀錄引用，不能刪除。".to_string(),
+                    }
+                }
+                _ => {}
+            }
+        }
+        StoreError::Db(err)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("資料庫錯誤：{0}")]
-    Db(#[from] sqlx::Error),
+    Db(sqlx::Error),
+
+    #[error("{message}")]
+    Duplicate { message: String },
+
+    #[error("{message}")]
+    StillReferenced { message: String },
 
     #[error("migration 失敗：{0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
@@ -45,6 +117,12 @@ pub enum StoreError {
 
     #[error("傳票 {no} 目前是「{status}」，只有已過帳傳票可以作廢")]
     NotVoidable { no: String, status: String },
+
+    #[error("傳票 {no} 已經過帳，不能刪除。不應存在的請作廢，記錯的請開立反向傳票。")]
+    NotDiscardable { no: String, status: String },
+
+    #[error("傳票 {no} 由{owner}產生，請到該頁處理，不要單獨刪除傳票。")]
+    VoucherHasAnOwner { no: String, owner: String },
 
     #[error("傳票 {no} 目前是「{status}」，只有已過帳傳票可以沖銷")]
     NotReversible { no: String, status: String },
@@ -201,6 +279,15 @@ pub enum StoreError {
 
     #[error("異動單 {no} 的第 {step} 關已完成")]
     MovementStepAlreadyDone { no: String, step: i32 },
+
+    /// Closing a pay change writes the amount to the employee record, so the
+    /// amount has to be readable. Refusing here rather than closing quietly
+    /// keeps the flow from claiming an effect it did not have.
+    #[error("異動單 {no} 的調整後月底薪是「{value}」，不是金額。請重開一張調薪單，填入金額，例如 45000。")]
+    MovementSalaryTargetUnreadable { no: String, value: String },
+
+    #[error("異動單 {no} 的調任部門「{value}」不是現有部門。{hint}")]
+    MovementDepartmentUnknown { no: String, value: String, hint: String },
 
     /// Completing a leaving flow closes the person's login, and no operation
     /// grants the administrator role, so the last one has to keep it.
@@ -762,6 +849,36 @@ impl Store {
             .await?;
         tx.commit().await?;
         self.voucher_by_no(no).await
+    }
+
+    /// Throw away a voucher that was typed in by hand and never posted.
+    ///
+    /// Only `manual` and `ai_draft` qualify. Every other source belongs to a
+    /// record that would be left pointing at nothing — a bill, a claim, a
+    /// payroll run — and those are cancelled from the page that owns them.
+    /// Posted vouchers are not reachable here at all: they are corrected with
+    /// a void or a reversal, and the database refuses to delete them anyway.
+    pub async fn discard_voucher(&self, no: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT status, source FROM voucher WHERE no = $1 FOR UPDATE")
+            .bind(no)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::VoucherNotFound { no: no.to_string() })?;
+        let status: String = row.get("status");
+        let source: String = row.get("source");
+        if status != "pending" {
+            return Err(StoreError::NotDiscardable { no: no.to_string(), status });
+        }
+        if source != "manual" && source != "ai_draft" {
+            return Err(StoreError::VoucherHasAnOwner {
+                no: no.to_string(),
+                owner: voucher_owner_label(&source).to_string(),
+            });
+        }
+        sqlx::query("DELETE FROM voucher WHERE no = $1").bind(no).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Create and immediately post a reversing voucher on a given date.
@@ -5177,8 +5294,14 @@ impl Store {
     }
 
     /// Mark one step complete. The movement closes automatically once every
-    /// step is done, and a completed leaving flow closes the person's access
-    /// in the same transaction.
+    /// step is done, and closing writes the change to the employee record in
+    /// the same transaction: `left` plus closed access for a departure, the
+    /// new base salary for a pay change, the new department for a transfer.
+    ///
+    /// The last step of a pay change is labelled 「更新薪資檔」 and the last
+    /// step of a transfer 「更新部門歸屬」, so both are about this system's own
+    /// data. A target that cannot be read is an error, never a quiet close:
+    /// the flow would otherwise claim an effect it did not have.
     pub async fn complete_movement_step(
         &self,
         req: CompleteMovementStep<'_>,
@@ -5188,7 +5311,7 @@ impl Store {
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
-            "SELECT m.id, m.kind, m.status, m.employee_id, m.effective_on, e.name
+            "SELECT m.id, m.kind, m.status, m.employee_id, m.effective_on, m.to_value, e.name
                FROM employee_movement m
                JOIN employee e ON e.id = m.employee_id
               WHERE m.movement_no = $1 FOR UPDATE OF m",
@@ -5202,6 +5325,7 @@ impl Store {
         let kind: String = row.get("kind");
         let employee_id: i32 = row.get("employee_id");
         let effective_on: NaiveDate = row.get("effective_on");
+        let to_value: String = row.get("to_value");
         let name: String = row.get("name");
 
         let total: i64 = sqlx::query("SELECT COUNT(*)::bigint AS n FROM hr_flow_step WHERE kind = $1")
@@ -5238,24 +5362,79 @@ impl Store {
                 .get("n");
 
         let mut closed = ClosedAccess::default();
+        let mut applied = MovementApplied::default();
         if done >= total {
             sqlx::query("UPDATE employee_movement SET status = 'done' WHERE id = $1")
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
-            // The employee becomes 'left' only when the leaving flow completes.
-            if kind == "leave" {
-                sqlx::query("UPDATE employee SET status = 'left', left_on = $2 WHERE id = $1")
+            match kind.as_str() {
+                // The employee becomes 'left' only when the leaving flow
+                // completes.
+                "leave" => {
+                    sqlx::query("UPDATE employee SET status = 'left', left_on = $2 WHERE id = $1")
+                        .bind(employee_id)
+                        .bind(effective_on)
+                        .execute(&mut *tx)
+                        .await?;
+                    closed = close_access(&mut tx, employee_id, &name, req).await?;
+                }
+                "salary_change" => {
+                    let target = movement_salary_target(&to_value).ok_or_else(|| {
+                        StoreError::MovementSalaryTargetUnreadable {
+                            no: movement_no.to_string(),
+                            value: to_value.clone(),
+                        }
+                    })?;
+                    let previous: Money =
+                        sqlx::query("SELECT base_salary FROM employee WHERE id = $1 FOR UPDATE")
+                            .bind(employee_id)
+                            .fetch_one(&mut *tx)
+                            .await?
+                            .get("base_salary");
+                    sqlx::query("UPDATE employee SET base_salary = $2 WHERE id = $1")
+                        .bind(employee_id)
+                        .bind(target)
+                        .execute(&mut *tx)
+                        .await?;
+                    applied.base_salary = Some(AmountChange { from: previous, to: target });
+                }
+                "transfer" => {
+                    let departments = departments_in_tx(&mut tx).await?;
+                    let dept = match_department(&departments, &to_value).ok_or_else(|| {
+                        StoreError::MovementDepartmentUnknown {
+                            no: movement_no.to_string(),
+                            value: to_value.clone(),
+                            hint: department_hint(&departments),
+                        }
+                    })?;
+                    let previous: Option<String> = sqlx::query(
+                        "SELECT d.label FROM employee e
+                           LEFT JOIN dimension_value d ON d.id = e.dept_id
+                          WHERE e.id = $1",
+                    )
                     .bind(employee_id)
-                    .bind(effective_on)
-                    .execute(&mut *tx)
-                    .await?;
-                closed = close_access(&mut tx, employee_id, &name, req).await?;
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .get("label");
+                    sqlx::query("UPDATE employee SET dept_id = $2 WHERE id = $1")
+                        .bind(employee_id)
+                        .bind(dept.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    applied.department =
+                        Some(DepartmentChange { from: previous, to: dept.label.clone() });
+                }
+                _ => {}
             }
         }
 
         tx.commit().await?;
-        Ok(CompletedMovement { movement: self.employee_movement(movement_no).await?, closed })
+        Ok(CompletedMovement {
+            movement: self.employee_movement(movement_no).await?,
+            closed,
+            applied,
+        })
     }
 
     // HR: attendance and leave
@@ -5701,6 +5880,24 @@ impl Store {
         .await?
         .iter()
         .map(row_to_payroll_run)
+        .collect())
+    }
+
+    /// Employee ids already holding a payslip for this period, across every
+    /// run of it. 0054 allows a period to be paid more than once, so this is
+    /// what stops the same person being paid twice; `payslip` UNIQUE
+    /// (run_id, employee_id) only covers one run.
+    pub async fn payroll_paid_employee_ids(&self, period: &str) -> Result<Vec<i32>> {
+        Ok(sqlx::query(
+            "SELECT s.employee_id FROM payslip s
+               JOIN payroll_run p ON p.id = s.run_id
+              WHERE p.period = $1",
+        )
+        .bind(period)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| r.get("employee_id"))
         .collect())
     }
 
@@ -7341,9 +7538,33 @@ pub struct CompleteMovementStep<'a> {
     pub keep_active_role: &'a str,
 }
 
+#[derive(Debug)]
 pub struct CompletedMovement {
     pub movement: EmployeeMovement,
     pub closed: ClosedAccess,
+    pub applied: MovementApplied,
+}
+
+/// What closing a movement wrote to the employee record. Both fields stay
+/// `None` for the kinds whose steps happen outside this system, and for a
+/// movement that has steps left.
+#[derive(Debug, Default, Clone)]
+pub struct MovementApplied {
+    pub base_salary: Option<AmountChange>,
+    pub department: Option<DepartmentChange>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AmountChange {
+    pub from: Money,
+    pub to: Money,
+}
+
+#[derive(Debug, Clone)]
+pub struct DepartmentChange {
+    /// `None` when the employee had no department until now.
+    pub from: Option<String>,
+    pub to: String,
 }
 
 /// What a completed leaving flow shut off. Every count is zero for a person
@@ -7711,6 +7932,85 @@ async fn resolve_department_id(
     .map(|row| row.get("id"))
     .map(Some)
     .ok_or_else(|| StoreError::DepartmentNotFound { code: dept_code.to_string() })
+}
+
+/// Which page owns a voucher this system generated, named the way the screens
+/// name it. `source` is a column value and never reaches the reader.
+fn voucher_owner_label(source: &str) -> &'static str {
+    match source {
+        "invoice" => "應收或應付單據",
+        "payroll" => "薪資作業",
+        "depreciation" => "固定資產折舊",
+        "expense" => "費用報支",
+        "import" => "匯入整合",
+        "reversal" => "傳票沖銷",
+        _ => "其他作業",
+    }
+}
+
+/// The department list, read inside the transaction that closes a transfer so
+/// the match and the error's list of choices come from the same snapshot.
+async fn departments_in_tx(tx: &mut Tx<'_>) -> Result<Vec<Department>> {
+    Ok(sqlx::query(
+        "SELECT id, code, label, active FROM dimension_value
+          WHERE dimension_code = 'department' ORDER BY sort_order, code",
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    .iter()
+    .map(|r| Department {
+        id: r.get("id"),
+        code: r.get("code"),
+        label: r.get("label"),
+        active: r.get("active"),
+    })
+    .collect())
+}
+
+/// The new monthly base salary a pay change carries, read from the free-text
+/// `to_value` the movement was raised with.
+///
+/// Thousands separators, spaces and a trailing 元 are accepted because that is
+/// how an amount gets typed. `None` means the value is not an amount this can
+/// write to `employee.base_salary`: zero and negative amounts are refused
+/// here rather than stored, because zero already means "not agreed yet" and a
+/// pay change that closes on it would look like a decision.
+pub fn movement_salary_target(to_value: &str) -> Option<Money> {
+    let cleaned: String = to_value
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ',' && *c != '，')
+        .collect();
+    let cleaned = cleaned.strip_suffix('元').unwrap_or(&cleaned);
+    let amount = Money::from_str_exact(cleaned).ok()?;
+    (amount > Money::ZERO).then_some(amount)
+}
+
+/// The department a transfer moves someone to. Code first, then label,
+/// because the movement may have been raised from a screen showing either.
+pub fn match_department<'a>(departments: &'a [Department], value: &str) -> Option<&'a Department> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    departments
+        .iter()
+        .find(|d| d.code.eq_ignore_ascii_case(value))
+        .or_else(|| departments.iter().find(|d| d.label == value))
+}
+
+/// What to fill in instead, listed rather than described. An installation with
+/// no departments yet gets the one action that creates them.
+pub fn department_hint(departments: &[Department]) -> String {
+    let choices: Vec<&str> = departments
+        .iter()
+        .filter(|d| d.active)
+        .map(|d| d.label.as_str())
+        .collect();
+    if choices.is_empty() {
+        "請先在「基礎設定」新增部門。".to_string()
+    } else {
+        format!("可填：{}", choices.join("、"))
+    }
 }
 
 /// Replace every bank account on file for one employee.
@@ -8604,6 +8904,203 @@ mod tests {
 
         let fresh = sample_token(Utc::now() - chrono::Duration::days(1), Some(30));
         assert!(!fresh.is_expired(Utc::now()), "建立後 1 天、輪替 30 天的 token 不該過期");
+    }
+
+    /// The amount is typed by a person, so the reading has to survive
+    /// separators and a currency word. Zero is refused because zero already
+    /// means "not agreed yet" on the roster.
+    #[test]
+    fn a_pay_change_target_is_read_the_way_it_is_typed() {
+        let amount = |s: &str| movement_salary_target(s).map(|m| m.to_string());
+        assert_eq!(amount("45000").as_deref(), Some("45000"));
+        assert_eq!(amount(" 45,000 ").as_deref(), Some("45000"));
+        assert_eq!(amount("45,000元").as_deref(), Some("45000"));
+        assert_eq!(amount("45000.50").as_deref(), Some("45000.50"));
+
+        assert_eq!(amount(""), None, "空白沒有目標金額");
+        assert_eq!(amount("調升一級"), None, "不是金額");
+        assert_eq!(amount("0"), None, "0 是尚未設定，不是調薪結果");
+        assert_eq!(amount("-45000"), None, "負數不是月底薪");
+    }
+
+    #[test]
+    fn a_transfer_target_matches_a_department_code_or_its_name() {
+        let departments = vec![
+            Department { id: 1, code: "ADMIN".into(), label: "管理部".into(), active: true },
+            Department { id: 2, code: "TECH".into(), label: "技術部".into(), active: true },
+            Department { id: 3, code: "OLD".into(), label: "舊部門".into(), active: false },
+        ];
+        let id = |v: &str| match_department(&departments, v).map(|d| d.id);
+        assert_eq!(id("TECH"), Some(2));
+        assert_eq!(id("tech"), Some(2), "代碼不分大小寫");
+        assert_eq!(id(" 技術部 "), Some(2), "名稱也認");
+        assert_eq!(id("OLD"), Some(3), "停用的部門仍解析得到，異動單可能早於停用");
+
+        assert_eq!(id(""), None);
+        assert_eq!(id("研發部"), None);
+
+        // The refusal lists what can be filled in instead, and only the
+        // departments still in use.
+        assert_eq!(department_hint(&departments), "可填：管理部、技術部");
+        assert_eq!(department_hint(&[]), "請先在「基礎設定」新增部門。");
+    }
+
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// closing_a_movement_writes_the_change_to_the_employee -- --ignored`
+    ///
+    /// The flow is drawn on screen as four steps ending in 「更新薪資檔」, so
+    /// walking all four has to leave the roster showing the new salary.
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn closing_a_movement_writes_the_change_to_the_employee() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let suffix = Uuid::new_v4().simple().to_string()[..8].to_string();
+        let emp_no = format!("T{suffix}");
+        let dept_code = format!("D{suffix}").to_uppercase();
+        let dept = store
+            .create_dimension_value(CreateDimensionValue {
+                dimension_code: "department",
+                code: &dept_code,
+                label: &format!("測試部 {suffix}"),
+                active: true,
+                sort_order: 900,
+            })
+            .await
+            .expect("應可新增部門");
+
+        let hired_on = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        store
+            .create_employee(WriteEmployee {
+                emp_no: &emp_no,
+                name: "異動測試",
+                dept_code: None,
+                title: "",
+                employment_type: "full_time",
+                hired_on,
+                left_on: None,
+                status: "active",
+                base_salary: Some("42000".parse().unwrap()),
+                labor_insured_salary: None,
+                health_insured_salary: None,
+                pension_wage: None,
+                id_no: "",
+                bank_accounts: None,
+                note: "",
+                actor: "測試",
+            })
+            .await
+            .expect("應可建立員工");
+
+        let flow = store.hr_flow_steps().await.expect("應讀得到流程");
+        let steps_of = |kind: &str| {
+            flow.iter().filter(|s| s.kind == kind).map(|s| s.step_no).collect::<Vec<_>>()
+        };
+        async fn walk(store: &Store, movement_no: &str, steps: &[i32]) -> Result<CompletedMovement> {
+            let mut last = None;
+            for &step_no in steps {
+                last = Some(
+                    store
+                        .complete_movement_step(CompleteMovementStep {
+                            movement_no,
+                            step_no,
+                            actor: "測試",
+                            note: "",
+                            keep_active_role: "admin",
+                        })
+                        .await,
+                );
+            }
+            last.expect("流程至少有一關")
+        }
+
+        let raise = store
+            .record_employee_movement(RecordMovement {
+                emp_no: &emp_no,
+                kind: "salary_change",
+                effective_on: hired_on,
+                from_value: "42000",
+                to_value: "45,000",
+                reason: "年度調薪",
+                actor: "測試",
+            })
+            .await
+            .expect("應可開立調薪單");
+        let closed = walk(&store, &raise.movement_no, &steps_of("salary_change"))
+            .await
+            .expect("四關都應完成");
+        assert_eq!(closed.movement.status, "done");
+        let change = closed.applied.base_salary.expect("結案要回報本薪改了什麼");
+        assert_eq!(change.from, "42000".parse().unwrap());
+        assert_eq!(change.to, "45000".parse().unwrap());
+        let after_raise = store.employee(&emp_no).await.expect("應查得到員工");
+        assert_eq!(
+            after_raise.base_salary,
+            "45000".parse::<Money>().unwrap(),
+            "走完四關，名冊上的本薪就是新的數字"
+        );
+
+        let transfer = store
+            .record_employee_movement(RecordMovement {
+                emp_no: &emp_no,
+                kind: "transfer",
+                effective_on: hired_on,
+                from_value: "",
+                to_value: &dept_code,
+                reason: "支援專案",
+                actor: "測試",
+            })
+            .await
+            .expect("應可開立調部門單");
+        let closed = walk(&store, &transfer.movement_no, &steps_of("transfer"))
+            .await
+            .expect("三關都應完成");
+        let moved = closed.applied.department.expect("結案要回報部門改了什麼");
+        assert_eq!(moved.from, None, "原本沒有部門");
+        assert_eq!(moved.to, dept.label);
+        assert_eq!(store.employee(&emp_no).await.unwrap().dept_id, Some(dept.id));
+
+        // A target the last step cannot read is a refusal, not a quiet close:
+        // the salary stays where it was and the step is not recorded.
+        let vague = store
+            .record_employee_movement(RecordMovement {
+                emp_no: &emp_no,
+                kind: "salary_change",
+                effective_on: hired_on,
+                from_value: "45000",
+                to_value: "再談",
+                reason: "",
+                actor: "測試",
+            })
+            .await
+            .expect("應可開立調薪單");
+        let refused = walk(&store, &vague.movement_no, &steps_of("salary_change"))
+            .await
+            .expect_err("最後一關應被擋下");
+        assert!(matches!(refused, StoreError::MovementSalaryTargetUnreadable { .. }));
+        assert!(refused.to_string().contains("再談"));
+        let unchanged = store.employee(&emp_no).await.unwrap();
+        assert_eq!(unchanged.base_salary, "45000".parse::<Money>().unwrap());
+        let still_open = store.employee_movement(&vague.movement_no).await.unwrap();
+        assert_eq!(still_open.status, "open");
+        assert!(!still_open.step_done(4), "被擋下的那一關不能留下紀錄");
+
+        sqlx::query("DELETE FROM employee WHERE emp_no = $1")
+            .bind(&emp_no)
+            .execute(&store.pool)
+            .await
+            .expect("應可清掉測試員工");
+        sqlx::query("DELETE FROM dimension_value WHERE id = $1")
+            .bind(dept.id)
+            .execute(&store.pool)
+            .await
+            .expect("應可清掉測試部門");
     }
 
     /// Run with:

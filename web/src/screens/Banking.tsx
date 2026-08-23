@@ -185,7 +185,7 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
       {rows && rows.length === 0 && accounts && accounts.length > 0 && (
         <div className="placeholder">
           <div className="placeholder__title">尚無銀行明細</div>
-          <p>銀行明細由銀行對帳檔匯入後顯示於本頁，供逐筆與傳票核銷。</p>
+          <p>請以銀行對帳單核對上列帳戶餘額。</p>
         </div>
       )}
 

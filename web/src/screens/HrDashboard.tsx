@@ -88,12 +88,15 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
           <p className={`recon${data.payroll_reconciled ? '' : ' recon--off'}`}>
             {data.payroll_reconciled ? (
               <>
-                人資已過帳的應發合計與總帳 <span className="num">6111 薪資支出</span>{' '}
-                的餘額相符，兩者分開計算。
+                人資已過帳的應發合計 <span className="num">{money(data.payroll_posted_total)}</span>{' '}
+                等於總帳 <span className="num">6111 薪資支出</span> 的餘額，兩者分開計算。
               </>
             ) : (
               <>
-                人資應發合計與總帳 <span className="num">6111</span> 不符。
+                不相符：人資已過帳的應發合計{' '}
+                <span className="num">{money(data.payroll_posted_total)}</span> 對總帳{' '}
+                <span className="num">6111 薪資支出</span> 的{' '}
+                <span className="num">{money(data.payroll_gl_total)}</span>。
                 請先暫緩發薪，並至「薪資作業」查明異常的期別。
               </>
             )}

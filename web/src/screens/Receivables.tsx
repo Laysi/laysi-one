@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  businessToday,
   callOp,
   docNumberHint,
   isZero,
@@ -55,6 +56,10 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [onlyOverdue, setOnlyOverdue] = useState(false);
+
+  const [receipt, setReceipt] = useState<ArInvoice | null>(null);
+  const [receiptAmount, setReceiptAmount] = useState('');
+  const [receiptOn, setReceiptOn] = useState('');
 
   const [drawer, setDrawer] = useState(false);
   const [revenueAccounts, setRevenueAccounts] = useState<RevenueAccount[] | null>(null);
@@ -145,17 +150,30 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
     }
   }
 
-  async function collect(i: ArInvoice) {
+  function openReceipt(i: ArInvoice) {
+    setReceipt(i);
+    setReceiptAmount(i.outstanding);
+    setReceiptOn(businessToday());
+  }
+
+  async function collect() {
+    const i = receipt;
+    if (!i) return;
+    if (!receiptAmount.trim() || !receiptOn) {
+      onToast('實收金額與收款日期都要填寫');
+      return;
+    }
     setBusy(i.invoice_no);
     try {
       const d = await callOp<{ receipt: { voucher_no: string; amount: string } }>(
         'record_receipt',
-        { invoice_no: i.invoice_no },
-        `登記 ${i.customer} 收款 ${money(i.outstanding)}`,
+        { invoice_no: i.invoice_no, amount: receiptAmount.trim(), received_on: receiptOn },
+        `登記 ${i.customer} 收款 ${money(receiptAmount.trim())}`,
       );
       onToast(
         `已產生收款傳票 ${d.receipt.voucher_no}，${money(d.receipt.amount)} 待過帳；過帳後未收金額才會減少`,
       );
+      setReceipt(null);
       onChanged();
       load();
     } catch (e) {
@@ -270,7 +288,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                         <button
                           className="btn btn--compact"
                           disabled={busy === i.invoice_no || !i.recognised}
-                          onClick={() => void collect(i)}
+                          onClick={() => openReceipt(i)}
                         >
                           {busy === i.invoice_no ? '處理中…' : '登記收款'}
                         </button>
@@ -293,6 +311,56 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
             「登記收款」會開立一張借銀行存款、貸應收帳款的傳票，狀態為待過帳。
           </p>
         </>
+      )}
+
+      {receipt && (
+        <div className="overlay overlay--center" onClick={() => setReceipt(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer__head">
+              <div>
+                <div className="drawer__title">登記收款</div>
+                <div className="drawer__subtitle">
+                  {receipt.customer}　{receipt.invoice_no}　未收 {money(receipt.outstanding)}
+                </div>
+              </div>
+              <button className="btn btn--close" onClick={() => setReceipt(null)} aria-label="關閉">
+                ×
+              </button>
+            </div>
+            <div className="drawer__body">
+              <div className="field-grid">
+                <label className="field">
+                  實收金額
+                  <input
+                    className="input num"
+                    inputMode="decimal"
+                    value={receiptAmount}
+                    onChange={(e) => setReceiptAmount(e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  收款日期
+                  <DateField value={receiptOn} onChange={(v) => setReceiptOn(v)} />
+                </label>
+              </div>
+              <p className="form-note">
+                收款進入 1102 銀行存款。實收少於未收金額時，差額留在本單，傳票過帳後可再登記下一次收款。
+              </p>
+            </div>
+            <div className="drawer__foot">
+              <button className="btn btn--secondary" onClick={() => setReceipt(null)}>
+                取消
+              </button>
+              <button
+                className="btn"
+                disabled={busy === receipt.invoice_no}
+                onClick={() => void collect()}
+              >
+                {busy === receipt.invoice_no ? '處理中…' : '產生收款傳票'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {drawer && (

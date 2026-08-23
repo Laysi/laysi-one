@@ -102,6 +102,11 @@ export function Withholding({ onToast, reloadKey }: Props) {
               <div className="stat-card__kicker">檢核基準日</div>
               <div className="stat-card__value num">{compliance.as_of}</div>
               <div className="stat-card__note num">{compliance.employee_count} 位在職員工</div>
+              {compliance.missing_bracket_count > 0 && (
+                <div className="stat-card__note num">
+                  其中 {compliance.missing_bracket_count} 人尚未設定投保級距
+                </div>
+              )}
             </div>
           </div>
 

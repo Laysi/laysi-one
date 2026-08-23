@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  businessToday,
   callOp,
   money,
   OpFailed,
   type ChartOfAccounts,
+  type DimensionList,
   type ExpenseClaim,
   type ExpenseClaimList,
 } from '../api/client';
+import { DateField } from '../components/DateField';
 
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
   onChanged: () => void;
+  canSubmit: boolean;
 }
 
 function statusTag(c: ExpenseClaim): string {
@@ -20,7 +24,7 @@ function statusTag(c: ExpenseClaim): string {
   return 'tag tag--warn tag--static';
 }
 
-export function Expenses({ onToast, reloadKey, onChanged }: Props) {
+export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
   const [data, setData] = useState<ExpenseClaimList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -28,6 +32,17 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
   const [open, setOpen] = useState<string | null>(null);
   const [account, setAccount] = useState<Record<string, string>>({});
   const [accounts, setAccounts] = useState<ChartOfAccounts | null>(null);
+  const [depts, setDepts] = useState<DimensionList | null>(null);
+
+  const [drawer, setDrawer] = useState(false);
+  const [title, setTitle] = useState('');
+  const [amount, setAmount] = useState('');
+  const [spentOn, setSpentOn] = useState('');
+  const [claimant, setClaimant] = useState('');
+  const [deptCode, setDeptCode] = useState('');
+  const [payMethod, setPayMethod] = useState('reimburse');
+  const [memo, setMemo] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(() => {
     setError(null);
@@ -43,6 +58,55 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
       .then(setAccounts)
       .catch(() => setAccounts(null));
   }, []);
+
+  useEffect(() => {
+    if (!drawer || depts) return;
+    callOp<DimensionList>('list_dimensions')
+      .then(setDepts)
+      .catch(() => setDepts(null));
+  }, [drawer, depts]);
+
+  function openDrawer() {
+    setTitle('');
+    setAmount('');
+    setSpentOn(businessToday());
+    setClaimant('');
+    setDeptCode('');
+    setPayMethod('reimburse');
+    setMemo('');
+    setDrawer(true);
+  }
+
+  async function saveClaim() {
+    if (!title.trim() || !amount.trim() || !spentOn || !claimant.trim()) {
+      onToast('事由、金額、支出日期與申請人都要填寫');
+      return;
+    }
+    setSaving(true);
+    try {
+      const d = await callOp<{ claim: ExpenseClaim }>(
+        'submit_expense_claim',
+        {
+          title: title.trim(),
+          amount: amount.trim(),
+          spent_on: spentOn,
+          claimant: claimant.trim(),
+          pay_method: payMethod,
+          ...(deptCode ? { dept_code: deptCode } : {}),
+          ...(memo.trim() ? { memo: memo.trim() } : {}),
+        },
+        `代 ${claimant.trim()} 建立報支單 ${money(amount.trim())}`,
+      );
+      onToast(`已建立報支單 ${d.claim.claim_no}，目前關卡：${d.claim.step_label}`);
+      setDrawer(false);
+      onChanged();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function decide(c: ExpenseClaim, approve: boolean) {
     const picked = (account[c.claim_no] ?? c.suggested_account_code ?? '').trim();
@@ -111,6 +175,11 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
             >
               併同顯示已入帳與已退回
             </button>
+            {canSubmit && (
+              <button className="btn btn--compact" onClick={openDrawer}>
+                ＋ 建立報支單
+              </button>
+            )}
             <span className="spacer" />
             <span className="section-note">
               簽核流程：
@@ -175,11 +244,7 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
                       )}
                     </td>
                     <td className="align-right">
-                      {c.next_step && !c.can_approve ? (
-                        <span className="cell-muted cell-reason">
-                          {c.approve_blocked_reason}
-                        </span>
-                      ) : c.next_step ? (
+                      {c.can_approve ? (
                         <span className="cell-actions">
 
                           {!c.account_confirmed && (
@@ -203,22 +268,36 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
                           <button
                             className="btn btn--compact"
                             disabled={busy === c.claim_no}
-                            title={`本關由${c.next_step.role_name ?? '其他角色'}負責，其他角色簽核會被拒絕`}
+                            title={
+                              c.next_step
+                                ? `本關由${c.next_step.role_name ?? '其他角色'}負責，其他角色簽核會被拒絕`
+                                : '應經的關卡都已簽核，開立待過帳的費用傳票'
+                            }
                             onClick={() => void decide(c, true)}
                           >
-                            {busy === c.claim_no ? '處理中…' : '簽核'}
+                            {busy === c.claim_no
+                              ? '處理中…'
+                              : c.next_step
+                                ? '簽核'
+                                : '產生傳票'}
                           </button>
-                          <button
-                            className="btn btn--compact btn--secondary"
-                            disabled={busy === c.claim_no}
-                            onClick={() => void decide(c, false)}
-                          >
-                            退回
-                          </button>
+                          {c.next_step && (
+                            <button
+                              className="btn btn--compact btn--secondary"
+                              disabled={busy === c.claim_no}
+                              onClick={() => void decide(c, false)}
+                            >
+                              退回
+                            </button>
+                          )}
+                        </span>
+                      ) : c.approve_blocked_reason ? (
+                        <span className="cell-muted cell-reason">
+                          {c.approve_blocked_reason}
                         </span>
                       ) : (
                         <span className="cell-muted">
-                          {c.status === 'rejected' ? '已退回' : '流程已完成'}
+                          {c.status === 'rejected' ? '已退回' : '已入帳'}
                         </span>
                       )}
                     </td>
@@ -241,6 +320,100 @@ export function Expenses({ onToast, reloadKey, onChanged }: Props) {
           </p>
 
         </>
+      )}
+
+      {drawer && (
+        <div className="overlay overlay--center" onClick={() => setDrawer(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer__head">
+              <div>
+                <div className="drawer__title">建立報支單</div>
+                <div className="drawer__subtitle">代沒有登入帳號的員工送單</div>
+              </div>
+              <button className="btn btn--close" onClick={() => setDrawer(false)} aria-label="關閉">
+                ×
+              </button>
+            </div>
+            <div className="drawer__body">
+              <div className="field-grid">
+                <label className="field field--full">
+                  事由
+                  <input
+                    className="input"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  金額（含稅）
+                  <input
+                    className="input num"
+                    inputMode="decimal"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  支出日期
+                  <DateField value={spentOn} onChange={(v) => setSpentOn(v)} />
+                </label>
+                <label className="field">
+                  申請人
+                  <input
+                    className="input"
+                    value={claimant}
+                    onChange={(e) => setClaimant(e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  部門
+                  <select
+                    className="input"
+                    value={deptCode}
+                    onChange={(e) => setDeptCode(e.target.value)}
+                  >
+                    <option value="">未指定</option>
+                    {(depts?.dimensions ?? [])
+                      .filter((d) => d.code === 'department')
+                      .flatMap((d) => d.values)
+                      .filter((v) => v.active)
+                      .map((v) => (
+                        <option key={v.code} value={v.code}>
+                          {v.label}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label className="field">
+                  付款方式
+                  <select
+                    className="input"
+                    value={payMethod}
+                    onChange={(e) => setPayMethod(e.target.value)}
+                  >
+                    <option value="reimburse">月底彙總匯款</option>
+                    <option value="petty_cash">零用金即時支付</option>
+                  </select>
+                </label>
+                <label className="field field--full">
+                  備註
+                  <input className="input" value={memo} onChange={(e) => setMemo(e.target.value)} />
+                </label>
+              </div>
+              <p className="form-note">
+                費用科目在會計那一關決定。有登入帳號的員工請自行到「請款申請」送單。
+              </p>
+            </div>
+            <div className="drawer__foot">
+              <button className="btn btn--secondary" onClick={() => setDrawer(false)}>
+                取消
+              </button>
+              <button className="btn" disabled={saving} onClick={() => void saveClaim()}>
+                {saving ? '建立中…' : '建立報支單'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

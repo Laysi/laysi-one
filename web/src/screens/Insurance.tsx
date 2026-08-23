@@ -71,6 +71,11 @@ export function Insurance({ onToast, reloadKey }: Props) {
               <div className="stat-card__kicker">公司負擔合計</div>
               <div className="stat-card__value num">{money(data.employer_total)}</div>
               <div className="stat-card__note num">{data.headcount} 人 · {data.as_of} 適用</div>
+              {data.missing_bracket_count > 0 && (
+                <div className="stat-card__note num">
+                  其中 {data.missing_bracket_count} 人尚未設定投保級距
+                </div>
+              )}
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">員工自付合計</div>
@@ -78,6 +83,10 @@ export function Insurance({ onToast, reloadKey }: Props) {
               <div className="stat-card__note num">自薪資扣除的兩項</div>
             </div>
           </div>
+
+          {data.missing_bracket_note && (
+            <p className="recon recon--off">{data.missing_bracket_note}</p>
+          )}
 
           {!data.posted_to_ledger && <p className="recon recon--off">{data.posting_note}</p>}
 
@@ -116,41 +125,84 @@ export function Insurance({ onToast, reloadKey }: Props) {
               </thead>
               <tbody>
                 {data.rows.map((r) => (
-                  <tr key={r.emp_no} className={r.labor_capped ? 'row--pending' : undefined}>
+                  <tr
+                    key={r.emp_no}
+                    className={r.brackets_missing || r.labor_capped ? 'row--pending' : undefined}
+                  >
                     <td>
                       {r.name}
+                      {r.brackets_missing && (
+                        <span className="tag tag--bad tag--static">尚未設定投保級距</span>
+                      )}
                       <span className="cell-hint cell-hint--block num">
                         {r.emp_no} · {r.dept_label ?? '未指定'} · {r.title}
                       </span>
                     </td>
                     <td className="num align-right">
-                      {money(r.labor_insured_salary)}
-                      {r.labor_capped && (
-                        <span className="cell-hint cell-hint--block num">
-                          按上限 {money(r.labor_charged_on)} 計費
-                        </span>
+                      {r.labor_bracket_missing ? (
+                        '尚未設定'
+                      ) : (
+                        <>
+                          {money(r.labor_insured_salary)}
+                          {r.labor_capped && (
+                            <span className="cell-hint cell-hint--block num">
+                              按上限 {money(r.labor_charged_on)} 計費
+                            </span>
+                          )}
+                        </>
                       )}
                     </td>
                     <td className="num align-right">
-                      {money(r.labor_employer)}
-                      <span className="cell-hint cell-hint--block num">
-                        自付 {money(r.labor_employee)}
-                      </span>
+                      {r.labor_bracket_missing ? (
+                        <span className="cell-muted">—</span>
+                      ) : (
+                        <>
+                          {money(r.labor_employer)}
+                          <span className="cell-hint cell-hint--block num">
+                            自付 {money(r.labor_employee)}
+                          </span>
+                        </>
+                      )}
                     </td>
-                    <td className="num align-right">{money(r.health_insured_salary)}</td>
                     <td className="num align-right">
-                      {money(r.health_employer)}
-                      <span className="cell-hint cell-hint--block num">
-                        自付 {money(r.health_employee)}
-                      </span>
+                      {r.health_bracket_missing ? '尚未設定' : money(r.health_insured_salary)}
                     </td>
                     <td className="num align-right">
-                      {money(r.pension_employer)}
-                      <span className="cell-hint cell-hint--block num">
-                        提繳工資 {money(r.pension_wage)}
-                      </span>
+                      {r.health_bracket_missing ? (
+                        <span className="cell-muted">—</span>
+                      ) : (
+                        <>
+                          {money(r.health_employer)}
+                          <span className="cell-hint cell-hint--block num">
+                            自付 {money(r.health_employee)}
+                          </span>
+                        </>
+                      )}
                     </td>
-                    <td className="num align-right">{money(r.employer_total)}</td>
+                    <td className="num align-right">
+                      {r.pension_wage_missing ? (
+                        <>
+                          <span className="cell-muted">—</span>
+                          <span className="cell-hint cell-hint--block">提繳工資尚未設定</span>
+                        </>
+                      ) : (
+                        <>
+                          {money(r.pension_employer)}
+                          <span className="cell-hint cell-hint--block num">
+                            提繳工資 {money(r.pension_wage)}
+                          </span>
+                        </>
+                      )}
+                    </td>
+                    <td className="num align-right">
+                      {r.labor_bracket_missing &&
+                      r.health_bracket_missing &&
+                      r.pension_wage_missing ? (
+                        <span className="cell-muted">—</span>
+                      ) : (
+                        money(r.employer_total)
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

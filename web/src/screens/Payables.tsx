@@ -21,14 +21,6 @@ interface Props {
   onChanged: () => void;
 }
 
-interface DebitAccount {
-  code: string;
-  name: string;
-  kind: string;
-  is_postable: boolean;
-  is_active: boolean;
-}
-
 function sumCents(values: string[]): string {
   const cents = values.reduce((acc, v) => {
     const neg = v.startsWith('-');
@@ -48,7 +40,6 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
 
   const [drawer, setDrawer] = useState(false);
-  const [debitAccounts, setDebitAccounts] = useState<DebitAccount[] | null>(null);
   const [vendor, setVendor] = useState('');
   const [billNo, setBillNo] = useState('');
   const [amounts, setAmounts] = useState<TaxTriple>(EMPTY_TAX_TRIPLE);
@@ -70,19 +61,6 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(load, [load, reloadKey]);
 
-  useEffect(() => {
-    if (!drawer || debitAccounts) return;
-    callOp<{ accounts: DebitAccount[] }>('list_accounts')
-      .then((d) => {
-        const usable = d.accounts.filter((a) => a.is_postable && a.is_active);
-        const preferred = usable.filter((a) => a.kind === 'expense' || a.kind === 'asset');
-        const options = preferred.length > 0 ? preferred : usable;
-        setDebitAccounts(options);
-        setDebitAccountCode((code) => code || options[0]?.code || '');
-      })
-      .catch(() => setDebitAccounts([]));
-  }, [drawer, debitAccounts]);
-
   async function saveBill() {
     if (
       !vendor.trim() ||
@@ -91,7 +69,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
       !dueOn ||
       !debitAccountCode
     ) {
-      onToast('供應商、單號、金額、到期日與借方科目都要填寫');
+      onToast('供應商、帳單號碼、金額、到期日與借方科目都要填寫');
       return;
     }
     setSavingBill(true);
@@ -117,6 +95,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
       setBillNo('');
       setAmounts(EMPTY_TAX_TRIPLE);
       setDueOn('');
+      setDebitAccountCode('');
       setMemo('');
       setDrawer(false);
       onChanged();
@@ -321,13 +300,14 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
                   />
                 </label>
                 <label className="field field--full">
-                  借方科目（費用、存貨或預付款等啟用中的可入帳科目）
+                  借方科目（費用、存貨、預付款或固定資產）
                   <select
                     className="input"
                     value={debitAccountCode}
                     onChange={(e) => setDebitAccountCode(e.target.value)}
                   >
-                    {(debitAccounts ?? []).map((a) => (
+                    <option value="">請選擇</option>
+                    {(data?.debit_accounts ?? []).map((a) => (
                       <option key={a.code} value={a.code}>
                         {a.code} {a.name}
                       </option>

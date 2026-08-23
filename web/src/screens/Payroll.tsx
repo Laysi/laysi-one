@@ -310,15 +310,17 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 <span className="spacer" />
               </div>
               <button
-                className={`btn${alreadyRun ? ' btn--off' : ''}`}
-                disabled={busy || alreadyRun}
+                className="btn"
+                disabled={busy}
                 onClick={() => void run()}
               >
-                {busy ? '計算中…' : alreadyRun ? `${runPeriod.trim()} 已計算` : '計算薪資並產生傳票'}
+                {busy ? '計算中…' : alreadyRun ? '補算並產生傳票' : '計算薪資並產生傳票'}
               </button>
               {alreadyRun && (
                 <p className="form-note">
-                  同一期不能算兩次。要更正 {runPeriod.trim()} 請開立反向分錄。
+                  {runPeriod.trim()} 已計算過。已計薪的人不會再算一次，只有後來到職或
+                  當時漏算的人會算進來，另外產生一張傳票。金額記錯請到「傳票 · 總帳」
+                  開立傳票更正。
                 </p>
               )}
               <p className="form-note">
@@ -326,8 +328,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                 兩者通常同月，跨月發薪時才分開。
               </p>
               <p className="form-note">
-                本操作一次決定全公司當月薪資並產生傳票，同一期僅能計算一次，
-                更正請開立反向分錄。傳票狀態為<strong>待過帳</strong>。
+                本操作一次決定全公司當月薪資並產生傳票，傳票狀態為<strong>待過帳</strong>。
               </p>
             </div>
 

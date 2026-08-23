@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
+  money,
   OpFailed,
   type ClosedAccess,
+  type DepartmentChoice,
   type EmployeeList,
+  type MovementApplied,
   type MovementList,
   type MovementRow,
 } from '../api/client';
@@ -15,8 +18,29 @@ interface Props {
   onChanged: () => void;
 }
 
+const TARGET_KINDS = ['salary_change', 'transfer'];
+
 function statusTag(m: MovementRow): string {
   return m.status === 'done' ? 'tag tag--static' : 'tag tag--warn tag--static';
+}
+
+function valueLabel(kind: string, value: string, departments: DepartmentChoice[]): string {
+  if (!value) return '—';
+  if (kind === 'transfer') return departments.find((d) => d.code === value)?.label ?? value;
+  if (kind === 'salary_change') return money(value);
+  return value;
+}
+
+function appliedNote(applied: MovementApplied | undefined): string {
+  if (!applied) return '';
+  const parts: string[] = [];
+  if (applied.base_salary) {
+    parts.push(`本薪由 ${money(applied.base_salary.from)} 改為 ${money(applied.base_salary.to)}`);
+  }
+  if (applied.department) {
+    parts.push(`部門由 ${applied.department.from ?? '未指定'} 改為 ${applied.department.to}`);
+  }
+  return parts.length > 0 ? `，${parts.join('、')}` : '';
 }
 
 function closedNote(closed: ClosedAccess | undefined): string {
@@ -37,9 +61,16 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
   const [empNo, setEmpNo] = useState('');
   const [kind, setKind] = useState('');
   const [effectiveOn, setEffectiveOn] = useState('');
-  const [fromValue, setFromValue] = useState('');
   const [toValue, setToValue] = useState('');
   const [reason, setReason] = useState('');
+
+  const selected = staff?.employees.find((e) => e.emp_no === empNo);
+  const fromValue =
+    kind === 'salary_change'
+      ? (selected?.base_salary ?? '')
+      : kind === 'transfer'
+        ? (selected?.dept_code ?? '')
+        : '';
 
   const load = useCallback(() => {
     setError(null);
@@ -63,6 +94,7 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
         movement: MovementRow;
         finished: boolean;
         closed_access: ClosedAccess;
+        applied: MovementApplied;
       }>(
         'complete_movement_step',
         { movement_no: m.movement_no },
@@ -70,7 +102,8 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
       );
       onToast(
         d.finished
-          ? `${m.movement_no} 全部關卡已完成，單據結案${closedNote(d.closed_access)}`
+          ? `${m.movement_no} 全部關卡已完成，單據結案` +
+              `${appliedNote(d.applied)}${closedNote(d.closed_access)}`
           : `${m.movement_no} 本關已完成，尚待「${d.movement.next_step?.label ?? '結案'}」`,
       );
       onChanged();
@@ -102,7 +135,6 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
           `共 ${d.movement.step_count} 關`,
       );
       setEmpNo('');
-      setFromValue('');
       setToValue('');
       setReason('');
       onChanged();
@@ -157,7 +189,8 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
                         </span>
                         {(m.from_value || m.to_value) && (
                           <span className="cell-hint cell-hint--block">
-                            {m.from_value || '—'} → {m.to_value || '—'}
+                            {valueLabel(m.kind, m.from_value, data.departments)} →{' '}
+                            {valueLabel(m.kind, m.to_value, data.departments)}
                           </span>
                         )}
                         {open === m.movement_no && (
@@ -244,7 +277,10 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
                   <select
                     className="input"
                     value={kind}
-                    onChange={(e) => setKind(e.target.value)}
+                    onChange={(e) => {
+                      setKind(e.target.value);
+                      setToValue('');
+                    }}
                   >
                     <option value="">請選擇</option>
                     {data.flows.map((f) => (
@@ -265,23 +301,51 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
                     onChange={(v) => setEffectiveOn(v)}
                   />
                 </label>
-                <label className="field field--grow">
-                  從
-                  <input
-                    className="input"
-                    placeholder="調薪、調部門需填寫"
-                    value={fromValue}
-                    onChange={(e) => setFromValue(e.target.value)}
-                  />
-                </label>
-                <label className="field field--grow">
-                  變成
-                  <input
-                    className="input"
-                    value={toValue}
-                    onChange={(e) => setToValue(e.target.value)}
-                  />
-                </label>
+                {kind === 'salary_change' && (
+                  <label className="field field--grow">
+                    調整後月底薪
+                    <input
+                      className="input num"
+                      inputMode="decimal"
+                      placeholder="45000"
+                      value={toValue}
+                      onChange={(e) => setToValue(e.target.value)}
+                    />
+                    {selected && (
+                      <span className="field__hint num">
+                        目前 {money(selected.base_salary)}
+                      </span>
+                    )}
+                  </label>
+                )}
+                {kind === 'transfer' && (
+                  <label className="field field--grow">
+                    調任部門
+                    <select
+                      className="input"
+                      value={toValue}
+                      onChange={(e) => setToValue(e.target.value)}
+                    >
+                      <option value="">請選擇</option>
+                      {data.departments.map((d) => (
+                        <option key={d.code} value={d.code}>
+                          {d.label}
+                        </option>
+                      ))}
+                    </select>
+                    {data.departments.length === 0 ? (
+                      <span className="field__hint field__hint--missing">
+                        請系統管理員先在「基礎設定」新增部門。
+                      </span>
+                    ) : (
+                      selected && (
+                        <span className="field__hint">
+                          目前 {selected.dept_label ?? '未指定'}
+                        </span>
+                      )
+                    )}
+                  </label>
+                )}
               </div>
 
               <label className="field">
@@ -296,13 +360,18 @@ export function Onboarding({ onToast, reloadKey, onChanged }: Props) {
 
               <button
                 className="btn"
-                disabled={busy === 'new' || !empNo.trim() || !kind}
+                disabled={
+                  busy === 'new' ||
+                  !empNo.trim() ||
+                  !kind ||
+                  (TARGET_KINDS.includes(kind) && !toValue.trim())
+                }
                 onClick={() => void record()}
               >
                 {busy === 'new' ? '開單中…' : '開單'}
               </button>
               <p className="form-note">
-                加保、退保與調薪都要完成全部關卡才生效。
+                調薪與調部門在最後一關完成時寫入員工主檔，下一期薪資作業採用新的本薪。
               </p>
             </div>
 

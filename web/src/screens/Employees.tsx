@@ -536,6 +536,11 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     placeholder={drawer === 'edit' ? currentAmount('base_salary') : '38000'}
                     onChange={(e) => setField('base_salary', e.target.value)}
                   />
+                  {drawer === 'edit' && (
+                    <span className="field__hint">
+                      調薪請在「到離職與異動」開立異動單。
+                    </span>
+                  )}
                 </label>
                 <label className="field">
                   勞保投保薪資

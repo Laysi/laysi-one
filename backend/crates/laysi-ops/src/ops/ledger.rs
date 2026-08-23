@@ -31,6 +31,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(CreateVoucher),
         Box::new(PostVoucher),
         Box::new(VoidVoucher),
+        Box::new(DiscardVoucher),
         Box::new(ReverseVoucher),
     ]
 }
@@ -375,7 +376,7 @@ impl Operation for CreateVoucher {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "直接開立待過帳傳票（人工記帳用）。AI 請改用 draft_voucher。"
+        "直接開立待過帳傳票（人工記帳用）。AI 請改用草擬分錄。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<DraftVoucherInput>()
@@ -411,7 +412,7 @@ impl Operation for PostVoucher {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "將傳票過帳。自始不應存在的錯帳請用 void_voucher；交易確實發生但記載錯誤請用 reverse_voucher。預設關閉。"
+        "將傳票過帳。自始不應存在的錯帳請作廢；交易確實發生但記載錯誤請開立反向傳票。預設關閉。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<PostVoucherInput>()
@@ -454,7 +455,7 @@ impl Operation for VoidVoucher {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "作廢自始不應存在的已過帳傳票（如重複過帳或交易對象完全錯誤）；交易確實發生但金額或科目記載錯誤時，請用 reverse_voucher。"
+        "作廢自始不應存在的已過帳傳票（如重複過帳或交易對象完全錯誤）；交易確實發生但金額或科目記載錯誤時，請開立反向傳票。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<VoidVoucherInput>()
@@ -468,6 +469,40 @@ impl Operation for VoidVoucher {
         let summary = format!("{} 已作廢 · 理由：{reason}", voucher.no);
         let no = voucher.no.clone();
         Ok(OpOutcome::new(json!({ "voucher": voucher }), summary).with_voucher(no))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DiscardVoucherInput {
+    /// Number of the unposted voucher to delete.
+    pub no: String,
+}
+
+struct DiscardVoucher;
+
+#[async_trait]
+impl Operation for DiscardVoucher {
+    fn name(&self) -> &'static str {
+        "discard_voucher"
+    }
+    fn risk(&self) -> Risk {
+        // An unposted voucher has not reached the ledger, so nothing in the
+        // reports moves. It is still gone for good, hence the confirmation.
+        Risk::NeedsConfirm
+    }
+    fn summary(&self) -> &'static str {
+        "刪除一張還沒過帳的手工傳票。已過帳的不能刪除：不應存在的請作廢，記錯的請開立反向傳票。由應收、應付、薪資、折舊、報支或匯入產生的傳票也不能單獨刪除，請到產生它的那一頁處理。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<DiscardVoucherInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: DiscardVoucherInput = parse(input)?;
+        let voucher = ctx.store.voucher_by_no(&i.no).await?;
+        ctx.store.discard_voucher(&i.no).await?;
+        let summary = format!("{} 已刪除 · {} {}", voucher.no, voucher.date, voucher.memo);
+        Ok(OpOutcome::new(json!({ "no": voucher.no, "discarded": true }), summary))
     }
 }
 
@@ -490,7 +525,7 @@ impl Operation for ReverseVoucher {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "以指定日期開立並過帳反向傳票，更正確實發生但金額或科目記載錯誤的交易；原傳票自始不應存在時，請用 void_voucher。"
+        "以指定日期開立並過帳反向傳票，更正確實發生但金額或科目記載錯誤的交易；原傳票自始不應存在時，請改為作廢。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ReverseVoucherInput>()
@@ -525,9 +560,15 @@ mod tests {
         let reverse_summary = ReverseVoucher.summary();
 
         assert!(void_summary.contains("自始不應存在"));
-        assert!(void_summary.contains("reverse_voucher"));
+        assert!(void_summary.contains("反向傳票"));
         assert!(reverse_summary.contains("確實發生"));
-        assert!(reverse_summary.contains("void_voucher"));
+        assert!(reverse_summary.contains("作廢"));
+
+        // Summaries are read on screen and by the AI. Operation names are
+        // internal identifiers, so the pointer to the other operation is its
+        // Chinese name.
+        assert!(!void_summary.contains('_'));
+        assert!(!reverse_summary.contains('_'));
     }
 
     #[test]

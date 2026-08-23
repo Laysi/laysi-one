@@ -14,6 +14,14 @@ interface Props {
   reloadKey: number;
 }
 
+function rangeLabel(from: string, to: string): string {
+  const start = from.replace(/-/g, '/');
+  const end =
+    from.slice(0, 4) === to.slice(0, 4) ? to.slice(5).replace('-', '/') : to.replace(/-/g, '/');
+
+  return `${start}–${end}`;
+}
+
 function Sheet({ title, period, rows }: { title: string; period: string; rows: ReportRow[] }) {
   return (
     <section className="card doc-card report-card">
@@ -120,7 +128,7 @@ export function Reports({ reloadKey }: Props) {
             </section>
 
             <section>
-              <Sheet title="損益表" period={pl.period_label} rows={pl.rows} />
+              <Sheet title="損益表" period={`${rangeLabel(pl.from, pl.to)} 累計`} rows={pl.rows} />
               <p className="recon">
                 本期損益 <span className="num">{money(pl.profit)}</span>，
                 與資產負債表滾進權益的金額相同，兩張報表採用同一個定義計算。
