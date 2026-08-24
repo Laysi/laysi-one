@@ -746,13 +746,19 @@ mod tests {
         assert_eq!(before, declared, "註冊表裡有不屬於任何模組的操作");
     }
 
-    fn grant_names(migration: &'static str) -> std::collections::BTreeSet<&'static str> {
-        migration
-            .split_once("INSERT INTO mcp_tool_grant")
-            .expect("migration 沒有 mcp_tool_grant INSERT")
+    /// The one migration, as text. Every assertion below reads the seed data
+    /// straight out of it, so a switch or a permission that the schema does
+    /// not actually seed cannot pass by being described in a test.
+    const SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
+
+    /// Values of the first column of every row of one multi-row INSERT.
+    fn first_column_of(table: &str) -> std::collections::BTreeSet<&'static str> {
+        SCHEMA
+            .split_once(&format!("INSERT INTO {table} ("))
+            .unwrap_or_else(|| panic!("0001 沒有 {table} 的 INSERT"))
             .1
-            .split_once(';')
-            .expect("migration 的 mcp_tool_grant INSERT 沒有分號結尾")
+            .split_once(";\n")
+            .unwrap_or_else(|| panic!("{table} 的 INSERT 沒有分號結尾"))
             .0
             .lines()
             .filter_map(|line| line.trim().strip_prefix("('"))
@@ -760,257 +766,81 @@ mod tests {
             .collect()
     }
 
-    /// Tools deleted by a later migration: the movement form (0058) and the
-    /// imported attendance summary (0059). `grant_names` reads INSERT
-    /// statements only, so a later DELETE has to be subtracted here.
-    const REVOKED_GRANTS: [&str; 4] = [
-        "list_employee_movements",
-        "record_employee_movement",
-        "complete_movement_step",
-        "get_attendance",
-    ];
-
-    /// 0008, 0009, 0015, 0016, 0017, 0020, 0045 and 0057 seed the HR and
-    /// self-service grants. One
-    /// operation short and AI sees a switch it cannot call; one too many and
-    /// there is no default MCP policy for it. The two sets must match exactly.
+    /// Every operation needs exactly one MCP switch, and every switch needs an
+    /// operation. One short and AI sees a tool it cannot call; one too many and
+    /// there is no default policy for it.
     #[test]
-    fn hr_and_self_service_registry_matches_the_migration_grants() {
+    fn every_registry_operation_has_an_mcp_tool_grant() {
         use std::collections::BTreeSet;
 
-        let migration_names: BTreeSet<&str> = [
-            include_str!("../../../migrations/0008_hr_employees_attendance_payroll.sql"),
-            include_str!("../../../migrations/0009_staff_self_service.sql"),
-            include_str!("../../../migrations/0015_self_service_expense_claim.sql"),
-            include_str!("../../../migrations/0016_attendance_punch.sql"),
-            include_str!("../../../migrations/0017_self_service_mcp.sql"),
-            include_str!("../../../migrations/0020_expense_claim_receipt.sql"),
-            include_str!("../../../migrations/0045_employees_ask_to_fix_their_own_punches.sql"),
-            include_str!("../../../migrations/0057_overtime_is_asked_for_before_it_is_paid.sql"),
-        ]
-        .into_iter()
-        .flat_map(grant_names)
-        .filter(|name| !REVOKED_GRANTS.contains(name))
-        .collect();
-        assert!(
-            !migration_names.is_empty(),
-            "沒有從 0008／0009／0015／0016／0017／0020 migration 抓到任何人資或自助工具"
-        );
-
-        let hr_modules = [
-            ops::employees::ops(),
-            ops::attendance::ops(),
-            ops::insurance::ops(),
-            ops::payroll::ops(),
-            ops::hr_compliance::ops(),
-            ops::selfservice::ops(),
-        ];
-        let declared_names: BTreeSet<&str> =
-            hr_modules.iter().flatten().map(|op| op.name()).collect();
-
-        let registry = Registry::new();
-        let registry_names: BTreeSet<&str> = registry
-            .iter()
-            .map(|op| op.name())
-            .filter(|name| declared_names.contains(name))
-            .collect();
-        assert_eq!(
-            registry_names, declared_names,
-            "人資模組宣告的操作沒有完整註冊進 Registry"
-        );
-        assert_eq!(
-            registry_names, migration_names,
-            "Registry 的人資／自助操作與 0008／0009／0015／0016／0017 migration 種下的 mcp_tool_grant 不一致"
-        );
-    }
-
-    /// The nine grants in 0012 must match the seven structural master data
-    /// operations plus creating a receivable and a payable, exactly.
-    #[test]
-    fn master_data_registry_matches_the_migration_grants() {
-        use std::collections::BTreeSet;
-
-        let migration_names =
-            grant_names(include_str!("../../../migrations/0012_master_data_ops.sql"));
-        let mut declared_names: BTreeSet<&str> =
-            ops::masters::ops().iter().map(|op| op.name()).collect();
-        declared_names.insert("create_ap_bill");
-        declared_names.insert("create_ar_invoice");
-
-        let registry_names: BTreeSet<&str> = Registry::new()
-            .iter()
-            .map(|op| op.name())
-            .filter(|name| declared_names.contains(name))
-            .collect();
-        assert_eq!(
-            registry_names, declared_names,
-            "主檔、應收與應付建立操作沒有完整註冊進 Registry"
-        );
-        assert_eq!(
-            registry_names, migration_names,
-            "Registry 的主檔建立操作與 0012 migration 種下的 mcp_tool_grant 不一致"
-        );
-    }
-
-    /// The two correction tools in 0014 must exist in both the registry and
-    /// the default MCP policy.
-    #[test]
-    fn voucher_correction_registry_matches_the_migration_grants() {
-        use std::collections::BTreeSet;
-
-        let migration_names =
-            grant_names(include_str!("../../../migrations/0014_voucher_correction.sql"));
-        let declared_names = BTreeSet::from(["void_voucher", "reverse_voucher"]);
-        let registry_names: BTreeSet<&str> = Registry::new()
-            .iter()
-            .map(|op| op.name())
-            .filter(|name| declared_names.contains(name))
-            .collect();
+        let seeded = first_column_of("mcp_tool_grant");
+        let registry: BTreeSet<&str> = Registry::new().iter().map(|op| op.name()).collect();
 
         assert_eq!(
-            registry_names, declared_names,
-            "作廢與沖銷操作沒有完整註冊進 Registry"
+            registry.difference(&seeded).collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "Registry 操作沒有 mcp_tool_grant"
         );
         assert_eq!(
-            registry_names, migration_names,
-            "Registry 的作廢與沖銷操作和 0014 migration 的 MCP grant 不一致"
+            seeded.difference(&registry).collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "mcp_tool_grant 指到不存在的操作"
         );
-    }
-
-    /// Replay the permission INSERTs and UPDATEs in migration order, keeping
-    /// only the last op_names set for each permission. This matches what
-    /// PostgreSQL ends up with, and avoids reading an array that 0008 wrote
-    /// and 0011 later overwrote as a duplicate grant.
-    fn permission_assignments(migration: &str) -> Vec<(String, Vec<String>)> {
-        fn array_at(statement: &str, start: usize) -> Vec<String> {
-            let rest = &statement[start + 2..];
-            let body = rest
-                .split_once("}'")
-                .expect("op_names 陣列字面沒有結尾")
-                .0;
-            body.split(',')
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect()
-        }
-
-        let mut assignments = Vec::new();
-        for statement in migration.split(';') {
-            if statement.contains("INSERT INTO permission (") {
-                for (array_start, _) in statement.match_indices("'{") {
-                    let before = &statement[..array_start];
-                    let row_start = before
-                        .rfind("('")
-                        .expect("permission INSERT 的資料列沒有代碼");
-                    let code = before[row_start + 2..]
-                        .split_once('\'')
-                        .expect("permission INSERT 的代碼沒有結尾")
-                        .0;
-                    assignments.push((code.to_string(), array_at(statement, array_start)));
-                }
-            } else if statement.contains("UPDATE permission")
-                && statement.contains("SET op_names")
-            {
-                let array_start = statement
-                    .find("'{")
-                    .expect("permission UPDATE 沒有 op_names 陣列");
-                let code = statement
-                    .split_once("WHERE code = '")
-                    .expect("permission UPDATE 沒有 WHERE code")
-                    .1
-                    .split_once('\'')
-                    .expect("permission UPDATE 的 code 沒有結尾")
-                    .0;
-                assignments.push((code.to_string(), array_at(statement, array_start)));
-            }
-        }
-        assignments
     }
 
     /// Every registry operation must be governed by exactly one permission.
     ///
     /// One missing means deny-by-default makes it permanently unusable; a
     /// duplicate means revoking one permission still leaves a way back in.
-    /// This parses the migration text only and needs no database.
+    /// Reads the seeded rows out of 0001 and needs no database.
     #[test]
     fn every_registry_operation_has_exactly_one_permission() {
         use std::collections::{BTreeMap, BTreeSet};
 
-        let migrations = [
-            include_str!("../../../migrations/0006_reports_roles_security.sql"),
-            include_str!("../../../migrations/0008_hr_employees_attendance_payroll.sql"),
-            include_str!("../../../migrations/0009_staff_self_service.sql"),
-            include_str!("../../../migrations/0011_permission_coverage.sql"),
-            include_str!("../../../migrations/0012_master_data_ops.sql"),
-            include_str!("../../../migrations/0014_voucher_correction.sql"),
-            // 0015 onwards rewrite permissions earlier migrations wrote, so
-            // they have to be replayed in order for the same reason
-            // PostgreSQL applies them in order.
-            include_str!("../../../migrations/0015_self_service_expense_claim.sql"),
-            include_str!("../../../migrations/0016_attendance_punch.sql"),
-            include_str!("../../../migrations/0017_self_service_mcp.sql"),
-            include_str!("../../../migrations/0020_expense_claim_receipt.sql"),
-            include_str!("../../../migrations/0023_system_administrator.sql"),
-            include_str!("../../../migrations/0025_user_account_roster.sql"),
-            include_str!("../../../migrations/0026_user_account_edit.sql"),
-            include_str!("../../../migrations/0027_user_account_delete.sql"),
-            include_str!("../../../migrations/0029_user_password_reset.sql"),
-            include_str!("../../../migrations/0031_drop_einvoicing.sql"),
-            include_str!("../../../migrations/0034_first_budget_version.sql"),
-            include_str!("../../../migrations/0039_register_fixed_assets.sql"),
-            include_str!("../../../migrations/0044_role_can_change_after_creation.sql"),
-            include_str!("../../../migrations/0045_employees_ask_to_fix_their_own_punches.sql"),
-            include_str!("../../../migrations/0046_external_identity_can_be_unlinked.sql"),
-            include_str!("../../../migrations/0047_external_login_is_configured_on_screen.sql"),
-            include_str!("../../../migrations/0052_the_business_time_zone_is_a_setting.sql"),
-            include_str!("../../../migrations/0055_a_draft_voucher_can_be_thrown_away.sql"),
-            include_str!("../../../migrations/0057_overtime_is_asked_for_before_it_is_paid.sql"),
-            include_str!("../../../migrations/0058_the_movement_form_is_gone.sql"),
-            include_str!(
-                "../../../migrations/0059_the_imported_attendance_summary_is_gone.sql"
-            ),
-        ];
-        let mut permissions = BTreeMap::new();
-        for migration in migrations {
-            let assignments = permission_assignments(migration);
-            assert!(
-                !assignments.is_empty(),
-                "migration 沒有解析到任何 permission op_names"
-            );
-            for (code, op_names) in assignments {
-                permissions.insert(code, op_names);
+        let rows = SCHEMA
+            .split_once("INSERT INTO permission (")
+            .expect("0001 沒有 permission 的 INSERT")
+            .1
+            .split_once(";\n")
+            .expect("permission 的 INSERT 沒有分號結尾")
+            .0;
+
+        let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut permissions = 0;
+        for line in rows.lines() {
+            let Some(row) = line.trim().strip_prefix("('") else { continue };
+            permissions += 1;
+            let code = row.split_once('\'').expect("permission 的代碼沒有結尾").0;
+            let op_names = row
+                .split_once("'{")
+                .expect("permission 沒有 op_names 陣列")
+                .1
+                .split_once("}'")
+                .expect("op_names 陣列字面沒有結尾")
+                .0;
+            assert!(!op_names.is_empty(), "permission 沒有對應操作：{code}");
+            for op_name in op_names.split(',').map(str::trim) {
+                owners.entry(op_name).or_default().push(code);
             }
         }
+        assert!(permissions > 0, "permission 的 INSERT 沒有解析到任何資料列");
 
-        let empty: Vec<&String> = permissions
-            .iter()
-            .filter_map(|(code, op_names)| op_names.is_empty().then_some(code))
-            .collect();
-        assert!(empty.is_empty(), "仍有 permission 沒有對應操作：{empty:?}");
+        let registry: BTreeSet<&str> = Registry::new().iter().map(|op| op.name()).collect();
+        let mapped: BTreeSet<&str> = owners.keys().copied().collect();
+        let duplicated: Vec<_> =
+            owners.iter().filter(|(_, holders)| holders.len() != 1).collect();
 
-        let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for (permission, op_names) in &permissions {
-            for op_name in op_names {
-                owners.entry(op_name.clone()).or_default().push(permission.clone());
-            }
-        }
-
-        let registry: BTreeSet<String> =
-            Registry::new().iter().map(|op| op.name().to_string()).collect();
-        let mapped: BTreeSet<String> = owners.keys().cloned().collect();
-        let missing: Vec<&String> = registry.difference(&mapped).collect();
-        let unknown: Vec<&String> = mapped.difference(&registry).collect();
-        let duplicated: Vec<(&String, &Vec<String>)> =
-            owners.iter().filter(|(_, permission)| permission.len() != 1).collect();
-
-        assert!(missing.is_empty(), "Registry 操作沒有 permission：{missing:?}");
-        assert!(unknown.is_empty(), "permission 指到不存在的操作：{unknown:?}");
-        assert!(
-            duplicated.is_empty(),
-            "操作出現在不只一條 permission：{duplicated:?}"
+        assert_eq!(
+            registry.difference(&mapped).collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "Registry 操作沒有 permission"
         );
-        assert_eq!(registry.len(), owners.len(), "Registry 與 permission 的操作數量不同");
+        assert_eq!(
+            mapped.difference(&registry).collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "permission 指到不存在的操作"
+        );
+        assert!(duplicated.is_empty(), "操作出現在不只一條 permission：{duplicated:?}");
     }
 
     /// The UI channel must not be bound by AI tool grants; otherwise
@@ -1118,24 +948,22 @@ mod tests {
         );
     }
 
-    /// The owner must not keep the permission matrix after 0023: holding both
-    /// would make the split cosmetic.
+    /// The owner must not hold the permission matrix: holding both it and the
+    /// payroll floor would make the split between the two roles cosmetic.
     #[test]
     fn the_owner_no_longer_holds_manage_access() {
-        let migration = include_str!("../../../migrations/0023_system_administrator.sql");
         assert!(
-            migration.contains("DELETE FROM role_permission")
-                && migration.contains("permission_code = 'manage_access'"),
-            "0023 必須收回 boss 的 manage_access"
+            SCHEMA.contains("('admin', 'manage_access'"),
+            "manage_access 必須給 admin"
         );
         assert!(
-            migration.contains("('admin', 'manage_access', 'full'"),
-            "0023 必須把 manage_access 給 admin"
+            !SCHEMA.contains("('boss', 'manage_access'"),
+            "boss 不得持有 manage_access"
         );
         // Balances are business information. The administrator reads the
         // chart's structure through list_accounts and nothing more.
         assert!(
-            !migration.contains("'{list_accounts,get_company_settings,list_chart_of_accounts"),
+            !SCHEMA.contains("'{list_accounts,get_company_settings,list_chart_of_accounts"),
             "list_chart_of_accounts 帶餘額，不能留在 view_masters"
         );
     }

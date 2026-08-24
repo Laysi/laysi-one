@@ -62,6 +62,12 @@ scripts/dev stop       # 停掉兩個容器
 `laysi-store/build.rs` 會 `rerun-if-changed=../../migrations`——**沒有它，新增一個
 migration 檔不會觸發重編**，伺服器會帶著舊的 migration 集合啟動且不報錯。
 
+**Schema 是一個檔案**：`migrations/0001_initial.sql`。上線前的 63 份已經合併進去，
+單一決定的來龍去脈在 git 歷史裡（`git log --diff-filter=D -- backend/migrations`），
+文件與本檔的四位數編號指的是那段歷史，不是還存在的檔案。**0001 從此不再更動**——
+已經套用過的 migration 改一個位元組，現有的資料庫就會拒絕啟動；schema 要變就新增
+`0002_*.sql`。
+
 ## 架構：四個關鍵設計
 
 ### 1. 操作註冊表：三個介面由同一份定義生成
@@ -645,8 +651,8 @@ CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_
 老闆代發的 Token 沒有 owner，自助操作對它一律回「尚未連結員工資料」。0018 因此
 才把五個唯讀自助工具對 AI 打開；寫入類與薪資明細維持關閉。
 
-**新增操作時 migration 的 `mcp_tool_grant` 要同步**：`laysi-ops` 有測試以
-`include_str!` 直接讀 0008／0009／0012／0014／0015／0016／0017，比對 Registry 與
-grant 的名稱集合（0020 也在裡面）。0018 只 UPDATE 既有 grant、不新增，所以不在那份清單裡。這條測試是因為 0008 種了 15 筆 grant 卻只實作 10 個操作才補上的。
-改寫既有 permission 的 migration（0015、0016、0017）在測試的重播清單裡要按順序排在最後，
-理由與 PostgreSQL 最後套用它們相同。
+**新增操作時 `mcp_tool_grant` 與 `permission` 要同步**：`laysi-ops` 有兩個測試以
+`include_str!` 讀 `0001_initial.sql` 的種子資料，比對 Registry 與 grant 的名稱集合、
+以及每個操作恰好屬於一條 permission。少一筆 grant，AI 看得到一個叫不動的工具；少一條
+permission，deny-by-default 讓那個操作永遠打不開。合併之前這兩個測試要按順序重播十幾份
+migration 才算得出最終狀態，現在種子只有一份，兩邊直接比對。

@@ -789,7 +789,16 @@ Token 還能不能用，一個只是提醒該換了。撤銷與過期的原因�
 
 ## 資料庫 schema（PostgreSQL 17）
 
-Migration 放 `backend/migrations/`，以 `sqlx::migrate!()` 在啟動時執行。
+Schema 是**一個檔案**：`backend/migrations/0001_initial.sql`，以 `sqlx::migrate!()`
+在啟動時執行。上線前那 63 份 migration 已經合併進去，因為當時還沒有任何一個安裝需要
+沿用，而新裝的人讀一份 SQL 比讀 63 份差異合理。
+
+**本文與 `CLAUDE.md` 裡的四位數編號（0016、0044、0057……）指的是 git 歷史，不是檔案。**
+單一決定的來龍去脈用 `git log --diff-filter=D -- backend/migrations` 找得回來；會影響
+跨層契約的結論寫在本文，不靠那些檔案保存。
+
+合併之後**每一次 schema 變更都是新的一份 migration**，0001 不再更動——它已經被套用過，
+改一個位元組就會讓現有的資料庫拒絕啟動。
 
 ```
 account(code PK text, name text, kind text, normal_side text,
@@ -823,18 +832,18 @@ reg_ruleset(id serial PK, domain text, version text, effective_from date,
 mcp_tool_grant(tool_name text PK, enabled bool, risk text, note text,
                updated_at timestamptz)
 
--- 收付模組（0004）
+-- 收付
 ar_invoice / ap_bill        明細帳。餘額的真相仍是總帳 1131 / 2101，
                             這兩張表只承載明細與到期日
 bank_txn                    銀行匯入的流水；核銷是把它對到一張傳票，不產生分錄
 
--- 稅務與資產模組（0005）
+-- 稅務與資產
 withholding_record          給付事實。**不存稅額**，稅額由 ruleset 現算
 fixed_asset                 **不存耐用年數**，只存 category；年數來自 ruleset
 depreciation_run            一期一筆（period UNIQUE），存 ruleset_version
 depreciation_entry          逐項金額，含當時解析出的 useful_life_years
 
--- 報表分組、角色權限、安全（0006）
+-- 報表分組、角色權限、安全
 account.report_group        資產負債表／損益表的分段，NOT NULL，以 CHECK 與 kind 綁死
 account.cash_flow_section   現金流量表活動別；損益科目必須為 NULL（CHECK 強制）
 company_setting             公司與帳務設定。**法規決定的值不得進這張表**
@@ -846,7 +855,7 @@ role / permission / role_permission
 approval_rule               費用簽核流程與金額門檻（公司政策，不是法規）
 api_token                   **不存明文**，只有 BLAKE3 雜湊與前八碼
 
--- 費用、預算、文件、匯入（0007）
+-- 費用、預算、文件、匯入
 voucher_line.dept_id        分錄的部門分類。以 (id, dimension_code) 複合外鍵
                             綁死只能指向「部門」那一組值
 document / document_version 文件身分與版本。**內容不在資料庫**，只有物件鍵、
@@ -859,7 +868,7 @@ import_source / import_batch / import_issue
                             `supported` 決定檔案交給哪個解析器；`payload` 存預覽
                             結果。0061 刪掉五列沒有解析器的來源
 
--- 登入、權限、主檔操作、MCP 憑證與傳票更正（0010／0011／0012／0013／0014）
+-- 登入、權限、主檔操作與 MCP 憑證
 user_account                登入帳號；可選擇連到 employee，密碼雜湊可為 NULL
 user_identity               以 IdP 的 provider + subject 唯一識別；email 只供稽核
 user_session                只存 token 雜湊、到期與撤銷狀態，明文不落地
@@ -868,7 +877,7 @@ account.is_active           0012 新增；停用阻止新分錄，但保留歷�
 api_token（0013）           MCP 身分改由 api_token 雜湊驗證與資料列綁定
 voucher.reverses            0014 新增；沖銷傳票指回原傳票，UNIQUE 防止重複沖銷
 
--- 員工的銀行帳戶（0049）
+-- 員工的銀行帳戶
 employee_bank_account       一人可有多筆；`is_payroll` 標出薪轉的那一筆，
                             以 partial UNIQUE 索引限制至多一筆。
                             原本是 `employee.bank_account` 單一自由文字欄

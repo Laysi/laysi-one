@@ -1656,24 +1656,15 @@ mod tests {
     }
 
     /// Every value in the `leave_request.kind` CHECK needs its own label. If a
-    /// migration adds a type and this does not follow, the screen quietly
+    /// kind is added to the schema and this does not follow, the screen quietly
     /// shows "other", so the two sets are compared verbatim.
     #[test]
     fn every_leave_kind_in_the_database_check_has_a_label() {
-        let migration =
-            include_str!("../../../../migrations/0008_hr_employees_attendance_payroll.sql");
-        let table = migration
-            .split_once("CREATE TABLE leave_request")
-            .expect("0008 migration 缺少 leave_request")
+        let check = include_str!("../../../../migrations/0001_initial.sql")
+            .split_once("CONSTRAINT leave_request_kind_check")
+            .expect("0001 缺少 leave_request.kind 的 CHECK")
             .1
-            .split_once("CREATE INDEX leave_request_emp_idx")
-            .expect("找不到 leave_request 表的結尾")
-            .0;
-        let check = table
-            .split_once("CHECK (kind IN")
-            .expect("leave_request.kind 缺少 CHECK")
-            .1
-            .split_once(")),")
+            .split_once("])))")
             .expect("leave_request.kind CHECK 沒有結尾")
             .0;
         let migration_kinds: BTreeSet<&str> =
