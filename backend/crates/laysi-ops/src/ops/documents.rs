@@ -14,9 +14,6 @@
 //! can store files too. The cost is base64 transport, hence the per-file limit
 //! [`laysi_store::storage::MAX_OBJECT_BYTES`]; larger files need streaming
 //! uploads, not a higher limit.
-//!
-//! There is no OCR engine. The CHECK on `document_version.ocr_status` accepts
-//! only `pending` and `not_applicable` (see migrations/0007).
 
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -61,15 +58,6 @@ fn kind_label(kind: &str) -> &'static str {
     }
 }
 
-/// Display label for an OCR status. There is no "recognised" value; the
-/// database cannot store one.
-fn ocr_label(status: &str) -> &'static str {
-    match status {
-        "not_applicable" => "不適用",
-        _ => "待處理",
-    }
-}
-
 /// Short form of a hash, e.g. `a91f…c4e2`. The full value is returned
 /// alongside; the short form is only for reading.
 pub(crate) fn short_checksum(sum: &str) -> String {
@@ -99,8 +87,6 @@ fn document_json(d: &laysi_store::DocumentRow) -> Value {
         "content_type": d.content_type,
         "checksum": d.checksum,
         "checksum_short": short_checksum(&d.checksum),
-        "ocr_status": d.ocr_status,
-        "ocr_label": ocr_label(&d.ocr_status),
         "uploaded_at": d.uploaded_at,
         "uploaded_by": d.uploaded_by,
         "created_at": d.created_at,
@@ -114,9 +100,8 @@ struct ListDocuments;
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct ListDocumentsInput {
-    /// Search file name, document number or linked record number.
-    ///
-    /// Full text is not searched: without OCR there is no text to search.
+    /// Search file name, document number or linked record number. File
+    /// contents are not searched.
     #[serde(default)]
     pub q: Option<String>,
     /// Maximum rows, default 50.
@@ -168,11 +153,10 @@ impl Operation for ListDocuments {
         let gap = bucket_bytes.map(|b| b - stats.bytes);
 
         let summary = format!(
-            "讀取文件 · {} 份／{} 個版本／{} · 未 OCR {} 份",
+            "讀取文件 · {} 份／{} 個版本／{}",
             stats.documents,
             stats.versions,
-            human_size(stats.bytes),
-            stats.ocr_pending
+            human_size(stats.bytes)
         );
         Ok(OpOutcome::new(
             json!({
@@ -182,7 +166,6 @@ impl Operation for ListDocuments {
                     "versions": stats.versions,
                     "bytes": stats.bytes,
                     "size_label": human_size(stats.bytes),
-                    "ocr_pending": stats.ocr_pending,
                     "archived": stats.archived,
                     "vouchers_without_doc": stats.vouchers_without_doc,
                 },
@@ -190,9 +173,8 @@ impl Operation for ListDocuments {
                 "bucket_difference": gap,
                 "bucket_reconciled": gap.map(|g| g == 0),
                 "storage_error": storage_error,
-                // Both of these must be shown on screen, not left in the code.
-                "ocr_note": "尚未接上 OCR 引擎，全文搜尋只找得到檔名與關聯單據號。",
-                "immutability_note": "上傳後檔案不可覆寫，改版會存成新版本；稽核封存的文件無法刪除。",
+                // Must be shown on screen, not left in the code.
+                "immutability_note": "稽核封存的文件無法刪除。",
                 "max_object_bytes": MAX_OBJECT_BYTES,
             }),
             summary,
@@ -331,19 +313,10 @@ impl Operation for UploadDocument {
         let content_type = storage::guess_content_type(&i.file_name);
         let stored = objects.put(&key, &body, content_type, &i.file_name).await?;
 
-        // 3. Register it. Formats that never need OCR (CSV, XML) are marked
-        //    not applicable, everything else pending: there is no engine, and
-        //    the database would reject any other value anyway.
-        let ocr_status = if content_type.starts_with("application/pdf")
-            || content_type.starts_with("image/")
-        {
-            "pending"
-        } else {
-            "not_applicable"
-        };
+        // 3. Register it.
         let doc = ctx
             .store
-            .record_document_version(&slot, &stored, &i.file_name, ocr_status, &ctx.actor)
+            .record_document_version(&slot, &stored, &i.file_name, &ctx.actor)
             .await?;
 
         let summary = format!(
@@ -360,7 +333,6 @@ impl Operation for UploadDocument {
                 "document": document_json(&doc),
                 "bucket": objects.bucket(),
                 "new_version": doc.version_no > 1,
-                "ocr_note": "尚未接上 OCR 引擎，本文件的辨識狀態為「待處理」。",
             }),
             summary,
         ))
@@ -446,16 +418,6 @@ mod tests {
         let full = "a91f0c3d55e7b8241f6a09cd7b3e5518d24c9f7061ba38ed4297cf50a63bc4e2";
         assert_eq!(short_checksum(full), "a91f…c4e2");
         assert_eq!(short_checksum("abc"), "abc", "太短就原樣顯示，不要切出亂碼");
-    }
-
-    /// There is no "recognised" status, and the database CHECK cannot store
-    /// one either.
-    #[test]
-    fn there_is_no_such_thing_as_recognised() {
-        assert_eq!(ocr_label("pending"), "待處理");
-        assert_eq!(ocr_label("not_applicable"), "不適用");
-        // Even a value forced in does not become "recognised".
-        assert_eq!(ocr_label("done"), "待處理");
     }
 
     #[test]

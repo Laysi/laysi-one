@@ -100,10 +100,6 @@ export function Documents({ onToast, reloadKey }: Props) {
               </div>
             </div>
             <div className="card stat-card">
-              <div className="stat-card__kicker">尚未辨識</div>
-              <div className="stat-card__value num">{data.stats.ocr_pending}</div>
-            </div>
-            <div className="card stat-card">
               <div className="stat-card__kicker">缺附件的傳票</div>
               <div className="stat-card__value num">{data.stats.vouchers_without_doc}</div>
               <div className="stat-card__note num">查帳時常見的查核項目</div>
@@ -173,8 +169,6 @@ export function Documents({ onToast, reloadKey }: Props) {
                       {d.file_name}
                       <span className="cell-hint cell-hint--block">
                         <span className="num">{d.doc_no}</span> · {d.kind_label} · {d.uploaded_by}
-                        {' · OCR '}
-                        {d.ocr_label}
                       </span>
                     </td>
                     <td className="cell-accounts num cell-nowrap">{d.link_ref || '—'}</td>
@@ -209,7 +203,6 @@ export function Documents({ onToast, reloadKey }: Props) {
             </table>
           </div>
 
-          <p className="hint">{data.ocr_note}</p>
           <p className="hint">{data.immutability_note}</p>
           <p className="hint">
             「取回驗證」會比對檔案與登記的指紋，不符時<strong>不交出內容</strong>。

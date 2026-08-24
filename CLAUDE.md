@@ -401,8 +401,8 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 的 `REDACTED_FIELDS` 依欄位名換成「[已遮蔽]」，長度規則擋不到十個字元的字號。
 
 **文件內容在 RustFS，資料庫只留物件鍵與 BLAKE3**。先配編號、檔案進桶子成功
-才寫資料庫；取回時一定重算雜湊比對，對不上就不交出內容。**沒有 OCR 引擎**，
-`ocr_status` 的 CHECK 只收 `pending` 與 `not_applicable`。
+才寫資料庫；取回時一定重算雜湊比對，對不上就不交出內容。**沒有 OCR**——0003 把
+`ocr_status` 整欄刪掉，它是由 MIME 型別推出來、沒有任何判斷讀它的常數。
 
 **角色權限由 `dispatch` 即時強制 deny-by-default**：每次都查
 `role_permission → permission.op_names`，不快取。矩陣之外還有**兩道風險底線**

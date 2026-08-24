@@ -301,8 +301,9 @@ SQL 會讓三張表對「什麼算已過帳」與日期怎麼比各有一套定�
 不能有例外。代價是 base64 膨脹三分之一，因此設 `MAX_OBJECT_BYTES` 上限；要放更大
 的檔案得改成串流上傳，**不是把上限調大**。
 
-**沒有 OCR 引擎**，所以 `document_version.ocr_status` 的 CHECK 只收 `pending`
-與 `not_applicable`，資料庫層面就寫不進「已辨識」。接上引擎時要一起改 migration。
+**沒有 OCR**（0003）。`ocr_status` 原本由上傳當下的 MIME 型別推出 `pending` 或
+`not_applicable`，沒有任何判斷讀它，而畫面上那張統計卡與逐列標籤在每一套安裝上
+都印同一件事。要接引擎時新增欄位，不是留一個永遠停在 `pending` 的欄位等它。
 
 ### 身分證字號完整保存（0032）
 
@@ -1156,7 +1157,7 @@ impl Registry {
 | `get_department_pl` | ReadOnly | `{ from?, to? }` | `rows[]`（含 `unallocated`）、`total_profit`、`statement_profit`、`reconciled` |
 | `create_budget_version` | BossOnly | `{ code, label?, fiscal_year?, is_current?, note? }` | `{ version }` |
 | `set_budget` | BossOnly | `{ account_code, amount, version?, dept_code? }` | `{ budget }` |
-| `list_documents` | ReadOnly | `{ q?, limit? }` | `documents[]`、`stats`、`bucket`、`bucket_reconciled`、`ocr_note` |
+| `list_documents` | ReadOnly | `{ q?, limit? }` | `documents[]`、`stats`、`bucket`、`bucket_reconciled` |
 | `upload_document` | NeedsConfirm | `{ file_name, content_base64, kind?, link_type?, link_ref?, doc_no? }` | `{ document, new_version }` |
 | `get_document` | ReadOnly | `{ doc_no, version?, include_content? }` | `{ document, verified, checksum_recomputed }` |
 | `list_imports` | ReadOnly | `{}` | `sources[]`、`batches[]`、`csv_columns` |

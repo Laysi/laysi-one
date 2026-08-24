@@ -568,8 +568,6 @@ export interface RoleMatrix {
   roles: RoleRow[];
   permissions: PermissionRow[];
   grants: GrantCell[];
-  enforced: boolean;
-  enforcement_note: string;
   actor_role: string;
 }
 
@@ -600,7 +598,6 @@ export interface ApprovalStep {
 
 export interface ApprovalRules {
   steps: ApprovalStep[];
-  enforced: boolean;
   enforcement_note: string;
 }
 
@@ -609,7 +606,6 @@ export interface SecurityRule {
   label: string;
   value: string;
   detail: string;
-  enforced: boolean;
   source: 'policy' | 'tool_grant' | 'approval_flow';
   blocked_tools?: string[];
   risky_enabled_tools?: string[];
@@ -617,7 +613,6 @@ export interface SecurityRule {
 
 export interface SecurityPolicy {
   rules: SecurityRule[];
-  enforced_count: number;
   total: number;
 }
 
@@ -941,8 +936,6 @@ export interface DocumentRow {
   content_type: string;
   checksum: string;
   checksum_short: string;
-  ocr_status: string;
-  ocr_label: string;
   uploaded_at: string;
   uploaded_by: string;
   created_at: string;
@@ -956,7 +949,6 @@ export interface DocumentList {
     versions: number;
     bytes: number;
     size_label: string;
-    ocr_pending: number;
     archived: number;
     vouchers_without_doc: number;
   };
@@ -970,7 +962,6 @@ export interface DocumentList {
   bucket_difference: number | null;
   bucket_reconciled: boolean | null;
   storage_error: string | null;
-  ocr_note: string;
   immutability_note: string;
   max_object_bytes: number;
 }

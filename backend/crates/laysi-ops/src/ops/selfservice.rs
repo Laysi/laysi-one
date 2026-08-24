@@ -1092,16 +1092,9 @@ impl Operation for AttachMyExpenseReceipt {
         );
         let content_type = storage::guess_content_type(file_name);
         let stored = objects.put(&key, &body, content_type, file_name).await?;
-        let ocr_status = if content_type.starts_with("application/pdf")
-            || content_type.starts_with("image/")
-        {
-            "pending"
-        } else {
-            "not_applicable"
-        };
         let document = ctx
             .store
-            .record_document_version(&slot, &stored, file_name, ocr_status, &ctx.actor)
+            .record_document_version(&slot, &stored, file_name, &ctx.actor)
             .await?;
         ctx.store
             .set_claim_document_if_absent(&claim.claim_no, slot.document_id)
@@ -1640,7 +1633,7 @@ impl Operation for SubmitMyPunchCorrection {
     }
 
     fn summary(&self) -> &'static str {
-        "以目前登入帳號所連結的員工身分送出打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為送出即通過時，在同一個交易寫進打卡紀錄。"
+        "以目前登入帳號所連結的員工身分送出打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為自動通過時，在同一個交易寫進打卡紀錄。"
     }
 
     fn input_schema(&self) -> Value {

@@ -4094,7 +4094,7 @@ impl Store {
             "SELECT d.doc_no, d.name, d.kind, d.link_type, d.link_ref, d.archived,
                     d.note, d.created_at, d.created_by,
                     v.version_no, v.object_key, v.file_name, v.byte_size, v.content_type,
-                    v.checksum, v.ocr_status, v.uploaded_at, v.uploaded_by,
+                    v.checksum, v.uploaded_at, v.uploaded_by,
                     n.versions, n.total_bytes
                FROM document d
                JOIN LATERAL (SELECT * FROM document_version dv
@@ -4418,7 +4418,7 @@ impl Store {
             "SELECT d.doc_no, d.name, d.kind, d.link_type, d.link_ref, d.archived,
                     d.note, d.created_at, d.created_by,
                     v.version_no, v.object_key, v.file_name, v.byte_size, v.content_type,
-                    v.checksum, v.ocr_status, v.uploaded_at, v.uploaded_by,
+                    v.checksum, v.uploaded_at, v.uploaded_by,
                     n.versions, n.total_bytes
                FROM document d
                JOIN LATERAL (SELECT * FROM document_version dv
@@ -4463,7 +4463,7 @@ impl Store {
             "SELECT d.doc_no, d.name, d.kind, d.link_type, d.link_ref, d.archived,
                     d.note, d.created_at, d.created_by,
                     v.version_no, v.object_key, v.file_name, v.byte_size, v.content_type,
-                    v.checksum, v.ocr_status, v.uploaded_at, v.uploaded_by,
+                    v.checksum, v.uploaded_at, v.uploaded_by,
                     n.versions, n.total_bytes
                FROM document d
                JOIN document_version v ON v.document_id = d.id
@@ -4550,14 +4550,13 @@ impl Store {
         slot: &DocumentSlot,
         object: &storage::StoredObject,
         file_name: &str,
-        ocr_status: &str,
         actor: &str,
     ) -> Result<DocumentRow> {
         sqlx::query(
             "INSERT INTO document_version
                (document_id, version_no, object_key, file_name, byte_size, content_type,
-                checksum, ocr_status, uploaded_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                checksum, uploaded_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(slot.document_id)
         .bind(slot.version_no)
@@ -4566,15 +4565,13 @@ impl Store {
         .bind(object.byte_size)
         .bind(&object.content_type)
         .bind(&object.checksum)
-        .bind(ocr_status)
         .bind(actor)
         .execute(&self.pool)
         .await?;
         self.document_version(&slot.doc_no, Some(slot.version_no)).await
     }
 
-    /// Document statistics: documents, revisions, bytes, and how many await
-    /// OCR.
+    /// Document statistics: documents, revisions and bytes.
     ///
     /// The byte count is the database side's sum; the bucket side is measured
     /// separately by `ObjectStore::usage`. Reporting both makes a mismatch
@@ -4585,7 +4582,6 @@ impl Store {
                (SELECT COUNT(*) FROM document)                                    AS documents,
                (SELECT COUNT(*) FROM document_version)                            AS versions,
                (SELECT COALESCE(SUM(byte_size),0)::bigint FROM document_version)   AS bytes,
-               (SELECT COUNT(*) FROM document_version WHERE ocr_status = 'pending') AS ocr_pending,
                (SELECT COUNT(*) FROM document WHERE archived)                      AS archived,
                (SELECT COUNT(*) FROM voucher v
                  WHERE v.status IN ('pending','posted')
@@ -4599,7 +4595,6 @@ impl Store {
             documents: r.get("documents"),
             versions: r.get("versions"),
             bytes: r.get("bytes"),
-            ocr_pending: r.get("ocr_pending"),
             archived: r.get("archived"),
             vouchers_without_doc: r.get("vouchers_without_doc"),
         })
@@ -7111,9 +7106,6 @@ pub struct DocumentRow {
     pub content_type: String,
     /// BLAKE3 computed at upload time, recomputed and compared on retrieval.
     pub checksum: String,
-    /// `pending` (not recognised; the system has no OCR engine) or
-    /// `not_applicable`.
-    pub ocr_status: String,
     pub uploaded_at: DateTime<Utc>,
     pub uploaded_by: String,
 }
@@ -7147,7 +7139,6 @@ pub struct DocumentStats {
     /// Bytes registered on the database side. The bucket side is measured
     /// separately by `ObjectStore::usage`.
     pub bytes: i64,
-    pub ocr_pending: i64,
     pub archived: i64,
     /// Saved or posted vouchers with no document attached.
     pub vouchers_without_doc: i64,
@@ -8384,7 +8375,6 @@ fn row_to_document(r: &PgRow) -> DocumentRow {
         total_bytes: r.get("total_bytes"),
         content_type: r.get("content_type"),
         checksum: r.get("checksum"),
-        ocr_status: r.get("ocr_status"),
         uploaded_at: r.get("uploaded_at"),
         uploaded_by: r.get("uploaded_by"),
     }
