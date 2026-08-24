@@ -294,7 +294,7 @@ export function Security({ onToast, reloadKey }: Props) {
               <>
                 <h3 className="section-title">外部登入</h3>
                 {oidcForm ? (
-                  <div className="card">
+                  <div className="card form-card">
                     <div className="field-grid">
                       <label className="field">
                         供應商
@@ -345,7 +345,7 @@ export function Security({ onToast, reloadKey }: Props) {
                         <span className="field__hint">存入後無法再顯示。</span>
                       </label>
                       <label className="field">
-                        允許的網域
+                        公司電子郵件網域
                         <input
                           className="input"
                           value={oidcForm.allowed_domain}
@@ -368,7 +368,7 @@ export function Security({ onToast, reloadKey }: Props) {
                             </option>
                           ))}
                         </select>
-                        <span className="field__hint">自動建立帳號需要先填允許的網域。</span>
+                        <span className="field__hint">自動建立帳號需要先填公司電子郵件網域。</span>
                       </label>
                       <div className="field field--full">
                         轉址網址
@@ -412,14 +412,13 @@ export function Security({ onToast, reloadKey }: Props) {
                         </label>
                       )}
                     </div>
-                    <div className="toolbar doc-card__actions">
+                    <div className="wizard-actions">
                       <button
                         className="btn btn--compact btn--ghost"
                         onClick={() => setOidcForm(null)}
                       >
                         取消
                       </button>
-                      <span className="spacer" />
                       <button
                         className={`btn btn--compact${savingOidc ? ' btn--off' : ''}`}
                         disabled={savingOidc}
@@ -448,7 +447,7 @@ export function Security({ onToast, reloadKey }: Props) {
                       {oidc.enabled && (
                         <>
                           <div className="fact">
-                            <span className="fact__key">允許的網域</span>
+                            <span className="fact__key">公司電子郵件網域</span>
                             <span className="fact__value">
                               {oidc.allowed_domain ? `@${oidc.allowed_domain}` : '不限網域'}
                             </span>
