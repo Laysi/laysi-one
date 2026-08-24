@@ -40,7 +40,7 @@ const DUPLICATE_MESSAGES: &[(&str, &str)] = &[
     ("ar_invoice_invoice_no_key", "這個發票號碼已經用過了，請換一個。"),
     ("employee_emp_no_key", "這個員工編號已經有人使用，請換一個。"),
     ("fixed_asset_code_key", "這個資產編號已經用過了，請換一個。"),
-    ("dimension_value_dimension_code_code_key", "這個代碼已經存在，請換一個。"),
+    ("dimension_value_dimension_code_code_key", "這個名稱已經有人使用，請換一個。"),
     ("user_account_username_key", "這個登入信箱已經有帳號，請改用其他地址。"),
     ("user_identity_provider_subject_key", "這個外部帳號已經連結到其他登入帳號。"),
     (
@@ -2514,6 +2514,46 @@ impl Store {
             sort_order: row.get("sort_order"),
         })
     }
+    /// Rename or retire one dimension value.
+    ///
+    /// Vouchers, employees, claims and budget lines point at `id`, so a rename
+    /// reaches every one of them and no row is orphaned.
+    ///
+    /// A rename carries `code` along only while the two still match, which is
+    /// how the settings screen creates them. `code` is the key the CSV
+    /// importer matches on and the importer lists the available ones, so a
+    /// code left behind at the old name would be a name nobody recognises;
+    /// a code that was chosen separately is somebody's key and stays put.
+    pub async fn update_dimension_value(
+        &self,
+        req: UpdateDimensionValue<'_>,
+    ) -> Result<DimensionValueRecord> {
+        let row = sqlx::query(
+            "UPDATE dimension_value
+                SET code = CASE WHEN code = label THEN COALESCE($3, code) ELSE code END,
+                    label = COALESCE($3, label),
+                    active = COALESCE($4, active)
+              WHERE dimension_code = $1 AND code = $2
+             RETURNING id, dimension_code, code, label, active, sort_order",
+        )
+        .bind(req.dimension_code)
+        .bind(req.code)
+        .bind(req.label)
+        .bind(req.active)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StoreError::DepartmentNotFound { code: req.code.to_string() })?;
+
+        Ok(DimensionValueRecord {
+            id: row.get("id"),
+            dimension_code: row.get("dimension_code"),
+            code: row.get("code"),
+            label: row.get("label"),
+            active: row.get("active"),
+            sort_order: row.get("sort_order"),
+        })
+    }
+
     // Roles and permissions
     //
     // The matrix serves both the settings screen and `Registry::dispatch`.
@@ -6486,6 +6526,15 @@ pub struct CreateDimensionValue<'a> {
     pub label: &'a str,
     pub active: bool,
     pub sort_order: i32,
+}
+
+pub struct UpdateDimensionValue<'a> {
+    pub dimension_code: &'a str,
+    /// Current code of the row to update.
+    pub code: &'a str,
+    /// New display name. None leaves the name alone.
+    pub label: Option<&'a str>,
+    pub active: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

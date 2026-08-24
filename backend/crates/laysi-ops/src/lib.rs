@@ -746,23 +746,45 @@ mod tests {
         assert_eq!(before, declared, "註冊表裡有不屬於任何模組的操作");
     }
 
-    /// The one migration, as text. Every assertion below reads the seed data
-    /// straight out of it, so a switch or a permission that the schema does
-    /// not actually seed cannot pass by being described in a test.
-    const SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
+    /// Every migration, in order, as text. The assertions below read the seed
+    /// data straight out of them, so a switch or a permission that the schema
+    /// does not actually seed cannot pass by being described in a test.
+    /// A new migration file has to be listed here.
+    const MIGRATIONS: &[&str] = &[
+        include_str!("../../../migrations/0001_initial.sql"),
+        include_str!("../../../migrations/0002_dimension_value_rename.sql"),
+    ];
+
+    /// The rows of one multi-row INSERT, one string per row, without the
+    /// leading `('`.
+    fn inserted_rows(table: &str) -> Vec<&'static str> {
+        let head = format!("INSERT INTO {table} (");
+        let rows: Vec<&str> = MIGRATIONS
+            .iter()
+            .flat_map(|sql| sql.split(head.as_str()).skip(1))
+            .flat_map(|block| {
+                block
+                    .split_once(";\n")
+                    .unwrap_or_else(|| panic!("{table} 的 INSERT 沒有分號結尾"))
+                    .0
+                    .lines()
+            })
+            .filter_map(|line| line.trim().strip_prefix("('"))
+            .collect();
+        assert!(!rows.is_empty(), "migrations 裡沒有 {table} 的 INSERT");
+        rows
+    }
+
+    /// Whether any migration contains this literal.
+    fn seeded(needle: &str) -> bool {
+        MIGRATIONS.iter().any(|sql| sql.contains(needle))
+    }
 
     /// Values of the first column of every row of one multi-row INSERT.
     fn first_column_of(table: &str) -> std::collections::BTreeSet<&'static str> {
-        SCHEMA
-            .split_once(&format!("INSERT INTO {table} ("))
-            .unwrap_or_else(|| panic!("0001 沒有 {table} 的 INSERT"))
-            .1
-            .split_once(";\n")
-            .unwrap_or_else(|| panic!("{table} 的 INSERT 沒有分號結尾"))
-            .0
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("('"))
-            .filter_map(|line| line.split_once('\'').map(|(name, _)| name))
+        inserted_rows(table)
+            .into_iter()
+            .filter_map(|row| row.split_once('\'').map(|(name, _)| name))
             .collect()
     }
 
@@ -797,33 +819,45 @@ mod tests {
     fn every_registry_operation_has_exactly_one_permission() {
         use std::collections::{BTreeMap, BTreeSet};
 
-        let rows = SCHEMA
-            .split_once("INSERT INTO permission (")
-            .expect("0001 沒有 permission 的 INSERT")
-            .1
-            .split_once(";\n")
-            .expect("permission 的 INSERT 沒有分號結尾")
-            .0;
-
-        let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        let mut permissions = 0;
-        for line in rows.lines() {
-            let Some(row) = line.trim().strip_prefix("('") else { continue };
-            permissions += 1;
-            let code = row.split_once('\'').expect("permission 的代碼沒有結尾").0;
-            let op_names = row
-                .split_once("'{")
+        fn op_names_of(row: &str) -> &str {
+            row.split_once("'{")
                 .expect("permission 沒有 op_names 陣列")
                 .1
                 .split_once("}'")
                 .expect("op_names 陣列字面沒有結尾")
+                .0
+        }
+
+        let mut granted: BTreeMap<&str, &str> = BTreeMap::new();
+        for row in inserted_rows("permission") {
+            let code = row.split_once('\'').expect("permission 的代碼沒有結尾").0;
+            granted.insert(code, op_names_of(row));
+        }
+        // A later migration rewrites the whole array rather than appending, so
+        // the final state is the last statement that named the permission.
+        for statement in MIGRATIONS
+            .iter()
+            .flat_map(|sql| sql.split("UPDATE permission").skip(1))
+            .filter_map(|chunk| chunk.split_once(';').map(|(s, _)| s))
+        {
+            let code = statement
+                .split_once("WHERE code = '")
+                .expect("UPDATE permission 沒有指定 code")
+                .1
+                .split_once('\'')
+                .expect("code 沒有結尾")
                 .0;
+            granted.insert(code, op_names_of(statement));
+        }
+        assert!(!granted.is_empty(), "permission 沒有解析到任何資料列");
+
+        let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (code, op_names) in &granted {
             assert!(!op_names.is_empty(), "permission 沒有對應操作：{code}");
             for op_name in op_names.split(',').map(str::trim) {
                 owners.entry(op_name).or_default().push(code);
             }
         }
-        assert!(permissions > 0, "permission 的 INSERT 沒有解析到任何資料列");
 
         let registry: BTreeSet<&str> = Registry::new().iter().map(|op| op.name()).collect();
         let mapped: BTreeSet<&str> = owners.keys().copied().collect();
@@ -953,17 +987,17 @@ mod tests {
     #[test]
     fn the_owner_no_longer_holds_manage_access() {
         assert!(
-            SCHEMA.contains("('admin', 'manage_access'"),
+            seeded("('admin', 'manage_access'"),
             "manage_access 必須給 admin"
         );
         assert!(
-            !SCHEMA.contains("('boss', 'manage_access'"),
+            !seeded("('boss', 'manage_access'"),
             "boss 不得持有 manage_access"
         );
         // Balances are business information. The administrator reads the
         // chart's structure through list_accounts and nothing more.
         assert!(
-            !SCHEMA.contains("'{list_accounts,get_company_settings,list_chart_of_accounts"),
+            !seeded("'{list_accounts,get_company_settings,list_chart_of_accounts"),
             "list_chart_of_accounts 帶餘額，不能留在 view_masters"
         );
     }
