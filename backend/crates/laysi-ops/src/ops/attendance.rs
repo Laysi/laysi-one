@@ -451,7 +451,7 @@ impl PunchSummary {
             "overtime_hours": self.overtime_seconds.map(|s| hours(s).to_string()),
             "manual_days": self.manual_days,
             "overtime_pay_computed": false,
-            "overtime_note": "打卡推導的是時數。加班費依核准的加班申請計算，請送出加班申請。",
+            "overtime_note": "加班費請送出加班申請。",
         })
     }
 }
