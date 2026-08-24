@@ -1063,7 +1063,6 @@ export interface HrDashboard {
   links: HrLink[];
   headcount: number;
   leaving: number;
-  flow_kinds: string[];
   payroll_reconciled: boolean;
   payroll_not_yet_posted: string;
   payroll_posted_total: string;
@@ -1114,66 +1113,6 @@ export interface EmployeeList {
   avg_service_label: string;
   annual_leave_ruleset: RulesetRef;
   salary_note: string;
-}
-
-export interface FlowStepRef {
-  step_no: number;
-  label: string;
-  note: string;
-}
-
-export interface MovementStepState {
-  step_no: number;
-  label: string;
-  note: string;
-  done: boolean;
-  done_by: string | null;
-  done_at: string | null;
-  done_note: string | null;
-}
-
-export interface MovementRow {
-  movement_no: string;
-  emp_no: string;
-  name: string;
-  dept_label: string | null;
-  kind: string;
-  kind_label: string;
-  effective_on: string;
-  from_value: string;
-  to_value: string;
-  reason: string;
-  status: string;
-  done_count: number;
-  step_count: number;
-  step_label: string;
-  next_step: FlowStepRef | null;
-  steps: MovementStepState[];
-  created_at: string;
-  created_by: string;
-}
-
-export interface MovementFlow {
-  kind: string;
-  label: string;
-  steps: FlowStepRef[];
-}
-
-export interface MovementList {
-  movements: MovementRow[];
-  flows: MovementFlow[];
-  open_count: number;
-  departments: DepartmentChoice[];
-}
-
-export interface DepartmentChoice {
-  code: string;
-  label: string;
-}
-
-export interface MovementApplied {
-  base_salary: { from: string; to: string } | null;
-  department: { from: string | null; to: string } | null;
 }
 
 export interface ClosedAccess {

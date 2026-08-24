@@ -9,7 +9,6 @@ interface Props {
 
 const DESTINATION: Record<string, ScreenId> = {
   hr: 'hr',
-  hr_mv: 'onb',
   hr_att: 'att',
   hr_pay: 'pay',
   hr_ins: 'ins',
@@ -153,10 +152,6 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
       </div>
 
       <p className="hint">逐人薪資明細與年度扣繳憑單限負責人檢視。</p>
-      <p className="hint">
-        目前收了 {new Set(data.flow_kinds).size} 種異動、共 {data.flow_kinds.length} 關，
-        逐關列在「到離職與異動」。
-      </p>
     </div>
   );
 }

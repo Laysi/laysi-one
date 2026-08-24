@@ -20,7 +20,6 @@ export type ScreenId =
 
   | 'hrdash'
   | 'hr'
-  | 'onb'
   | 'att'
   | 'pay'
   | 'ins'
@@ -91,7 +90,6 @@ export const HR_NAV: NavEntry[] = [
   { kind: 'item', id: 'ins', label: '勞健保與勞退', op: 'get_insurance_summary', ready: true },
   { kind: 'head', label: '人員' },
   { kind: 'item', id: 'hr', label: '員工名冊', op: 'list_employees', ready: true },
-  { kind: 'item', id: 'onb', label: '到離職與異動', op: 'list_employee_movements', ready: true },
   { kind: 'head', label: '法遵' },
   { kind: 'item', id: 'wht', label: '扣繳與法遵', op: 'get_hr_compliance', ready: true },
 ];
@@ -177,7 +175,6 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   pay: '/hr/payroll',
   ins: '/hr/insurance',
   hr: '/hr/employees',
-  onb: '/hr/movements',
   wht: '/hr/withholding',
 
   setup: '/system/settings',

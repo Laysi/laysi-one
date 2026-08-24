@@ -5,6 +5,7 @@ import {
   money,
   OpFailed,
   trimDecimal,
+  type ClosedAccess,
   type DimensionList,
   type EmployeeList,
   type EmployeeRow,
@@ -245,12 +246,19 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         note: form.note.trim(),
       };
       const op = drawer === 'edit' ? 'update_employee' : 'create_employee';
-      const d = await callOp<{ employee: { emp_no: string; name: string } }>(
-        op,
-        input,
-        drawer === 'edit' ? `更新員工 ${form.emp_no}` : `新增員工 ${form.name}`,
+      const d = await callOp<{
+        employee: { emp_no: string; name: string };
+        closed_access?: ClosedAccess;
+      }>(op, input, drawer === 'edit' ? `更新員工 ${form.emp_no}` : `新增員工 ${form.name}`);
+      const closed = d.closed_access;
+      const shut: string[] = [];
+      if (closed && closed.logins.length > 0) shut.push(`停用登入帳號 ${closed.logins.join('、')}`);
+      if (closed && closed.tokens > 0) shut.push(`撤銷 ${closed.tokens} 組 MCP Token`);
+      onToast(
+        shut.length > 0
+          ? `${d.employee.emp_no} ${d.employee.name} 已離職，並${shut.join('、')}`
+          : `${d.employee.emp_no} ${d.employee.name} 已儲存`,
       );
-      onToast(`${d.employee.emp_no} ${d.employee.name} 已儲存`);
       setDrawer(null);
       onChanged();
       load();
@@ -536,11 +544,6 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     placeholder={drawer === 'edit' ? currentAmount('base_salary') : '38000'}
                     onChange={(e) => setField('base_salary', e.target.value)}
                   />
-                  {drawer === 'edit' && (
-                    <span className="field__hint">
-                      調薪請在「到離職與異動」開立異動單。
-                    </span>
-                  )}
                 </label>
                 <label className="field">
                   勞保投保薪資

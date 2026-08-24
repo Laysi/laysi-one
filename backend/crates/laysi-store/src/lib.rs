@@ -271,27 +271,9 @@ pub enum StoreError {
     #[error("沒有這位員工：{no}")]
     EmployeeNotFound { no: String },
 
-    #[error("找不到異動單 {no}")]
-    MovementNotFound { no: String },
-
-    #[error("「{kind}」的流程只有 {total} 關，沒有第 {step_no} 關")]
-    NoSuchFlowStep { kind: String, step_no: i32, total: i64 },
-
-    #[error("異動單 {no} 的第 {step} 關已完成")]
-    MovementStepAlreadyDone { no: String, step: i32 },
-
-    /// Closing a pay change writes the amount to the employee record, so the
-    /// amount has to be readable. Refusing here rather than closing quietly
-    /// keeps the flow from claiming an effect it did not have.
-    #[error("異動單 {no} 的調整後月底薪是「{value}」，不是金額。請重開一張調薪單，填入金額，例如 45000。")]
-    MovementSalaryTargetUnreadable { no: String, value: String },
-
-    #[error("異動單 {no} 的調任部門「{value}」不是現有部門。{hint}")]
-    MovementDepartmentUnknown { no: String, value: String, hint: String },
-
-    /// Completing a leaving flow closes the person's login, and no operation
+    /// Ending an employment closes the person's login, and no operation
     /// grants the administrator role, so the last one has to keep it.
-    #[error("{name} 的登入帳號「{username}」是唯一啟用中的系統管理員，離職結案將停用該帳號。請先在「帳號管理」建立另一個系統管理員帳號。")]
+    #[error("{name} 的登入帳號「{username}」是唯一啟用中的系統管理員，改為已離職將停用該帳號。請先在「帳號管理」建立另一個系統管理員帳號。")]
     LastAdministratorLeaving { name: String, username: String },
 
     #[error("找不到休假單 {no}")]
@@ -4942,7 +4924,7 @@ impl Store {
         .ok_or_else(|| StoreError::UnknownAccount { code: gl_code.to_string() })
     }
 
-    // HR: employees and movements
+    // HR: employees
     //
     // This section only moves data. Premiums, leave entitlement and the
     // minimum wage check all happen in laysi-ops via `laysi-regulation`; the
@@ -5012,17 +4994,23 @@ impl Store {
     /// Neither creating nor updating an employee creates a login;
     /// `user_account` stays with `laysi-admin`, and the two tables are
     /// deliberately separate.
-    pub async fn update_employee(&self, req: WriteEmployee<'_>) -> Result<Employee> {
+    ///
+    /// Moving someone to `left` closes their access in this same transaction:
+    /// the roster saying the company has stopped employing this person and the
+    /// login still working are not two states the system may hold at once.
+    /// Nothing revisits `left_on` later, so a login left open is open for good.
+    pub async fn update_employee(&self, req: WriteEmployee<'_>) -> Result<UpdatedEmployee> {
         let mut tx = self.pool.begin().await?;
-        let employee_id: Option<i32> =
-            sqlx::query("SELECT id FROM employee WHERE emp_no = $1 FOR UPDATE")
-                .bind(req.emp_no)
-                .fetch_optional(&mut *tx)
-                .await?
-                .map(|r| r.get("id"));
-        let Some(employee_id) = employee_id else {
+        let current = sqlx::query("SELECT id, name, status FROM employee WHERE emp_no = $1 FOR UPDATE")
+            .bind(req.emp_no)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(current) = current else {
             return Err(StoreError::EmployeeNotFound { no: req.emp_no.to_string() });
         };
+        let employee_id: i32 = current.get("id");
+        let was_left: String = current.get("status");
+        let name: String = current.get("name");
 
         let dept_id = resolve_department_id(&mut tx, req.dept_code).await?;
         sqlx::query(
@@ -5056,8 +5044,14 @@ impl Store {
 
         replace_bank_accounts(&mut tx, employee_id, &req).await?;
 
+        let closed = if req.status == "left" && was_left != "left" {
+            close_access(&mut tx, employee_id, &name, req.actor, req.keep_active_role).await?
+        } else {
+            ClosedAccess::default()
+        };
+
         tx.commit().await?;
-        self.employee(req.emp_no).await
+        Ok(UpdatedEmployee { employee: self.employee(req.emp_no).await?, closed })
     }
 
     pub async fn employees(&self, include_left: bool, q: Option<&str>) -> Result<Vec<Employee>> {
@@ -5087,9 +5081,9 @@ impl Store {
         Ok(staff)
     }
 
-    /// Fill in [`Employee::bank_accounts`]. One query for the whole roster,
-    /// the same shape as movement steps: a query per person would be one round
-    /// trip per row on a page that reads every employee at once.
+    /// Fill in [`Employee::bank_accounts`]. One query for the whole roster: a
+    /// query per person would be one round trip per row on a page that reads
+    /// every employee at once.
     async fn attach_bank_accounts(&self, staff: &mut [Employee]) -> Result<()> {
         if staff.is_empty() {
             return Ok(());
@@ -5163,284 +5157,6 @@ impl Store {
             self.attach_bank_accounts(std::slice::from_mut(employee)).await?;
         }
         Ok(found)
-    }
-
-    /// The steps required by hire, leave, pay change and transfer. The flow is
-    /// data, not code.
-    pub async fn hr_flow_steps(&self) -> Result<Vec<HrFlowStep>> {
-        Ok(sqlx::query(
-            "SELECT kind, step_no, label, note FROM hr_flow_step ORDER BY kind, step_no",
-        )
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| HrFlowStep {
-            kind: r.get("kind"),
-            step_no: r.get("step_no"),
-            label: r.get("label"),
-            note: r.get("note"),
-        })
-        .collect())
-    }
-
-    pub async fn employee_movements(&self, limit: i64) -> Result<Vec<EmployeeMovement>> {
-        let rows = sqlx::query(
-            "SELECT m.id, m.movement_no, m.employee_id, e.emp_no, e.name,
-                    d.label AS dept_label, m.kind, m.effective_on,
-                    m.from_value, m.to_value, m.reason, m.status, m.created_at, m.created_by
-               FROM employee_movement m
-               JOIN employee e            ON e.id = m.employee_id
-               LEFT JOIN dimension_value d ON d.id = e.dept_id
-              ORDER BY m.effective_on DESC, m.id DESC
-              LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let steps = sqlx::query(
-            "SELECT movement_id, step_no, done_at, done_by, note
-               FROM employee_movement_step ORDER BY movement_id, step_no",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let id: i32 = r.get("id");
-                EmployeeMovement {
-                    id,
-                    movement_no: r.get("movement_no"),
-                    emp_no: r.get("emp_no"),
-                    name: r.get("name"),
-                    dept_label: r.get("dept_label"),
-                    kind: r.get("kind"),
-                    effective_on: r.get("effective_on"),
-                    from_value: r.get("from_value"),
-                    to_value: r.get("to_value"),
-                    reason: r.get("reason"),
-                    status: r.get("status"),
-                    created_at: r.get("created_at"),
-                    created_by: r.get("created_by"),
-                    done_steps: steps
-                        .iter()
-                        .filter(|s| s.get::<i32, _>("movement_id") == id)
-                        .map(|s| MovementStep {
-                            step_no: s.get("step_no"),
-                            done_at: s.get("done_at"),
-                            done_by: s.get("done_by"),
-                            note: s.get("note"),
-                        })
-                        .collect(),
-                }
-            })
-            .collect())
-    }
-
-    pub async fn employee_movement(&self, movement_no: &str) -> Result<EmployeeMovement> {
-        self.employee_movements(1000)
-            .await?
-            .into_iter()
-            .find(|m| m.movement_no == movement_no)
-            .ok_or_else(|| StoreError::MovementNotFound { no: movement_no.to_string() })
-    }
-
-    /// Open a movement request. Numbered `MV{yymm}-{nnn}`, sharing
-    /// `doc_sequence` with vouchers.
-    pub async fn record_employee_movement(
-        &self,
-        req: RecordMovement<'_>,
-    ) -> Result<EmployeeMovement> {
-        let mut tx = self.pool.begin().await?;
-
-        let employee_id: i32 = sqlx::query("SELECT id FROM employee WHERE emp_no = $1")
-            .bind(req.emp_no)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| StoreError::EmployeeNotFound { no: req.emp_no.to_string() })?
-            .get("id");
-
-        let period = req.effective_on.format("%y%m").to_string();
-        let seq = next_doc_no(&mut tx, "MV", &period).await?;
-        let movement_no = format!("MV{period}-{seq:03}");
-
-        sqlx::query(
-            "INSERT INTO employee_movement
-               (movement_no, employee_id, kind, effective_on, from_value, to_value,
-                reason, status, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8)",
-        )
-        .bind(&movement_no)
-        .bind(employee_id)
-        .bind(req.kind)
-        .bind(req.effective_on)
-        .bind(req.from_value)
-        .bind(req.to_value)
-        .bind(req.reason)
-        .bind(req.actor)
-        .execute(&mut *tx)
-        .await?;
-
-        // Raising a leaving request immediately marks the employee as leaving
-        // and records the planned date: the roster and payroll must see it now,
-        // not only when the final step completes.
-        if req.kind == "leave" {
-            sqlx::query(
-                "UPDATE employee SET status = 'leaving', left_on = $2 WHERE id = $1",
-            )
-            .bind(employee_id)
-            .bind(req.effective_on)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        tx.commit().await?;
-        self.employee_movement(&movement_no).await
-    }
-
-    /// Mark one step complete. The movement closes automatically once every
-    /// step is done, and closing writes the change to the employee record in
-    /// the same transaction: `left` plus closed access for a departure, the
-    /// new base salary for a pay change, the new department for a transfer.
-    ///
-    /// The last step of a pay change is labelled 「更新薪資檔」 and the last
-    /// step of a transfer 「更新部門歸屬」, so both are about this system's own
-    /// data. A target that cannot be read is an error, never a quiet close:
-    /// the flow would otherwise claim an effect it did not have.
-    pub async fn complete_movement_step(
-        &self,
-        req: CompleteMovementStep<'_>,
-    ) -> Result<CompletedMovement> {
-        let movement_no = req.movement_no;
-        let step_no = req.step_no;
-        let mut tx = self.pool.begin().await?;
-
-        let row = sqlx::query(
-            "SELECT m.id, m.kind, m.status, m.employee_id, m.effective_on, m.to_value, e.name
-               FROM employee_movement m
-               JOIN employee e ON e.id = m.employee_id
-              WHERE m.movement_no = $1 FOR UPDATE OF m",
-        )
-        .bind(movement_no)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| StoreError::MovementNotFound { no: movement_no.to_string() })?;
-
-        let id: i32 = row.get("id");
-        let kind: String = row.get("kind");
-        let employee_id: i32 = row.get("employee_id");
-        let effective_on: NaiveDate = row.get("effective_on");
-        let to_value: String = row.get("to_value");
-        let name: String = row.get("name");
-
-        let total: i64 = sqlx::query("SELECT COUNT(*)::bigint AS n FROM hr_flow_step WHERE kind = $1")
-            .bind(&kind)
-            .fetch_one(&mut *tx)
-            .await?
-            .get("n");
-        if step_no < 1 || i64::from(step_no) > total {
-            return Err(StoreError::NoSuchFlowStep { kind, step_no, total });
-        }
-
-        let inserted = sqlx::query(
-            "INSERT INTO employee_movement_step (movement_id, step_no, done_by, note)
-             VALUES ($1,$2,$3,$4) ON CONFLICT (movement_id, step_no) DO NOTHING",
-        )
-        .bind(id)
-        .bind(step_no)
-        .bind(req.actor)
-        .bind(req.note)
-        .execute(&mut *tx)
-        .await?;
-        if inserted.rows_affected() == 0 {
-            return Err(StoreError::MovementStepAlreadyDone {
-                no: movement_no.to_string(),
-                step: step_no,
-            });
-        }
-
-        let done: i64 =
-            sqlx::query("SELECT COUNT(*)::bigint AS n FROM employee_movement_step WHERE movement_id = $1")
-                .bind(id)
-                .fetch_one(&mut *tx)
-                .await?
-                .get("n");
-
-        let mut closed = ClosedAccess::default();
-        let mut applied = MovementApplied::default();
-        if done >= total {
-            sqlx::query("UPDATE employee_movement SET status = 'done' WHERE id = $1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            match kind.as_str() {
-                // The employee becomes 'left' only when the leaving flow
-                // completes.
-                "leave" => {
-                    sqlx::query("UPDATE employee SET status = 'left', left_on = $2 WHERE id = $1")
-                        .bind(employee_id)
-                        .bind(effective_on)
-                        .execute(&mut *tx)
-                        .await?;
-                    closed = close_access(&mut tx, employee_id, &name, req).await?;
-                }
-                "salary_change" => {
-                    let target = movement_salary_target(&to_value).ok_or_else(|| {
-                        StoreError::MovementSalaryTargetUnreadable {
-                            no: movement_no.to_string(),
-                            value: to_value.clone(),
-                        }
-                    })?;
-                    let previous: Money =
-                        sqlx::query("SELECT base_salary FROM employee WHERE id = $1 FOR UPDATE")
-                            .bind(employee_id)
-                            .fetch_one(&mut *tx)
-                            .await?
-                            .get("base_salary");
-                    sqlx::query("UPDATE employee SET base_salary = $2 WHERE id = $1")
-                        .bind(employee_id)
-                        .bind(target)
-                        .execute(&mut *tx)
-                        .await?;
-                    applied.base_salary = Some(AmountChange { from: previous, to: target });
-                }
-                "transfer" => {
-                    let departments = departments_in_tx(&mut tx).await?;
-                    let dept = match_department(&departments, &to_value).ok_or_else(|| {
-                        StoreError::MovementDepartmentUnknown {
-                            no: movement_no.to_string(),
-                            value: to_value.clone(),
-                            hint: department_hint(&departments),
-                        }
-                    })?;
-                    let previous: Option<String> = sqlx::query(
-                        "SELECT d.label FROM employee e
-                           LEFT JOIN dimension_value d ON d.id = e.dept_id
-                          WHERE e.id = $1",
-                    )
-                    .bind(employee_id)
-                    .fetch_one(&mut *tx)
-                    .await?
-                    .get("label");
-                    sqlx::query("UPDATE employee SET dept_id = $2 WHERE id = $1")
-                        .bind(employee_id)
-                        .bind(dept.id)
-                        .execute(&mut *tx)
-                        .await?;
-                    applied.department =
-                        Some(DepartmentChange { from: previous, to: dept.label.clone() });
-                }
-                _ => {}
-            }
-        }
-
-        tx.commit().await?;
-        Ok(CompletedMovement {
-            movement: self.employee_movement(movement_no).await?,
-            closed,
-            applied,
-        })
     }
 
     // HR: attendance and leave
@@ -7651,105 +7367,27 @@ pub struct WriteEmployee<'a> {
     pub bank_accounts: Option<&'a [WriteEmployeeBankAccount<'a>]>,
     pub note: &'a str,
     pub actor: &'a str,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct HrFlowStep {
-    pub kind: String,
-    pub step_no: i32,
-    pub label: String,
-    pub note: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct MovementStep {
-    pub step_no: i32,
-    pub done_at: DateTime<Utc>,
-    pub done_by: String,
-    pub note: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct EmployeeMovement {
-    pub id: i32,
-    pub movement_no: String,
-    pub emp_no: String,
-    pub name: String,
-    pub dept_label: Option<String>,
-    pub kind: String,
-    pub effective_on: NaiveDate,
-    pub from_value: String,
-    pub to_value: String,
-    pub reason: String,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub created_by: String,
-    pub done_steps: Vec<MovementStep>,
-}
-
-impl EmployeeMovement {
-    pub fn step_done(&self, step_no: i32) -> bool {
-        self.done_steps.iter().any(|s| s.step_no == step_no)
-    }
-}
-
-pub struct CompleteMovementStep<'a> {
-    pub movement_no: &'a str,
-    pub step_no: i32,
-    pub actor: &'a str,
-    pub note: &'a str,
-    /// Role that must keep one active login. A completed leaving flow closes
+    /// Role that must keep one active login. Setting a status of `left` closes
     /// the person's logins, and no operation grants a role, so the last
     /// account holding this one cannot be closed that way.
     pub keep_active_role: &'a str,
 }
 
+/// An updated employee record and, when the update ended the employment,
+/// what that closed.
 #[derive(Debug)]
-pub struct CompletedMovement {
-    pub movement: EmployeeMovement,
+pub struct UpdatedEmployee {
+    pub employee: Employee,
     pub closed: ClosedAccess,
-    pub applied: MovementApplied,
 }
 
-/// What closing a movement wrote to the employee record. Both fields stay
-/// `None` for the kinds whose steps happen outside this system, and for a
-/// movement that has steps left.
-#[derive(Debug, Default, Clone)]
-pub struct MovementApplied {
-    pub base_salary: Option<AmountChange>,
-    pub department: Option<DepartmentChange>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AmountChange {
-    pub from: Money,
-    pub to: Money,
-}
-
-#[derive(Debug, Clone)]
-pub struct DepartmentChange {
-    /// `None` when the employee had no department until now.
-    pub from: Option<String>,
-    pub to: String,
-}
-
-/// What a completed leaving flow shut off. Every count is zero for a person
+/// What ending an employment shut off. Every count is zero for a person
 /// who never had a login.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct ClosedAccess {
     pub logins: Vec<String>,
     pub sessions: u64,
     pub tokens: u64,
-}
-
-pub struct RecordMovement<'a> {
-    pub emp_no: &'a str,
-    pub kind: &'a str,
-    pub effective_on: NaiveDate,
-    pub from_value: &'a str,
-    pub to_value: &'a str,
-    pub reason: &'a str,
-    pub actor: &'a str,
 }
 
 /// One clock-in or clock-out.
@@ -8158,71 +7796,6 @@ fn voucher_owner_label(source: &str) -> &'static str {
     }
 }
 
-/// The department list, read inside the transaction that closes a transfer so
-/// the match and the error's list of choices come from the same snapshot.
-async fn departments_in_tx(tx: &mut Tx<'_>) -> Result<Vec<Department>> {
-    Ok(sqlx::query(
-        "SELECT id, code, label, active FROM dimension_value
-          WHERE dimension_code = 'department' ORDER BY sort_order, code",
-    )
-    .fetch_all(&mut **tx)
-    .await?
-    .iter()
-    .map(|r| Department {
-        id: r.get("id"),
-        code: r.get("code"),
-        label: r.get("label"),
-        active: r.get("active"),
-    })
-    .collect())
-}
-
-/// The new monthly base salary a pay change carries, read from the free-text
-/// `to_value` the movement was raised with.
-///
-/// Thousands separators, spaces and a trailing 元 are accepted because that is
-/// how an amount gets typed. `None` means the value is not an amount this can
-/// write to `employee.base_salary`: zero and negative amounts are refused
-/// here rather than stored, because zero already means "not agreed yet" and a
-/// pay change that closes on it would look like a decision.
-pub fn movement_salary_target(to_value: &str) -> Option<Money> {
-    let cleaned: String = to_value
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != ',' && *c != '，')
-        .collect();
-    let cleaned = cleaned.strip_suffix('元').unwrap_or(&cleaned);
-    let amount = Money::from_str_exact(cleaned).ok()?;
-    (amount > Money::ZERO).then_some(amount)
-}
-
-/// The department a transfer moves someone to. Code first, then label,
-/// because the movement may have been raised from a screen showing either.
-pub fn match_department<'a>(departments: &'a [Department], value: &str) -> Option<&'a Department> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    departments
-        .iter()
-        .find(|d| d.code.eq_ignore_ascii_case(value))
-        .or_else(|| departments.iter().find(|d| d.label == value))
-}
-
-/// What to fill in instead, listed rather than described. An installation with
-/// no departments yet gets the one action that creates them.
-pub fn department_hint(departments: &[Department]) -> String {
-    let choices: Vec<&str> = departments
-        .iter()
-        .filter(|d| d.active)
-        .map(|d| d.label.as_str())
-        .collect();
-    if choices.is_empty() {
-        "請先在「基礎設定」新增部門。".to_string()
-    } else {
-        format!("可填：{}", choices.join("、"))
-    }
-}
-
 /// Replace every bank account on file for one employee.
 ///
 /// `None` leaves them alone, so an operation that never asked for them cannot
@@ -8519,7 +8092,8 @@ async fn close_access(
     tx: &mut Tx<'_>,
     employee_id: i32,
     name: &str,
-    req: CompleteMovementStep<'_>,
+    actor: &str,
+    keep_active_role: &str,
 ) -> Result<ClosedAccess> {
     let last_of_role: Option<String> = sqlx::query(
         "SELECT u.username FROM user_account u
@@ -8531,7 +8105,7 @@ async fn close_access(
           ORDER BY u.username LIMIT 1",
     )
     .bind(employee_id)
-    .bind(req.keep_active_role)
+    .bind(keep_active_role)
     .fetch_optional(&mut **tx)
     .await?
     .map(|r| r.get("username"));
@@ -8560,7 +8134,7 @@ async fn close_access(
               WHERE user_id = ANY($1) AND revoked_at IS NULL AND expires_at > now()",
         )
         .bind(&ids)
-        .bind(req.actor)
+        .bind(actor)
         .execute(&mut **tx)
         .await?
         .rows_affected();
@@ -8571,7 +8145,7 @@ async fn close_access(
           WHERE owner_employee_id = $1 AND revoked_at IS NULL",
     )
     .bind(employee_id)
-    .bind(req.actor)
+    .bind(actor)
     .execute(&mut **tx)
     .await?
     .rows_affected();
@@ -9143,202 +8717,6 @@ mod tests {
         assert!(!fresh.is_expired(Utc::now()), "建立後 1 天、輪替 30 天的 token 不該過期");
     }
 
-    /// The amount is typed by a person, so the reading has to survive
-    /// separators and a currency word. Zero is refused because zero already
-    /// means "not agreed yet" on the roster.
-    #[test]
-    fn a_pay_change_target_is_read_the_way_it_is_typed() {
-        let amount = |s: &str| movement_salary_target(s).map(|m| m.to_string());
-        assert_eq!(amount("45000").as_deref(), Some("45000"));
-        assert_eq!(amount(" 45,000 ").as_deref(), Some("45000"));
-        assert_eq!(amount("45,000元").as_deref(), Some("45000"));
-        assert_eq!(amount("45000.50").as_deref(), Some("45000.50"));
-
-        assert_eq!(amount(""), None, "空白沒有目標金額");
-        assert_eq!(amount("調升一級"), None, "不是金額");
-        assert_eq!(amount("0"), None, "0 是尚未設定，不是調薪結果");
-        assert_eq!(amount("-45000"), None, "負數不是月底薪");
-    }
-
-    #[test]
-    fn a_transfer_target_matches_a_department_code_or_its_name() {
-        let departments = vec![
-            Department { id: 1, code: "ADMIN".into(), label: "管理部".into(), active: true },
-            Department { id: 2, code: "TECH".into(), label: "技術部".into(), active: true },
-            Department { id: 3, code: "OLD".into(), label: "舊部門".into(), active: false },
-        ];
-        let id = |v: &str| match_department(&departments, v).map(|d| d.id);
-        assert_eq!(id("TECH"), Some(2));
-        assert_eq!(id("tech"), Some(2), "代碼不分大小寫");
-        assert_eq!(id(" 技術部 "), Some(2), "名稱也認");
-        assert_eq!(id("OLD"), Some(3), "停用的部門仍解析得到，異動單可能早於停用");
-
-        assert_eq!(id(""), None);
-        assert_eq!(id("研發部"), None);
-
-        // The refusal lists what can be filled in instead, and only the
-        // departments still in use.
-        assert_eq!(department_hint(&departments), "可填：管理部、技術部");
-        assert_eq!(department_hint(&[]), "請先在「基礎設定」新增部門。");
-    }
-
-    /// Run with:
-    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
-    /// closing_a_movement_writes_the_change_to_the_employee -- --ignored`
-    ///
-    /// The flow is drawn on screen as four steps ending in 「更新薪資檔」, so
-    /// walking all four has to leave the roster showing the new salary.
-    #[tokio::test]
-    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
-    async fn closing_a_movement_writes_the_change_to_the_employee() {
-        let database_url =
-            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
-        let store = Store::connect(&database_url, 2)
-            .await
-            .expect("應可連上測試資料庫");
-        store.migrate().await.expect("測試資料庫 migrations 應成功");
-
-        let suffix = Uuid::new_v4().simple().to_string()[..8].to_string();
-        let emp_no = format!("T{suffix}");
-        let dept_code = format!("D{suffix}").to_uppercase();
-        let dept = store
-            .create_dimension_value(CreateDimensionValue {
-                dimension_code: "department",
-                code: &dept_code,
-                label: &format!("測試部 {suffix}"),
-                active: true,
-                sort_order: 900,
-            })
-            .await
-            .expect("應可新增部門");
-
-        let hired_on = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        store
-            .create_employee(WriteEmployee {
-                emp_no: &emp_no,
-                name: "異動測試",
-                dept_code: None,
-                title: "",
-                employment_type: "full_time",
-                hired_on,
-                left_on: None,
-                status: "active",
-                base_salary: Some("42000".parse().unwrap()),
-                labor_insured_salary: None,
-                health_insured_salary: None,
-                pension_wage: None,
-                id_no: "",
-                bank_accounts: None,
-                note: "",
-                actor: "測試",
-            })
-            .await
-            .expect("應可建立員工");
-
-        let flow = store.hr_flow_steps().await.expect("應讀得到流程");
-        let steps_of = |kind: &str| {
-            flow.iter().filter(|s| s.kind == kind).map(|s| s.step_no).collect::<Vec<_>>()
-        };
-        async fn walk(store: &Store, movement_no: &str, steps: &[i32]) -> Result<CompletedMovement> {
-            let mut last = None;
-            for &step_no in steps {
-                last = Some(
-                    store
-                        .complete_movement_step(CompleteMovementStep {
-                            movement_no,
-                            step_no,
-                            actor: "測試",
-                            note: "",
-                            keep_active_role: "admin",
-                        })
-                        .await,
-                );
-            }
-            last.expect("流程至少有一關")
-        }
-
-        let raise = store
-            .record_employee_movement(RecordMovement {
-                emp_no: &emp_no,
-                kind: "salary_change",
-                effective_on: hired_on,
-                from_value: "42000",
-                to_value: "45,000",
-                reason: "年度調薪",
-                actor: "測試",
-            })
-            .await
-            .expect("應可開立調薪單");
-        let closed = walk(&store, &raise.movement_no, &steps_of("salary_change"))
-            .await
-            .expect("四關都應完成");
-        assert_eq!(closed.movement.status, "done");
-        let change = closed.applied.base_salary.expect("結案要回報本薪改了什麼");
-        assert_eq!(change.from, "42000".parse().unwrap());
-        assert_eq!(change.to, "45000".parse().unwrap());
-        let after_raise = store.employee(&emp_no).await.expect("應查得到員工");
-        assert_eq!(
-            after_raise.base_salary,
-            "45000".parse::<Money>().unwrap(),
-            "走完四關，名冊上的本薪就是新的數字"
-        );
-
-        let transfer = store
-            .record_employee_movement(RecordMovement {
-                emp_no: &emp_no,
-                kind: "transfer",
-                effective_on: hired_on,
-                from_value: "",
-                to_value: &dept_code,
-                reason: "支援專案",
-                actor: "測試",
-            })
-            .await
-            .expect("應可開立調部門單");
-        let closed = walk(&store, &transfer.movement_no, &steps_of("transfer"))
-            .await
-            .expect("三關都應完成");
-        let moved = closed.applied.department.expect("結案要回報部門改了什麼");
-        assert_eq!(moved.from, None, "原本沒有部門");
-        assert_eq!(moved.to, dept.label);
-        assert_eq!(store.employee(&emp_no).await.unwrap().dept_id, Some(dept.id));
-
-        // A target the last step cannot read is a refusal, not a quiet close:
-        // the salary stays where it was and the step is not recorded.
-        let vague = store
-            .record_employee_movement(RecordMovement {
-                emp_no: &emp_no,
-                kind: "salary_change",
-                effective_on: hired_on,
-                from_value: "45000",
-                to_value: "再談",
-                reason: "",
-                actor: "測試",
-            })
-            .await
-            .expect("應可開立調薪單");
-        let refused = walk(&store, &vague.movement_no, &steps_of("salary_change"))
-            .await
-            .expect_err("最後一關應被擋下");
-        assert!(matches!(refused, StoreError::MovementSalaryTargetUnreadable { .. }));
-        assert!(refused.to_string().contains("再談"));
-        let unchanged = store.employee(&emp_no).await.unwrap();
-        assert_eq!(unchanged.base_salary, "45000".parse::<Money>().unwrap());
-        let still_open = store.employee_movement(&vague.movement_no).await.unwrap();
-        assert_eq!(still_open.status, "open");
-        assert!(!still_open.step_done(4), "被擋下的那一關不能留下紀錄");
-
-        sqlx::query("DELETE FROM employee WHERE emp_no = $1")
-            .bind(&emp_no)
-            .execute(&store.pool)
-            .await
-            .expect("應可清掉測試員工");
-        sqlx::query("DELETE FROM dimension_value WHERE id = $1")
-            .bind(dept.id)
-            .execute(&store.pool)
-            .await
-            .expect("應可清掉測試部門");
-    }
 
     /// Run with:
     /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
@@ -9449,6 +8827,7 @@ mod tests {
                 bank_accounts: accounts,
                 note: "",
                 actor: "測試",
+                keep_active_role: "admin",
             }
         }
 
@@ -9479,7 +8858,7 @@ mod tests {
             .update_employee(write(&emp_no, None))
             .await
             .expect("應可只更新其他欄位");
-        assert_eq!(untouched.bank_accounts.len(), 2);
+        assert_eq!(untouched.employee.bank_accounts.len(), 2);
 
         let replaced = store
             .update_employee(write(&emp_no, Some(&[WriteEmployeeBankAccount {
@@ -9490,13 +8869,13 @@ mod tests {
             }])))
             .await
             .expect("應可整份取代");
-        assert_eq!(replaced.bank_accounts.len(), 1);
-        assert_eq!(replaced.bank_accounts[0].account_no, "6789012");
-        assert!(replaced.bank_accounts[0].is_payroll);
+        assert_eq!(replaced.employee.bank_accounts.len(), 1);
+        assert_eq!(replaced.employee.bank_accounts[0].account_no, "6789012");
+        assert!(replaced.employee.bank_accounts[0].is_payroll);
 
         // Reading one employee and reading the roster must agree.
         let by_id = store
-            .employee_by_id(replaced.id)
+            .employee_by_id(replaced.employee.id)
             .await
             .expect("應查得到員工")
             .expect("員工應存在");

@@ -148,6 +148,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
   const me = useCurrentUser();
   const canEditSettings = me.permissions.includes('update_company_setting');
   const canSetTimezone = me.permissions.includes('set_company_timezone');
+  const canAddDimension = me.permissions.includes('create_dimension_value');
   const showBalances = me.permissions.includes('list_chart_of_accounts');
   const [settings, setSettings] = useState<CompanySettingRow[] | null>(null);
   const [coa, setCoa] = useState<ChartOfAccounts | null>(null);
@@ -318,31 +319,25 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
     }
   }
 
-  const [dimCode, setDimCode] = useState('');
-  const [valueCode, setValueCode] = useState('');
+  const [adding, setAdding] = useState<string | null>(null);
   const [valueLabel, setValueLabel] = useState('');
   const [savingDim, setSavingDim] = useState(false);
 
-  useEffect(() => {
-    if (!dimCode && dims && dims.dimensions.length > 0) {
-      setDimCode(dims.dimensions[0]?.code ?? '');
-    }
-  }, [dims, dimCode]);
-
-  async function saveDimensionValue() {
-    if (!dimCode || !valueCode.trim() || !valueLabel.trim()) {
-      onToast('類別、代號與名稱都要填寫');
+  async function saveDimensionValue(dimensionCode: string) {
+    const label = valueLabel.trim();
+    if (!label) {
+      onToast('請填寫名稱');
       return;
     }
     setSavingDim(true);
     try {
       await callOp<unknown>(
         'create_dimension_value',
-        { dimension_code: dimCode, code: valueCode.trim(), label: valueLabel.trim() },
+        { dimension_code: dimensionCode, label },
         '新增分類項目',
       );
-      onToast(`已新增「${valueLabel.trim()}」`);
-      setValueCode('');
+      onToast(`已新增「${label}」`);
+      setAdding(null);
       setValueLabel('');
       load();
     } catch (e) {
@@ -468,50 +463,53 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                 {dims.dimensions.map((d) => (
                   <div className="fact fact--stacked" key={d.code}>
                     <span className="fact__key">{d.label}</span>
-                    <span className="fact__value">
-                      {d.values.length > 0 ? d.values.map((v) => v.label).join('　') : '（尚未建立）'}
-                      {d.note && <span className="fact__note">{d.note}</span>}
-                    </span>
+                    {adding === d.code ? (
+                      <span className="fact__edit">
+                        <input
+                          className="entry-input"
+                          value={valueLabel}
+                          autoFocus
+                          onChange={(e) => setValueLabel(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void saveDimensionValue(d.code);
+                            if (e.key === 'Escape') setAdding(null);
+                          }}
+                        />
+                        <button
+                          className="btn btn--compact"
+                          disabled={savingDim}
+                          onClick={() => void saveDimensionValue(d.code)}
+                        >
+                          {savingDim ? '存檔中…' : '新增'}
+                        </button>
+                        <button className="btn--icon" onClick={() => setAdding(null)}>
+                          ×
+                        </button>
+                      </span>
+                    ) : (
+                      <span className="fact__value">
+                        {d.values.length > 0
+                          ? d.values.map((v) => v.label).join('　')
+                          : '（尚未建立）'}
+                        {canAddDimension && (
+                          <button
+                            className="btn--icon fact__pencil"
+                            title={`新增${d.label}`}
+                            onClick={() => {
+                              setAdding(d.code);
+                              setValueLabel('');
+                            }}
+                          >
+                            ＋
+                          </button>
+                        )}
+                        {d.note && <span className="fact__note">{d.note}</span>}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
 
-              <h3 className="section-title section-title--spaced">新增項目</h3>
-              <div className="card form-card">
-                <div className="field-grid">
-                  <label className="field">
-                    類別
-                    <select className="input" value={dimCode} onChange={(e) => setDimCode(e.target.value)}>
-                      {dims.dimensions.map((d) => (
-                        <option key={d.code} value={d.code}>
-                          {d.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="field">
-                    代號
-                    <input
-                      className="input num"
-                      value={valueCode}
-                      placeholder="sales"
-                      onChange={(e) => setValueCode(e.target.value)}
-                    />
-                  </label>
-                  <label className="field field--full">
-                    顯示名稱
-                    <input
-                      className="input"
-                      value={valueLabel}
-                      placeholder="業務部"
-                      onChange={(e) => setValueLabel(e.target.value)}
-                    />
-                  </label>
-                </div>
-                <button className="btn btn--compact" disabled={savingDim} onClick={() => void saveDimensionValue()}>
-                  {savingDim ? '存檔中…' : '＋ 新增'}
-                </button>
-              </div>
             </section>
 
             {coa && (

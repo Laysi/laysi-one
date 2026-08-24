@@ -516,6 +516,7 @@ fn employee_write<'a>(
         bank_accounts,
         note: input.note.trim(),
         actor,
+        keep_active_role: crate::ROLE_ADMIN,
     }
 }
 
@@ -574,7 +575,7 @@ impl Operation for UpdateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "更新員工主檔。本薪與三項投保級距沒帶就不變更，帶 0 表示尚未設定；身分證字號會驗檢查碼；狀態為待離職或已離職時必須填離職日。"
+        "更新員工主檔。本薪與三項投保級距沒帶就不變更，帶 0 表示尚未設定；身分證字號會驗檢查碼；狀態為待離職或已離職時必須填離職日。狀態改為已離職會在同一個交易停用該員工的登入帳號、結束登入工作階段並撤銷 MCP Token，不等離職日；唯一啟用中的系統管理員不能這樣關掉。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -584,19 +585,32 @@ impl Operation for UpdateEmployee {
         let input: EmployeeInput = parse(input)?;
         validate_employee(&input)?;
         let accounts = employee_accounts(&input);
-        let employee = ctx
+        let updated = ctx
             .store
             .update_employee(employee_write(&input, &ctx.actor, accounts.as_deref()))
             .await?;
+        let employee = updated.employee;
+        let closed = updated.closed;
+        let mut closed_note = String::new();
+        if !closed.logins.is_empty() {
+            closed_note.push_str(&format!(" · 停用登入帳號 {}", closed.logins.join("、")));
+        }
+        if closed.tokens > 0 {
+            closed_note.push_str(&format!(" · 撤銷 {} 組 MCP Token", closed.tokens));
+        }
         let summary = format!(
-            "更新員工 {} {} · 狀態 {} · 登入帳號未變更",
-            employee.emp_no, employee.name, employee.status
+            "更新員工 {} {} · 狀態 {}{}",
+            employee.emp_no,
+            employee.name,
+            crate::ops::employees::status_label(&employee.status),
+            if closed_note.is_empty() { " · 登入帳號未變更".to_string() } else { closed_note }
         );
         Ok(OpOutcome::new(
             json!({
                 "employee": employee,
-                "login_account_changed": false,
-                "login_note": "登入帳號由系統管理員另行建立。",
+                // What ending the employment shut off, so the screen can say it
+                // rather than only reporting a saved record.
+                "closed_access": closed,
             }),
             summary,
         ))
@@ -671,7 +685,9 @@ impl Operation for CreateBankAccount {
 pub struct CreateDimensionValueInput {
     /// Existing dimension code; this operation does not create dimensions.
     pub dimension_code: String,
-    /// Dimension value code.
+    /// Dimension value code. Empty means the display name; it is only a lookup
+    /// key for `dept_code` and every screen picks values by label.
+    #[serde(default)]
     pub code: String,
     /// Display name.
     pub label: String,
@@ -684,11 +700,8 @@ pub struct CreateDimensionValueInput {
 }
 
 fn validate_dimension_value(input: &CreateDimensionValueInput) -> Result<(), OpError> {
-    if input.dimension_code.trim().is_empty()
-        || input.code.trim().is_empty()
-        || input.label.trim().is_empty()
-    {
-        return Err(OpError::BadInput("類別、代號與名稱都要填寫".into()));
+    if input.dimension_code.trim().is_empty() || input.label.trim().is_empty() {
+        return Err(OpError::BadInput("類別與名稱都要填寫".into()));
     }
     Ok(())
 }
@@ -713,20 +726,19 @@ impl Operation for CreateDimensionValue {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let input: CreateDimensionValueInput = parse(input)?;
         validate_dimension_value(&input)?;
+        let code =
+            if input.code.trim().is_empty() { input.label.trim() } else { input.code.trim() };
         let value = ctx
             .store
             .create_dimension_value(StoreCreateDimensionValue {
                 dimension_code: input.dimension_code.trim(),
-                code: input.code.trim(),
+                code,
                 label: input.label.trim(),
                 active: input.active,
                 sort_order: input.sort_order,
             })
             .await?;
-        let summary = format!(
-            "新增分類項目 {} / {} {}",
-            value.dimension_code, value.code, value.label
-        );
+        let summary = format!("新增分類項目 {}", value.label);
         Ok(OpOutcome::new(json!({ "value": value }), summary))
     }
 }
@@ -1024,7 +1036,7 @@ mod tests {
     fn create_dimension_value_rejects_an_empty_dimension_code() {
         let input = CreateDimensionValueInput {
             dimension_code: String::new(),
-            code: "sales".into(),
+            code: String::new(),
             label: "業務部".into(),
             active: true,
             sort_order: 0,

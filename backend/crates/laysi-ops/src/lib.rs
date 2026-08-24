@@ -760,6 +760,11 @@ mod tests {
             .collect()
     }
 
+    /// Tools 0058 deleted along with the movement form. `grant_names` reads
+    /// INSERT statements only, so a later DELETE has to be subtracted here.
+    const REVOKED_GRANTS: [&str; 3] =
+        ["list_employee_movements", "record_employee_movement", "complete_movement_step"];
+
     /// 0008, 0009, 0015, 0016, 0017, 0020, 0045 and 0057 seed the HR and
     /// self-service grants. One
     /// operation short and AI sees a switch it cannot call; one too many and
@@ -780,6 +785,7 @@ mod tests {
         ]
         .into_iter()
         .flat_map(grant_names)
+        .filter(|name| !REVOKED_GRANTS.contains(name))
         .collect();
         assert!(
             !migration_names.is_empty(),
@@ -955,6 +961,7 @@ mod tests {
             include_str!("../../../migrations/0052_the_business_time_zone_is_a_setting.sql"),
             include_str!("../../../migrations/0055_a_draft_voucher_can_be_thrown_away.sql"),
             include_str!("../../../migrations/0057_overtime_is_asked_for_before_it_is_paid.sql"),
+            include_str!("../../../migrations/0058_the_movement_form_is_gone.sql"),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {

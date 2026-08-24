@@ -295,36 +295,6 @@ async fn seed_people(
         .await?;
     }
 
-    call(
-        registry,
-        ctx,
-        "record_employee_movement",
-        json!({
-            "emp_no": "E003",
-            "kind": "salary_change",
-            "effective_on": back(today, 2, 1),
-            "from_value": "42000",
-            "to_value": "45000",
-            "reason": "年度調薪",
-        }),
-        calls,
-    )
-    .await?;
-    call(
-        registry,
-        ctx,
-        "record_employee_movement",
-        json!({
-            "emp_no": "E005",
-            "kind": "transfer",
-            "effective_on": back(today, 1, 1),
-            "from_value": "ADMIN",
-            "to_value": "TECH",
-            "reason": "轉任技術部",
-        }),
-        calls,
-    )
-    .await?;
     Ok(())
 }
 

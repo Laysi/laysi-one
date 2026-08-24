@@ -670,6 +670,7 @@ async fn link_employee(
             bank_accounts: None,
             note: "",
             actor: &ctx.actor,
+            keep_active_role: crate::ROLE_ADMIN,
         })
         .await?;
     Ok(employee)

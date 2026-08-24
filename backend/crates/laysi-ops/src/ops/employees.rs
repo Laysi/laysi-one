@@ -1,4 +1,4 @@
-//! Employee roster, onboarding and offboarding movements, HR dashboard.
+//! Employee roster and HR dashboard.
 //!
 //! [`ListEmployees`] is `ReadOnly` and returns neither monthly salary nor
 //! insured salary brackets. Per-person amounts have exactly two exits:
@@ -10,21 +10,6 @@
 //! Annual leave entitlement is `annual_leave_days(ruleset, service_months)`,
 //! never stored; days taken are summed from `leave_request`.
 //!
-//! Which approval steps onboarding, offboarding, pay changes and transfers
-//! require lives in `hr_flow_step`. This module only compares completed steps
-//! against that table to determine where a movement is stuck.
-//!
-//! Closing a movement writes its change to the employee record in the same
-//! transaction. Completing a leaving flow marks the employee `left` and closes
-//! their access: the two are one event, because the roster says the company
-//! has stopped employing this person, and nothing checks the effective date
-//! afterwards, so a login left open is open for good. The last remaining
-//! administrator is the exception, because no operation grants a role and the
-//! installation would have nobody able to open the accounts screen. A pay
-//! change writes `base_salary` and a transfer writes `dept_id`, both read from
-//! `to_value`, which is why that field is checked when the movement is raised
-//! rather than only at the last step.
-//!
 //! Each of the four HR-to-finance links on the dashboard carries an
 //! `implemented` flag: the ones that are wired report their evidence (voucher
 //! number, reconciliation result), the ones that are not state what is
@@ -34,7 +19,6 @@ use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk}
 use async_trait::async_trait;
 use chrono::{Datelike, NaiveDate};
 use laysi_domain::Money;
-use laysi_store::{EmployeeMovement, HrFlowStep};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -56,9 +40,6 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
     vec![
         Box::new(GetHrDashboard),
         Box::new(ListEmployees),
-        Box::new(ListEmployeeMovements),
-        Box::new(RecordEmployeeMovement),
-        Box::new(CompleteMovementStep),
     ]
 }
 
@@ -100,55 +81,6 @@ pub(crate) fn status_label(status: &str) -> &'static str {
     }
 }
 
-pub(crate) fn movement_kind_label(kind: &str) -> &'static str {
-    match kind {
-        "hire" => "到職",
-        "leave" => "離職",
-        "salary_change" => "調薪",
-        "transfer" => "調部門",
-        _ => "異動",
-    }
-}
-
-/// JSON shape of a movement. Which step it has reached is derived, not a
-/// stored string.
-fn movement_json(m: &EmployeeMovement, flow: &[HrFlowStep]) -> Value {
-    let steps: Vec<&HrFlowStep> = flow.iter().filter(|s| s.kind == m.kind).collect();
-    let next = steps.iter().find(|s| !m.step_done(s.step_no));
-    json!({
-        "movement_no": m.movement_no,
-        "emp_no": m.emp_no,
-        "name": m.name,
-        "dept_label": m.dept_label,
-        "kind": m.kind,
-        "kind_label": movement_kind_label(&m.kind),
-        "effective_on": m.effective_on,
-        "from_value": m.from_value,
-        "to_value": m.to_value,
-        "reason": m.reason,
-        "status": m.status,
-        "done_count": m.done_steps.len(),
-        "step_count": steps.len(),
-        "step_label": match (&m.status[..], next) {
-            ("done", _) => "已完成".to_string(),
-            (_, Some(s)) => format!("等「{}」", s.label),
-            (_, None) => "等結案".to_string(),
-        },
-        "next_step": next.map(|s| json!({ "step_no": s.step_no, "label": s.label, "note": s.note })),
-        "steps": steps.iter().map(|s| json!({
-            "step_no": s.step_no,
-            "label": s.label,
-            "note": s.note,
-            "done": m.step_done(s.step_no),
-            "done_by": m.done_steps.iter().find(|d| d.step_no == s.step_no).map(|d| d.done_by.clone()),
-            "done_at": m.done_steps.iter().find(|d| d.step_no == s.step_no).map(|d| d.done_at),
-            "done_note": m.done_steps.iter().find(|d| d.step_no == s.step_no).map(|d| d.note.clone()),
-        })).collect::<Vec<_>>(),
-        "created_at": m.created_at,
-        "created_by": m.created_by,
-    })
-}
-
 // HR dashboard
 
 struct GetHrDashboard;
@@ -162,7 +94,7 @@ impl Operation for GetHrDashboard {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀人資總覽：在職人數、本月到離職、待簽核的休假單與異動單，以及人資與財務各條銜接的接上狀態"
+        "讀人資總覽：在職人數、本月到離職、待簽核的休假單，以及人資與財務各條銜接的接上狀態"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -172,8 +104,6 @@ impl Operation for GetHrDashboard {
         let _: crate::Empty = parse(input)?;
         let month = ctx.today.format("%Y-%m").to_string();
         let staff = ctx.store.employees(true, None).await?;
-        let flow = ctx.store.hr_flow_steps().await?;
-        let movements = ctx.store.employee_movements(200).await?;
         let leaves = ctx.store.leave_requests(false, 200).await?;
         let runs = ctx.store.payroll_runs(24).await?;
 
@@ -187,8 +117,6 @@ impl Operation for GetHrDashboard {
             .iter()
             .filter(|e| e.left_on.is_some_and(|d| d.format("%Y-%m").to_string() == month))
             .count();
-        let open_movements = movements.iter().filter(|m| m.status == "open").count();
-
         let latest = runs.first();
         let (posted, in_transit) = ctx.store.payroll_totals().await?;
         let gl = ctx.store.balance_of(&["6111"], true).await?;
@@ -198,7 +126,7 @@ impl Operation for GetHrDashboard {
             { "kicker": "在職人數", "value": active.to_string(),
               "note": format!("其中 {leaving} 位離職中") },
             { "kicker": "這個月進出", "value": format!("+{joined} / -{departed}"),
-              "note": format!("{open_movements} 張異動單還在跑") },
+              "note": format!("在職 {active} 位") },
             { "kicker": "待簽核休假單", "value": leaves.len().to_string(),
               "note": "休假單簽核" },
             { "kicker": latest.map(|r| format!("{} 薪資成本", r.period)).unwrap_or_else(|| "薪資成本".into()),
@@ -214,14 +142,6 @@ impl Operation for GetHrDashboard {
                 "label": "張休假單等簽核",
                 "due": leaves.first().map(|l| l.from_on.to_string()).unwrap_or_default(),
                 "screen": "hr_att",
-            }));
-        }
-        if open_movements > 0 {
-            todos.push(json!({
-                "count": open_movements.to_string(),
-                "label": "張異動單尚未結案",
-                "due": "到離職與異動",
-                "screen": "hr_mv",
             }));
         }
         if !in_transit.is_zero() {
@@ -291,7 +211,7 @@ impl Operation for GetHrDashboard {
         ]);
 
         let summary = format!(
-            "讀人資總覽 · 在職 {active} 人 · 本月 +{joined}/-{departed} · {} 張休假單待簽 · {open_movements} 張異動單進行中",
+            "讀人資總覽 · 在職 {active} 人 · 本月 +{joined}/-{departed} · {} 張休假單待簽",
             leaves.len()
         );
         Ok(OpOutcome::new(
@@ -302,7 +222,6 @@ impl Operation for GetHrDashboard {
                 "links": links,
                 "headcount": active,
                 "leaving": leaving,
-                "flow_kinds": flow.iter().map(|s| s.kind.clone()).collect::<Vec<_>>(),
                 "payroll_reconciled": gap.is_zero(),
                 "payroll_not_yet_posted": in_transit.to_string(),
                 // Both sides of the reconciliation, so the screen can print the
@@ -437,297 +356,6 @@ impl Operation for ListEmployees {
                 // A blank column reads as "no data" more easily than a sentence
                 // explaining where the figure lives.
                 "salary_note": "個人薪資明細見「薪資作業」，限負責人檢視；投保級距見「勞健保與勞退」，該數字為向勞保局申報值，供會計核對繳款單。",
-            }),
-            summary,
-        ))
-    }
-}
-
-// Onboarding, offboarding and movements
-
-struct ListEmployeeMovements;
-
-#[async_trait]
-impl Operation for ListEmployeeMovements {
-    fn name(&self) -> &'static str {
-        "list_employee_movements"
-    }
-    fn risk(&self) -> Risk {
-        Risk::ReadOnly
-    }
-    fn summary(&self) -> &'static str {
-        "讀到離職與異動單：每一張目前的關卡與剩餘關卡。流程本身（到職四步、離職四步…）為公司設定。"
-    }
-    fn input_schema(&self) -> Value {
-        schema_of::<crate::LimitInput>()
-    }
-
-    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let i: crate::LimitInput = parse(input)?;
-        let flow = ctx.store.hr_flow_steps().await?;
-        let movements = ctx.store.employee_movements(i.limit.unwrap_or(50)).await?;
-        let departments = ctx.store.departments().await?;
-
-        let mut kinds: Vec<Value> = Vec::new();
-        for kind in ["hire", "leave", "salary_change", "transfer"] {
-            let steps: Vec<Value> = flow
-                .iter()
-                .filter(|s| s.kind == kind)
-                .map(|s| json!({ "step_no": s.step_no, "label": s.label, "note": s.note }))
-                .collect();
-            if !steps.is_empty() {
-                kinds.push(json!({
-                    "kind": kind,
-                    "label": movement_kind_label(kind),
-                    "steps": steps,
-                }));
-            }
-        }
-
-        let open = movements.iter().filter(|m| m.status == "open").count();
-        let summary = format!(
-            "讀到離職與異動 · {} 張（{open} 張進行中）· 流程依公司設定",
-            movements.len()
-        );
-        Ok(OpOutcome::new(
-            json!({
-                "movements": movements.iter().map(|m| movement_json(m, &flow)).collect::<Vec<_>>(),
-                "flows": kinds,
-                "open_count": open,
-                // A transfer names its destination department, so the screen
-                // can offer the list instead of asking for a code from memory.
-                "departments": departments.iter()
-                    .filter(|d| d.active)
-                    .map(|d| json!({ "code": d.code, "label": d.label }))
-                    .collect::<Vec<_>>(),
-            }),
-            summary,
-        ))
-    }
-}
-
-struct RecordEmployeeMovement;
-
-#[derive(Deserialize, JsonSchema)]
-pub struct RecordMovementInput {
-    /// Employee number, e.g. `E006`.
-    pub emp_no: String,
-    /// `hire`, `leave`, `salary_change` or `transfer`.
-    pub kind: String,
-    /// Effective date (YYYY-MM-DD). Defaults to today.
-    #[serde(default)]
-    pub effective_on: Option<NaiveDate>,
-    /// Pay and department changes must show what changed from what.
-    #[serde(default)]
-    pub from_value: Option<String>,
-    /// The new monthly base salary for `salary_change`, the destination
-    /// department for `transfer`. Closing the movement writes it to the
-    /// employee record, so it is checked here.
-    #[serde(default)]
-    pub to_value: Option<String>,
-    #[serde(default)]
-    pub reason: Option<String>,
-}
-
-#[async_trait]
-impl Operation for RecordEmployeeMovement {
-    fn name(&self) -> &'static str {
-        "record_employee_movement"
-    }
-    fn risk(&self) -> Risk {
-        // Only raises the request. Enrolment, withdrawal and pay changes take
-        // effect once the steps are complete.
-        Risk::NeedsConfirm
-    }
-    fn summary(&self) -> &'static str {
-        "開立到職／離職／調薪／調部門的異動單。調薪填調整後的月底薪，調部門填調任部門，最後一關完成時寫入員工主檔。開立離職單時，員工就標示為「離職中」並記錄預定離職日，名冊與薪資作業立即反映，不等最後一關完成。"
-    }
-    fn input_schema(&self) -> Value {
-        schema_of::<RecordMovementInput>()
-    }
-
-    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let i: RecordMovementInput = parse(input)?;
-        let flow = ctx.store.hr_flow_steps().await?;
-        if !flow.iter().any(|s| s.kind == i.kind) {
-            return Err(OpError::BadInput(format!(
-                "「{}」不是有效的異動種類。目前有：{}",
-                i.kind,
-                flow.iter()
-                    .map(|s| s.kind.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join("、")
-            )));
-        }
-        let e = ctx.store.employee(&i.emp_no).await?;
-        if e.status == "left" && i.kind != "hire" {
-            return Err(OpError::BadInput(format!(
-                "{} {} 已經離職了，開不了「{}」異動單",
-                e.emp_no,
-                e.name,
-                movement_kind_label(&i.kind)
-            )));
-        }
-
-        // The last step of a pay change writes `base_salary` and the last step
-        // of a transfer writes `dept_id`. Reading `to_value` here means an
-        // unusable target is refused now, not after four approvals.
-        let to_value = i.to_value.as_deref().unwrap_or("").trim();
-        match i.kind.as_str() {
-            "salary_change" if laysi_store::movement_salary_target(to_value).is_none() => {
-                return Err(OpError::BadInput(
-                    "調整後月底薪要填金額，例如 45000。".to_string(),
-                ));
-            }
-            "transfer" => {
-                let departments = ctx.store.departments().await?;
-                if laysi_store::match_department(&departments, to_value).is_none() {
-                    let hint = laysi_store::department_hint(&departments);
-                    return Err(OpError::BadInput(if to_value.is_empty() {
-                        format!("調任部門要選一個部門。{hint}")
-                    } else {
-                        format!("調任部門「{to_value}」不是現有部門。{hint}")
-                    }));
-                }
-            }
-            _ => {}
-        }
-
-        let m = ctx
-            .store
-            .record_employee_movement(laysi_store::RecordMovement {
-                emp_no: &i.emp_no,
-                kind: &i.kind,
-                effective_on: i.effective_on.unwrap_or(ctx.today),
-                from_value: i.from_value.as_deref().unwrap_or("").trim(),
-                to_value,
-                reason: i.reason.as_deref().unwrap_or(""),
-                actor: &ctx.actor,
-            })
-            .await?;
-
-        let steps = flow.iter().filter(|s| s.kind == m.kind).count();
-        let summary = format!(
-            "{} · {} {} {} 生效日 {} · 要走 {} 關",
-            m.movement_no,
-            m.emp_no,
-            m.name,
-            movement_kind_label(&m.kind),
-            m.effective_on,
-            steps
-        );
-        Ok(OpOutcome::new(json!({ "movement": movement_json(&m, &flow) }), summary))
-    }
-}
-
-struct CompleteMovementStep;
-
-#[derive(Deserialize, JsonSchema)]
-pub struct CompleteMovementStepInput {
-    /// Movement number, e.g. `MV2607-001`.
-    pub movement_no: String,
-    /// Which step to complete. Defaults to the next incomplete one.
-    #[serde(default)]
-    pub step_no: Option<i32>,
-    #[serde(default)]
-    pub note: Option<String>,
-}
-
-#[async_trait]
-impl Operation for CompleteMovementStep {
-    fn name(&self) -> &'static str {
-        "complete_movement_step"
-    }
-    fn risk(&self) -> Risk {
-        Risk::NeedsConfirm
-    }
-    fn summary(&self) -> &'static str {
-        "將異動單的某一關標記為完成。全部關卡完成時異動單自動結案，並把異動寫入員工主檔：調薪寫入本薪，下一期薪資作業採用新的數字；調部門寫入部門歸屬；離職標示為「已離職」，登入帳號一併停用、登入工作階段結束、MCP Token 全數撤銷，不等生效日。要重新啟用帳號，由系統管理員在「帳號管理」處理。"
-    }
-    fn input_schema(&self) -> Value {
-        schema_of::<CompleteMovementStepInput>()
-    }
-
-    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let i: CompleteMovementStepInput = parse(input)?;
-        let flow = ctx.store.hr_flow_steps().await?;
-        let m = ctx.store.employee_movement(&i.movement_no).await?;
-
-        let step_no = match i.step_no {
-            Some(n) => n,
-            None => flow
-                .iter()
-                .filter(|s| s.kind == m.kind)
-                .find(|s| !m.step_done(s.step_no))
-                .map(|s| s.step_no)
-                .ok_or_else(|| {
-                    OpError::BadInput(format!("{} 的關卡都完成了", m.movement_no))
-                })?,
-        };
-
-        let done = ctx
-            .store
-            .complete_movement_step(laysi_store::CompleteMovementStep {
-                movement_no: &i.movement_no,
-                step_no,
-                actor: &ctx.actor,
-                note: i.note.as_deref().unwrap_or(""),
-                keep_active_role: crate::ROLE_ADMIN,
-            })
-            .await?;
-        let updated = done.movement;
-
-        let label = flow
-            .iter()
-            .find(|s| s.kind == updated.kind && s.step_no == step_no)
-            .map(|s| s.label.clone())
-            .unwrap_or_default();
-        let total = flow.iter().filter(|s| s.kind == updated.kind).count();
-        let mut closed_note = String::new();
-        if let Some(pay) = &done.applied.base_salary {
-            closed_note.push_str(&format!(" · 本薪 {} → {}", money(pay.from), money(pay.to)));
-        }
-        if let Some(dept) = &done.applied.department {
-            closed_note.push_str(&format!(
-                " · 部門 {} → {}",
-                dept.from.as_deref().unwrap_or("未指定"),
-                dept.to
-            ));
-        }
-        if !done.closed.logins.is_empty() {
-            closed_note.push_str(&format!(" · 停用登入帳號 {}", done.closed.logins.join("、")));
-        }
-        if done.closed.tokens > 0 {
-            closed_note.push_str(&format!(" · 撤銷 {} 組 MCP Token", done.closed.tokens));
-        }
-        let summary = format!(
-            "{} {} {} · 完成第 {step_no} 關「{label}」（{}/{total}）{}{closed_note}",
-            updated.movement_no,
-            updated.emp_no,
-            updated.name,
-            updated.done_steps.len(),
-            if updated.status == "done" { " · 已結案" } else { "" }
-        );
-        Ok(OpOutcome::new(
-            json!({
-                "movement": movement_json(&updated, &flow),
-                "step_taken": step_no,
-                "finished": updated.status == "done",
-                "closed_access": done.closed,
-                // What the close actually wrote to the employee record, so the
-                // screen can say it instead of only "已結案".
-                "applied": {
-                    "base_salary": done.applied.base_salary.map(|p| json!({
-                        "from": p.from.to_string(),
-                        "to": p.to.to_string(),
-                    })),
-                    "department": done.applied.department.map(|d| json!({
-                        "from": d.from,
-                        "to": d.to,
-                    })),
-                },
             }),
             summary,
         ))

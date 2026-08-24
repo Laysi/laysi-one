@@ -235,7 +235,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   }
 
   const [dims, setDims] = useState<DimensionList | null>(null);
-  const [deptCode, setDeptCode] = useState('');
   const [deptLabel, setDeptLabel] = useState('');
   const [savingDept, setSavingDept] = useState(false);
 
@@ -247,15 +246,15 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   const deptDimension = dims?.dimensions.find((d) => d.code === 'department') ?? null;
 
   async function saveDept() {
-    if (!deptCode.trim() || !deptLabel.trim()) {
-      onToast('部門代號與名稱都要填寫');
+    if (!deptLabel.trim()) {
+      onToast('請填寫部門名稱');
       return;
     }
     setSavingDept(true);
     try {
       await callOp<unknown>(
         'create_dimension_value',
-        { dimension_code: 'department', code: deptCode.trim(), label: deptLabel.trim() },
+        { dimension_code: 'department', label: deptLabel.trim() },
         '設定第一個部門',
       );
       onToast(`已建立部門「${deptLabel.trim()}」`);
@@ -511,18 +510,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
             </p>
           )}
           <div className="field-grid">
-            <label className="field">
-              部門代號
-              <input
-                className="input num"
-                value={deptCode}
-                placeholder="A01"
-                onChange={(e) => setDeptCode(e.target.value)}
-              />
-              <span className="field__hint">
-                報表與匯入檔以此對應部門，建立後不再更動；名稱之後可修改。
-              </span>
-            </label>
             <label className="field">
               部門名稱
               <input

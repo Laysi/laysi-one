@@ -893,7 +893,7 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 
 格式 `{前綴}{西元年末兩碼}{月份兩碼}-{三碼流水}`，例：2026/07 第 18 張傳票 →
 `V2607-018`。以 `doc_sequence` 取號，同一交易內遞增。傳票 `V`、付款批次 `P`、
-費用報支 `EX`、文件 `D`、匯入批次 `IM`、異動單 `MV`、休假單 `LV` 共用這一套。
+費用報支 `EX`、文件 `D`、匯入批次 `IM`、休假單 `LV` 共用這一套。
 
 **休假單原本用民國年**（`LV11507-001`），於是同一天建立的四張單上並排著兩種
 曆法。年份的寫法是編號格式的一部分，不是各模組自己的選擇。
@@ -945,7 +945,7 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 - `account`：提供可直接開始設定的基礎科目表；報表分組與現金流量活動別一併建立。
 - `role`、`permission`、`role_permission`、`mcp_tool_grant`：提供預設拒絕的權限
   與 AI 工具開關。
-- `security_policy`、`approval_rule`、`hr_flow_step`：提供系統控制與流程定義。
+- `security_policy`、`approval_rule`：提供系統控制與簽核門檻。
 - `dimension`：只建立分類定義；部門、專案、成本中心與付款條件的項目由各公司
   建立。畫面上一律稱「分類」「類別」「項目」——「維度」是 BI 與對岸 ERP 的講法，
   資料表與操作名維持英文 `dimension` 不動。
@@ -1208,9 +1208,6 @@ column，因此不可能與上面的區間不一致。
 | `get_attendance` | ReadOnly | `{ month? }` | 逐人出勤、請假、遲到與來源系統帶入的加班費 |
 | `list_leave_requests` | ReadOnly | `{ include_done?, limit? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度 |
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
-| `list_employee_movements` | ReadOnly | `{ limit? }` | 到離職與異動單、逐關完成狀態 |
-| `record_employee_movement` | NeedsConfirm | `{ emp_no, kind, effective_on?, … }` | `{ movement }` |
-| `complete_movement_step` | NeedsConfirm | `{ movement_no, step_no?, note? }` | `{ movement, step_taken, finished, closed_access }`；離職結案同一交易停用登入帳號、撤銷 session 與該員工的 MCP Token |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
 | `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額 |
@@ -1246,19 +1243,26 @@ column，因此不可能與上面的區間不一致。
 而持有 `view_hr` 的只有負責人與會計，兩者都已看得到薪資明細。逐月薪資單仍在
 `list_payslips`，仍限負責人。
 
-**離職結案與關掉存取是同一件事（0042 之後的 `close_access`）**。走完離職流程的最後
-一關，員工主檔即為 `left`，同一個交易接著把他的登入帳號停用、撤銷未過期的 session，
-並撤銷 `api_token.owner_employee_id` 指向他的 MCP Token。三件事必須一起做：session
-查詢雖然帶 `u.status = 'active'`，但 MCP Token 不讀那一欄，而生效日之後也沒有任何
-排程回頭檢查，所以留著的登入就是永久有效的登入。唯一的例外是**最後一個啟用中的
-系統管理員**——沒有任何操作能把角色給出去，停用它等於誰也打不開帳號管理，因此該關卡
-直接拒絕並要求先建立另一個管理員帳號。`complete_movement_step` 以 `closed_access`
-回報實際關掉了什麼，畫面照實說出來；`list_user_accounts` 另外回連結員工的在職狀態，
-讓帳號管理不必跳到名冊才看得出這個人已經離職。
+**離職與關掉存取是同一件事（`close_access`）**。`update_employee` 把狀態改成 `left`
+時，同一個交易接著把他的登入帳號停用、撤銷未過期的 session，並撤銷
+`api_token.owner_employee_id` 指向他的 MCP Token。三件事必須一起做：session 查詢雖然
+帶 `u.status = 'active'`，但 MCP Token 不讀那一欄，而生效日之後也沒有任何排程回頭
+檢查，所以留著的登入就是永久有效的登入。唯一的例外是**最後一個啟用中的系統管理員**
+——沒有任何操作能把角色給出去，停用它等於誰也打不開帳號管理，因此那次更新直接拒絕並
+要求先建立另一個管理員帳號。`update_employee` 以 `closed_access` 回報實際關掉了什麼，
+畫面照實說出來；`list_user_accounts` 另外回連結員工的在職狀態，讓帳號管理不必跳到
+名冊才看得出這個人已經離職。
 
-0008 的十五個 `mcp_tool_grant` 名稱必須與上述五個人資操作模組在 Registry
-裡的名稱集合完全相等；`laysi-ops` 以 `include_str!` 直接讀 migration 的測試
-守住這條契約。完成本模組後 Registry 共 **71 個操作**。
+這條銜接原本掛在異動單的離職流程最後一關（0008 的 `hr_flow_step`／
+`employee_movement`）。0058 把整套異動單刪掉：四種異動裡，調薪與調部門結案時只寫
+一個欄位，而名冊的編輯抽屜一步就寫得到同一個欄位，也沒有任何機制要求走異動單；到職
+流程結案不寫任何東西；`hr_flow_step` 全 codebase 沒有寫入路徑，十五列是穿著資料表
+外衣的常數。真正沒有第二條路的只有離職這段交易，於是它搬到 `update_employee`——那正是
+原本繞得過去的那條路。
+
+0008 的 `mcp_tool_grant` 名稱必須與上述五個人資操作模組在 Registry 裡的名稱集合
+完全相等；`laysi-ops` 以 `include_str!` 直接讀 migration 的測試守住這條契約，0058
+刪掉的三個工具在該測試裡另以一份名單扣除（`grant_names` 只讀 INSERT）。
 
 ### 員工自助的 MCP（0017、0018）
 

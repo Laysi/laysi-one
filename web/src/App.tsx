@@ -28,7 +28,6 @@ import { MyLeave } from './screens/MyLeave';
 import { MyOvertime } from './screens/MyOvertime';
 import { MyMcp } from './screens/MyMcp';
 import { MyPayslips } from './screens/MyPayslips';
-import { Onboarding } from './screens/Onboarding';
 import { Payables } from './screens/Payables';
 import { Payroll } from './screens/Payroll';
 import { Receivables } from './screens/Receivables';
@@ -489,9 +488,6 @@ function Workspace() {
               {screen === 'hrdash' && <HrDashboard onGo={go} reloadKey={reloadKey} />}
               {screen === 'hr' && (
                 <Employees onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
-              )}
-              {screen === 'onb' && (
-                <Onboarding onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
               )}
               {screen === 'att' && (
                 <Attendance onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
