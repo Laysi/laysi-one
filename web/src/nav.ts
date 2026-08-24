@@ -69,7 +69,7 @@ export const FINANCE_NAV: NavEntry[] = [
   { kind: 'item', id: 'fa', label: '固定資產', op: 'list_fixed_assets', ready: true },
   { kind: 'head', label: '資料' },
   { kind: 'item', id: 'doc', label: '文件管理', op: 'list_documents', ready: true },
-  { kind: 'item', id: 'imp', label: '匯入與整合', op: 'list_imports', ready: true },
+  { kind: 'item', id: 'imp', label: '資料匯入', op: 'list_imports', ready: true },
 ];
 
 export const SYSTEM_NAV: NavEntry[] = [
@@ -85,7 +85,7 @@ export const SYSTEM_NAV: NavEntry[] = [
 export const HR_NAV: NavEntry[] = [
   { kind: 'head', label: '每月作業' },
   { kind: 'item', id: 'hrdash', label: '人資總覽', op: 'get_hr_dashboard', ready: true },
-  { kind: 'item', id: 'att', label: '出勤與休假', op: 'get_attendance', ready: true },
+  { kind: 'item', id: 'att', label: '出勤與休假', op: 'list_attendance_punches', ready: true },
   { kind: 'item', id: 'pay', label: '薪資作業', op: 'get_payroll_summary', ready: true },
   { kind: 'item', id: 'ins', label: '勞健保與勞退', op: 'get_insurance_summary', ready: true },
   { kind: 'head', label: '人員' },

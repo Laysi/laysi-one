@@ -5,13 +5,11 @@ import {
   OpFailed,
   trimDecimal,
   wallSpan,
-  type AttendanceMonth,
   type AttendancePunchList,
   type LeaveRequestList,
   type LeaveRequestRow,
   type OvertimeRequestList,
   type PunchCorrectionList,
-  type PunchReconciliation,
 } from '../api/client';
 import { DateField } from '../components/DateField';
 import { useCurrentUser } from '../auth';
@@ -20,19 +18,6 @@ interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
   onChanged: () => void;
-}
-
-function reconLabel(recon: PunchReconciliation): string {
-  if (!recon.imported) return '無匯入資料';
-  if (recon.matches) return '一致';
-  const parts: string[] = [];
-  if (recon.worked_days && recon.worked_days.difference !== '0') {
-    parts.push(`工作日 ${recon.worked_days.imported} / ${recon.worked_days.from_punches}`);
-  }
-  if (recon.late_count?.difference != null && recon.late_count.difference !== 0) {
-    parts.push(`遲到 ${recon.late_count.imported} / ${recon.late_count.from_punches}`);
-  }
-  return parts.length > 0 ? parts.join('、') : '一致';
 }
 
 function validTime(v: string): boolean {
@@ -49,7 +34,6 @@ function statusTag(r: LeaveRequestRow): string {
 }
 
 export function Attendance({ onToast, reloadKey, onChanged }: Props) {
-  const [att, setAtt] = useState<AttendanceMonth | null>(null);
   const [leave, setLeave] = useState<LeaveRequestList | null>(null);
   const [punches, setPunches] = useState<AttendancePunchList | null>(null);
   const [fixes, setFixes] = useState<PunchCorrectionList | null>(null);
@@ -72,15 +56,13 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<AttendanceMonth>('get_attendance', month ? { month } : {}),
       callOp<LeaveRequestList>('list_leave_requests', { include_done: includeDone }),
       callOp<AttendancePunchList>('list_attendance_punches', {
         ...(month ? { month } : {}),
         ...(picked ? { emp_no: picked } : {}),
       }),
     ])
-      .then(([a, l, p]) => {
-        setAtt(a);
+      .then(([l, p]) => {
         setLeave(l);
         setPunches(p);
       })
@@ -219,96 +201,26 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       <h1 className="page-title">出勤與休假</h1>
 
       {error && <p className="state-note state-note--error">{error}</p>}
-      {!att && !error && <p className="state-note">讀取中…</p>}
+      {!punches && !error && <p className="state-note">讀取中…</p>}
 
-      {att && leave && (
+      {punches && leave && (
         <>
           <div className="toolbar">
-            {att.months.map((m) => (
+            {punches.months.map((m) => (
               <button
                 key={m}
-                className={`chip${m === att.month ? ' chip--on' : ''}`}
+                className={`chip${m === punches.month ? ' chip--on' : ''}`}
                 onClick={() => setMonth(m)}
               >
                 {m}
               </button>
             ))}
             <span className="spacer" />
-            <span className="section-note">{att.headcount} 人有出勤紀錄</span>
-          </div>
-
-          <div className="stat-grid">
-            <div className="card stat-card">
-              <div className="stat-card__kicker">實際出勤</div>
-              <div className="stat-card__value num">{trimDecimal(att.totals.worked_days)}</div>
-              <div className="stat-card__note num">應出勤 {trimDecimal(att.totals.required_days)} 日</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-card__kicker">休假</div>
-              <div className="stat-card__value num">{trimDecimal(att.totals.leave_days)}</div>
-              <div className="stat-card__note num">日</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-card__kicker">加班時數</div>
-              <div className="stat-card__value num">{trimDecimal(att.totals.overtime_hours)}</div>
-              <div className="stat-card__note num">小時 · 遲到 {att.totals.late_count} 次</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-card__kicker">加班費</div>
-              <div className="stat-card__value num">{money(att.totals.overtime_pay)}</div>
-              <div className="stat-card__note num">由差勤系統帶入</div>
-            </div>
-          </div>
-
-          {!att.overtime_recomputed && <p className="recon">{att.overtime_note}</p>}
-
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>員工</th>
-                  <th className="align-right">應出勤</th>
-                  <th className="align-right">實出勤</th>
-                  <th className="align-right">休假</th>
-                  <th className="align-right">加班時數</th>
-                  <th className="align-right">加班費</th>
-                  <th className="align-right">遲到</th>
-                </tr>
-              </thead>
-              <tbody>
-                {att.rows.map((r) => (
-                  <tr key={r.emp_no}>
-                    <td>
-                      {r.name}
-                      <span className="cell-hint cell-hint--block num">
-                        {r.emp_no} · {r.dept_label ?? '未指定'} · {r.title}
-                      </span>
-                      {r.note && <span className="cell-hint cell-hint--block">{r.note}</span>}
-                    </td>
-                    <td className="num align-right">{trimDecimal(r.required_days)}</td>
-                    <td className="num align-right">{trimDecimal(r.worked_days)}</td>
-                    <td className="num align-right">{trimDecimal(r.leave_days)}</td>
-                    <td className="num align-right">{trimDecimal(r.overtime_hours)}</td>
-                    <td className="num align-right">
-                      {money(r.overtime_pay)}
-                    </td>
-                    <td className="num align-right">{r.late_count}</td>
-                  </tr>
-                ))}
-                {att.rows.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="cell-muted">
-                      {att.month} 尚無出勤資料。
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            <span className="section-note">{punches.rows.length} 人有打卡紀錄</span>
           </div>
 
           {punches && (
             <>
-              <h3 className="section-title section-title--spaced">打卡紀錄</h3>
               <p className="section-note">
                 {!punches.schedule.judges_lateness || !punches.schedule.counts_overtime
                   ? punches.schedule.note
@@ -329,7 +241,6 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       <th className="align-right">時數</th>
                       <th className="align-right">遲到</th>
                       <th className="align-right">未打下班</th>
-                      <th>與月統計對帳</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -358,22 +269,11 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                         <td className="num align-right">{r.summary.worked_hours}</td>
                         <td className="num align-right">{r.summary.late_days ?? '—'}</td>
                         <td className="num align-right">{r.summary.open_days}</td>
-                        <td>
-                          <span
-                            className={
-                              r.reconciliation.matches === false
-                                ? 'tag tag--warn tag--static'
-                                : 'tag tag--pale tag--static'
-                            }
-                          >
-                            {reconLabel(r.reconciliation)}
-                          </span>
-                        </td>
                       </tr>
                     ))}
                     {punches.rows.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="cell-muted">
+                        <td colSpan={5} className="cell-muted">
                           {punches.month} 尚無打卡紀錄。員工可於「我的 · 打卡」自行打卡。
                         </td>
                       </tr>
@@ -381,10 +281,6 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                   </tbody>
                 </table>
               </div>
-
-              <p className="recon">
-                打卡與匯入的月統計分開列出，兩者不同時由人資決定更正何者。
-              </p>
 
               {picked && punches.days && (
                 <div className="split-columns split-columns--wide-left">

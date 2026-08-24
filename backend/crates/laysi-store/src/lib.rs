@@ -3503,26 +3503,8 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
-    // Security policies and tokens
+    // API and MCP tokens
 
-    pub async fn security_policies(&self) -> Result<Vec<SecurityPolicy>> {
-        Ok(sqlx::query(
-            "SELECT code, label, value, detail, enforced, sort_order
-               FROM security_policy ORDER BY sort_order, code",
-        )
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| SecurityPolicy {
-            code: r.get("code"),
-            label: r.get("label"),
-            value: r.get("value"),
-            detail: r.get("detail"),
-            enforced: r.get("enforced"),
-            sort_order: r.get("sort_order"),
-        })
-        .collect())
-    }
 
     pub async fn api_tokens(&self, include_revoked: bool) -> Result<Vec<ApiToken>> {
         self.api_tokens_filtered(include_revoked, None).await
@@ -4615,23 +4597,6 @@ impl Store {
         .collect())
     }
 
-    pub async fn integrations(&self) -> Result<Vec<Integration>> {
-        Ok(sqlx::query(
-            "SELECT code, label, detail, live, note FROM integration ORDER BY sort_order, code",
-        )
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| Integration {
-            code: r.get("code"),
-            label: r.get("label"),
-            detail: r.get("detail"),
-            live: r.get("live"),
-            note: r.get("note"),
-        })
-        .collect())
-    }
-
     pub async fn import_batches(&self, limit: i64) -> Result<Vec<ImportBatch>> {
         let rows = sqlx::query(
             "SELECT b.id, b.batch_no, b.source_code, s.label AS source_label, b.file_name,
@@ -5161,47 +5126,17 @@ impl Store {
 
     // HR: attendance and leave
 
-    pub async fn attendance(&self, month: &str) -> Result<Vec<AttendanceRow>> {
+    /// Which months have punches, so the month picker does not guess.
+    pub async fn punch_months(&self) -> Result<Vec<String>> {
         Ok(sqlx::query(
-            "SELECT a.employee_id, e.emp_no, e.name, d.label AS dept_label, e.title,
-                    a.month, a.required_days, a.worked_days, a.leave_days,
-                    a.overtime_hours, a.overtime_pay, a.late_count, a.note
-               FROM attendance a
-               JOIN employee e            ON e.id = a.employee_id
-               LEFT JOIN dimension_value d ON d.id = e.dept_id
-              WHERE a.month = $1
-              ORDER BY e.emp_no",
+            "SELECT DISTINCT to_char(punched_on, 'YYYY-MM') AS month
+               FROM attendance_punch ORDER BY month DESC",
         )
-        .bind(month)
         .fetch_all(&self.pool)
         .await?
         .iter()
-        .map(|r| AttendanceRow {
-            employee_id: r.get("employee_id"),
-            emp_no: r.get("emp_no"),
-            name: r.get("name"),
-            dept_label: r.get("dept_label"),
-            title: r.get("title"),
-            month: r.get("month"),
-            required_days: r.get("required_days"),
-            worked_days: r.get("worked_days"),
-            leave_days: r.get("leave_days"),
-            overtime_hours: r.get("overtime_hours"),
-            overtime_pay: r.get("overtime_pay"),
-            late_count: r.get("late_count"),
-            note: r.get("note"),
-        })
+        .map(|r| r.get("month"))
         .collect())
-    }
-
-    /// Which months have attendance data, so the month picker does not guess.
-    pub async fn attendance_months(&self) -> Result<Vec<String>> {
-        Ok(sqlx::query("SELECT DISTINCT month FROM attendance ORDER BY month DESC")
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(|r| r.get("month"))
-            .collect())
     }
 
     pub async fn leave_requests(
@@ -6837,18 +6772,6 @@ pub struct SetApprovalRule<'a> {
     pub min_amount: Option<Money>,
 }
 
-/// One control rule. `enforced` is the reason this type exists: being able
-/// to state a rule is not the same as applying it.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SecurityPolicy {
-    pub code: String,
-    pub label: String,
-    pub value: String,
-    pub detail: String,
-    pub enforced: bool,
-    pub sort_order: i32,
-}
-
 /// An API or MCP token. There is no plaintext field, and no method to
 /// recover one.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -7197,17 +7120,6 @@ pub struct ImportSource {
     pub last_batch_no: Option<String>,
 }
 
-/// One external integration. `live` is the reason this table exists: being
-/// able to describe an integration is not the same as having one.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Integration {
-    pub code: String,
-    pub label: String,
-    pub detail: String,
-    pub live: bool,
-    pub note: String,
-}
-
 /// One problem found by a dry run. `error` blocks the batch, `warning` only
 /// reports.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -7474,26 +7386,6 @@ pub struct NewPunchCorrection<'a> {
     /// Same reason as on `NewPunch`: approving one writes a punch, and the
     /// message it may fail with is a wall-clock time.
     pub offset: FixedOffset,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct AttendanceRow {
-    pub employee_id: i32,
-    pub emp_no: String,
-    pub name: String,
-    pub dept_label: Option<String>,
-    pub title: String,
-    pub month: String,
-    pub required_days: Money,
-    pub worked_days: Money,
-    pub leave_days: Money,
-    pub overtime_hours: Money,
-    /// Overtime pay. The multipliers are regulation and are not yet in the
-    /// rule library, so this comes from the timekeeping system rather than
-    /// being computed here.
-    pub overtime_pay: Money,
-    pub late_count: i32,
-    pub note: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

@@ -447,7 +447,7 @@ impl Operation for ListDimensions {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀部門、專案、成本中心與付款條件的分類項目。"
+        "讀部門清單。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -456,16 +456,9 @@ impl Operation for ListDimensions {
     async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
         let dims = ctx.store.dimensions().await?;
         let values: usize = dims.iter().map(|d| d.values.len()).sum();
-        let summary = format!("讀取分類 · {} 類、共 {values} 個項目", dims.len());
+        let summary = format!("讀取部門 · {values} 個");
         Ok(OpOutcome::new(
-            json!({
-                "dimensions": dims,
-                // Only departments are wired up so far; the composite foreign key
-                // guarantees dept_id cannot point at another dimension.
-                "applied_to_entries": true,
-                "entry_dimension": "department",
-                "application_note": "部門欄位只接受部門分類的項目。",
-            }),
+            json!({ "dimensions": dims }),
             summary,
         ))
     }

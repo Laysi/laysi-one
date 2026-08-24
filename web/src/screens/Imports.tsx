@@ -94,7 +94,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
 
   return (
     <div>
-      <h1 className="page-title">匯入與整合</h1>
+      <h1 className="page-title">資料匯入</h1>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -289,32 +289,6 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
               </table>
             </div>
             <p className="hint">{data.commit_note}</p>
-          </section>
-
-          <section>
-            <h3 className="section-title">對外整合</h3>
-            <p className="section-note">
-              {data.live_integrations} / {data.integrations.length} 條實際運作中。
-            </p>
-            <div className="card fact-card">
-              {data.integrations.map((i) => (
-                <div className="fact fact--stacked" key={i.code}>
-                  <span className="fact__key">
-                    {i.label}
-                    <span className={`tag${i.live ? ' tag--warn tag--static' : ' tag--pale'}`}>
-                      {i.live ? '運作中' : '未啟用'}
-                    </span>
-                  </span>
-                  <span className="fact__value">
-                    {i.detail}
-                    {i.note && <span className="fact__note">{i.note}</span>}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <p className="hint">
-              標為「未啟用」的整合尚未接上。
-            </p>
           </section>
         </div>
       )}

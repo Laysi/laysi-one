@@ -760,10 +760,15 @@ mod tests {
             .collect()
     }
 
-    /// Tools 0058 deleted along with the movement form. `grant_names` reads
-    /// INSERT statements only, so a later DELETE has to be subtracted here.
-    const REVOKED_GRANTS: [&str; 3] =
-        ["list_employee_movements", "record_employee_movement", "complete_movement_step"];
+    /// Tools deleted by a later migration: the movement form (0058) and the
+    /// imported attendance summary (0059). `grant_names` reads INSERT
+    /// statements only, so a later DELETE has to be subtracted here.
+    const REVOKED_GRANTS: [&str; 4] = [
+        "list_employee_movements",
+        "record_employee_movement",
+        "complete_movement_step",
+        "get_attendance",
+    ];
 
     /// 0008, 0009, 0015, 0016, 0017, 0020, 0045 and 0057 seed the HR and
     /// self-service grants. One
@@ -962,6 +967,9 @@ mod tests {
             include_str!("../../../migrations/0055_a_draft_voucher_can_be_thrown_away.sql"),
             include_str!("../../../migrations/0057_overtime_is_asked_for_before_it_is_paid.sql"),
             include_str!("../../../migrations/0058_the_movement_form_is_gone.sql"),
+            include_str!(
+                "../../../migrations/0059_the_imported_attendance_summary_is_gone.sql"
+            ),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {

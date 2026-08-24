@@ -16,10 +16,9 @@
 //! Overtime pay comes from approved overtime requests: the hours are what
 //! somebody asked for and a manager agreed to, and the multipliers of Labor
 //! Standards Act art. 24 are in the `overtime` ruleset, resolved on the day
-//! worked. No multiplier appears in this module. A period with no approved
-//! request falls back to `attendance.overtime_pay`, which is what an outside
-//! timekeeping system asserts; both figures are reported so the two can be
-//! compared.
+//! worked. No multiplier appears in this module. Hours with no approved
+//! request are not paid: an approval is the only record that the overtime
+//! was agreed to.
 //!
 //! The payroll voucher has three parts and is created unposted:
 //!
@@ -537,12 +536,9 @@ impl Operation for RunPayroll {
         let supplementary = !already_paid.is_empty();
 
         let staff = ctx.store.employees(true, None).await?;
-        let attendance = ctx.store.attendance(&period).await?;
 
         // Approved overtime for the period, priced by the ruleset in force on
-        // each day worked. Hours and pay are kept apart from the imported
-        // figures rather than replacing them, so a company running both can
-        // see when the two disagree.
+        // each day worked.
         let approved_overtime = ctx.store.approved_overtime(from, to).await?;
         let mut overtime_by_employee: BTreeMap<i32, (Money, Money)> = BTreeMap::new();
         for o in &approved_overtime {
@@ -588,18 +584,10 @@ impl Operation for RunPayroll {
                 }));
                 continue;
             }
-            let imported = attendance
-                .iter()
-                .find(|a| a.employee_id == e.id)
-                .map(|a| a.overtime_pay)
-                .unwrap_or(Money::ZERO);
-            // An approved request is this system's own answer and wins. The
-            // import is the answer of a system that was not told about the
-            // approval, so it is only used when there is nothing to compare.
             let overtime = overtime_by_employee
                 .get(&e.id)
                 .map(|(_, pay)| *pay)
-                .unwrap_or(imported);
+                .unwrap_or(Money::ZERO);
 
             let c = compute_one(ctx, e, from, to, pay_on, overtime).await?;
             if let Some(floor) = c.below_minimum {
@@ -713,9 +701,8 @@ impl Operation for RunPayroll {
                     "approved_count": approved_overtime.len(),
                     "hours": overtime_by_employee.values().map(|(h, _)| *h).sum::<Money>().normalize().to_string(),
                     "pay": overtime_by_employee.values().map(|(_, p)| *p).sum::<Money>().to_string(),
-                    "imported_pay": attendance.iter().map(|a| a.overtime_pay).sum::<Money>().to_string(),
                     "ruleset_version": overtime_version,
-                    "note": "加班費依核准的加班申請與加班日適用的加班規則計算；沒有核准紀錄的人改用匯入的出勤加班費。",
+                    "note": "加班費依核准的加班申請與加班日適用的加班規則計算。沒有核准紀錄的加班不計入。",
                 },
                 "employer_in_ledger": false,
                 "employer_note": "公司負擔的勞健保與勞退未納入本張傳票。",

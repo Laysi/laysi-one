@@ -838,13 +838,12 @@ depreciation_entry          逐項金額，含當時解析出的 useful_life_yea
 account.report_group        資產負債表／損益表的分段，NOT NULL，以 CHECK 與 kind 綁死
 account.cash_flow_section   現金流量表活動別；損益科目必須為 NULL（CHECK 強制）
 company_setting             公司與帳務設定。**法規決定的值不得進這張表**
-dimension / dimension_value 部門、專案、成本中心、付款條件；department 已以
-                            複合外鍵掛到分錄與員工，其他分類尚未掛上
+dimension / dimension_value 部門。0060 刪掉專案、成本中心與付款條件三個沒有
+                            消費者的分類；department 以複合外鍵掛到分錄與員工
 role / permission / role_permission
                             人的權限矩陣。與 mcp_tool_grant 是兩件事：前者管人，
                             後者管 AI。dispatch 每次呼叫即時強制 deny-by-default
 approval_rule               費用簽核流程與金額門檻（公司政策，不是法規）
-security_policy             控制規則，含 `enforced`，標示有沒有實際執行
 api_token                   **不存明文**，只有 BLAKE3 雜湊與前八碼
 
 -- 費用、預算、文件、匯入（0007）
@@ -857,8 +856,8 @@ expense_claim / expense_claim_step
                             「已核准 ⇔ 有傳票」
 budget_version / budget     **只有預算數，沒有實際數**。實際數一律現查
 import_source / import_batch / import_issue
-                            `supported` 是欄位不是文案；`payload` 存預覽結果
-integration                 對外整合，`live` 標明有沒有實際接上
+                            `supported` 決定檔案交給哪個解析器；`payload` 存預覽
+                            結果。0061 刪掉五列沒有解析器的來源
 
 -- 登入、權限、主檔操作、MCP 憑證與傳票更正（0010／0011／0012／0013／0014）
 user_account                登入帳號；可選擇連到 employee，密碼雜湊可為 NULL
@@ -866,7 +865,7 @@ user_identity               以 IdP 的 provider + subject 唯一識別；email 
 user_session                只存 token 雜湊、到期與撤銷狀態，明文不落地
 permission.op_names         95 個 Registry 操作各恰好屬於一條 permission
 account.is_active           0012 新增；停用阻止新分錄，但保留歷史帳
-integration.mcp             0013 更新為 api_token 雜湊驗證與資料列身分綁定
+api_token（0013）           MCP 身分改由 api_token 雜湊驗證與資料列綁定
 voucher.reverses            0014 新增；沖銷傳票指回原傳票，UNIQUE 防止重複沖銷
 
 -- 員工的銀行帳戶（0049）
@@ -945,12 +944,12 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 - `account`：提供可直接開始設定的基礎科目表；報表分組與現金流量活動別一併建立。
 - `role`、`permission`、`role_permission`、`mcp_tool_grant`：提供預設拒絕的權限
   與 AI 工具開關。
-- `security_policy`、`approval_rule`：提供系統控制與簽核門檻。
-- `dimension`：只建立分類定義；部門、專案、成本中心與付款條件的項目由各公司
-  建立。畫面上一律稱「分類」「類別」「項目」——「維度」是 BI 與對岸 ERP 的講法，
-  資料表與操作名維持英文 `dimension` 不動。
+- `approval_rule`：提供簽核門檻。
+- `dimension`：只建立「部門」這一組定義，項目由各公司自行建立。畫面上一律稱
+  「分類」「類別」「項目」——「維度」是 BI 與對岸 ERP 的講法，資料表與操作名
+  維持英文 `dimension` 不動。
 - `company_setting`：保留設定鍵與標籤，值一律為空字串，等公司自行填寫。
-- `integration`、`import_source`、`reg_ruleset`：保留功能狀態、匯入來源與法規投影。
+- `import_source`、`reg_ruleset`：保留匯入來源與法規投影。
 
 正式安裝不預載銀行帳戶、傳票、應收應付、固定資產、預算、報支、員工、差勤、
 薪資、API Token、分類項目或單據流水起始值。
@@ -1043,7 +1042,7 @@ impl Registry {
 | `get_company_settings` | ReadOnly | `{}` | `settings[]`，含 `source: setting \| regulation` |
 | `update_company_setting` | AdminOnly | `{ code, value }` | `{ setting }`；`editable = false` 的擋下；`tax_id` 驗檢查碼、`fiscal_year` 收 1 到 12、有 `options` 的只收清單內的值 |
 | `list_chart_of_accounts` | ReadOnly | `{ only_used? }` | 科目＋報表分組＋活動別＋餘額 |
-| `list_dimensions` | ReadOnly | `{}` | `dimensions[]`、`entry_dimension: department`、`applied_to_entries: true` |
+| `list_dimensions` | ReadOnly | `{}` | `dimensions[]`（只有部門） |
 | `list_roles` | ReadOnly | `{}` | `roles[]`、`permissions[]`、`grants[]`、**`enforced: true`** |
 | `set_role_permission` | AdminOnly | `{ role_code, permission_code, level: full\|limited\|none }` | `{ cell, enforced: true }`；下次呼叫立即生效 |
 | `create_user_account` | AdminOnly | `{ username, display_name, email?, role_code, employee_no? }` | `{ user, temporary_password }`；密碼只顯示這一次，`must_change_password = true` |
@@ -1053,7 +1052,7 @@ impl Registry {
 | `delete_user_account` | AdminOnly | `{ username, confirm: true }` | `{ user, remaining }`；session 與外部身分連帶刪除，最後一個帳號與最後一個啟用中的管理員擋下 |
 | `list_user_accounts` | AdminOnly | `{}` | `accounts[]`：登入名稱、角色、連結員工與其在職狀態、帳號狀態、`must_change_password`、`has_password`、最後登入；**無密碼雜湊** |
 | `list_approval_rules` | ReadOnly | `{}` | `steps[]`、`enforced: true` |
-| `get_security_policy` | ReadOnly | `{}` | `rules[]`，每條帶 `enforced` 與 `source` |
+| `get_security_policy` | ReadOnly | `{}` | `rules[]`，每條帶 `source`；四條全部 `enforced` |
 | `list_api_tokens` | ReadOnly | `{ include_revoked? }` | `tokens[]`（**無明文**）、`storage_note`、`wiring_note` |
 | `issue_api_token` | AdminOnly | `{ name, kind, scope, actor, actor_role, rotate_days?, expiry_note? }` | `{ token, secret }`，`secret` 只顯示這一次 |
 | `revoke_api_token` | HighRisk | `{ id }` | `{ token }` |
@@ -1144,7 +1143,7 @@ impl Registry {
 | `list_documents` | ReadOnly | `{ q?, limit? }` | `documents[]`、`stats`、`bucket`、`bucket_reconciled`、`ocr_note` |
 | `upload_document` | NeedsConfirm | `{ file_name, content_base64, kind?, link_type?, link_ref?, doc_no? }` | `{ document, new_version }` |
 | `get_document` | ReadOnly | `{ doc_no, version?, include_content? }` | `{ document, verified, checksum_recomputed }` |
-| `list_imports` | ReadOnly | `{}` | `sources[]`、`batches[]`、`integrations[]`、`csv_columns` |
+| `list_imports` | ReadOnly | `{}` | `sources[]`、`batches[]`、`csv_columns` |
 | `preview_import` | NeedsConfirm | `{ source_code, file_name, content }` | `{ batch, drafts, can_commit, blocked_note }` |
 | `commit_import` | HighRisk | `{ batch_no }` | `{ batch, posted: false }` |
 | `rollback_import` | HighRisk | `{ batch_no }` | `{ batch, removed }` |
@@ -1205,7 +1204,6 @@ column，因此不可能與上面的區間不一致。
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦與人資／財務銜接狀態 |
 | `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、特休額度、約定的底薪與三個投保級距；**不含系統角色** |
-| `get_attendance` | ReadOnly | `{ month? }` | 逐人出勤、請假、遲到與來源系統帶入的加班費 |
 | `list_leave_requests` | ReadOnly | `{ include_done?, limit? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度 |
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
@@ -1301,8 +1299,8 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `punch_clock` | NeedsConfirm | `{ kind, note? }` | 本人上／下班卡，時間取伺服器時鐘 |
-| `list_my_punches` | ReadOnly | `{ month? }` | 本人逐日明細（該月每一天）、月統計、與 `attendance` 對帳 |
-| `list_attendance_punches` | ReadOnly | `{ month?, emp_no? }` | 全公司逐人統計與對帳；帶 `emp_no` 另附逐日明細 |
+| `list_my_punches` | ReadOnly | `{ month? }` | 本人逐日明細（該月每一天）與月統計 |
+| `list_attendance_punches` | ReadOnly | `{ month?, emp_no? }` | 全公司逐人統計；帶 `emp_no` 另附逐日明細 |
 | `correct_punch` | NeedsConfirm | `{ emp_no, punched_on, kind, at, note? }` | 補登，`source = manual` |
 | `submit_my_punch_correction` | NeedsConfirm | `{ punched_on, kind, at, reason? }` | 本人送出補登申請；公司設定為自動通過時同一交易寫入打卡 |
 | `list_my_punch_corrections` | ReadOnly | `{}` | 本人送出過的補登申請與狀態 |
@@ -1310,9 +1308,10 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 | `decide_punch_correction` | NeedsConfirm | `{ id, approve, note? }` | 核准即在同一交易寫入打卡 |
 
 `attendance` 一直有欄位放月統計，卻沒有任何東西產生它——0016 補上被彙總的那個
-原始事件。**兩者互不覆蓋**：打卡是這裡的人記下來的，`attendance` 是來源系統
-主張的，操作把兩邊都算出來並回報差額，形狀與薪資用 `payroll_year_totals` 對
-`employee_income` 的作法相同。
+原始事件，0059 刪掉那張表。從 0008 到 0059 沒有任何操作、解析器或種子寫過它，
+於是 `get_attendance` 每次回空清單、對帳每次回「沒有可對照的資料」、月份選單每次
+是空的，而 `run_payroll` 的加班費退路恆為 0。**打卡是這個月唯一的紀錄**，月統計
+由打卡現算，月份選單改讀有打卡的月份。
 
 **打卡記錄到秒。** `punched_at` 是 `timestamptz`，本來就有秒；操作層一律以
 `%H:%M:%S` 呈現，時數與加班以 `num_seconds()` 計算，遲到判定也在秒的精度上比較
@@ -1380,9 +1379,9 @@ ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日�
 ### 加班申請（0057）
 
 加班原本散在三個互不相連的地方：打卡推導出時數，`attendance.overtime_hours` 與
-`overtime_pay` 是外部差勤系統對一個月的主張，薪資單上的 `overtime` 直接抄後者。
-只用本系統的公司因此永遠發不出加班費，而且**沒有任何人核准過任何一次加班**——
-勞基法第 32 條把雇主的同意當成加班合法的前提。
+`overtime_pay` 是外部差勤系統對一個月的主張（0059 已把那張沒人寫得進去的表刪掉），
+薪資單上的 `overtime` 直接抄後者。只用本系統的公司因此永遠發不出加班費，而且
+**沒有任何人核准過任何一次加班**——勞基法第 32 條把雇主的同意當成加班合法的前提。
 
 申請就是那份同意，形狀與休假單相同：牆上時鐘的起訖時刻，時數等於區間長度，
 待簽核到有人決定。`worked_on` 由 `from_at` 推導（generated column），所以一張單
@@ -1405,8 +1404,8 @@ ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日�
 沒有設定上下班時間時不做重疊檢查——沒有區間就沒有東西可以重疊，而加班時數不需要
 它就算得出來，這一點與休假相反。
 
-`run_payroll` 以核准的申請為準，沒有核准紀錄的人才沿用匯入的
-`attendance.overtime_pay`，兩個數字都回報。**國定假日與例假不做**：第 39 條與第 40 條
+`run_payroll` 只認核准的申請；沒有核准紀錄的加班不計入（0059 之後也沒有第二個
+來源可以沿用）。**國定假日與例假不做**：第 39 條與第 40 條
 按日加倍發給而不是按小時計費，而系統沒有國定假日日曆，判定不了某一天屬於哪一種。
 週六與週日一律當休息日，與休假時數的假設同一套；法遵檢核把這一塊列為未檢查。
 

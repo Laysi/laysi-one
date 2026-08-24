@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { callOp, money, OpFailed, trimDecimal, type MyHome } from '../api/client';
+import { callOp, OpFailed, trimDecimal, type MyHome } from '../api/client';
 import type { ScreenId } from '../nav';
 
 interface Props {
@@ -84,100 +84,52 @@ export function Me({ onGo, reloadKey }: Props) {
         </button>
       </div>
 
-      <div className="split-columns">
-        <section>
-          <h3 className="section-title">我的基本資料</h3>
-          <div className="card fact-card">
-            <div className="fact">
-              <span className="fact__key">姓名與工號</span>
-              <span className="fact__value">
-                {p.name}
-                <span className="fact__note num">{p.emp_no}</span>
-              </span>
-            </div>
-            <div className="fact">
-              <span className="fact__key">部門與職稱</span>
-              <span className="fact__value">
-                {p.dept_label ?? '未指定'}
-                {p.title ? ` · ${p.title}` : ''}
-              </span>
-            </div>
-            <div className="fact">
-              <span className="fact__key">在職狀態</span>
-              <span className="fact__value">
-                {p.status_label}
-                <span className="fact__note num">
-                  {p.employment_label} · {p.hired_on} 起
-                  {p.left_on ? ` · ${p.left_on} 離職` : ''}
-                </span>
-              </span>
-            </div>
-            {p.bank_accounts.length === 0 ? (
-              <div className="fact">
-                <span className="fact__key">銀行帳戶</span>
-                <span className="fact__value">尚未登錄，由人資維護</span>
-              </div>
-            ) : (
-              p.bank_accounts.map((b, i) => (
-                <div className="fact" key={i}>
-                  <span className="fact__key">{b.is_payroll ? '薪轉帳戶' : '其他帳戶'}</span>
-                  <span className="fact__value num">
-                    {b.bank_name ? `${b.bank_name} · ` : ''}
-                    {b.account_masked}
-                    {b.note && <span className="fact__note">{b.note}</span>}
-                  </span>
-                </div>
-              ))
-            )}
+      <section>
+        <h3 className="section-title">我的基本資料</h3>
+        <div className="card fact-card">
+          <div className="fact">
+            <span className="fact__key">姓名與工號</span>
+            <span className="fact__value">
+              {p.name}
+              <span className="fact__note num">{p.emp_no}</span>
+            </span>
           </div>
-
-        </section>
-
-        <section>
-          <h3 className="section-title">{data.attendance_month} 的差勤彙總</h3>
-          {data.attendance ? (
-            <>
-              <div className="card fact-card">
-                <div className="fact">
-                  <span className="fact__key">應出勤 / 實出勤</span>
-                  <span className="fact__value num">
-                    {trimDecimal(data.attendance.required_days)} /{' '}
-                    {trimDecimal(data.attendance.worked_days)} 日
-                  </span>
-                </div>
-                <div className="fact">
-                  <span className="fact__key">休假</span>
-                  <span className="fact__value num">
-                    {trimDecimal(data.attendance.leave_days)} 日
-                  </span>
-                </div>
-                <div className="fact">
-                  <span className="fact__key">加班</span>
-                  <span className="fact__value num">
-                    {trimDecimal(data.attendance.overtime_hours)} 小時 ·{' '}
-                    {money(data.attendance.overtime_pay)} 元
-                  </span>
-                </div>
-                <div className="fact">
-                  <span className="fact__key">遲到</span>
-                  <span className="fact__value num">{data.attendance.late_count} 次</span>
-                </div>
-                {data.attendance.note && (
-                  <div className="fact">
-                    <span className="fact__key">備註</span>
-                    <span className="fact__value">{data.attendance.note}</span>
-                  </div>
-                )}
-              </div>
-              {!data.attendance.overtime_recomputed && (
-                <p className="recon recon--off">{data.attendance.overtime_note}</p>
-              )}
-            </>
+          <div className="fact">
+            <span className="fact__key">部門與職稱</span>
+            <span className="fact__value">
+              {p.dept_label ?? '未指定'}
+              {p.title ? ` · ${p.title}` : ''}
+            </span>
+          </div>
+          <div className="fact">
+            <span className="fact__key">在職狀態</span>
+            <span className="fact__value">
+              {p.status_label}
+              <span className="fact__note num">
+                {p.employment_label} · {p.hired_on} 起
+                {p.left_on ? ` · ${p.left_on} 離職` : ''}
+              </span>
+            </span>
+          </div>
+          {p.bank_accounts.length === 0 ? (
+            <div className="fact">
+              <span className="fact__key">銀行帳戶</span>
+              <span className="fact__value">尚未登錄，由人資維護</span>
+            </div>
           ) : (
-            <p className="state-note">{data.attendance_note}</p>
+            p.bank_accounts.map((b, i) => (
+              <div className="fact" key={i}>
+                <span className="fact__key">{b.is_payroll ? '薪轉帳戶' : '其他帳戶'}</span>
+                <span className="fact__value num">
+                  {b.bank_name ? `${b.bank_name} · ` : ''}
+                  {b.account_masked}
+                  {b.note && <span className="fact__note">{b.note}</span>}
+                </span>
+              </div>
+            ))
           )}
-        </section>
-      </div>
+        </div>
+      </section>
 
       <p className="hint">
         特休額度依年資與 {al.ruleset.source_note} 即時計算，已休天數只計本年度已核准的特休。

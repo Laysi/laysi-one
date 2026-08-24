@@ -1,13 +1,15 @@
 //! Security policy, API and MCP tokens, system health.
 //!
-//! A security policy must not be prose. Every rule here either carries an
-//! `enforced` flag ([`GetSecurityPolicy`] states whether it is actually
-//! applied) or is not stored at all and derived on each call:
+//! A security policy must not be prose, so every rule [`GetSecurityPolicy`]
+//! returns is one the system applies:
 //!
 //! - What AI may not do is derived from `mcp_tool_grant`, and high-risk tools
 //!   that are still enabled are listed alongside.
 //! - Amount thresholds are derived from `approval_rule`, so editing the table
 //!   changes the screen.
+//! - The two in [`FIXED_RULES`] hold by construction. A rule this page could
+//!   only describe would not belong on it, which is why 0062 could drop the
+//!   table they used to live in.
 //!
 //! `api_token` stores only a BLAKE3 hash and the first eight characters: the
 //! prefix lets a person recognise which token a row is, the hash lets the
@@ -64,6 +66,34 @@ fn short_list(names: &[String]) -> String {
 
 // Control rules
 
+/// A rule that holds by construction rather than by a setting somebody can
+/// change. Both are enforced, which is why neither carries a flag: a rule
+/// this page can only describe does not belong on it.
+struct FixedRule {
+    code: &'static str,
+    label: &'static str,
+    value: &'static str,
+    detail: &'static str,
+    sort_order: i64,
+}
+
+const FIXED_RULES: [FixedRule; 2] = [
+    FixedRule {
+        code: "separation_of_duties",
+        label: "職責分離",
+        value: "建立傳票的人不能自行核准；會計不能執行匯款",
+        detail: "每次呼叫都即時檢查角色權限；會計沒有實際匯款權限，出納沒有開立、調整或過帳分錄權限。",
+        sort_order: 20,
+    },
+    FixedRule {
+        code: "audit_retention",
+        label: "稽核紀錄",
+        value: "每一次呼叫都留下紀錄，含被擋下的",
+        detail: "唯讀查詢與被權限擋下的呼叫同樣寫入。",
+        sort_order: 50,
+    },
+];
+
 struct GetSecurityPolicy;
 
 #[async_trait]
@@ -82,7 +112,6 @@ impl Operation for GetSecurityPolicy {
     }
 
     async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
-        let stored = ctx.store.security_policies().await?;
         let grants = ctx.store.tool_grant_details().await?;
         let rules = ctx.store.approval_rules().await?;
 
@@ -139,15 +168,15 @@ impl Operation for GetSecurityPolicy {
             "sort_order": 30,
         }));
 
-        rows.extend(stored.iter().map(|p| {
+        rows.extend(FIXED_RULES.iter().map(|r| {
             json!({
-                "code": p.code,
-                "label": p.label,
-                "value": p.value,
-                "detail": p.detail,
-                "enforced": p.enforced,
+                "code": r.code,
+                "label": r.label,
+                "value": r.value,
+                "detail": r.detail,
+                "enforced": true,
                 "source": "policy",
-                "sort_order": p.sort_order,
+                "sort_order": r.sort_order,
             })
         }));
         rows.sort_by_key(|r| r["sort_order"].as_i64().unwrap_or(0));

@@ -1,4 +1,4 @@
-//! Imports and external integrations.
+//! CSV imports.
 //!
 //! [`PreviewImport`] parses, validates and reports problems per row without
 //! writing anything, storing the parsed drafts in `import_batch.payload`.
@@ -13,9 +13,9 @@
 //! every converted row carries a warning — silent conversion is not
 //! acceptable.
 //!
-//! `import_source.supported` is a column, not marketing copy. Only the
-//! historical voucher CSV is currently true; OFX, the tax bureau XML and Excel
-//! have no parser yet.
+//! `import_source.supported` is what routes a file to a parser, so a source
+//! row only exists once its parser does. 0061 removed the five rows that
+//! described parsers nobody had written.
 
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -354,7 +354,7 @@ impl Operation for ListImports {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀匯入來源、批次紀錄與對外整合現況。逐一標明各來源的解析器與各條整合是否已接上。"
+        "讀匯入來源與批次紀錄。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -363,27 +363,20 @@ impl Operation for ListImports {
     async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
         let sources = ctx.store.import_sources().await?;
         let batches = ctx.store.import_batches(20).await?;
-        let integrations = ctx.store.integrations().await?;
 
         let supported: Vec<&str> =
             sources.iter().filter(|s| s.supported).map(|s| s.code.as_str()).collect();
-        let live = integrations.iter().filter(|i| i.live).count();
-
         let summary = format!(
-            "讀取匯入 · {} 種來源（{} 種可匯入）· {} 批紀錄 · 對外整合 {}／{} 條運作中",
+            "讀取匯入 · {} 種來源（{} 種可匯入）· {} 批紀錄",
             sources.len(),
             supported.len(),
-            batches.len(),
-            live,
-            integrations.len()
+            batches.len()
         );
         Ok(OpOutcome::new(
             json!({
                 "sources": sources,
                 "batches": batches,
-                "integrations": integrations,
                 "supported_sources": supported,
-                "live_integrations": live,
                 // Both of these must be shown on screen.
                 "csv_columns": COLUMNS,
                 "format_note":

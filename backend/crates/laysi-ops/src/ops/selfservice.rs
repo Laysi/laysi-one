@@ -33,7 +33,7 @@
 use crate::ops::attendance::{
     business_instant, correction_auto_approves, default_overtime_day_type, leave_kind_label,
     leave_status_label, month_days, overtime_json, punch_correction_json,
-    punch_correction_status_label, punch_days, punch_kind_label, reconciliation, summarise,
+    punch_correction_status_label, punch_days, punch_kind_label, summarise,
     valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
@@ -48,7 +48,7 @@ use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES};
 use laysi_store::{
-    AttendanceRow, DocumentRow, Employee, LeaveRequest, NewLeaveRequest, NewOvertimeRequest,
+    DocumentRow, Employee, LeaveRequest, NewLeaveRequest, NewOvertimeRequest,
     NewPunchCorrection, Payslip, ReserveDocument, SubmitExpenseClaim,
 };
 use schemars::JsonSchema;
@@ -203,21 +203,6 @@ fn profile_json(employee: &Employee, months: u32) -> Value {
     })
 }
 
-fn attendance_json(row: &AttendanceRow) -> Value {
-    json!({
-        "month": row.month,
-        "required_days": row.required_days.to_string(),
-        "worked_days": row.worked_days.to_string(),
-        "leave_days": row.leave_days.to_string(),
-        "overtime_hours": row.overtime_hours.to_string(),
-        "overtime_pay": row.overtime_pay.to_string(),
-        "late_count": row.late_count,
-        "note": row.note,
-        "overtime_recomputed": false,
-        "overtime_note": "加班費金額由差勤來源帶入，本系統不自行重算。",
-    })
-}
-
 fn leave_request_json(request: &LeaveRequest) -> Value {
     json!({
         "leave_no": request.leave_no,
@@ -303,13 +288,6 @@ impl Operation for GetMyHome {
         let _: crate::Empty = parse(input)?;
         let employee = actor_employee(ctx).await?;
         let months = service_months(employee.hired_on, service_through(&employee, ctx.today));
-        let month = ctx.today.format("%Y-%m").to_string();
-        let attendance = ctx
-            .store
-            .attendance(&month)
-            .await?
-            .into_iter()
-            .find(|row| row.employee_id == employee.id);
         let (annual_rs, annual_balance) = my_annual_leave(ctx, &employee).await?;
         let leaves = ctx.store.leave_requests_by_employee(employee.id).await?;
         let approval_rules = ctx.store.approval_rules().await?;
@@ -327,25 +305,14 @@ impl Operation for GetMyHome {
             .filter(|claim| claim.status == "submitted" || claim.status == "approving")
             .count();
         let summary = format!(
-            "讀 {} 的員工自助首頁 · 年資 {} · 本月出勤{} · {pending_leaves} 張休假、{pending_claims} 張報支進行中",
+            "讀 {} 的員工自助首頁 · 年資 {} · {pending_leaves} 張休假、{pending_claims} 張報支進行中",
             employee.name,
             service_label(months),
-            if attendance.is_some() { "已帶入" } else { "尚無資料" },
         );
 
         Ok(OpOutcome::new(
             json!({
                 "profile": profile_json(&employee, months),
-                "attendance_month": month,
-                "attendance": attendance.as_ref().map(attendance_json),
-                // The summary and the punch record are two sources. Saying
-                // 「尚無差勤資料」 on a screen whose header shows today's
-                // clock-in reads as the system having lost it.
-                "attendance_note": if attendance.is_some() {
-                    "本月差勤彙總已由差勤系統匯入。"
-                } else {
-                    "本月沒有匯入的差勤彙總。休假與遲到請看打卡紀錄。"
-                },
                 "annual_leave": annual_leave_json(
                     ctx.today.year(),
                     annual_rs,
@@ -1311,12 +1278,6 @@ impl Operation for ListMyPunches {
         let schedule = WorkSchedule::load(ctx).await?;
         let punched = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
         let stats = summarise(&punched, &schedule);
-        let imported = ctx
-            .store
-            .attendance(&month)
-            .await?
-            .into_iter()
-            .find(|row| row.employee_id == employee.id);
 
         let local_today = laysi_domain::business_time(Utc::now(), ctx.offset).date();
         // Days without a punch are rows too: they are the ones a correction is
@@ -1371,7 +1332,6 @@ impl Operation for ListMyPunches {
                 "next_kind_label": next_kind.map(punch_kind_label),
                 "days": days.iter().map(|d| d.json(&schedule)).collect::<Vec<_>>(),
                 "summary": stats.json(),
-                "reconciliation": reconciliation(&stats, imported.as_ref()),
                 "schedule": schedule.json(),
                 "scope_note": "僅查詢已驗證 session 的 ctx.employee_id；輸入只有月份。",
             }),

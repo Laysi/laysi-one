@@ -59,7 +59,6 @@ export type OpName =
   | 'set_approval_rule'
   | 'get_hr_dashboard'
   | 'list_employees'
-  | 'get_attendance'
   | 'list_attendance_punches'
   | 'correct_punch'
   | 'list_leave_requests'
@@ -182,8 +181,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'set_approval_rule', risk: 'boss_only', riskLabel: '限負責人', summary: "新增、覆寫或刪除一關費用簽核規則；相同關卡編號會覆蓋，未設金額門檻代表一律需要。金額門檻可隨時調整；整套流程至少保留一關。" },
   { name: 'get_hr_dashboard', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資總覽：在職人數、本月到離職、待簽核的休假單，以及人資與財務各條銜接的接上狀態" },
   { name: 'list_employees', risk: 'read_only', riskLabel: '唯讀', summary: "讀員工名冊：部門、職稱、到職日、年資、特休額度（額度依年資由特休規則計算），以及約定的底薪與三個投保級距。逐月薪資單另有操作，且限負責人。" },
-  { name: 'get_attendance', risk: 'read_only', riskLabel: '唯讀', summary: "讀某個月的逐人出勤、休假、遲到與加班時數。加班費金額由差勤系統帶入；規則庫尚未收錄加班費倍數，本系統不自行重算。" },
-  { name: 'list_attendance_punches', risk: 'read_only', riskLabel: '唯讀', summary: "讀某個月全公司的打卡紀錄：逐人統計（實際打滿的天數、時數、遲到天數、加班時數），並與匯入的出勤月統計對帳回報差額。指定員工編號時另附該員的逐日明細。上下班時間取自公司設定，未設定時不判定遲到。" },
+  { name: 'list_attendance_punches', risk: 'read_only', riskLabel: '唯讀', summary: "讀某個月全公司的打卡紀錄：逐人統計（實際打滿的天數、時數、遲到天數、加班時數）。指定員工編號時另附該員的逐日明細。上下班時間取自公司設定，未設定時不判定遲到。" },
   { name: 'correct_punch', risk: 'needs_confirm', riskLabel: '需人確認', summary: "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。同一時段已有紀錄時會覆蓋原值。漏打卡沒有其他更正管道。" },
   { name: 'list_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀休假單與逐人特休餘額。額度依查詢當日適用的特休規則與年資現算，系統只留已核准的實休天數。" },
   { name: 'decide_leave_request', risk: 'needs_confirm', riskLabel: '需人確認', summary: "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕；申請人不得核准本人送出的單據。" },
@@ -297,7 +295,6 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'set_approval_rule': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"condition_note":{"default":"","description":"Description of the condition.","type":"string"},"delete":{"default":false,"description":"true deletes this step; a flow always keeps at least one.","type":"boolean"},"label":{"default":null,"description":"Step name. May be omitted when deleting.","type":["string","null"]},"min_amount":{"default":null,"description":"Company policy amount threshold; null means always required. Amounts are strings in JSON.","type":["string","null"]},"role_code":{"default":null,"description":"Responsible role. null is allowed for a step the claimant handles.","type":["string","null"]},"step_no":{"description":"Step number, also the upsert key.","format":"int32","type":"integer"}},"required":["step_no"],"title":"SetApprovalRuleInput","type":"object"},
   'get_hr_dashboard': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_employees': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_left":{"default":false,"description":"Include departed employees; excluded by default.","type":"boolean"},"q":{"default":null,"description":"Search name, employee number, job title or department.","type":["string","null"]}},"title":"ListEmployeesInput","type":"object"},
-  'get_attendance': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"month":{"default":null,"description":"Month (YYYY-MM). Defaults to this month.","type":["string","null"]}},"title":"GetAttendanceInput","type":"object"},
   'list_attendance_punches': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"emp_no":{"default":null,"description":"Employee number. Without it the reply is one summary row per person; with it, the day-by-day detail for that person as well.","type":["string","null"]},"month":{"default":null,"description":"Month (YYYY-MM). Defaults to this month.","type":["string","null"]}},"title":"ListAttendancePunchesInput","type":"object"},
   'correct_punch': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"at":{"description":"Wall-clock time on that day in the company's own time zone, `HH:MM:SS`. `HH:MM` is accepted and stored as second zero, because a correction is a remembered time and the second is not known; `source` already marks the row as entered by hand.","type":"string"},"emp_no":{"description":"Whose record to correct.","type":"string"},"kind":{"description":"`in` or `out`.","type":"string"},"note":{"default":null,"description":"Why it is being entered by hand. Kept on the record.","type":["string","null"]},"punched_on":{"description":"The working day.","format":"date","type":"string"}},"required":["at","emp_no","kind","punched_on"],"title":"CorrectPunchInput","type":"object"},
   'list_leave_requests': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_done":{"default":false,"description":"Include approved and rejected requests; by default only pending ones.","type":"boolean"},"limit":{"default":null,"description":"Maximum rows. Omit for no additional limit.","format":"int64","type":["integer","null"]}},"title":"ListLeaveRequestsInput","type":"object"},

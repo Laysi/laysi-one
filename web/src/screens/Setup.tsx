@@ -458,7 +458,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                   : '公司設定由系統管理員維護。'}
               </p>
 
-              <h3 className="section-title section-title--spaced">分類與條件</h3>
+              <h3 className="section-title section-title--spaced">部門</h3>
               <div className="card fact-card">
                 {dims.dimensions.map((d) => (
                   <div className="fact fact--stacked" key={d.code}>

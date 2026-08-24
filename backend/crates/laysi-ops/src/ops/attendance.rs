@@ -1,16 +1,9 @@
 //! Attendance, clock-in records, leave requests and approvals.
 //!
-//! The ruleset library does not yet carry overtime multipliers, so
-//! [`GetAttendance`] passes through the `overtime_pay` supplied by the
-//! timekeeping system without recomputing it. Punches are subject to the same
-//! rule from the other direction: [`PunchSummary`] derives overtime *hours*
-//! from the clock and never turns them into an amount.
-//!
-//! Punches and the monthly `attendance` row are two accounts of the same
-//! month and neither overwrites the other. The punches are what the people
-//! here recorded; the `attendance` row is what a source system asserts. The
-//! operations compute both and report the difference, which is the same shape
-//! as payroll reconciling `payroll_year_totals` against `employee_income`.
+//! Punches are the only record of a month. [`PunchSummary`] derives worked
+//! and overtime *hours* from the clock and never turns them into an amount:
+//! overtime pay comes from an approved request, priced by the ruleset of the
+//! day worked (0057).
 //!
 //! Working hours are company policy, so they are read from `company_setting`
 //! at call time, never held in this file. When `work_start` is blank the
@@ -26,7 +19,7 @@
 
 use crate::ops::employees::service_months;
 use crate::ops::insurance::ruleset_json;
-use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
+use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{
     DateTime, Datelike, FixedOffset, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
@@ -34,7 +27,7 @@ use chrono::{
 };
 use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
-use laysi_store::{AttendancePunch, AttendanceRow, LeaveRequest, OvertimeRequest, PunchCorrection};
+use laysi_store::{AttendancePunch, LeaveRequest, OvertimeRequest, PunchCorrection};
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -44,7 +37,6 @@ use std::collections::BTreeMap;
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
     vec![
-        Box::new(GetAttendance),
         Box::new(ListAttendancePunches),
         Box::new(CorrectPunch),
         Box::new(ListLeaveRequests),
@@ -409,9 +401,7 @@ pub(crate) fn month_days(
 
 /// What a month of punches adds up to.
 ///
-/// Everything here is derived. Nothing is written back to `attendance`: the
-/// imported row stays as the source system left it, and the difference is
-/// reported instead.
+/// Everything here is derived from the punches themselves.
 pub(crate) struct PunchSummary {
     pub days_with_arrival: i64,
     pub complete_days: i64,
@@ -464,39 +454,6 @@ impl PunchSummary {
             "overtime_note": "打卡推導的是時數。加班費依核准的加班申請計算，請送出加班申請。",
         })
     }
-}
-
-/// Compare the punches against the imported monthly row.
-///
-/// `None` when there is no imported row to compare with, which is a fact
-/// worth stating rather than a zero difference.
-pub(crate) fn reconciliation(summary: &PunchSummary, imported: Option<&AttendanceRow>) -> Value {
-    let Some(row) = imported else {
-        return json!({
-            "imported": false,
-            "note": "本月沒有匯入的出勤統計可以對照，畫面上的數字全部由打卡推導。",
-        });
-    };
-    let worked_gap = Decimal::from(summary.complete_days) - row.worked_days;
-    let late_gap = summary.late_days.map(|late| late - i64::from(row.late_count));
-    let overtime_gap = summary
-        .overtime_seconds
-        .map(|s| hours(s) - row.overtime_hours);
-    json!({
-        "imported": true,
-        "worked_days": { "imported": row.worked_days.to_string(),
-                         "from_punches": summary.complete_days,
-                         "difference": worked_gap.to_string() },
-        "late_count": { "imported": row.late_count, "from_punches": summary.late_days,
-                        "difference": late_gap },
-        "overtime_hours": { "imported": row.overtime_hours.to_string(),
-                            "from_punches": summary.overtime_seconds.map(|s| hours(s).to_string()),
-                            "difference": overtime_gap.map(|d| d.to_string()) },
-        "matches": worked_gap.is_zero()
-            && late_gap.is_none_or(|g| g == 0)
-            && overtime_gap.is_none_or(|g| g.is_zero()),
-        "note": "打卡與匯入的月統計互不覆蓋。兩者不同時照實回報差額，由人資決定更正何者。",
-    })
 }
 
 /// Values accepted by `leave_request.kind`. A migration test compares this
@@ -597,106 +554,6 @@ fn leave_json(request: &LeaveRequest, balance: Option<AnnualBalance>) -> Value {
     })
 }
 
-// Attendance
-
-struct GetAttendance;
-
-#[derive(Deserialize, JsonSchema, Default)]
-pub struct GetAttendanceInput {
-    /// Month (YYYY-MM). Defaults to this month.
-    #[serde(default)]
-    pub month: Option<String>,
-}
-
-#[async_trait]
-impl Operation for GetAttendance {
-    fn name(&self) -> &'static str {
-        "get_attendance"
-    }
-
-    fn risk(&self) -> Risk {
-        Risk::ReadOnly
-    }
-
-    fn summary(&self) -> &'static str {
-        "讀某個月的逐人出勤、休假、遲到與加班時數。加班費金額由差勤系統帶入；規則庫尚未收錄加班費倍數，本系統不自行重算。"
-    }
-
-    fn input_schema(&self) -> Value {
-        schema_of::<GetAttendanceInput>()
-    }
-
-    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let i: GetAttendanceInput = parse(input)?;
-        let month = i
-            .month
-            .unwrap_or_else(|| ctx.today.format("%Y-%m").to_string());
-        if !valid_month(&month) {
-            return Err(OpError::BadInput(format!(
-                "月份要寫成 YYYY-MM，收到的是「{month}」"
-            )));
-        }
-
-        let rows = ctx.store.attendance(&month).await?;
-        let months = ctx.store.attendance_months().await?;
-        let required_days: Money = rows.iter().map(|r| r.required_days).sum();
-        let worked_days: Money = rows.iter().map(|r| r.worked_days).sum();
-        let leave_days: Money = rows.iter().map(|r| r.leave_days).sum();
-        let overtime_hours: Money = rows.iter().map(|r| r.overtime_hours).sum();
-        let overtime_pay: Money = rows.iter().map(|r| r.overtime_pay).sum();
-        let late_count: i64 = rows.iter().map(|r| i64::from(r.late_count)).sum();
-
-        let attendance_rows = rows
-            .iter()
-            .map(|r| {
-                json!({
-                    "emp_no": r.emp_no,
-                    "name": r.name,
-                    "dept_label": r.dept_label,
-                    "title": r.title,
-                    "month": r.month,
-                    "required_days": r.required_days.to_string(),
-                    "worked_days": r.worked_days.to_string(),
-                    "leave_days": r.leave_days.to_string(),
-                    "overtime_hours": r.overtime_hours.to_string(),
-                    "overtime_pay": r.overtime_pay.to_string(),
-                    "late_count": r.late_count,
-                    "note": r.note,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let summary = format!(
-            "讀 {month} 出勤 · {} 人 · 出勤 {} 日、休假 {} 日、加班 {} 小時 · 加班費 {} 由來源系統帶入",
-            attendance_rows.len(),
-            worked_days.normalize(),
-            leave_days.normalize(),
-            overtime_hours.normalize(),
-            money(overtime_pay)
-        );
-
-        Ok(OpOutcome::new(
-            json!({
-                "month": month,
-                "months": months,
-                "rows": attendance_rows,
-                "headcount": rows.len(),
-                "totals": {
-                    "required_days": required_days.to_string(),
-                    "worked_days": worked_days.to_string(),
-                    "leave_days": leave_days.to_string(),
-                    "overtime_hours": overtime_hours.to_string(),
-                    "overtime_pay": overtime_pay.to_string(),
-                    "late_count": late_count,
-                },
-                "overtime_recomputed": false,
-                "overtime_note": "本欄的加班費來自匯入的出勤資料。薪資作業以核准的加班申請為準，沒有核准紀錄的人才採用本欄。",
-            }),
-            summary,
-        ))
-    }
-}
-
 // Punches, company-wide
 
 struct ListAttendancePunches;
@@ -723,7 +580,7 @@ impl Operation for ListAttendancePunches {
     }
 
     fn summary(&self) -> &'static str {
-        "讀某個月全公司的打卡紀錄：逐人統計（實際打滿的天數、時數、遲到天數、加班時數），並與匯入的出勤月統計對帳回報差額。指定員工編號時另附該員的逐日明細。上下班時間取自公司設定，未設定時不判定遲到。"
+        "讀某個月全公司的打卡紀錄：逐人統計（實際打滿的天數、時數、遲到天數、加班時數）。指定員工編號時另附該員的逐日明細。上下班時間取自公司設定，未設定時不判定遲到。"
     }
 
     fn input_schema(&self) -> Value {
@@ -750,10 +607,9 @@ impl Operation for ListAttendancePunches {
             .store
             .punches(&month, only.as_ref().map(|e| e.id))
             .await?;
-        let imported = ctx.store.attendance(&month).await?;
 
-        // One bucket per person, keyed by employee so the summary rows and
-        // the imported rows line up on a primary key rather than a name.
+        // One bucket per person, keyed by employee rather than by name:
+        // display names collide.
         let mut by_employee: BTreeMap<i32, Vec<AttendancePunch>> = BTreeMap::new();
         for punch in punches {
             by_employee.entry(punch.employee_id).or_default().push(punch);
@@ -764,14 +620,12 @@ impl Operation for ListAttendancePunches {
         for (employee_id, punches) in &by_employee {
             let days = punch_days(punches, ctx.offset);
             let summary = summarise(&days, &schedule);
-            let row = imported.iter().find(|r| r.employee_id == *employee_id);
             let first = &punches[0];
             rows.push(json!({
                 "emp_no": first.emp_no,
                 "name": first.name,
                 "dept_label": first.dept_label,
                 "summary": summary.json(),
-                "reconciliation": reconciliation(&summary, row),
             }));
             if only.as_ref().is_some_and(|e| e.id == *employee_id) {
                 detail = json!(days.iter().map(|d| d.json(&schedule)).collect::<Vec<_>>());
@@ -782,25 +636,20 @@ impl Operation for ListAttendancePunches {
             .iter()
             .filter_map(|r| r["summary"]["open_days"].as_i64())
             .sum();
-        let mismatched = rows
-            .iter()
-            .filter(|r| r["reconciliation"]["matches"] == json!(false))
-            .count();
         let summary = format!(
-            "讀 {month} 打卡 · {} 人有紀錄 · {open_days} 天只打上班沒打下班 · {mismatched} 人與匯入的月統計不相符",
+            "讀 {month} 打卡 · {} 人有紀錄 · {open_days} 天只打上班沒打下班",
             rows.len()
         );
 
         Ok(OpOutcome::new(
             json!({
                 "month": month,
-                "months": ctx.store.attendance_months().await?,
+                "months": ctx.store.punch_months().await?,
                 "schedule": schedule.json(),
                 "rows": rows,
                 "employee": only.as_ref().map(|e| json!({ "emp_no": e.emp_no, "name": e.name })),
                 "days": detail,
                 "open_days": open_days,
-                "mismatched": mismatched,
             }),
             summary,
         ))
@@ -1804,45 +1653,6 @@ mod tests {
         let stats = summarise(&days, &schedule(Some("09:00"), Some("18:00"), 0));
         assert_eq!(stats.complete_days, 1, "空白的日子不算工作日");
         assert_eq!(stats.open_days, 1, "只有 08-01 那天是未打下班");
-    }
-
-    /// Punches never overwrite the imported monthly row. When they disagree
-    /// the difference is reported, in both directions.
-    #[test]
-    fn punches_and_the_imported_month_are_reconciled_not_merged() {
-        let sched = schedule(Some("09:00"), Some("18:00"), 0);
-        let days = punch_days(&[
-            punch("2026-08-05", "in", "08:58", "self"),
-            punch("2026-08-05", "out", "18:00", "self"),
-        ], tz());
-        let stats = summarise(&days, &sched);
-
-        let imported = AttendanceRow {
-            employee_id: 1,
-            emp_no: "E003".into(),
-            name: "黃柏叡".into(),
-            dept_label: None,
-            title: "業務專員".into(),
-            month: "2026-08".into(),
-            required_days: Money::from(21),
-            worked_days: Money::from(3),
-            leave_days: Money::ZERO,
-            overtime_hours: Money::ZERO,
-            overtime_pay: Money::ZERO,
-            late_count: 0,
-            note: String::new(),
-        };
-
-        let out = reconciliation(&stats, Some(&imported));
-        assert_eq!(out["matches"], json!(false));
-        assert_eq!(out["worked_days"]["from_punches"], json!(1));
-        assert_eq!(out["worked_days"]["imported"], json!("3"));
-        assert_eq!(out["worked_days"]["difference"], json!("-2"));
-
-        // No imported row at all is a different statement from "they agree".
-        let none = reconciliation(&stats, None);
-        assert_eq!(none["imported"], json!(false));
-        assert!(none.get("matches").is_none());
     }
 
     /// Every value in the `leave_request.kind` CHECK needs its own label. If a

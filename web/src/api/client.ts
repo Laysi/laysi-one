@@ -536,7 +536,6 @@ export interface Dimension {
 
 export interface DimensionList {
   dimensions: Dimension[];
-  applied_to_entries: boolean;
 }
 
 export interface RoleRow {
@@ -1013,20 +1012,10 @@ export interface ImportBatchRow {
   issues: ImportIssueRow[];
 }
 
-export interface IntegrationRow {
-  code: string;
-  label: string;
-  detail: string;
-  live: boolean;
-  note: string;
-}
-
 export interface ImportList {
   sources: ImportSourceRow[];
   batches: ImportBatchRow[];
-  integrations: IntegrationRow[];
   supported_sources: string[];
-  live_integrations: number;
   csv_columns: string[];
   format_note: string;
   commit_note: string;
@@ -1119,38 +1108,6 @@ export interface ClosedAccess {
   logins: string[];
   sessions: number;
   tokens: number;
-}
-
-export interface AttendanceRow {
-  emp_no: string;
-  name: string;
-  dept_label: string | null;
-  title: string;
-  month: string;
-  required_days: string;
-  worked_days: string;
-  leave_days: string;
-  overtime_hours: string;
-  overtime_pay: string;
-  late_count: number;
-  note: string;
-}
-
-export interface AttendanceMonth {
-  month: string;
-  months: string[];
-  rows: AttendanceRow[];
-  headcount: number;
-  totals: {
-    required_days: string;
-    worked_days: string;
-    leave_days: string;
-    overtime_hours: string;
-    overtime_pay: string;
-    late_count: number;
-  };
-  overtime_recomputed: boolean;
-  overtime_note: string;
 }
 
 export interface AnnualLeaveBalance {
@@ -1535,19 +1492,6 @@ export interface MyProfile {
   privacy_note: string;
 }
 
-export interface MyAttendance {
-  month: string;
-  required_days: string;
-  worked_days: string;
-  leave_days: string;
-  overtime_hours: string;
-  overtime_pay: string;
-  late_count: number;
-  note: string;
-  overtime_recomputed: boolean;
-  overtime_note: string;
-}
-
 export interface MyAnnualLeave {
   year: number;
   entitlement: string;
@@ -1613,9 +1557,6 @@ export interface MyPayslip {
 
 export interface MyHome {
   profile: MyProfile;
-  attendance_month: string;
-  attendance: MyAttendance | null;
-  attendance_note: string;
   annual_leave: MyAnnualLeave;
   submissions: {
     leave_requests: MyLeaveRequest[];
@@ -1808,19 +1749,6 @@ export interface PunchSummary {
   overtime_note: string;
 }
 
-export interface PunchReconciliation {
-  imported: boolean;
-  matches?: boolean;
-  worked_days?: { imported: string; from_punches: number; difference: string };
-  late_count?: { imported: number; from_punches: number | null; difference: number | null };
-  overtime_hours?: {
-    imported: string;
-    from_punches: string | null;
-    difference: string | null;
-  };
-  note: string;
-}
-
 export interface MyPunchList {
   employee: { emp_no: string; name: string };
   month: string;
@@ -1830,7 +1758,6 @@ export interface MyPunchList {
   next_kind_label: string | null;
   days: PunchDay[];
   summary: PunchSummary;
-  reconciliation: PunchReconciliation;
   schedule: WorkSchedule;
   scope_note: string;
 }
@@ -1898,12 +1825,10 @@ export interface AttendancePunchList {
     name: string;
     dept_label: string | null;
     summary: PunchSummary;
-    reconciliation: PunchReconciliation;
   }[];
   employee: { emp_no: string; name: string } | null;
   days: PunchDay[] | null;
   open_days: number;
-  mismatched: number;
 }
 
 export interface MyMcpTools {

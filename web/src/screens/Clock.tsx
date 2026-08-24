@@ -9,7 +9,6 @@ import {
   type PunchCorrection,
   type PunchCorrectionResult,
   type PunchDay,
-  type PunchReconciliation,
   type PunchResult,
   type WorkSchedule,
 } from '../api/client';
@@ -25,23 +24,6 @@ function dayTag(day: PunchDay): { className: string; label: string } | null {
   if (day.open) return { className: 'tag tag--warn tag--static', label: '未打下班' };
   if (day.late === true) return { className: 'tag tag--bad tag--static', label: '遲到' };
   return null;
-}
-
-function Reconciliation({ recon }: { recon: PunchReconciliation }) {
-  if (!recon.imported) return <p className="recon">{recon.note}</p>;
-  if (recon.matches) return <p className="recon">打卡推導的天數與匯入的出勤月統計一致。</p>;
-  return (
-    <p className="recon recon--off">
-      與匯入的出勤月統計不一致：工作日 {recon.worked_days?.imported} /{' '}
-      {recon.worked_days?.from_punches}（匯入 / 打卡）
-      {recon.late_count?.from_punches != null && (
-        <>
-          ，遲到 {recon.late_count.imported} / {recon.late_count.from_punches}
-        </>
-      )}
-      。{recon.note}
-    </p>
-  );
 }
 
 function ScheduleNote({ schedule }: { schedule: WorkSchedule }) {
@@ -479,7 +461,6 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
           </p>
         )}
 
-        <Reconciliation recon={data.reconciliation} />
         {s.overtime_hours != null && (
           <p className="recon recon--off">
             本月加班 {s.overtime_hours} 小時。{s.overtime_note}
