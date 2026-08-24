@@ -269,7 +269,8 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
     }
   }
 
-  const deptValues = dims?.dimensions.find((d) => d.code === 'department')?.values ?? [];
+  const deptValues = (dims?.dimensions.find((d) => d.code === 'department')?.values ?? [])
+    .filter((v) => v.active || v.code === form.dept_code);
 
   return (
     <div>

@@ -9,6 +9,7 @@ import {
   type ChartOfAccounts,
   type CompanySettingRow,
   type DimensionList,
+  type DimensionValue,
   type UserAccountRow,
 } from '../api/client';
 import type { ScreenId } from '../nav';
@@ -149,6 +150,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
   const canEditSettings = me.permissions.includes('update_company_setting');
   const canSetTimezone = me.permissions.includes('set_company_timezone');
   const canAddDimension = me.permissions.includes('create_dimension_value');
+  const canEditDimension = me.permissions.includes('update_dimension_value');
   const showBalances = me.permissions.includes('list_chart_of_accounts');
   const [settings, setSettings] = useState<CompanySettingRow[] | null>(null);
   const [coa, setCoa] = useState<ChartOfAccounts | null>(null);
@@ -320,8 +322,27 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
   }
 
   const [adding, setAdding] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [valueLabel, setValueLabel] = useState('');
   const [savingDim, setSavingDim] = useState(false);
+
+  function startAdd(dimensionCode: string) {
+    setRenaming(null);
+    setAdding(dimensionCode);
+    setValueLabel('');
+  }
+
+  function startRename(dimensionCode: string, value: DimensionValue) {
+    setAdding(null);
+    setRenaming(`${dimensionCode}:${value.code}`);
+    setValueLabel(value.label);
+  }
+
+  function closeDimensionEdit() {
+    setAdding(null);
+    setRenaming(null);
+    setValueLabel('');
+  }
 
   async function saveDimensionValue(dimensionCode: string) {
     const label = valueLabel.trim();
@@ -337,8 +358,51 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
         '新增分類項目',
       );
       onToast(`已新增「${label}」`);
-      setAdding(null);
-      setValueLabel('');
+      closeDimensionEdit();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingDim(false);
+    }
+  }
+
+  async function renameDimensionValue(dimensionCode: string, value: DimensionValue) {
+    const label = valueLabel.trim();
+    if (!label) {
+      onToast('請填寫名稱');
+      return;
+    }
+    if (label === value.label) {
+      closeDimensionEdit();
+      return;
+    }
+    setSavingDim(true);
+    try {
+      await callOp<unknown>(
+        'update_dimension_value',
+        { dimension_code: dimensionCode, code: value.code, label },
+        '分類項目改名',
+      );
+      onToast(`「${value.label}」已改名為「${label}」`);
+      closeDimensionEdit();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingDim(false);
+    }
+  }
+
+  async function toggleDimensionValue(dimensionCode: string, value: DimensionValue) {
+    setSavingDim(true);
+    try {
+      await callOp<unknown>(
+        'update_dimension_value',
+        { dimension_code: dimensionCode, code: value.code, active: !value.active },
+        value.active ? '停用分類項目' : '啟用分類項目',
+      );
+      onToast(value.active ? `已停用「${value.label}」` : `已啟用「${value.label}」`);
       load();
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
@@ -458,57 +522,119 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                   : '公司設定由系統管理員維護。'}
               </p>
 
-              <h3 className="section-title section-title--spaced">部門</h3>
-              <div className="card fact-card">
-                {dims.dimensions.map((d) => (
-                  <div className="fact fact--stacked" key={d.code}>
-                    <span className="fact__key">{d.label}</span>
-                    {adding === d.code ? (
-                      <span className="fact__edit">
-                        <input
-                          className="entry-input"
-                          value={valueLabel}
-                          autoFocus
-                          onChange={(e) => setValueLabel(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') void saveDimensionValue(d.code);
-                            if (e.key === 'Escape') setAdding(null);
-                          }}
-                        />
-                        <button
-                          className="btn btn--compact"
-                          disabled={savingDim}
-                          onClick={() => void saveDimensionValue(d.code)}
-                        >
-                          {savingDim ? '存檔中…' : '新增'}
-                        </button>
-                        <button className="btn--icon" onClick={() => setAdding(null)}>
-                          ×
-                        </button>
-                      </span>
-                    ) : (
-                      <span className="fact__value">
-                        {d.values.length > 0
-                          ? d.values.map((v) => v.label).join('　')
-                          : '（尚未建立）'}
-                        {canAddDimension && (
-                          <button
-                            className="btn--icon fact__pencil"
-                            title={`新增${d.label}`}
-                            onClick={() => {
-                              setAdding(d.code);
-                              setValueLabel('');
-                            }}
-                          >
-                            ＋
-                          </button>
-                        )}
-                        {d.note && <span className="fact__note">{d.note}</span>}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
+              {dims.dimensions.map((d) => (
+                <div key={d.code}>
+                  <h3 className="section-title section-title--spaced">{d.label}</h3>
+                  {canAddDimension && (
+                    <div className="toolbar">
+                      <span className="spacer" />
+                      <button className="btn btn--compact" onClick={() => startAdd(d.code)}>
+                        ＋ 新增{d.label}
+                      </button>
+                    </div>
+                  )}
+                  <table className="table">
+                    <tbody>
+                      {d.values.map((v) => (
+                        <tr key={v.code} className={v.active ? undefined : 'row--waiting'}>
+                          {renaming === `${d.code}:${v.code}` ? (
+                            <td colSpan={2}>
+                              <span className="fact__edit">
+                                <input
+                                  className="entry-input"
+                                  value={valueLabel}
+                                  autoFocus
+                                  onChange={(e) => setValueLabel(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') void renameDimensionValue(d.code, v);
+                                    if (e.key === 'Escape') closeDimensionEdit();
+                                  }}
+                                />
+                                <button
+                                  className="btn btn--compact"
+                                  disabled={savingDim}
+                                  onClick={() => void renameDimensionValue(d.code, v)}
+                                >
+                                  {savingDim ? '存檔中…' : '儲存'}
+                                </button>
+                                <button className="btn--icon" onClick={closeDimensionEdit}>
+                                  ×
+                                </button>
+                              </span>
+                            </td>
+                          ) : (
+                            <>
+                              <td>
+                                {v.label}
+                                {!v.active && <span className="cell-hint">已停用</span>}
+                              </td>
+                              <td className="align-right">
+                                {canEditDimension && (
+                                  <span className="cell-actions">
+                                    <button
+                                      className="btn--icon"
+                                      title="改名"
+                                      onClick={() => startRename(d.code, v)}
+                                    >
+                                      ✎
+                                    </button>
+                                    <button
+                                      className="btn btn--compact btn--secondary"
+                                      disabled={savingDim}
+                                      onClick={() => void toggleDimensionValue(d.code, v)}
+                                    >
+                                      {v.active ? '停用' : '啟用'}
+                                    </button>
+                                  </span>
+                                )}
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                      {adding === d.code && (
+                        <tr>
+                          <td colSpan={2}>
+                            <span className="fact__edit">
+                              <input
+                                className="entry-input"
+                                value={valueLabel}
+                                autoFocus
+                                placeholder={`${d.label}名稱`}
+                                onChange={(e) => setValueLabel(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') void saveDimensionValue(d.code);
+                                  if (e.key === 'Escape') closeDimensionEdit();
+                                }}
+                              />
+                              <button
+                                className="btn btn--compact"
+                                disabled={savingDim}
+                                onClick={() => void saveDimensionValue(d.code)}
+                              >
+                                {savingDim ? '存檔中…' : '新增'}
+                              </button>
+                              <button className="btn--icon" onClick={closeDimensionEdit}>
+                                ×
+                              </button>
+                            </span>
+                          </td>
+                        </tr>
+                      )}
+                      {d.values.length === 0 && adding !== d.code && (
+                        <tr>
+                          <td colSpan={2} className="cell-muted">
+                            {canAddDimension
+                              ? `還沒有${d.label}，員工與分錄的${d.label}欄位只能留空。`
+                              : `${d.label}由系統管理員維護。`}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                  {d.note && <p className="hint">{d.note}</p>}
+                </div>
+              ))}
 
             </section>
 

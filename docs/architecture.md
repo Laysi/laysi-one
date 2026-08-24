@@ -798,7 +798,13 @@ Schema 是**一個檔案**：`backend/migrations/0001_initial.sql`，以 `sqlx::
 跨層契約的結論寫在本文，不靠那些檔案保存。
 
 合併之後**每一次 schema 變更都是新的一份 migration**，0001 不再更動——它已經被套用過，
-改一個位元組就會讓現有的資料庫拒絕啟動。
+改一個位元組就會讓現有的資料庫拒絕啟動。目前另有 `0002_dimension_value_rename.sql`
+（`update_dimension_value` 的 permission 與 mcp_tool_grant）。
+
+**新增一份 migration 要同時加進 `laysi-ops` 的 `MIGRATIONS`**：兩個種子比對測試以
+`include_str!` 讀那份清單，算出 permission 與 mcp_tool_grant 的最終狀態再與 Registry
+對照。permission 的最終狀態取「最後一個提到該 `code` 的敘述」，所以 0002 之後的
+migration 要改權限就整份重寫 `op_names` 陣列，不要用陣列附加。
 
 ```
 account(code PK text, name text, kind text, normal_side text,
@@ -1080,7 +1086,8 @@ impl Registry {
 | `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 一次收整份清單；不建立登入帳號 |
 | `update_employee` | NeedsConfirm | 除四個金額外完整更新；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 不帶＝不動、給清單＝整份取代；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
 | `create_bank_account` | NeedsConfirm | `gl_code` 必須指向啟用中的可入帳資產科目 |
-| `create_dimension_value` | NeedsConfirm | 只在既有 `dimension` 下新增項目；不建立分類 |
+| `create_dimension_value` | NeedsConfirm | 只在既有 `dimension` 下新增項目；不建立分類。`code` 留空時取 `label` |
+| `update_dimension_value` | NeedsConfirm | 依 `(dimension_code, code)` 改名或切換 `active`；兩個欄位都不帶就回「沒有變更」。改名只在 `code` 仍等於舊 `label` 時一起改寫 `code`——CSV 匯入以 `code` 比對且會把可用的代碼列給使用者看，另外指定過的 `code` 是別人的鍵，不動 |
 | `set_approval_rule` | BossOnly | 依 `step_no` upsert 或刪除；`min_amount = null` 代表一律需要，流程至少留一關 |
 | `create_ap_bill` | NeedsConfirm | 同一交易寫 `ap_bill` 與待過帳傳票；借方拆出 1284 進項稅額；不會直接付款 |
 | `create_ar_invoice` | NeedsConfirm | 同一交易寫 `ar_invoice` 與待過帳傳票；貸方拆出 2211 代收營業稅 |

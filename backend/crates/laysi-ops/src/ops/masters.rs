@@ -29,7 +29,7 @@ use laysi_domain::Money;
 use laysi_store::{
     CreateBankAccount as StoreCreateBankAccount,
     CreateDimensionValue as StoreCreateDimensionValue,
-    SetApprovalRule as StoreSetApprovalRule, WriteAccount, WriteEmployee,
+    SetApprovalRule as StoreSetApprovalRule, UpdateDimensionValue as StoreUpdateDimensionValue, WriteAccount, WriteEmployee,
     WriteEmployeeBankAccount,
 };
 use schemars::JsonSchema;
@@ -45,6 +45,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(UpdateEmployee),
         Box::new(CreateBankAccount),
         Box::new(CreateDimensionValue),
+        Box::new(UpdateDimensionValue),
         Box::new(SetApprovalRule),
     ]
 }
@@ -743,6 +744,71 @@ impl Operation for CreateDimensionValue {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateDimensionValueInput {
+    /// Existing dimension code.
+    pub dimension_code: String,
+    /// Code of the value to update.
+    pub code: String,
+    /// New display name. Omit to leave it.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Whether it stays selectable. Omit to leave it.
+    #[serde(default)]
+    pub active: Option<bool>,
+}
+
+fn validate_update_dimension_value(input: &UpdateDimensionValueInput) -> Result<(), OpError> {
+    if input.dimension_code.trim().is_empty() || input.code.trim().is_empty() {
+        return Err(OpError::BadInput("類別與項目都要指定".into()));
+    }
+    if input.label.as_ref().is_some_and(|l| l.trim().is_empty()) {
+        return Err(OpError::BadInput("名稱不能留空".into()));
+    }
+    if input.label.is_none() && input.active.is_none() {
+        return Err(OpError::BadInput("沒有變更".into()));
+    }
+    Ok(())
+}
+
+struct UpdateDimensionValue;
+
+#[async_trait]
+impl Operation for UpdateDimensionValue {
+    fn name(&self) -> &'static str {
+        "update_dimension_value"
+    }
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+    fn summary(&self) -> &'static str {
+        "改分類項目的名稱，或停用項目。停用後不再出現在選單，已經記在單據與員工上的不受影響。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<UpdateDimensionValueInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let input: UpdateDimensionValueInput = parse(input)?;
+        validate_update_dimension_value(&input)?;
+        let value = ctx
+            .store
+            .update_dimension_value(StoreUpdateDimensionValue {
+                dimension_code: input.dimension_code.trim(),
+                code: input.code.trim(),
+                label: input.label.as_deref().map(str::trim),
+                active: input.active,
+            })
+            .await?;
+        let summary = match input.active {
+            Some(false) => format!("停用分類項目 {}", value.label),
+            Some(true) => format!("啟用分類項目 {}", value.label),
+            None => format!("分類項目改名為 {}", value.label),
+        };
+        Ok(OpOutcome::new(json!({ "value": value }), summary))
+    }
+}
+
 // Approval rules
 
 #[derive(Deserialize, JsonSchema)]
@@ -1043,6 +1109,27 @@ mod tests {
         };
         assert!(validate_dimension_value(&input).is_err());
         assert!(CreateDimensionValue.summary().contains("在既有分類下新增一個項目"));
+    }
+
+    #[test]
+    fn update_dimension_value_needs_something_to_change_and_a_non_empty_name() {
+        let mut input = UpdateDimensionValueInput {
+            dimension_code: "department".into(),
+            code: "業務部".into(),
+            label: None,
+            active: None,
+        };
+        assert!(validate_update_dimension_value(&input).unwrap_err().to_string().contains("沒有變更"));
+
+        input.label = Some("  ".into());
+        assert!(validate_update_dimension_value(&input).is_err());
+
+        input.label = Some("業務一部".into());
+        assert!(validate_update_dimension_value(&input).is_ok());
+
+        input.label = None;
+        input.active = Some(false);
+        assert!(validate_update_dimension_value(&input).is_ok());
     }
 
     #[test]

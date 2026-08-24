@@ -197,7 +197,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
 
   async function saveSso() {
     if (!ssoClientId.trim() || !ssoDomain.trim()) {
-      onToast('用戶端 ID 與允許的網域都要填寫');
+      onToast('用戶端 ID 與公司電子郵件網域都要填寫');
       return;
     }
     if (!oidc?.has_client_secret && !ssoSecret.trim()) {
@@ -602,7 +602,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
               />
             </label>
             <label className="field">
-              允許的網域
+              公司電子郵件網域
               <input
                 className="input"
                 value={ssoDomain}

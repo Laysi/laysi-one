@@ -263,7 +263,7 @@ async fn resolve_provisioning(
     }
     if allowed_hd.is_none() {
         return Err(anyhow!(
-            "要自動建立帳號請先填允許的網域，否則任何外部帳號都能建立登入"
+            "要自動建立帳號請先填公司電子郵件網域，否則任何外部帳號都能建立登入"
         ));
     }
     let roles = store.roles().await.context("讀取角色表以驗證自動建帳號角色失敗")?;
@@ -744,7 +744,7 @@ pub async fn callback(
 
     if let Some(required) = oidc.allowed_hd.as_deref() {
         if !hd_matches(required, claims.additional_claims().hd.as_deref()) {
-            tracing::warn!("外部登入的帳號不屬於允許的網域");
+            tracing::warn!("外部登入的帳號不屬於公司電子郵件網域");
             return auth::error_response(
                 StatusCode::FORBIDDEN,
                 "oidc_domain_not_allowed",

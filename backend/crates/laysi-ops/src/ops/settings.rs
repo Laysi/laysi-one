@@ -1474,7 +1474,7 @@ impl Operation for GetOidcSetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "讀外部登入設定：供應商、用戶端 ID、允許的網域、自動建立帳號的角色、是否停用帳號密碼登入與上次驗證結果。用戶端密鑰不在回應內，設定後也無法取回。"
+        "讀外部登入設定：供應商、用戶端 ID、公司電子郵件網域、自動建立帳號的角色、是否停用帳號密碼登入與上次驗證結果。用戶端密鑰不在回應內，設定後也無法取回。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -1575,7 +1575,7 @@ impl Operation for UpdateOidcSetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "設定外部登入：供應商、用戶端 ID 與密鑰、轉址網址、允許的網域，以及網域內首次登入是否自動建立帳號。存檔後立即生效，不必重新啟動。用戶端密鑰留空表示沿用原設定。"
+        "設定外部登入：供應商、用戶端 ID 與密鑰、轉址網址、公司電子郵件網域，以及網域內首次登入是否自動建立帳號。存檔後立即生效，不必重新啟動。用戶端密鑰留空表示沿用原設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateOidcSettingInput>()
@@ -1626,7 +1626,7 @@ impl Operation for UpdateOidcSetting {
                 }
                 if next_domain.is_empty() {
                     return Err(OpError::BadInput(
-                        "要自動建立帳號請先填允許的網域，否則任何外部帳號都能建立登入".into(),
+                        "要自動建立帳號請先填公司電子郵件網域，否則任何外部帳號都能建立登入".into(),
                     ));
                 }
             }
@@ -1688,7 +1688,7 @@ impl Operation for UpdateOidcSetting {
             .filter(|value| changed_field("轉址網址", *value != current.redirect_url));
         let write_domain = allowed_domain
             .as_deref()
-            .filter(|value| changed_field("允許的網域", *value != current.allowed_domain));
+            .filter(|value| changed_field("公司電子郵件網域", *value != current.allowed_domain));
         let write_role = provision_role
             .as_deref()
             .filter(|value| changed_field("自動建立帳號", *value != current.provision_role));
