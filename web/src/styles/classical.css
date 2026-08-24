@@ -42,13 +42,12 @@
   --wash-selection: rgba(182, 130, 53, 0.3);
   --wash-scrollbar: rgba(32, 31, 29, 0.18);
 
-  --font-display: 'Cormorant Garamond', 'Noto Sans TC', 'PingFang TC',
-    'Microsoft JhengHei', 'Noto Sans CJK TC', sans-serif;
-  --font-body: 'Lora', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei',
+  --font-sans: 'Inter', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei',
     'Noto Sans CJK TC', sans-serif;
+  --font-display: var(--font-sans);
+  --font-body: var(--font-sans);
+  --font-numeric: var(--font-sans);
   --font-mono: ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
-  --font-numeric: 'Source Serif 4', 'Lora', 'Noto Sans TC', 'PingFang TC',
-    'Microsoft JhengHei', 'Noto Sans CJK TC', serif;
   --weight-regular: 400;
   --weight-semibold: 600;
 
