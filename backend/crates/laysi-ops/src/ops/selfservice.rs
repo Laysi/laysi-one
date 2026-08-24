@@ -26,15 +26,15 @@
 //!
 //! Leave entitlement still has one source: this module passes completed
 //! service months to `annual_leave_days`, and the database only sums approved
-//! days actually taken. The number of days on a request is entered by the
-//! employee, because the system has no weekend or public holiday rules and
-//! cannot derive it from a date range.
+//! days actually taken. A request states when the leave starts and ends; the
+//! hours and days it is worth are derived from the working window, so the
+//! two numbers on the request cannot disagree with the range above them.
 
 use crate::ops::attendance::{
-    business_instant, correction_auto_approves, leave_kind_label, leave_status_label, month_days,
-    punch_correction_json, punch_correction_status_label, punch_days, punch_kind_label,
-    reconciliation, summarise, valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS,
-    PUNCH_TIME,
+    business_instant, correction_auto_approves, default_overtime_day_type, leave_kind_label,
+    leave_status_label, month_days, overtime_json, punch_correction_json,
+    punch_correction_status_label, punch_days, punch_kind_label, reconciliation, summarise,
+    valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
@@ -43,13 +43,13 @@ use crate::ops::insurance::ruleset_json;
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::Engine;
-use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES};
 use laysi_store::{
-    AttendanceRow, DocumentRow, Employee, LeaveRequest, NewLeaveRequest, NewPunchCorrection,
-    Payslip, ReserveDocument, SubmitExpenseClaim,
+    AttendanceRow, DocumentRow, Employee, LeaveRequest, NewLeaveRequest, NewOvertimeRequest,
+    NewPunchCorrection, Payslip, ReserveDocument, SubmitExpenseClaim,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -65,6 +65,8 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListMyPayslips),
         Box::new(ListMyLeaveRequests),
         Box::new(RequestLeave),
+        Box::new(ListMyOvertimeRequests),
+        Box::new(SubmitMyOvertimeRequest),
         Box::new(ListMyExpenseClaims),
         Box::new(SubmitMyExpenseClaim),
         Box::new(AttachMyExpenseReceipt),
@@ -221,8 +223,11 @@ fn leave_request_json(request: &LeaveRequest) -> Value {
         "leave_no": request.leave_no,
         "kind": request.kind,
         "kind_label": leave_kind_label(&request.kind),
+        "from_at": request.from_at,
+        "to_at": request.to_at,
         "from_on": request.from_on,
         "to_on": request.to_on,
+        "hours": request.hours.to_string(),
         "days": request.days.to_string(),
         "reason": request.reason,
         "status": request.status,
@@ -474,6 +479,7 @@ impl Operation for ListMyLeaveRequests {
                     .map(leave_request_json)
                     .collect::<Vec<_>>(),
                 "leave_kinds": leave_kinds_json(),
+                "schedule": WorkSchedule::load(ctx).await?.json(),
                 "pending_count": pending,
                 "annual_leave": annual_leave_json(
                     ctx.today.year(),
@@ -495,15 +501,11 @@ struct RequestLeave;
 pub struct RequestLeaveInput {
     /// Leave type. Valid values match the CHECK on `leave_request.kind`.
     pub kind: String,
-    /// First day of leave.
-    pub from_on: NaiveDate,
-    /// Last day of leave.
-    pub to_on: NaiveDate,
-    /// Days requested, entered by the employee; half days may use decimals.
-    /// The system does not derive this from the date range.
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schemars(with = "String")]
-    pub days: Money,
+    /// When the leave starts, in local wall-clock time, `2026-08-25T13:30:00`.
+    pub from_at: NaiveDateTime,
+    /// When the leave ends. Hours and days are derived from the range and the
+    /// company's working window, so neither is accepted as input.
+    pub to_at: NaiveDateTime,
     /// Reason for the request.
     #[serde(default)]
     pub reason: Option<String>,
@@ -520,7 +522,7 @@ impl Operation for RequestLeave {
     }
 
     fn summary(&self) -> &'static str {
-        "以目前登入帳號所連結的員工身分送出待簽核休假單。申請人與建立者都由登入身分決定，輸入不能指定他人。"
+        "以目前登入帳號所連結的員工身分送出待簽核休假單。收起訖時刻，時數與天數依公司上下班時間計算，週六與週日不計入。申請人與建立者都由登入身分決定，輸入不能指定他人。"
     }
 
     fn input_schema(&self) -> Value {
@@ -540,12 +542,26 @@ impl Operation for RequestLeave {
                 i.kind
             )));
         }
-        if i.to_on < i.from_on {
-            return Err(OpError::BadInput("休假結束日不能早於開始日".into()));
+        if i.to_at <= i.from_at {
+            return Err(OpError::BadInput("休假結束時刻要晚於開始時刻".into()));
         }
-        if i.days <= Money::ZERO {
-            return Err(OpError::BadInput("休假日數要大於零".into()));
+
+        let schedule = WorkSchedule::load(ctx).await?;
+        let (Some(seconds), Some(daily)) = (
+            schedule.leave_seconds(i.from_at, i.to_at),
+            schedule.daily_seconds(),
+        ) else {
+            return Err(OpError::BadInput(
+                "休假時數依上下班時間計算，請系統管理員在基礎設定填寫上班時間與下班時間".into(),
+            ));
+        };
+        if seconds == 0 {
+            return Err(OpError::BadInput(
+                "所選時段落在上班時間之外，請改選上班時間內的區間".into(),
+            ));
         }
+        let hours = (Money::from(seconds) / Money::from(3600)).round_dp(2);
+        let days = (Money::from(seconds) / Money::from(daily)).round_dp(2);
 
         let employee = actor_employee(ctx).await?;
         let request = ctx
@@ -553,28 +569,249 @@ impl Operation for RequestLeave {
             .create_leave_request(NewLeaveRequest {
                 employee_id: employee.id,
                 kind: &i.kind,
-                from_on: i.from_on,
-                to_on: i.to_on,
-                days: i.days,
+                from_at: i.from_at,
+                to_at: i.to_at,
+                hours,
+                days,
                 reason: i.reason.as_deref().unwrap_or(""),
                 actor: &ctx.actor,
             })
             .await?;
+        let stamp = |at: NaiveDateTime| at.format("%Y-%m-%d %H:%M").to_string();
         let summary = format!(
-            "{} · {} {}申請 {} 日 · {} 到 {} · 等簽核",
+            "{} · {} {}申請 {} 小時（{} 日）· {} 到 {} · 等簽核",
             request.leave_no,
             employee.name,
             leave_kind_label(&request.kind),
+            request.hours.normalize(),
             request.days.normalize(),
-            request.from_on,
-            request.to_on
+            stamp(request.from_at),
+            stamp(request.to_at)
         );
 
         Ok(OpOutcome::new(
             json!({
                 "request": leave_request_json(&request),
                 "status": "pending",
-                "days_source": "由申請人填寫；系統尚未收錄例假日與國定假日規則，因此不從日期範圍推算。",
+                "schedule": schedule.json(),
+                "hours_source": "起訖時刻落在上下班時間內的部分，週六與週日不計入；天數等於時數除以一天的上班時數。",
+                "scope_note": "employee_id 由已驗證 session 的 ctx.employee_id 決定，created_by 來自同一個登入身分。",
+            }),
+            summary,
+        ))
+    }
+}
+
+// My overtime
+
+struct ListMyOvertimeRequests;
+
+#[async_trait]
+impl Operation for ListMyOvertimeRequests {
+    fn name(&self) -> &'static str {
+        "list_my_overtime_requests"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+
+    fn summary(&self) -> &'static str {
+        "讀本人送出的加班申請與本月已核准時數。加班費依加班日適用的加班規則現算；輸入不含可指定他人的欄位。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<crate::Empty>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let _: crate::Empty = parse(input)?;
+        let employee = actor_employee(ctx).await?;
+        let requests = ctx.store.overtime_requests(true, Some(employee.id), None).await?;
+        let rs = laysi_regulation::resolve("overtime", ctx.today)?;
+        let ceiling = laysi_regulation::overtime_monthly_max_hours(rs)?;
+        let month = ctx.today.format("%Y-%m").to_string();
+
+        let this_month: Vec<_> = requests
+            .iter()
+            .filter(|o| o.worked_on.format("%Y-%m").to_string() == month)
+            .cloned()
+            .collect();
+        let approved_hours: Money = this_month
+            .iter()
+            .filter(|o| o.status == "approved")
+            .map(|o| o.hours)
+            .sum();
+        let pending = requests.iter().filter(|o| o.status == "pending").count();
+
+        let summary = format!(
+            "讀{}的加班申請 · {} 張（{pending} 張等簽）· {month} 已核准 {} 小時",
+            employee.name,
+            requests.len(),
+            approved_hours.normalize()
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "employee": { "emp_no": employee.emp_no, "name": employee.name },
+                "requests": requests
+                    .iter()
+                    .map(overtime_json)
+                    .collect::<Result<Vec<_>, OpError>>()?,
+                "pending_count": pending,
+                "month": month,
+                "month_approved_hours": approved_hours.normalize().to_string(),
+                "monthly_max_hours": ceiling.normalize().to_string(),
+                "day_types": laysi_regulation::overtime_day_types(rs)?
+                    .iter()
+                    .map(|t| json!({
+                        "code": t.code,
+                        "label": t.label,
+                        "max_hours": t.max_hours.normalize().to_string(),
+                    }))
+                    .collect::<Vec<_>>(),
+                "schedule": WorkSchedule::load(ctx).await?.json(),
+                "ruleset": ruleset_json(rs),
+                "scope_note": "僅查詢已驗證 session 的 ctx.employee_id；輸入不含可指定他人的欄位。",
+            }),
+            summary,
+        ))
+    }
+}
+
+struct SubmitMyOvertimeRequest;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SubmitMyOvertimeRequestInput {
+    /// When the overtime starts, in local wall-clock time,
+    /// `2026-08-25T18:00:00`.
+    pub from_at: NaiveDateTime,
+    /// When it ends. The hours are the length of the range; nothing else is
+    /// accepted, so the request cannot claim more than it covers.
+    pub to_at: NaiveDateTime,
+    /// Which kind of day to price it at, as listed by the overtime ruleset.
+    /// Omitted takes the day of the week: Saturday and Sunday are rest days.
+    #[serde(default)]
+    pub day_type: Option<String>,
+    /// Why the work is needed.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[async_trait]
+impl Operation for SubmitMyOvertimeRequest {
+    fn name(&self) -> &'static str {
+        "submit_my_overtime_request"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "以目前登入帳號所連結的員工身分送出加班申請。時數為起訖時刻的長度，一日與每月上限來自加班規則；核准後才列入薪資。申請人與建立者都由登入身分決定，輸入不能指定他人。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<SubmitMyOvertimeRequestInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: SubmitMyOvertimeRequestInput = parse(input)?;
+        if i.to_at <= i.from_at {
+            return Err(OpError::BadInput("加班結束時刻要晚於開始時刻".into()));
+        }
+        let worked_on = i.from_at.date();
+        let hours = (Money::from((i.to_at - i.from_at).num_seconds()) / Money::from(3600))
+            .round_dp(2);
+
+        let rs = laysi_regulation::resolve("overtime", worked_on)?;
+        let day_types = laysi_regulation::overtime_day_types(rs)?;
+        let code = i
+            .day_type
+            .clone()
+            .unwrap_or_else(|| default_overtime_day_type(worked_on).to_string());
+        let Some(day_type) = day_types.iter().find(|t| t.code == code) else {
+            let names = day_types
+                .iter()
+                .map(|t| t.label.as_str())
+                .collect::<Vec<_>>()
+                .join("、");
+            return Err(OpError::BadInput(format!(
+                "加班日的種類要填{names}其中一項"
+            )));
+        };
+        if hours > day_type.max_hours {
+            return Err(OpError::BadInput(format!(
+                "{}加班一天最多 {} 小時，這張單是 {} 小時，請分成多天申請",
+                day_type.label,
+                day_type.max_hours.normalize(),
+                hours.normalize()
+            )));
+        }
+
+        // Normal working hours are already paid by the salary, so a weekday
+        // request that overlaps them would be paid twice. Without a stated
+        // working window there is nothing to overlap and nothing to check.
+        let schedule = WorkSchedule::load(ctx).await?;
+        if code == "weekday" && schedule.leave_seconds(i.from_at, i.to_at).is_some_and(|s| s > 0) {
+            return Err(OpError::BadInput(format!(
+                "所選時段與上班時間（{} 至 {}）重疊，加班要填上班時間以外的時段",
+                schedule.starts_at.map(|t| t.format("%H:%M").to_string()).unwrap_or_default(),
+                schedule.ends_at.map(|t| t.format("%H:%M").to_string()).unwrap_or_default(),
+            )));
+        }
+
+        let employee = actor_employee(ctx).await?;
+        let month = worked_on.format("%Y-%m").to_string();
+        let ceiling = laysi_regulation::overtime_monthly_max_hours(rs)?;
+        let so_far: Money = ctx
+            .store
+            .overtime_requests(true, Some(employee.id), Some(&month))
+            .await?
+            .iter()
+            .filter(|o| o.status != "rejected")
+            .map(|o| o.hours)
+            .sum();
+        if so_far + hours > ceiling {
+            return Err(OpError::BadInput(format!(
+                "{month} 的加班時數上限為 {} 小時，已送出 {} 小時，這張單再加 {} 小時就超過了",
+                ceiling.normalize(),
+                so_far.normalize(),
+                hours.normalize()
+            )));
+        }
+
+        let request = ctx
+            .store
+            .create_overtime_request(NewOvertimeRequest {
+                employee_id: employee.id,
+                day_type: &code,
+                from_at: i.from_at,
+                to_at: i.to_at,
+                hours,
+                reason: i.reason.as_deref().unwrap_or(""),
+                actor: &ctx.actor,
+            })
+            .await?;
+
+        let stamp = |at: NaiveDateTime| at.format("%Y-%m-%d %H:%M").to_string();
+        let summary = format!(
+            "{} · {} {}加班 {} 小時 · {} 到 {} · 等簽核",
+            request.request_no,
+            employee.name,
+            day_type.label,
+            request.hours.normalize(),
+            stamp(request.from_at),
+            stamp(request.to_at)
+        );
+
+        Ok(OpOutcome::new(
+            json!({
+                "request": overtime_json(&request)?,
+                "status": "pending",
+                "month_hours_after": (so_far + hours).normalize().to_string(),
+                "monthly_max_hours": ceiling.normalize().to_string(),
+                "ruleset": ruleset_json(rs),
                 "scope_note": "employee_id 由已驗證 session 的 ctx.employee_id 決定，created_by 來自同一個登入身分。",
             }),
             summary,
@@ -1611,7 +1848,15 @@ mod tests {
             ("list_my_leave_requests", BTreeSet::new()),
             (
                 "request_leave",
-                BTreeSet::from(["kind", "from_on", "to_on", "days", "reason"]),
+                BTreeSet::from(["kind", "from_at", "to_at", "reason"]),
+            ),
+            ("list_my_overtime_requests", BTreeSet::new()),
+            // `day_type` names a kind of calendar day, not a person, and the
+            // ruleset decides which values exist. The hours are the length of
+            // the range, so there is no field to inflate them with either.
+            (
+                "submit_my_overtime_request",
+                BTreeSet::from(["from_at", "to_at", "day_type", "reason"]),
             ),
             ("list_my_expense_claims", BTreeSet::new()),
             (

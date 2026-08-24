@@ -29,10 +29,12 @@ export type ScreenId =
   | 'me'
   | 'meclock'
   | 'meleavenew'
+  | 'meotnew'
   | 'meexpnew'
   | 'meexp'
   | 'mepay'
   | 'meleave'
+  | 'meot'
   | 'memcp';
 
 export interface NavItem {
@@ -104,6 +106,13 @@ export const ME_NAV: NavEntry[] = [
   { kind: 'item', id: 'meleavenew', label: '休假申請', op: 'request_leave', ready: true },
   {
     kind: 'item',
+    id: 'meotnew',
+    label: '加班申請',
+    op: 'submit_my_overtime_request',
+    ready: true,
+  },
+  {
+    kind: 'item',
     id: 'meexpnew',
     label: '請款申請',
     op: 'submit_my_expense_claim',
@@ -111,6 +120,13 @@ export const ME_NAV: NavEntry[] = [
   },
   { kind: 'head', label: '查詢紀錄' },
   { kind: 'item', id: 'meleave', label: '我的休假', op: 'list_my_leave_requests', ready: true },
+  {
+    kind: 'item',
+    id: 'meot',
+    label: '我的加班',
+    op: 'list_my_overtime_requests',
+    ready: true,
+  },
   { kind: 'item', id: 'meexp', label: '我的請款', op: 'list_my_expense_claims', ready: true },
   { kind: 'item', id: 'mepay', label: '我的薪資單', op: 'list_my_payslips', ready: true },
   { kind: 'head', label: '連線' },
@@ -135,8 +151,10 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   meclock: '/me/clock',
   me: '/me',
   meleavenew: '/me/leave/new',
+  meotnew: '/me/overtime/new',
   meexpnew: '/me/expense/new',
   meleave: '/me/leave',
+  meot: '/me/overtime',
   meexp: '/me/expense',
   mepay: '/me/payslip',
   memcp: '/me/mcp',

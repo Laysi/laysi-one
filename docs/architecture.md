@@ -136,6 +136,7 @@ government_share = "0.10"
 | `withholding` | `codes` 陣列：`{code="50", name="薪資所得", rate="0.05"}`、`9A`、`51`、`9B` |
 | `annual_leave` | `tiers` 陣列：`{months=6, days=3}` … 依勞基法第 38 條 |
 | `depreciation` | `methods`、`useful_lives` |
+| `overtime` | `monthly_hours=240` `monthly_max_hours=46`、`day_types` 陣列：`{code, label, max_hours, bands[{up_to_hours?, multiplier}]}` 依勞基法第 24 條 |
 
 驗證基準（**必須寫成單元測試**，數值取自原型的 `ins` / `pay` 區塊）：
 
@@ -922,9 +923,15 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 **可編輯就要驗**：`update_company_setting` 對 `tax_id` 算財政部的統一編號檢查碼
 （權數 1、2、1、2、1、2、4、1，逐位數字相乘後各位數相加，總和被 5 整除；第七碼
 為 7 時另接受總和加一後整除），對 `fiscal_year` 只收 1 到 12，對 `work_start`／
-`work_end` 只收 `HH:MM`（兩位小時、兩位分鐘的 24 小時制），對兩個分鐘數只收整數。
-驗在後端而不只在精靈裡，因為 MCP 與未來的匯入程式走的是同一個操作。這些值不是法規
-數值，是公司自己的登記事實與決定，所以留在 `company_setting` 而不進規則檔。
+`work_end` 只收 `HH:MM`（兩位小時、兩位分鐘的 24 小時制），對兩個分鐘數只收整數，
+對 `punch_correction_policy` 只收它的兩個值。驗在後端而不只在精靈裡，因為 MCP 與
+未來的匯入程式走的是同一個操作。這些值不是法規數值，是公司自己的登記事實與決定，
+所以留在 `company_setting` 而不進規則檔。
+
+**只有幾個答案的設定由後端列出來，畫面照著畫**：`get_company_settings` 每一列多回
+一個 `options`，有值就是下拉、沒值就是文字欄。`punch_correction_policy` 原本是文字
+欄，於是政策只有兩個答案，畫面卻要人把其中一個逐字打對，打錯了就靜靜當成「人資
+審核」。清單放在後端，是因為判斷這個值合不合法的也是後端。
 
 **留空是答案，不是缺欄位。** `CLEARABLE_SETTINGS`（`work_start`、`work_end`、
 `late_grace_minutes`、`flex_window_minutes`）收得下空字串，其餘仍回「設定值為必填」。
@@ -1034,7 +1041,7 @@ impl Registry {
 | `get_income_statement` | ReadOnly | `{ from?, to? }` | `rows[]`、`revenue`、`cogs`、`gross_profit`、`operating_profit`、`profit` |
 | `get_cash_flow` | ReadOnly | `{ from?, to? }` | `rows[]`、`opening`、三段合計、`closing`、`ledger_closing`、`cash_accounts[]`、`reconciled` |
 | `get_company_settings` | ReadOnly | `{}` | `settings[]`，含 `source: setting \| regulation` |
-| `update_company_setting` | AdminOnly | `{ code, value }` | `{ setting }`；`editable = false` 的擋下；`tax_id` 驗檢查碼、`fiscal_year` 收 1 到 12 |
+| `update_company_setting` | AdminOnly | `{ code, value }` | `{ setting }`；`editable = false` 的擋下；`tax_id` 驗檢查碼、`fiscal_year` 收 1 到 12、有 `options` 的只收清單內的值 |
 | `list_chart_of_accounts` | ReadOnly | `{ only_used? }` | 科目＋報表分組＋活動別＋餘額 |
 | `list_dimensions` | ReadOnly | `{}` | `dimensions[]`、`entry_dimension: department`、`applied_to_entries: true` |
 | `list_roles` | ReadOnly | `{}` | `roles[]`、`permissions[]`、`grants[]`、**`enforced: true`** |
@@ -1173,6 +1180,21 @@ impl Registry {
 的出路——請系統管理員在「帳號管理」建立第二個帳號，因為建帳號是 `AdminOnly`，
 負責人自己做不到。
 
+**休假是一段時間，時數與天數由它算出來（0056）**。原本的請假單是兩個日期加一個
+申請人自己填的 `days`，於是同一張單上有兩個可以互相矛盾的說法，而「半天」是誰填誰
+算數。現在 `from_at`／`to_at` 是牆上時鐘的當地時刻（單據講的是上班日，不是全球
+時間軸上的一個瞬間），`from_on`／`to_on` 改由它們推導，是資料庫的 generated
+column，因此不可能與上面的區間不一致。
+
+`hours` 是這段區間落在上下班時間內的部分，逐日相加，週六與週日不計；`days` 等於
+`hours` 除以一天的上班時數。兩者在送出當下算好存下來——上下班時間是
+`company_setting` 的單一現值、沒有生效日，事後改動它不該回頭改寫已經核准的單。
+**上下班時間沒填就送不出休假單**：那個區間是把時間換算成時數的唯一依據，退而求其次
+就是自行編一個工作日。畫面在這個狀態不畫表單，改請系統管理員去填。
+
+國定假日與週休的哪兩天目前不在系統裡（規則庫還沒有這份日曆），所以跨到國定假日的
+休假會多算那一天，程式裡以 `ponytail:` 註記。
+
 `decide_leave_request` 順便補上一個對不上的宣告：模組註解說狀態由更新本身判定，
 程式卻是先讀再無條件更新。現在 `UPDATE` 自己帶 `status = 'pending'` 並檢查
 `rows_affected`，兩位主管同時按下去只有一位會成功。
@@ -1183,12 +1205,14 @@ impl Registry {
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦與人資／財務銜接狀態 |
 | `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、特休額度、約定的底薪與三個投保級距；**不含系統角色** |
-| `list_employee_movements` | ReadOnly | `{ limit? }` | 到離職與異動單、逐關完成狀態 |
-| `record_employee_movement` | NeedsConfirm | `{ emp_no, kind, effective_on?, … }` | `{ movement }` |
-| `complete_movement_step` | NeedsConfirm | `{ movement_no, step_no?, note? }` | `{ movement, step_taken, finished, closed_access }`；離職結案同一交易停用登入帳號、撤銷 session 與該員工的 MCP Token |
 | `get_attendance` | ReadOnly | `{ month? }` | 逐人出勤、請假、遲到與來源系統帶入的加班費 |
 | `list_leave_requests` | ReadOnly | `{ include_done?, limit? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度 |
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
+| `list_employee_movements` | ReadOnly | `{ limit? }` | 到離職與異動單、逐關完成狀態 |
+| `record_employee_movement` | NeedsConfirm | `{ emp_no, kind, effective_on?, … }` | `{ movement }` |
+| `complete_movement_step` | NeedsConfirm | `{ movement_no, step_no?, note? }` | `{ movement, step_taken, finished, closed_access }`；離職結案同一交易停用登入帳號、撤銷 session 與該員工的 MCP Token |
+| `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
+| `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額 |
 | `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳 |
 | `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票 |
@@ -1197,10 +1221,11 @@ impl Registry {
 | `get_hr_compliance` | ReadOnly | `{ as_of? }` | `checks[]`；逐項帶 `checked`、`passed`、ruleset 與差異 |
 | `list_withholding_statements` | BossOnly | `{ year? }` | 逐給付對象年度所得；`table` 稅額缺值保持 `null` |
 
-法遵檢核的 `checked_all_passed` **只涵蓋實際算過的項目**。完整投保薪資級距與
-加班費倍數尚未完整收錄，會以 `checked = false`、`passed = null` 與
+法遵檢核的 `checked_all_passed` **只涵蓋實際算過的項目**。完整投保薪資級距、
+國定假日與例假出勤工資尚未收錄，會以 `checked = false`、`passed = null` 與
 `not_checked_reason` 回傳；`coverage_complete` 因此是 `false`，畫面不得把它
-改寫成「全部法規皆符合」。
+改寫成「全部法規皆符合」。每月延長工時上限自 0057 起是**實際檢查**的項目：逐人
+加總當月已核准的加班時數，與 `overtime` ruleset 的上限比較。
 
 年度扣繳憑單以 `withholding_record` 的 `payee`／`payee_id` 分組。`basis = rate`
 依給付日 ruleset 計算，`basis = table` 只採來源系統帶入的
@@ -1342,11 +1367,44 @@ ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日�
 `Option<bool>`，`None` 一路傳到畫面上顯示為「未設定上班時間」。預設 09:00 等於
 本系統替別人的公司編了一條規定，再拿它去判定員工。
 
-**加班只算時數，不算金額。** 勞基法第 24 條的倍數是法規數字且仍未收錄至
-`backend/regulation/`，所以 0016 沒有打開 0008 當初刻意拒絕的那個計算。
+**打卡推導的加班只算時數，不算金額。** 打卡是「這個人幾點走的」，不是「公司同意他
+加班」；金額要有人同意過的時數才算得出來，那是 0057 的加班申請（見下一節）。
 
 順帶修掉一個既有問題：`today()` 原本讀 UTC 日期，於是本地時間 00:00–08:00 之間
 建立的任何單據都會記成前一天。現在走 `laysi_domain::business_today()`。
+
+### 加班申請（0057）
+
+加班原本散在三個互不相連的地方：打卡推導出時數，`attendance.overtime_hours` 與
+`overtime_pay` 是外部差勤系統對一個月的主張，薪資單上的 `overtime` 直接抄後者。
+只用本系統的公司因此永遠發不出加班費，而且**沒有任何人核准過任何一次加班**——
+勞基法第 32 條把雇主的同意當成加班合法的前提。
+
+申請就是那份同意，形狀與休假單相同：牆上時鐘的起訖時刻，時數等於區間長度，
+待簽核到有人決定。`worked_on` 由 `from_at` 推導（generated column），所以一張單
+屬於哪個月不是另一個可以填成別的值的欄位。
+
+**加班費不存欄位。** 它是時數乘一個有生效日的倍數，`run_payroll` 依加班當日的
+`overtime` ruleset 現算，理由與不存扣繳稅額相同：同一個問題有兩個答案就會漂走。
+`day_type` 也刻意沒有 CHECK——它的合法值來自有生效日的規則檔，而 CHECK 沒有生效日，
+修法多一種日子會讓約束拒絕法律允許的資料。驗證在 `submit_my_overtime_request`，
+比對的是加班當日解析出來的那一份規則。
+
+規則檔 `regulation/2026/overtime.toml` 收的是第 24 條：前二小時加給三分之一、
+再延長加給三分之二，寫成 `1.34`／`1.67`（三分之一除不盡，**進位**寫，捨去會低於
+法定下限）；`monthly_hours = 240` 是月薪換算時薪的除數（三十日乘八小時），不是公司
+自己的上下班區間——那一段可能是九小時，因為它含休息時間。上限也在檔案裡：一日
+四小時、每月四十六小時（第 32 條）。
+
+三道擋下：結束要晚於開始；**平日的時段不得與上下班時間重疊**（那段時間月薪已經
+給付，重疊等於同一段時間付兩次）；當月累計不得超過月上限，拒絕訊息說出還剩多少。
+沒有設定上下班時間時不做重疊檢查——沒有區間就沒有東西可以重疊，而加班時數不需要
+它就算得出來，這一點與休假相反。
+
+`run_payroll` 以核准的申請為準，沒有核准紀錄的人才沿用匯入的
+`attendance.overtime_pay`，兩個數字都回報。**國定假日與例假不做**：第 39 條與第 40 條
+按日加倍發給而不是按小時計費，而系統沒有國定假日日曆，判定不了某一天屬於哪一種。
+週六與週日一律當休息日，與休假時數的假設同一套；法遵檢核把這一塊列為未檢查。
 
 ### 補登申請（0045）
 
@@ -1404,10 +1462,12 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 |---|---|---|---|
 | `get_my_home` | ReadOnly | `{}` | 本人基本資料、年資、本月出勤、特休餘額、送出的單走到哪 |
 | `list_my_payslips` | ReadOnly | `{}` | **只有本人的**薪資單 |
-| `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘，以及 `leave_kinds` |
-| `request_leave` | NeedsConfirm | `{ kind, from_on, to_on, days, reason? }` | `{ request }`，編號 `LV{民國年月}-{三碼}` |
+| `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`，以及算時數用的 `schedule` |
+| `request_leave` | NeedsConfirm | `{ kind, from_at, to_at, reason? }` | `{ request, schedule }`，編號 `LV{西元年月}-{三碼}`；時數與天數由後端算 |
+| `list_my_overtime_requests` | ReadOnly | `{}` | 本人加班單、本月已核准時數與上限、`day_types` |
+| `submit_my_overtime_request` | NeedsConfirm | `{ from_at, to_at, day_type?, reason? }` | `{ request }`，編號 `OT{西元年月}-{三碼}`；時數為區間長度 |
 | `list_my_expense_claims` | ReadOnly | `{}` | 本人送出的報支與逐關進度 |
-| `submit_my_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, pay_method?, memo? }` | `{ claim }`，編號 `EX{民國年月}-{三碼}` |
+| `submit_my_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, pay_method?, memo? }` | `{ claim }`，編號 `EX{西元年月}-{三碼}` |
 | `attach_my_expense_receipt` | NeedsConfirm | `{ claim_no, file_name, content_base64 }` | `{ receipt, receipts }`，收據進 RustFS |
 
 **這個模組的授權不靠 `Risk`，靠輸入形狀。** `list_payslips` 是 `BossOnly`，
@@ -1416,8 +1476,10 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 以填，就沒有辦法填別人的名字；這比在查詢裡加過濾條件更難寫錯。
 
 `ops/selfservice.rs` 的 `no_self_service_input_can_select_another_employee`
-測試把十二個操作的 `Input` 屬性集合**逐字釘死**（`request_leave` 只有
-`kind`／`from_on`／`to_on`／`days`／`reason`，`submit_my_expense_claim` 只有
+測試把十四個操作的 `Input` 屬性集合**逐字釘死**（`request_leave` 只有
+`kind`／`from_at`／`to_at`／`reason`，`submit_my_overtime_request` 只有
+`from_at`／`to_at`／`day_type`／`reason`——`day_type` 指的是哪一種日子、
+合法值由規則庫決定，不是人，`submit_my_expense_claim` 只有
 `title`／`amount`／`spent_on`／`pay_method`／`memo`，`punch_clock` 只有
 `kind`／`note`，`list_my_punches` 只有 `month`——那是期別不是人——其餘四個是
 空集合），另加一份

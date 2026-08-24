@@ -486,6 +486,7 @@ export interface CompanySettingRow {
   value: string;
   note: string;
   editable: boolean;
+  options?: string[];
   source: 'setting' | 'regulation';
   updated_at?: string;
   updated_by?: string;
@@ -1226,8 +1227,11 @@ export interface LeaveRequestRow {
   dept_label: string | null;
   kind: string;
   kind_label: string;
+  from_at: string;
+  to_at: string;
   from_on: string;
   to_on: string;
+  hours: string;
   days: string;
   reason: string;
   status: string;
@@ -1619,8 +1623,11 @@ export interface MyLeaveRequest {
   leave_no: string;
   kind: string;
   kind_label: string;
+  from_at: string;
+  to_at: string;
   from_on: string;
   to_on: string;
+  hours: string;
   days: string;
   reason: string;
   status: string;
@@ -1695,15 +1702,91 @@ export interface MyLeaveList {
   employee: { emp_no: string; name: string };
   requests: MyLeaveRequest[];
   leave_kinds: { kind: string; label: string }[];
+  schedule: WorkSchedule;
   pending_count: number;
   annual_leave: MyAnnualLeave;
   scope_note: string;
 }
 
+export interface OvertimeDayType {
+  code: string;
+  label: string;
+  max_hours: string;
+}
+
+export interface OvertimeRequestRow {
+  request_no: string;
+  emp_no: string;
+  name: string;
+  dept_label: string | null;
+  day_type: string;
+  day_type_label: string;
+  from_at: string;
+  to_at: string;
+  worked_on: string;
+  hours: string;
+  pay: string | null;
+  pay_blocked_reason: string | null;
+  reason: string;
+  status: string;
+  status_label: string;
+  decided_by: string;
+  decided_role: string;
+  decided_at: string | null;
+  decision_note: string;
+  created_at: string;
+  created_by: string;
+  can_decide?: boolean;
+  decide_blocked_reason?: string | null;
+}
+
+export interface MyOvertimeList {
+  employee: { emp_no: string; name: string };
+  requests: OvertimeRequestRow[];
+  pending_count: number;
+  month: string;
+  month_approved_hours: string;
+  monthly_max_hours: string;
+  day_types: OvertimeDayType[];
+  schedule: WorkSchedule;
+  ruleset: RulesetRef;
+  scope_note: string;
+}
+
+export interface MyOvertimeResult {
+  request: OvertimeRequestRow;
+  status: string;
+  month_hours_after: string;
+  monthly_max_hours: string;
+  ruleset: RulesetRef;
+  scope_note: string;
+}
+
+export interface OvertimeMonthTotal {
+  emp_no: string;
+  name: string;
+  dept_label: string | null;
+  hours: string;
+  pay: string;
+  over_ceiling: boolean;
+}
+
+export interface OvertimeRequestList {
+  month: string;
+  requests: OvertimeRequestRow[];
+  pending_count: number;
+  other_month_pending: number;
+  month_totals: OvertimeMonthTotal[];
+  monthly_max_hours: string;
+  day_types: OvertimeDayType[];
+  ruleset: RulesetRef;
+}
+
 export interface MyLeaveResult {
   request: MyLeaveRequest;
   status: string;
-  days_source: string;
+  schedule: WorkSchedule;
+  hours_source: string;
   scope_note: string;
 }
 
@@ -2034,6 +2117,15 @@ export function businessDate(v: string | null | undefined, fallback = '—'): st
   return `${shifted.getUTCFullYear()}-${two(shifted.getUTCMonth() + 1)}-${two(
     shifted.getUTCDate(),
   )}`;
+}
+
+export function wallSpan(from: string, to: string): string {
+  const [fromDay = '', fromTime = ''] = from.split('T');
+  const [toDay = '', toTime = ''] = to.split('T');
+  const hm = (t: string) => t.slice(0, 5);
+  return fromDay === toDay
+    ? `${fromDay} ${hm(fromTime)} 至 ${hm(toTime)}`
+    : `${fromDay} ${hm(fromTime)} 至 ${toDay} ${hm(toTime)}`;
 }
 
 export function trimDecimal(v: string): string {

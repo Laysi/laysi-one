@@ -1,19 +1,70 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  businessToday,
   callOp,
   OpFailed,
   trimDecimal,
+  wallSpan,
   type MyLeaveList,
   type MyLeaveResult,
 } from '../api/client';
 import type { ScreenId } from '../nav';
 import { DateField } from '../components/DateField';
+import { TimeField } from '../components/TimeField';
 
 interface Props {
   onToast: (msg: string) => void;
   onGo: (screen: ScreenId) => void;
   reloadKey: number;
   onChanged: () => void;
+}
+
+const DAY_MS = 86400000;
+
+function dayStart(day: string): number {
+  const [y, m, d] = day.split('-').map(Number);
+  return Date.UTC(y ?? 2000, (m ?? 1) - 1, d ?? 1);
+}
+
+function minutesOf(time: string): number {
+  const [h, m] = time.split(':').map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+function weekend(at: number): boolean {
+  const day = new Date(at).getUTCDay();
+  return day === 0 || day === 6;
+}
+
+function spansWeekend(fromDay: string, toDay: string): boolean {
+  for (let at = dayStart(fromDay); at <= dayStart(toDay); at += DAY_MS) {
+    if (weekend(at)) return true;
+  }
+  return false;
+}
+
+function workingMinutes(
+  fromDay: string,
+  fromTime: string,
+  toDay: string,
+  toTime: string,
+  start: string,
+  end: string,
+): number {
+  const from = dayStart(fromDay) / 60000 + minutesOf(fromTime);
+  const to = dayStart(toDay) / 60000 + minutesOf(toTime);
+  let total = 0;
+  for (let at = dayStart(fromDay); at <= dayStart(toDay); at += DAY_MS) {
+    if (weekend(at)) continue;
+    const open = Math.max(at / 60000 + minutesOf(start), from);
+    const close = Math.min(at / 60000 + minutesOf(end), to);
+    total += Math.max(0, close - open);
+  }
+  return total;
+}
+
+function round2(v: number): string {
+  return trimDecimal((Math.round(v * 100) / 100).toFixed(2));
 }
 
 export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
@@ -24,58 +75,27 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   const [result, setResult] = useState<MyLeaveResult | null>(null);
 
   const [kind, setKind] = useState('');
-  const [fromOn, setFromOn] = useState('');
-  const [toOn, setToOn] = useState('');
-  const [days, setDays] = useState('');
+  const [fromDay, setFromDay] = useState('');
+  const [fromTime, setFromTime] = useState('');
+  const [toDay, setToDay] = useState('');
+  const [toTime, setToTime] = useState('');
   const [reason, setReason] = useState('');
 
   const load = useCallback(() => {
     setError(null);
     callOp<MyLeaveList>('list_my_leave_requests')
-      .then(setData)
+      .then((d) => {
+        setData(d);
+        const today = businessToday();
+        setFromDay((v) => v || today);
+        setToDay((v) => v || today);
+        setFromTime((v) => v || d.schedule.work_start || '');
+        setToTime((v) => v || d.schedule.work_end || '');
+      })
       .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
   }, []);
 
   useEffect(load, [load, reloadKey]);
-
-  const ready = kind !== '' && fromOn !== '' && toOn !== '' && days.trim() !== '';
-
-  async function submit() {
-    setBusy(true);
-    setFormError(null);
-    try {
-      const d = await callOp<MyLeaveResult>(
-        'request_leave',
-        {
-          kind,
-          from_on: fromOn,
-          to_on: toOn,
-
-          days: days.trim(),
-          ...(reason.trim() ? { reason: reason.trim() } : {}),
-        },
-        `申請${kind}，${fromOn} 至 ${toOn} 共 ${days.trim()} 日`,
-      );
-      setResult(d);
-      onToast(
-        `${d.request.leave_no} 已送出：${d.request.kind_label} ` +
-          `${trimDecimal(d.request.days)} 日，待主管簽核`,
-      );
-      setKind('');
-      setFromOn('');
-      setToOn('');
-      setDays('');
-      setReason('');
-      onChanged();
-      load();
-    } catch (e) {
-      const msg = e instanceof OpFailed ? e.error.message : String(e);
-      setFormError(msg);
-      onToast(msg);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   if (error) {
     return (
@@ -92,6 +112,55 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   if (!data) return <p className="state-note">讀取中…</p>;
 
   const al = data.annual_leave;
+  const workStart = data.schedule.work_start;
+  const workEnd = data.schedule.work_end;
+  const filled =
+    kind !== '' && fromDay !== '' && fromTime !== '' && toDay !== '' && toTime !== '';
+  const ordered =
+    filled &&
+    dayStart(fromDay) / 60000 + minutesOf(fromTime) <
+      dayStart(toDay) / 60000 + minutesOf(toTime);
+  const minutes =
+    ordered && workStart && workEnd
+      ? workingMinutes(fromDay, fromTime, toDay, toTime, workStart, workEnd)
+      : 0;
+  const dailyMinutes = workStart && workEnd ? minutesOf(workEnd) - minutesOf(workStart) : 0;
+  const hours = minutes / 60;
+  const days = dailyMinutes > 0 ? minutes / dailyMinutes : 0;
+  const ready = ordered && minutes > 0;
+  const kindLabel = data.leave_kinds.find((o) => o.kind === kind)?.label ?? kind;
+
+  async function submit() {
+    setBusy(true);
+    setFormError(null);
+    try {
+      const d = await callOp<MyLeaveResult>(
+        'request_leave',
+        {
+          kind,
+          from_at: `${fromDay}T${fromTime}:00`,
+          to_at: `${toDay}T${toTime}:00`,
+          ...(reason.trim() ? { reason: reason.trim() } : {}),
+        },
+        `申請${kindLabel}，${fromDay} ${fromTime} 至 ${toDay} ${toTime}`,
+      );
+      setResult(d);
+      onToast(
+        `${d.request.leave_no} 已送出：${d.request.kind_label} ` +
+          `${trimDecimal(d.request.hours)} 小時，待主管簽核`,
+      );
+      setKind('');
+      setReason('');
+      onChanged();
+      load();
+    } catch (e) {
+      const msg = e instanceof OpFailed ? e.error.message : String(e);
+      setFormError(msg);
+      onToast(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div>
@@ -116,67 +185,89 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
       <div className={result ? 'split-columns' : undefined}>
         <section>
           <h3 className="section-title">申請內容</h3>
-          <div className="card form-card">
-            <label className="field">
-              假別
-              <select className="input" value={kind} onChange={(e) => setKind(e.target.value)}>
-                <option value="">請選擇</option>
-                {data.leave_kinds.map((o) => (
-                  <option key={o.kind} value={o.kind}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+          {!workStart || !workEnd ? (
+            <div className="card form-card">
+              <p className="state-note">
+                休假時數依上下班時間計算，請系統管理員在基礎設定填寫上班時間與下班時間。
+              </p>
+            </div>
+          ) : (
+            <div className="card form-card">
+              <label className="field">
+                假別
+                <select className="input" value={kind} onChange={(e) => setKind(e.target.value)}>
+                  <option value="">請選擇</option>
+                  {data.leave_kinds.map((o) => (
+                    <option key={o.kind} value={o.kind}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-            <div className="field-row">
-              <label className="field field--date">
-                從
-                <DateField
-                  className="input input--date"
-                  value={fromOn}
-                  onChange={(v) => setFromOn(v)}
-                />
-              </label>
-              <label className="field field--date">
-                到
-                <DateField
-                  className="input input--date"
-                  value={toOn}
-                  onChange={(v) => setToOn(v)}
-                />
-              </label>
-              <label className="field field--grow">
-                天數
+              <div className="field-row">
+                <label className="field field--date">
+                  從
+                  <DateField
+                    className="input input--date"
+                    value={fromDay}
+                    onChange={(v) => setFromDay(v)}
+                  />
+                </label>
+                <label className="field">
+                  幾點
+                  <TimeField label="開始時間" value={fromTime} onChange={setFromTime} />
+                </label>
+              </div>
+
+              <div className="field-row">
+                <label className="field field--date">
+                  到
+                  <DateField
+                    className="input input--date"
+                    value={toDay}
+                    onChange={(v) => setToDay(v)}
+                  />
+                </label>
+                <label className="field">
+                  幾點
+                  <TimeField label="結束時間" value={toTime} onChange={setToTime} />
+                </label>
+              </div>
+
+              <label className="field">
+                事由
                 <input
                   className="input"
-                  placeholder="1 或 0.5"
-                  value={days}
-                  onChange={(e) => setDays(e.target.value)}
+                  placeholder="選填"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
                 />
               </label>
+
+              {filled && !ordered && (
+                <p className="state-note state-note--error">結束時刻要晚於開始時刻。</p>
+              )}
+              {ordered && minutes === 0 && (
+                <p className="state-note state-note--error">
+                  所選時段落在上班時間之外，請改選 {workStart} 至 {workEnd} 之間的區間。
+                </p>
+              )}
+              {ready && (
+                <p className="form-note">
+                  共 <span className="num">{round2(hours)}</span> 小時，等於{' '}
+                  <span className="num">{round2(days)}</span> 日。
+                  {spansWeekend(fromDay, toDay) && '週六與週日不計入。'}
+                </p>
+              )}
+
+              <button className="btn" disabled={busy || !ready} onClick={() => void submit()}>
+                {busy ? '送出中…' : '送出休假單'}
+              </button>
+
+              {formError && <p className="state-note state-note--error">{formError}</p>}
             </div>
-
-            <label className="field">
-              事由
-              <input
-                className="input"
-                placeholder="選填"
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-              />
-            </label>
-
-            <button className="btn" disabled={busy || !ready} onClick={() => void submit()}>
-              {busy ? '送出中…' : '送出休假單'}
-            </button>
-
-            {formError && <p className="state-note state-note--error">{formError}</p>}
-
-            <p className="form-note">
-              請填寫天數，半日填 <span className="num">0.5</span>。
-            </p>
-          </div>
+          )}
         </section>
 
         {result && (
@@ -190,12 +281,15 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
                 </div>
                 <div className="doc-row">
                   <span>{result.request.kind_label}</span>
-                  <span className="num">{trimDecimal(result.request.days)} 日</span>
+                  <span className="num">
+                    {trimDecimal(result.request.hours)} 小時 ·{' '}
+                    {trimDecimal(result.request.days)} 日
+                  </span>
                 </div>
                 <div className="doc-row doc-row--sub">
                   <span>期間</span>
                   <span className="num">
-                    {result.request.from_on} 至 {result.request.to_on}
+                    {wallSpan(result.request.from_at, result.request.to_at)}
                   </span>
                 </div>
                 {result.request.reason && (

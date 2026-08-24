@@ -1,0 +1,55 @@
+# Overtime pay
+#
+# Labor Standards Act art. 24: extended working time is paid at the ordinary
+# hourly wage plus at least one third for the first two hours and at least two
+# thirds beyond that. One third and two thirds do not terminate as decimals,
+# so the multipliers below are rounded up to two places -- rounding down would
+# put the figure under the statutory floor.
+#
+# `monthly_hours` turns a monthly salary into the ordinary hourly wage: thirty
+# days of eight hours. It is not the company's own working window, which may
+# be nine hours because it contains a break.
+#
+# Rest day work (art. 24 para. 2, as amended 2018-03-01) is paid by the hour
+# actually worked, on the same two bands.
+#
+# Public holidays (art. 39) and the weekly rest day (art. 40) are not here.
+# Both are paid as a doubled day rather than by the hour, and telling which
+# calendar day is which needs a holiday calendar the system does not have.
+
+domain = "overtime"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "勞動基準法第 24 條、第 32 條"
+
+[payload]
+monthly_hours = "240"
+# Art. 32 para. 2: extended working time may not exceed 46 hours a month.
+monthly_max_hours = "46"
+
+[[payload.day_types]]
+code = "weekday"
+label = "平日"
+# Art. 32 para. 2: no more than four hours of extended time in a day.
+max_hours = "4"
+
+[[payload.day_types.bands]]
+up_to_hours = "2"
+multiplier = "1.34"
+
+[[payload.day_types.bands]]
+multiplier = "1.67"
+
+[[payload.day_types]]
+code = "rest_day"
+label = "休息日"
+# Art. 36 with art. 32 para. 1: normal hours plus extended time may not
+# exceed twelve hours in a day.
+max_hours = "12"
+
+[[payload.day_types.bands]]
+up_to_hours = "2"
+multiplier = "1.34"
+
+[[payload.day_types.bands]]
+multiplier = "1.67"

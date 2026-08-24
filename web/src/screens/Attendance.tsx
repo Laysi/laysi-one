@@ -4,10 +4,12 @@ import {
   money,
   OpFailed,
   trimDecimal,
+  wallSpan,
   type AttendanceMonth,
   type AttendancePunchList,
   type LeaveRequestList,
   type LeaveRequestRow,
+  type OvertimeRequestList,
   type PunchCorrectionList,
   type PunchReconciliation,
 } from '../api/client';
@@ -52,6 +54,9 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const [punches, setPunches] = useState<AttendancePunchList | null>(null);
   const [fixes, setFixes] = useState<PunchCorrectionList | null>(null);
   const [fixDone, setFixDone] = useState(false);
+  const [overtime, setOvertime] = useState<OvertimeRequestList | null>(null);
+  const [otDone, setOtDone] = useState(false);
+  const [otNote, setOtNote] = useState<Record<string, string>>({});
   const [fixNoteById, setFixNoteById] = useState<Record<number, string>>({});
   const [month, setMonth] = useState<string | undefined>(undefined);
   const [picked, setPicked] = useState<string | null>(null);
@@ -85,6 +90,43 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const me = useCurrentUser();
   const canSeeFixes = me.permissions.includes('list_punch_corrections');
   const canDecideFixes = me.permissions.includes('decide_punch_correction');
+  const canSeeOvertime = me.permissions.includes('list_overtime_requests');
+  const canDecideOvertime = me.permissions.includes('decide_overtime_request');
+
+  const loadOvertime = useCallback(() => {
+    if (!canSeeOvertime) return;
+    callOp<OvertimeRequestList>('list_overtime_requests', {
+      ...(month ? { month } : {}),
+      include_done: otDone,
+    })
+      .then(setOvertime)
+      .catch(() => setOvertime(null));
+  }, [canSeeOvertime, month, otDone]);
+
+  useEffect(loadOvertime, [loadOvertime, reloadKey]);
+
+  async function decideOvertime(requestNo: string, approve: boolean) {
+    setBusy(`ot-${requestNo}`);
+    try {
+      await callOp<unknown>(
+        'decide_overtime_request',
+        {
+          request_no: requestNo,
+          approve,
+          ...(otNote[requestNo]?.trim() ? { note: otNote[requestNo].trim() } : {}),
+        },
+        approve ? '核准加班申請' : '駁回加班申請',
+      );
+      onToast(approve ? `${requestNo} 已核准，時數列入當期薪資` : `${requestNo} 已駁回`);
+      setOtNote((n) => ({ ...n, [requestNo]: '' }));
+      onChanged();
+      loadOvertime();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   const loadFixes = useCallback(() => {
     if (!canSeeFixes) return;
@@ -159,7 +201,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       );
       onToast(
         approve
-          ? `${r.leave_no} 已核准：${r.name} ${r.kind_label} ${trimDecimal(r.days)} 日`
+          ? `${r.leave_no} 已核准：${r.name} ${r.kind_label} ${trimDecimal(r.hours)} 小時`
           : `${r.leave_no} 已駁回，說明將顯示給 ${r.name}`,
       );
       setNote((n) => ({ ...n, [r.leave_no]: '' }));
@@ -565,6 +607,166 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
             </>
           )}
 
+          {overtime && (
+            <>
+              <h3 className="section-title section-title--spaced">加班申請</h3>
+              <div className="toolbar">
+                <button
+                  className={`chip${otDone ? ' chip--on' : ''}`}
+                  onClick={() => setOtDone((v) => !v)}
+                >
+                  含已決定
+                </button>
+                <span className="spacer" />
+                <span className="section-note">
+                  {overtime.pending_count} 張待簽核
+                  {overtime.other_month_pending > 0 &&
+                    ` · 其他月份還有 ${overtime.other_month_pending} 張`}
+                </span>
+              </div>
+              <div className="table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>員工</th>
+                      <th>加班日</th>
+                      <th>期間</th>
+                      <th className="align-right">時數</th>
+                      <th className="align-right">加班費</th>
+                      <th>決定</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {overtime.requests.map((r) => (
+                      <tr
+                        key={r.request_no}
+                        className={r.status === 'pending' ? 'row--pending' : undefined}
+                      >
+                        <td>
+                          {r.name}
+                          <span className="cell-hint cell-hint--block num">
+                            {r.request_no} · {r.emp_no}
+                            {r.dept_label && ` · ${r.dept_label}`}
+                          </span>
+                          {r.reason && (
+                            <span className="cell-hint cell-hint--block">{r.reason}</span>
+                          )}
+                        </td>
+                        <td>{r.day_type_label}</td>
+                        <td className="num cell-nowrap">{wallSpan(r.from_at, r.to_at)}</td>
+                        <td className="num align-right">{trimDecimal(r.hours)}</td>
+                        <td className="num align-right">
+                          {r.pay ? (
+                            money(r.pay)
+                          ) : (
+                            <span className="cell-hint">{r.pay_blocked_reason}</span>
+                          )}
+                        </td>
+                        <td>
+                          {r.status !== 'pending' ? (
+                            <>
+                              <span
+                                className={
+                                  r.status === 'rejected'
+                                    ? 'tag tag--bad tag--static'
+                                    : 'tag tag--static'
+                                }
+                              >
+                                {r.status_label}
+                              </span>
+                              {r.decided_by && (
+                                <span className="cell-hint cell-hint--block">
+                                  {r.decided_by}
+                                  {r.decision_note ? ` · ${r.decision_note}` : ''}
+                                </span>
+                              )}
+                            </>
+                          ) : !canDecideOvertime ? (
+                            <span className="cell-hint">由人資決定</span>
+                          ) : r.can_decide === false ? (
+                            <span className="cell-hint">{r.decide_blocked_reason}</span>
+                          ) : (
+                            <>
+                              <input
+                                className="entry-input"
+                                placeholder="說明，選填"
+                                value={otNote[r.request_no] ?? ''}
+                                onChange={(e) =>
+                                  setOtNote((n) => ({ ...n, [r.request_no]: e.target.value }))
+                                }
+                              />
+                              <div className="cell-actions">
+                                <button
+                                  className="btn btn--compact"
+                                  disabled={busy === `ot-${r.request_no}`}
+                                  onClick={() => void decideOvertime(r.request_no, true)}
+                                >
+                                  核准
+                                </button>
+                                <button
+                                  className="btn btn--compact btn--secondary"
+                                  disabled={busy === `ot-${r.request_no}`}
+                                  onClick={() => void decideOvertime(r.request_no, false)}
+                                >
+                                  駁回
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {overtime.requests.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="cell-muted">
+                          {otDone ? '本月沒有加班申請。' : '本月沒有待簽核的加班申請。'}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {overtime.month_totals.length > 0 && (
+                <div className="table-scroll">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>本月已核准</th>
+                        <th className="align-right">時數</th>
+                        <th className="align-right">加班費</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {overtime.month_totals.map((t) => (
+                        <tr key={t.emp_no}>
+                          <td>
+                            {t.name}
+                            <span className="cell-hint cell-hint--block num">
+                              {t.emp_no}
+                              {t.dept_label && ` · ${t.dept_label}`}
+                            </span>
+                          </td>
+                          <td className="num align-right">
+                            {trimDecimal(t.hours)}
+                            {t.over_ceiling && (
+                              <span className="cell-hint cell-hint--block">
+                                已超過每月 {trimDecimal(overtime.monthly_max_hours)} 小時
+                              </span>
+                            )}
+                          </td>
+                          <td className="num align-right">{money(t.pay)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="hint">
+                加班費依 {overtime.ruleset.source_note} 與加班日適用的規則計算，核准後列入當期薪資。
+              </p>
+            </>
+          )}
+
           <h3 className="section-title section-title--spaced">休假單</h3>
           <div className="toolbar">
             <button
@@ -584,7 +786,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                   <th>休假單</th>
                   <th>假別</th>
                   <th>期間</th>
-                  <th className="align-right">天數</th>
+                  <th className="align-right">時數</th>
                   <th>狀態</th>
                   <th className="align-right">動作</th>
                 </tr>
@@ -608,10 +810,13 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                         </span>
                       )}
                     </td>
-                    <td className="num cell-nowrap">
-                      {r.from_on} 至 {r.to_on}
+                    <td className="num cell-nowrap">{wallSpan(r.from_at, r.to_at)}</td>
+                    <td className="num align-right">
+                      {trimDecimal(r.hours)}
+                      <span className="cell-hint cell-hint--block num">
+                        {trimDecimal(r.days)} 日
+                      </span>
                     </td>
-                    <td className="num align-right">{trimDecimal(r.days)}</td>
                     <td>
                       <span className={statusTag(r)}>{r.status_label}</span>
                       {r.status !== 'pending' && r.decided_by && (

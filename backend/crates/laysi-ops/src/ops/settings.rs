@@ -130,6 +130,7 @@ impl Operation for GetCompanySettings {
                     "value": s.value,
                     "note": s.note,
                     "editable": s.editable,
+                    "options": setting_options(&s.code),
                     "source": "setting",
                     "updated_at": s.updated_at,
                     "updated_by": s.updated_by,
@@ -229,6 +230,16 @@ fn is_valid_tax_id(value: &str) -> bool {
     sum % 5 == 0 || (digits[6] == 7 && (sum + 1) % 5 == 0)
 }
 
+/// The values a setting accepts, when it accepts a fixed few. The screen
+/// offers exactly these and nothing else, so a policy that has two answers
+/// cannot be stored as a third thing that reads like neither.
+fn setting_options(code: &str) -> Vec<&'static str> {
+    match code {
+        "punch_correction_policy" => crate::ops::attendance::CORRECTION_POLICIES.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
 /// Settings for which no value is itself an answer.
 ///
 /// The working day is the case: `attendance::late()` returns `Option<bool>`,
@@ -253,6 +264,15 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
         }
         "late_grace_minutes" | "flex_window_minutes" if value.parse::<u32>().is_err() => {
             Err(OpError::BadInput(format!("「{value}」不是分鐘數")))
+        }
+        "punch_correction_policy"
+            if !crate::ops::attendance::CORRECTION_POLICIES.contains(&value) =>
+        {
+            Err(OpError::BadInput(format!(
+                "補登申請的處理方式填「{}」或「{}」，收到「{value}」",
+                crate::ops::attendance::CORRECTION_REVIEW,
+                crate::ops::attendance::CORRECTION_AUTO,
+            )))
         }
         _ => Ok(()),
     }

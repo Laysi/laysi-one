@@ -14,6 +14,7 @@ import { Expenses } from './screens/Expenses';
 import { Imports } from './screens/Imports';
 import { Init } from './screens/Init';
 import { LeaveRequest } from './screens/LeaveRequest';
+import { OvertimeRequest } from './screens/OvertimeRequest';
 import { Dashboard } from './screens/Dashboard';
 import { FixedAssets } from './screens/FixedAssets';
 import { GeneralLedger } from './screens/GeneralLedger';
@@ -24,6 +25,7 @@ import { McpTools } from './screens/McpTools';
 import { Me } from './screens/Me';
 import { MyExpenses } from './screens/MyExpenses';
 import { MyLeave } from './screens/MyLeave';
+import { MyOvertime } from './screens/MyOvertime';
 import { MyMcp } from './screens/MyMcp';
 import { MyPayslips } from './screens/MyPayslips';
 import { Onboarding } from './screens/Onboarding';
@@ -512,6 +514,14 @@ function Workspace() {
                   onChanged={reload}
                 />
               )}
+              {screen === 'meotnew' && (
+                <OvertimeRequest
+                  onToast={showToast}
+                  onGo={go}
+                  reloadKey={reloadKey}
+                  onChanged={reload}
+                />
+              )}
               {screen === 'meexpnew' && (
                 <ExpenseRequest
                   onToast={showToast}
@@ -525,6 +535,7 @@ function Workspace() {
               )}
               {screen === 'mepay' && <MyPayslips reloadKey={reloadKey} />}
               {screen === 'meleave' && <MyLeave onGo={go} reloadKey={reloadKey} />}
+              {screen === 'meot' && <MyOvertime onGo={go} reloadKey={reloadKey} />}
               {screen === 'memcp' && <MyMcp onToast={showToast} reloadKey={reloadKey} />}
             </>
           )}

@@ -42,6 +42,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("2026/withholding.toml", include_str!("../../../regulation/2026/withholding.toml")),
     ("2026/annual_leave.toml", include_str!("../../../regulation/2026/annual_leave.toml")),
     ("2026/depreciation.toml", include_str!("../../../regulation/2026/depreciation.toml")),
+    ("2026/overtime.toml", include_str!("../../../regulation/2026/overtime.toml")),
 ];
 
 /// Regulation domains the system knows. A rule file's `domain` must be one
@@ -55,6 +56,7 @@ pub const DOMAINS: &[&str] = &[
     "withholding",
     "annual_leave",
     "depreciation",
+    "overtime",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -312,6 +314,119 @@ pub fn annual_leave_days(rs: &Ruleset, service_months: u32) -> Result<u32, Regul
     Ok(days)
 }
 
+/// One kind of day overtime can fall on, as the ruleset lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OvertimeDayType {
+    pub code: String,
+    pub label: String,
+    /// Longest overtime the law allows on such a day.
+    pub max_hours: Money,
+}
+
+fn payload_array<'a>(rs: &'a Ruleset, key: &str) -> Result<&'a Vec<serde_json::Value>, RegulationError> {
+    let mut node = &rs.payload;
+    for part in key.split('.') {
+        node = node.get(part).ok_or_else(|| RegulationError::MissingField {
+            domain: rs.domain.clone(),
+            version: rs.version.clone(),
+            key: key.to_string(),
+        })?;
+    }
+    node.as_array().ok_or_else(|| RegulationError::BadNumber {
+        domain: rs.domain.clone(),
+        version: rs.version.clone(),
+        key: key.to_string(),
+        value: node.to_string(),
+    })
+}
+
+fn field(rs: &Ruleset, node: &serde_json::Value, key: &str) -> Result<Money, RegulationError> {
+    let text = node.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
+        RegulationError::MissingField {
+            domain: rs.domain.clone(),
+            version: rs.version.clone(),
+            key: key.to_string(),
+        }
+    })?;
+    text.parse::<Decimal>().map_err(|_| RegulationError::BadNumber {
+        domain: rs.domain.clone(),
+        version: rs.version.clone(),
+        key: key.to_string(),
+        value: text.to_string(),
+    })
+}
+
+/// The kinds of day the overtime rules distinguish, in the order listed.
+pub fn overtime_day_types(rs: &Ruleset) -> Result<Vec<OvertimeDayType>, RegulationError> {
+    rs.expect_domain("overtime")?;
+    payload_array(rs, "day_types")?
+        .iter()
+        .map(|t| {
+            Ok(OvertimeDayType {
+                code: t.get("code").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                label: t.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                max_hours: field(rs, t, "max_hours")?,
+            })
+        })
+        .collect()
+}
+
+/// Extended working time allowed in one month, across every kind of day.
+pub fn overtime_monthly_max_hours(rs: &Ruleset) -> Result<Money, RegulationError> {
+    rs.expect_domain("overtime")?;
+    rs.decimal("monthly_max_hours")
+}
+
+/// Pay for `hours` of overtime worked on a `day_type` by someone on
+/// `monthly_salary`.
+///
+/// The hourly wage is the monthly salary over the hours the ruleset says a
+/// month holds, and the hours are spent against the bands in order: the first
+/// band's multiplier up to its `up_to_hours`, then the next. A band without
+/// `up_to_hours` runs to the end.
+pub fn overtime_pay(
+    rs: &Ruleset,
+    monthly_salary: Money,
+    day_type: &str,
+    hours: Money,
+) -> Result<Money, RegulationError> {
+    rs.expect_domain("overtime")?;
+    let hourly = monthly_salary / rs.decimal("monthly_hours")?;
+    let types = payload_array(rs, "day_types")?;
+    let matched = types
+        .iter()
+        .find(|t| t.get("code").and_then(|v| v.as_str()) == Some(day_type))
+        .ok_or_else(|| RegulationError::MissingField {
+            domain: rs.domain.clone(),
+            version: rs.version.clone(),
+            key: format!("day_types.{day_type}"),
+        })?;
+
+    let bands = matched.get("bands").and_then(|v| v.as_array()).ok_or_else(|| {
+        RegulationError::MissingField {
+            domain: rs.domain.clone(),
+            version: rs.version.clone(),
+            key: format!("day_types.{day_type}.bands"),
+        }
+    })?;
+
+    let mut left = hours;
+    let mut pay = Money::ZERO;
+    for band in bands {
+        if left <= Money::ZERO {
+            break;
+        }
+        let multiplier = field(rs, band, "multiplier")?;
+        let span = match band.get("up_to_hours") {
+            Some(_) => field(rs, band, "up_to_hours")?.min(left),
+            None => left,
+        };
+        pay += hourly * multiplier * span;
+        left -= span;
+    }
+    Ok(to_dollars(pay))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +447,33 @@ mod tests {
     // The reference values below are the figures actually displayed on the
     // insurance and payroll screens. A mismatch means the calculator is
     // wrong.
+
+    /// Article 24 pays the first two hours at one rate and the rest at
+    /// another, so three hours is not three times the first hour. Nothing in
+    /// this crate knows what those rates are: replace the payload and the
+    /// same three hours must cost something else.
+    #[test]
+    fn overtime_walks_the_bands_and_reads_them_from_the_payload() {
+        let rs = resolve("overtime", d(2026, 7, 25)).unwrap();
+        // 40000 over 240 hours is 166.6667 an hour.
+        assert_eq!(overtime_pay(rs, dec!(40000), "weekday", dec!(2)).unwrap(), dec!(447));
+        assert_eq!(overtime_pay(rs, dec!(40000), "weekday", dec!(3)).unwrap(), dec!(725));
+        assert_eq!(overtime_pay(rs, dec!(40000), "rest_day", dec!(3)).unwrap(), dec!(725));
+        assert_eq!(overtime_pay(rs, dec!(40000), "weekday", Money::ZERO).unwrap(), Money::ZERO);
+        assert!(overtime_pay(rs, dec!(40000), "public_holiday", dec!(1)).is_err());
+
+        let mut changed = rs.clone();
+        changed.payload["day_types"][0]["bands"][0]["multiplier"] = "2".into();
+        assert_ne!(
+            overtime_pay(&changed, dec!(40000), "weekday", dec!(2)).unwrap(),
+            overtime_pay(rs, dec!(40000), "weekday", dec!(2)).unwrap()
+        );
+
+        let types = overtime_day_types(rs).unwrap();
+        assert_eq!(types.iter().map(|t| t.code.as_str()).collect::<Vec<_>>(), ["weekday", "rest_day"]);
+        assert_eq!(types[0].max_hours, dec!(4));
+        assert_eq!(overtime_monthly_max_hours(rs).unwrap(), dec!(46));
+    }
 
     #[test]
     fn labor_insurance_matches_the_prototype() {

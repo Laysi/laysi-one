@@ -393,6 +393,19 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                               </option>
                             ))}
                           </select>
+                        ) : s.options?.length ? (
+                          <select
+                            className="entry-input"
+                            value={draft}
+                            autoFocus
+                            onChange={(e) => setDraft(e.target.value)}
+                          >
+                            {s.options.map((o) => (
+                              <option key={o} value={o}>
+                                {o}
+                              </option>
+                            ))}
+                          </select>
                         ) : CLOCK_SETTINGS.has(s.code) ? (
                           <TimeField label={s.label} value={draft} onChange={setDraft} />
                         ) : (

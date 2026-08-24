@@ -67,6 +67,8 @@ export type OpName =
   | 'correct_punch'
   | 'list_leave_requests'
   | 'decide_leave_request'
+  | 'list_overtime_requests'
+  | 'decide_overtime_request'
   | 'list_punch_corrections'
   | 'decide_punch_correction'
   | 'get_insurance_summary'
@@ -80,6 +82,8 @@ export type OpName =
   | 'list_my_payslips'
   | 'list_my_leave_requests'
   | 'request_leave'
+  | 'list_my_overtime_requests'
+  | 'submit_my_overtime_request'
   | 'list_my_expense_claims'
   | 'submit_my_expense_claim'
   | 'attach_my_expense_receipt'
@@ -189,6 +193,8 @@ export const OPS: readonly OpMeta[] = [
   { name: 'correct_punch', risk: 'needs_confirm', riskLabel: '需人確認', summary: "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。同一時段已有紀錄時會覆蓋原值。漏打卡沒有其他更正管道。" },
   { name: 'list_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀休假單與逐人特休餘額。額度依查詢當日適用的特休規則與年資現算，系統只留已核准的實休天數。" },
   { name: 'decide_leave_request', risk: 'needs_confirm', riskLabel: '需人確認', summary: "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕；申請人不得核准本人送出的單據。" },
+  { name: 'list_overtime_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀一個月的加班申請與逐人已核准時數。加班費依加班日適用的加班規則現算，不存欄位；月上限同樣來自規則庫。" },
+  { name: 'decide_overtime_request', risk: 'needs_confirm', riskLabel: '需人確認', summary: "核准或駁回一張仍在等簽核的加班申請，留下決定者、身分與說明。核准後該時數會列入當期薪資的加班費。狀態不是等簽核時一律拒絕；申請人不得核准本人送出的申請。" },
   { name: 'list_punch_corrections', risk: 'read_only', riskLabel: '唯讀', summary: "讀打卡補登申請：申請人、日期與時段、申請時間、理由與目前狀態。核准後才寫入打卡紀錄。" },
   { name: 'decide_punch_correction', risk: 'needs_confirm', riskLabel: '需人確認', summary: "核准或駁回一張待審核的補登申請。核准會在同一個交易寫進打卡紀錄，來源記為補登並留下決定者。申請人不得決定本人送出的申請。" },
   { name: 'get_insurance_summary', risk: 'read_only', riskLabel: '唯讀', summary: "讀勞健保與勞退：公司負擔、員工自付、逐人投保級距與三項保費。費率、上限與平均眷口數依投保期間適用的規則解析。" },
@@ -196,12 +202,14 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_payroll_summary', risk: 'read_only', riskLabel: '唯讀', summary: "讀某一期的薪資彙總：應發、代扣、實發、公司負擔，並與總帳 6111 薪資支出對帳。不含任何個人金額。" },
   { name: 'list_payslips', risk: 'boss_only', riskLabel: '限負責人', summary: "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司負擔的勞健保與勞退。限負責人。以同一份規則重算一次，再與存下來的數字比對。" },
   { name: 'run_payroll', risk: 'high_risk', riskLabel: '高風險', summary: "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。已計薪的人不會再算一次，同一期可以為後來到職或漏算的人補算，各自產生一張傳票。" },
-  { name: 'get_hr_compliance', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算與特休餘額。完整投保級距與加班費倍數的規則不足時，明確標示為未檢查，不視為通過。" },
+  { name: 'get_hr_compliance', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算、每月延長工時上限與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。" },
   { name: 'list_withholding_statements', risk: 'boss_only', riskLabel: '限負責人', summary: "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限負責人；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。" },
   { name: 'get_my_home', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前呼叫者本人的員工首頁：基本資料（不含身分證字號，銀行帳戶僅留尾碼）、年資、本月出勤、特休餘額，以及本人送出的休假與報支的目前關卡。無任何參數可指定他人。" },
   { name: 'list_my_payslips', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由登入身分決定，查不到他人的薪資單。" },
   { name: 'list_my_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人的全部休假單與本年度特休額度、已休、剩餘。額度由查詢日適用的特休規則與年資現算，不逐人設定。" },
-  { name: 'request_leave', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出待簽核休假單。申請人與建立者都由登入身分決定，輸入不能指定他人。" },
+  { name: 'request_leave', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出待簽核休假單。收起訖時刻，時數與天數依公司上下班時間計算，週六與週日不計入。申請人與建立者都由登入身分決定，輸入不能指定他人。" },
+  { name: 'list_my_overtime_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人送出的加班申請與本月已核准時數。加班費依加班日適用的加班規則現算；輸入不含可指定他人的欄位。" },
+  { name: 'submit_my_overtime_request', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出加班申請。時數為起訖時刻的長度，一日與每月上限來自加班規則；核准後才列入薪資。申請人與建立者都由登入身分決定，輸入不能指定他人。" },
   { name: 'list_my_expense_claims', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前呼叫者本人送出的費用報支單，包含各關卡的產生原因、已簽核人員、目前關卡與最終產生的傳票。輸入不含申請人或其他人員欄位。" },
   { name: 'submit_my_expense_claim', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送一張費用報支單。申請人姓名與部門取自該員工主檔，輸入不能指定申請人；費用科目由會計關卡決定，本操作不接受科目與收據文件編號。不產生任何分錄。" },
   { name: 'attach_my_expense_receipt', risk: 'needs_confirm', riskLabel: '需人確認', summary: "為本人送出的費用報支單附上收據檔案。內容以 base64 傳入，存進物件儲存並記下內容雜湊；報支單號要屬於目前登入帳號所連結的員工，別人的單號一律查無此單。已核准或已產生傳票的單不再收件。" },
@@ -303,6 +311,8 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'correct_punch': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"at":{"description":"Wall-clock time on that day in the company's own time zone, `HH:MM:SS`. `HH:MM` is accepted and stored as second zero, because a correction is a remembered time and the second is not known; `source` already marks the row as entered by hand.","type":"string"},"emp_no":{"description":"Whose record to correct.","type":"string"},"kind":{"description":"`in` or `out`.","type":"string"},"note":{"default":null,"description":"Why it is being entered by hand. Kept on the record.","type":["string","null"]},"punched_on":{"description":"The working day.","format":"date","type":"string"}},"required":["at","emp_no","kind","punched_on"],"title":"CorrectPunchInput","type":"object"},
   'list_leave_requests': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_done":{"default":false,"description":"Include approved and rejected requests; by default only pending ones.","type":"boolean"},"limit":{"default":null,"description":"Maximum rows. Omit for no additional limit.","format":"int64","type":["integer","null"]}},"title":"ListLeaveRequestsInput","type":"object"},
   'decide_leave_request': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"approve":{"description":"`true` approves, `false` rejects.","type":"boolean"},"leave_no":{"description":"Leave request number.","type":"string"},"note":{"default":null,"description":"Note for the requester.","type":["string","null"]}},"required":["approve","leave_no"],"title":"DecideLeaveRequestInput","type":"object"},
+  'list_overtime_requests': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_done":{"default":null,"description":"Include the ones already decided. Omitted shows only what is waiting.","type":["boolean","null"]},"month":{"default":null,"description":"Month as `YYYY-MM`. Omitted reads the current month.","type":["string","null"]}},"title":"ListOvertimeRequestsInput","type":"object"},
+  'decide_overtime_request': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"approve":{"description":"`true` approves, `false` rejects.","type":"boolean"},"note":{"default":null,"description":"Note for the requester.","type":["string","null"]},"request_no":{"description":"Overtime request number.","type":"string"}},"required":["approve","request_no"],"title":"DecideOvertimeRequestInput","type":"object"},
   'list_punch_corrections': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_done":{"default":null,"description":"Include the ones already decided. Omitted shows only what is waiting.","type":["boolean","null"]}},"title":"ListPunchCorrectionsInput","type":"object"},
   'decide_punch_correction': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"approve":{"description":"True approves and writes the punch; false turns it down.","type":"boolean"},"id":{"description":"Which request.","format":"int32","type":"integer"},"note":{"default":null,"description":"What to tell the employee. Kept on the record.","type":["string","null"]}},"required":["approve","id"],"title":"DecidePunchCorrectionInput","type":"object"},
   'get_insurance_summary': {"$schema":"http://json-schema.org/draft-07/schema#","description":"Query as of a date. Needed by the regulation and balance operations.","properties":{"as_of":{"default":null,"description":"Cut-off date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"AsOfInput","type":"object"},
@@ -315,7 +325,9 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'get_my_home': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_my_payslips': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_my_leave_requests': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
-  'request_leave': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"days":{"description":"Days requested, entered by the employee; half days may use decimals. The system does not derive this from the date range.","type":"string"},"from_on":{"description":"First day of leave.","format":"date","type":"string"},"kind":{"description":"Leave type. Valid values match the CHECK on `leave_request.kind`.","type":"string"},"reason":{"default":null,"description":"Reason for the request.","type":["string","null"]},"to_on":{"description":"Last day of leave.","format":"date","type":"string"}},"required":["days","from_on","kind","to_on"],"title":"RequestLeaveInput","type":"object"},
+  'request_leave': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"from_at":{"description":"When the leave starts, in local wall-clock time, `2026-08-25T13:30:00`.","format":"partial-date-time","type":"string"},"kind":{"description":"Leave type. Valid values match the CHECK on `leave_request.kind`.","type":"string"},"reason":{"default":null,"description":"Reason for the request.","type":["string","null"]},"to_at":{"description":"When the leave ends. Hours and days are derived from the range and the company's working window, so neither is accepted as input.","format":"partial-date-time","type":"string"}},"required":["from_at","kind","to_at"],"title":"RequestLeaveInput","type":"object"},
+  'list_my_overtime_requests': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
+  'submit_my_overtime_request': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"day_type":{"default":null,"description":"Which kind of day to price it at, as listed by the overtime ruleset. Omitted takes the day of the week: Saturday and Sunday are rest days.","type":["string","null"]},"from_at":{"description":"When the overtime starts, in local wall-clock time, `2026-08-25T18:00:00`.","format":"partial-date-time","type":"string"},"reason":{"default":null,"description":"Why the work is needed.","type":["string","null"]},"to_at":{"description":"When it ends. The hours are the length of the range; nothing else is accepted, so the request cannot claim more than it covers.","format":"partial-date-time","type":"string"}},"required":["from_at","to_at"],"title":"SubmitMyOvertimeRequestInput","type":"object"},
   'list_my_expense_claims': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'submit_my_expense_claim': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"amount":{"description":"Amount paid, tax inclusive.","type":"string"},"memo":{"default":null,"description":"Anything the approvers need to know.","type":["string","null"]},"pay_method":{"default":null,"description":"`reimburse` paid with the month-end run (default), or `petty_cash` already taken from petty cash.","type":["string","null"]},"spent_on":{"default":null,"description":"Spend date. Defaults to today and may not be in the future.","format":"date","type":["string","null"]},"title":{"description":"What the money was spent on.","type":"string"}},"required":["amount","title"],"title":"SubmitMyExpenseClaimInput","type":"object"},
   'attach_my_expense_receipt': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"claim_no":{"description":"The claim to attach to, e.g. `EX2608-004`. Only claims filed through self-service by the caller can be found.","type":"string"},"content_base64":{"description":"File contents, base64.","type":"string"},"file_name":{"description":"File name. Non-ASCII names are kept; the object key is transliterated.","type":"string"}},"required":["claim_no","content_base64","file_name"],"title":"AttachMyExpenseReceiptInput","type":"object"},

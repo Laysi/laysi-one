@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use laysi_domain::{LineInput, Money, TrialBalanceRow};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -296,6 +296,12 @@ pub enum StoreError {
 
     #[error("找不到休假單 {no}")]
     LeaveNotFound { no: String },
+
+    #[error("找不到加班申請 {no}")]
+    OvertimeNotFound { no: String },
+
+    #[error("加班申請 {no} 已為「{status}」，不能重複簽核")]
+    OvertimeAlreadyDecided { no: String, status: String },
 
     #[error("{date} 已有{kind}卡紀錄（{at}），一天只記一次；如需更正請由人資補登")]
     PunchAlreadyRecorded { date: String, kind: String, at: String },
@@ -5507,7 +5513,8 @@ impl Store {
     ) -> Result<Vec<LeaveRequest>> {
         Ok(sqlx::query(
             "SELECT l.id, l.leave_no, l.employee_id, e.emp_no, e.name,
-                    d.label AS dept_label, l.kind, l.from_on, l.to_on, l.days, l.reason,
+                    d.label AS dept_label, l.kind, l.from_at, l.to_at,
+                    l.from_on, l.to_on, l.hours, l.days, l.reason,
                     l.status, l.decided_by,
                     COALESCE(r.name, l.decided_role) AS decided_role,
                     l.decided_at, l.decision_note,
@@ -5563,20 +5570,22 @@ impl Store {
         req: NewLeaveRequest<'_>,
     ) -> Result<LeaveRequest> {
         let mut tx = self.pool.begin().await?;
-        let period = req.from_on.format("%y%m").to_string();
+        let period = req.from_at.format("%y%m").to_string();
         let seq = next_doc_no(&mut tx, "LV", &period).await?;
         let leave_no = format!("LV{period}-{seq:03}");
 
         sqlx::query(
             "INSERT INTO leave_request
-               (leave_no, employee_id, kind, from_on, to_on, days, reason, status, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8)",
+               (leave_no, employee_id, kind, from_at, to_at, hours, days, reason,
+                status, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9)",
         )
         .bind(&leave_no)
         .bind(req.employee_id)
         .bind(req.kind)
-        .bind(req.from_on)
-        .bind(req.to_on)
+        .bind(req.from_at)
+        .bind(req.to_at)
+        .bind(req.hours)
         .bind(req.days)
         .bind(req.reason)
         .bind(req.actor)
@@ -5589,6 +5598,163 @@ impl Store {
             .into_iter()
             .find(|request| request.leave_no == leave_no)
             .ok_or(StoreError::LeaveNotFound { no: leave_no })
+    }
+
+    /// Overtime requests, newest day worked first.
+    ///
+    /// `base_salary` rides along because the pay is the hours times a
+    /// multiplier times that person's hourly wage, and the caller that
+    /// computes it should not have to go and fetch the roster again.
+    pub async fn overtime_requests(
+        &self,
+        include_done: bool,
+        employee_id: Option<i32>,
+        month: Option<&str>,
+    ) -> Result<Vec<OvertimeRequest>> {
+        Ok(sqlx::query(
+            "SELECT o.request_no, o.employee_id, e.emp_no, e.name, d.label AS dept_label,
+                    o.day_type, o.from_at, o.to_at, o.worked_on, o.hours, e.base_salary,
+                    o.reason, o.status, o.decided_by,
+                    COALESCE(r.name, o.decided_role) AS decided_role,
+                    o.decided_at, o.decision_note, o.created_at, o.created_by
+               FROM overtime_request o
+               JOIN employee e             ON e.id = o.employee_id
+               LEFT JOIN dimension_value d ON d.id = e.dept_id
+               LEFT JOIN role r            ON r.code = o.decided_role
+              WHERE ($1 OR o.status = 'pending')
+                AND ($2::int IS NULL OR o.employee_id = $2)
+                AND ($3::text IS NULL OR to_char(o.worked_on, 'YYYY-MM') = $3)
+              ORDER BY o.worked_on DESC, o.id DESC",
+        )
+        .bind(include_done)
+        .bind(employee_id)
+        .bind(month)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(row_to_overtime)
+        .collect())
+    }
+
+    /// Approved overtime worked between two dates, for payroll.
+    pub async fn approved_overtime(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<OvertimeRequest>> {
+        Ok(sqlx::query(
+            "SELECT o.request_no, o.employee_id, e.emp_no, e.name, d.label AS dept_label,
+                    o.day_type, o.from_at, o.to_at, o.worked_on, o.hours, e.base_salary,
+                    o.reason, o.status, o.decided_by,
+                    COALESCE(r.name, o.decided_role) AS decided_role,
+                    o.decided_at, o.decision_note, o.created_at, o.created_by
+               FROM overtime_request o
+               JOIN employee e             ON e.id = o.employee_id
+               LEFT JOIN dimension_value d ON d.id = e.dept_id
+               LEFT JOIN role r            ON r.code = o.decided_role
+              WHERE o.status = 'approved' AND o.worked_on BETWEEN $1 AND $2
+              ORDER BY o.worked_on, o.id",
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(row_to_overtime)
+        .collect())
+    }
+
+    /// Raise a pending overtime request on the employee's own behalf.
+    pub async fn create_overtime_request(
+        &self,
+        req: NewOvertimeRequest<'_>,
+    ) -> Result<OvertimeRequest> {
+        let mut tx = self.pool.begin().await?;
+        let period = req.from_at.format("%y%m").to_string();
+        let seq = next_doc_no(&mut tx, "OT", &period).await?;
+        let request_no = format!("OT{period}-{seq:03}");
+
+        sqlx::query(
+            "INSERT INTO overtime_request
+               (request_no, employee_id, day_type, from_at, to_at, hours, reason,
+                status, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8)",
+        )
+        .bind(&request_no)
+        .bind(req.employee_id)
+        .bind(req.day_type)
+        .bind(req.from_at)
+        .bind(req.to_at)
+        .bind(req.hours)
+        .bind(req.reason)
+        .bind(req.actor)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        self.overtime_requests(true, Some(req.employee_id), None)
+            .await?
+            .into_iter()
+            .find(|request| request.request_no == request_no)
+            .ok_or(StoreError::OvertimeNotFound { no: request_no })
+    }
+
+    /// Approve or reject one overtime request.
+    ///
+    /// The same two rules as leave: the requester may not decide their own,
+    /// and the status is re-checked inside the UPDATE so two managers acting
+    /// at once cannot both win.
+    pub async fn decide_overtime_request(
+        &self,
+        request_no: &str,
+        approve: bool,
+        actor: &str,
+        actor_role: &str,
+        actor_employee_id: Option<i32>,
+        note: &str,
+    ) -> Result<OvertimeRequest> {
+        let row =
+            sqlx::query("SELECT status, employee_id FROM overtime_request WHERE request_no = $1")
+                .bind(request_no)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| StoreError::OvertimeNotFound { no: request_no.to_string() })?;
+        let status: String = row.get("status");
+        if status != "pending" {
+            return Err(StoreError::OvertimeAlreadyDecided {
+                no: request_no.to_string(),
+                status,
+            });
+        }
+        if actor_employee_id.is_some() && actor_employee_id == Some(row.get("employee_id")) {
+            return Err(StoreError::LeaveDecidedByRequester { no: request_no.to_string() });
+        }
+
+        let updated = sqlx::query(
+            "UPDATE overtime_request
+                SET status = CASE WHEN $2 THEN 'approved' ELSE 'rejected' END,
+                    decided_by = $3, decided_role = $4, decided_at = now(), decision_note = $5
+              WHERE request_no = $1 AND status = 'pending'",
+        )
+        .bind(request_no)
+        .bind(approve)
+        .bind(actor)
+        .bind(actor_role)
+        .bind(note)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() == 0 {
+            return Err(StoreError::OvertimeAlreadyDecided {
+                no: request_no.to_string(),
+                status: "已處理".into(),
+            });
+        }
+
+        self.overtime_requests(true, None, None)
+            .await?
+            .into_iter()
+            .find(|o| o.request_no == request_no)
+            .ok_or_else(|| StoreError::OvertimeNotFound { no: request_no.to_string() })
     }
 
     /// Every punch of one month, optionally narrowed to one employee.
@@ -7700,8 +7866,15 @@ pub struct LeaveRequest {
     pub name: String,
     pub dept_label: Option<String>,
     pub kind: String,
+    pub from_at: NaiveDateTime,
+    pub to_at: NaiveDateTime,
     pub from_on: NaiveDate,
     pub to_on: NaiveDate,
+    /// Working hours the range is worth, and the same quantity in days.
+    /// Both are settled when the request is written: the working window they
+    /// come from has no effective date, so a later change to it must not
+    /// restate what was approved.
+    pub hours: Money,
     pub days: Money,
     pub reason: String,
     pub status: String,
@@ -7713,14 +7886,51 @@ pub struct LeaveRequest {
     pub created_by: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct OvertimeRequest {
+    pub request_no: String,
+    pub employee_id: i32,
+    pub emp_no: String,
+    pub name: String,
+    pub dept_label: Option<String>,
+    pub day_type: String,
+    pub from_at: NaiveDateTime,
+    pub to_at: NaiveDateTime,
+    pub worked_on: NaiveDate,
+    pub hours: Money,
+    pub base_salary: Money,
+    pub reason: String,
+    pub status: String,
+    pub decided_by: String,
+    pub decided_role: String,
+    pub decided_at: Option<DateTime<Utc>>,
+    pub decision_note: String,
+    pub created_at: DateTime<Utc>,
+    pub created_by: String,
+}
+
+/// An overtime request to be written. The pay is not among these fields: it
+/// is the hours times a dated multiplier, so it is computed when payroll runs
+/// rather than frozen here.
+pub struct NewOvertimeRequest<'a> {
+    pub employee_id: i32,
+    pub day_type: &'a str,
+    pub from_at: NaiveDateTime,
+    pub to_at: NaiveDateTime,
+    pub hours: Money,
+    pub reason: &'a str,
+    pub actor: &'a str,
+}
+
 /// A leave request to be written. Both `employee_id` and `actor` are
 /// resolved from `ctx.actor` by the self-service operation and never appear
 /// as API input.
 pub struct NewLeaveRequest<'a> {
     pub employee_id: i32,
     pub kind: &'a str,
-    pub from_on: NaiveDate,
-    pub to_on: NaiveDate,
+    pub from_at: NaiveDateTime,
+    pub to_at: NaiveDateTime,
+    pub hours: Money,
     pub days: Money,
     pub reason: &'a str,
     pub actor: &'a str,
@@ -8415,9 +8625,36 @@ fn row_to_leave(r: &PgRow) -> LeaveRequest {
         name: r.get("name"),
         dept_label: r.get("dept_label"),
         kind: r.get("kind"),
+        from_at: r.get("from_at"),
+        to_at: r.get("to_at"),
         from_on: r.get("from_on"),
         to_on: r.get("to_on"),
+        hours: r.get("hours"),
         days: r.get("days"),
+        reason: r.get("reason"),
+        status: r.get("status"),
+        decided_by: r.get("decided_by"),
+        decided_role: r.get("decided_role"),
+        decided_at: r.get("decided_at"),
+        decision_note: r.get("decision_note"),
+        created_at: r.get("created_at"),
+        created_by: r.get("created_by"),
+    }
+}
+
+fn row_to_overtime(r: &PgRow) -> OvertimeRequest {
+    OvertimeRequest {
+        request_no: r.get("request_no"),
+        employee_id: r.get("employee_id"),
+        emp_no: r.get("emp_no"),
+        name: r.get("name"),
+        dept_label: r.get("dept_label"),
+        day_type: r.get("day_type"),
+        from_at: r.get("from_at"),
+        to_at: r.get("to_at"),
+        worked_on: r.get("worked_on"),
+        hours: r.get("hours"),
+        base_salary: r.get("base_salary"),
         reason: r.get("reason"),
         status: r.get("status"),
         decided_by: r.get("decided_by"),

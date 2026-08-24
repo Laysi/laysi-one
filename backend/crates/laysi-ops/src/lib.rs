@@ -760,8 +760,8 @@ mod tests {
             .collect()
     }
 
-    /// 0008, 0009, 0015, 0016, 0017 and 0020 seed the HR and self-service
-    /// grants. One
+    /// 0008, 0009, 0015, 0016, 0017, 0020, 0045 and 0057 seed the HR and
+    /// self-service grants. One
     /// operation short and AI sees a switch it cannot call; one too many and
     /// there is no default MCP policy for it. The two sets must match exactly.
     #[test]
@@ -776,6 +776,7 @@ mod tests {
             include_str!("../../../migrations/0017_self_service_mcp.sql"),
             include_str!("../../../migrations/0020_expense_claim_receipt.sql"),
             include_str!("../../../migrations/0045_employees_ask_to_fix_their_own_punches.sql"),
+            include_str!("../../../migrations/0057_overtime_is_asked_for_before_it_is_paid.sql"),
         ]
         .into_iter()
         .flat_map(grant_names)
@@ -953,6 +954,7 @@ mod tests {
             include_str!("../../../migrations/0047_external_login_is_configured_on_screen.sql"),
             include_str!("../../../migrations/0052_the_business_time_zone_is_a_setting.sql"),
             include_str!("../../../migrations/0055_a_draft_voucher_can_be_thrown_away.sql"),
+            include_str!("../../../migrations/0057_overtime_is_asked_for_before_it_is_paid.sql"),
         ];
         let mut permissions = BTreeMap::new();
         for migration in migrations {

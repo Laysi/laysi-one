@@ -122,7 +122,7 @@ impl Operation for GetHrCompliance {
     }
 
     fn summary(&self) -> &'static str {
-        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算與特休餘額。完整投保級距與加班費倍數的規則不足時，明確標示為未檢查，不視為通過。"
+        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算、每月延長工時上限與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。"
     }
 
     fn input_schema(&self) -> Value {
@@ -235,6 +235,38 @@ impl Operation for GetHrCompliance {
         }
         let annual_failure_count = annual_failures.len();
 
+        // Extended working time against the monthly ceiling. Approved
+        // requests are the hours the company agreed to, so they are what the
+        // ceiling applies to; a pending one has not been agreed to yet.
+        let overtime_rs = laysi_regulation::resolve("overtime", as_of)?;
+        let overtime_ceiling = laysi_regulation::overtime_monthly_max_hours(overtime_rs)?;
+        let month = as_of.format("%Y-%m").to_string();
+        let mut overtime_hours: BTreeMap<i32, Money> = BTreeMap::new();
+        for request in ctx.store.overtime_requests(true, None, Some(&month)).await? {
+            if request.status == "approved" {
+                *overtime_hours.entry(request.employee_id).or_insert(Money::ZERO) += request.hours;
+            }
+        }
+        let mut overtime_failures = Vec::new();
+        for employee in &staff {
+            let hours = overtime_hours.get(&employee.id).copied().unwrap_or(Money::ZERO);
+            if hours > overtime_ceiling {
+                overtime_failures.push(json!({
+                    "emp_no": employee.emp_no,
+                    "name": employee.name,
+                    "approved": hours.normalize().to_string(),
+                    "ceiling": overtime_ceiling.normalize().to_string(),
+                    "difference": (hours - overtime_ceiling).normalize().to_string(),
+                    "message": format!(
+                        "{month} 已核准加班 {} 小時，比規則上限多 {} 小時",
+                        hours.normalize(),
+                        (hours - overtime_ceiling).normalize()
+                    ),
+                }));
+            }
+        }
+        let overtime_failure_count = overtime_failures.len();
+
         let mut checks = vec![
             json!({
                 "name": "最低工資",
@@ -281,6 +313,14 @@ impl Operation for GetHrCompliance {
                 "scope_note": "逐人以現行費率重算保費，確認申報的級距算得出金額。",
             }),
             json!({
+                "name": "每月延長工時上限",
+                "checked": true,
+                "passed": overtime_failures.is_empty(),
+                "rulesets": [ruleset_json(overtime_rs)],
+                "failures": overtime_failures,
+                "scope_note": format!("逐人加總 {month} 已核准的加班時數，與規則上限比較。等簽核的申請不計入。"),
+            }),
+            json!({
                 "name": "特休額度與已核准天數",
                 "checked": true,
                 "passed": annual_failures.is_empty(),
@@ -301,10 +341,10 @@ impl Operation for GetHrCompliance {
                 "本項未檢查：規則庫目前僅收錄費率、分攤方式與勞保計費上限，尚無完整的勞健保投保薪資分級表與勞退提繳工資級距。",
             ),
             unchecked_check(
-                "加班費倍數",
-                Vec::new(),
+                "國定假日與例假出勤工資",
+                vec![ruleset_json(overtime_rs)],
                 Some("overtime"),
-                "本項未檢查。出勤資料的加班費由來源差勤系統帶入，本系統不依時數自行重算。",
+                "本項未檢查：這兩種日子的工資按日加倍發給，而規則庫尚無國定假日日曆，無法判定某一天屬於哪一種。",
             ),
         ];
         checks.extend(unchecked);
@@ -314,6 +354,7 @@ impl Operation for GetHrCompliance {
         let failure_count = minimum_failure_count
             + unfiled_failure_count
             + labor_cap_failure_count
+            + overtime_failure_count
             + annual_failure_count;
         let checked_all_passed = failure_count == usize::default();
         let summary = format!(

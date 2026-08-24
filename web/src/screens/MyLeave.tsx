@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
-import { businessDate, callOp, OpFailed, trimDecimal, type MyLeaveList } from '../api/client';
+import {
+  businessDate,
+  callOp,
+  OpFailed,
+  trimDecimal,
+  wallSpan,
+  type MyLeaveList,
+} from '../api/client';
 import type { ScreenId } from '../nav';
 
 interface Props {
@@ -89,7 +96,7 @@ export function MyLeave({ onGo, reloadKey }: Props) {
                 <th>休假單</th>
                 <th>假別</th>
                 <th>期間</th>
-                <th className="align-right">天數</th>
+                <th className="align-right">時數</th>
                 <th>狀態</th>
               </tr>
             </thead>
@@ -107,10 +114,13 @@ export function MyLeave({ onGo, reloadKey }: Props) {
                     {r.kind_label}
                     {r.reason && <span className="cell-hint cell-hint--block">{r.reason}</span>}
                   </td>
-                  <td className="num cell-nowrap">
-                    {r.from_on} 至 {r.to_on}
+                  <td className="num cell-nowrap">{wallSpan(r.from_at, r.to_at)}</td>
+                  <td className="num align-right">
+                    {trimDecimal(r.hours)}
+                    <span className="cell-hint cell-hint--block num">
+                      {trimDecimal(r.days)} 日
+                    </span>
                   </td>
-                  <td className="num align-right">{trimDecimal(r.days)}</td>
                   <td>
                     <span className={statusTag(r.status)}>{r.status_label}</span>
                     {r.status !== 'pending' && r.decided_by && (

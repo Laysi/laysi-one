@@ -13,9 +13,13 @@
 //!   when payment is made (Income Tax Act art. 88), so a payment that crosses
 //!   a year boundary uses the rate of the year it was paid in.
 //!
-//! The overtime multipliers of Labor Standards Act art. 24 are not in
-//! `backend/regulation/` yet, so the amount comes in through
-//! `attendance.overtime_pay` and is never multiplied here.
+//! Overtime pay comes from approved overtime requests: the hours are what
+//! somebody asked for and a manager agreed to, and the multipliers of Labor
+//! Standards Act art. 24 are in the `overtime` ruleset, resolved on the day
+//! worked. No multiplier appears in this module. A period with no approved
+//! request falls back to `attendance.overtime_pay`, which is what an outside
+//! timekeeping system asserts; both figures are reported so the two can be
+//! compared.
 //!
 //! The payroll voucher has three parts and is created unposted:
 //!
@@ -47,6 +51,7 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
@@ -534,6 +539,33 @@ impl Operation for RunPayroll {
         let staff = ctx.store.employees(true, None).await?;
         let attendance = ctx.store.attendance(&period).await?;
 
+        // Approved overtime for the period, priced by the ruleset in force on
+        // each day worked. Hours and pay are kept apart from the imported
+        // figures rather than replacing them, so a company running both can
+        // see when the two disagree.
+        let approved_overtime = ctx.store.approved_overtime(from, to).await?;
+        let mut overtime_by_employee: BTreeMap<i32, (Money, Money)> = BTreeMap::new();
+        for o in &approved_overtime {
+            let rs = laysi_regulation::resolve("overtime", o.worked_on)?;
+            let salary = staff
+                .iter()
+                .find(|e| e.id == o.employee_id)
+                .map(|e| e.base_salary)
+                .unwrap_or(Money::ZERO);
+            let pay = match salary > Money::ZERO {
+                true => laysi_regulation::overtime_pay(rs, salary, &o.day_type, o.hours)?,
+                false => Money::ZERO,
+            };
+            let entry = overtime_by_employee.entry(o.employee_id).or_insert((Money::ZERO, Money::ZERO));
+            entry.0 += o.hours;
+            entry.1 += pay;
+        }
+        let overtime_version = approved_overtime
+            .first()
+            .map(|o| laysi_regulation::resolve("overtime", o.worked_on))
+            .transpose()?
+            .map(|rs| rs.version.clone());
+
         let mut slips: Vec<NewPayslip> = Vec::new();
         let mut warnings: Vec<Value> = Vec::new();
         let mut skipped: Vec<Value> = Vec::new();
@@ -556,11 +588,18 @@ impl Operation for RunPayroll {
                 }));
                 continue;
             }
-            let overtime = attendance
+            let imported = attendance
                 .iter()
                 .find(|a| a.employee_id == e.id)
                 .map(|a| a.overtime_pay)
                 .unwrap_or(Money::ZERO);
+            // An approved request is this system's own answer and wins. The
+            // import is the answer of a system that was not told about the
+            // approval, so it is only used when there is nothing to compare.
+            let overtime = overtime_by_employee
+                .get(&e.id)
+                .map(|(_, pay)| *pay)
+                .unwrap_or(imported);
 
             let c = compute_one(ctx, e, from, to, pay_on, overtime).await?;
             if let Some(floor) = c.below_minimum {
@@ -669,6 +708,14 @@ impl Operation for RunPayroll {
                     "rate_percent": percent(rate),
                     "note": income_note,
                     "ruleset": ruleset_json(wht_rs),
+                },
+                "overtime": {
+                    "approved_count": approved_overtime.len(),
+                    "hours": overtime_by_employee.values().map(|(h, _)| *h).sum::<Money>().normalize().to_string(),
+                    "pay": overtime_by_employee.values().map(|(_, p)| *p).sum::<Money>().to_string(),
+                    "imported_pay": attendance.iter().map(|a| a.overtime_pay).sum::<Money>().to_string(),
+                    "ruleset_version": overtime_version,
+                    "note": "加班費依核准的加班申請與加班日適用的加班規則計算；沒有核准紀錄的人改用匯入的出勤加班費。",
                 },
                 "employer_in_ledger": false,
                 "employer_note": "公司負擔的勞健保與勞退未納入本張傳票。",

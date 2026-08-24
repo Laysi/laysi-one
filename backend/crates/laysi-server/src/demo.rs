@@ -223,7 +223,7 @@ fn base64(bytes: &[u8]) -> String {
 async fn seed_company(registry: &Registry, ctx: &OpCtx, calls: &mut usize) -> anyhow::Result<()> {
     for (code, value) in [
         ("company_name", "承祐貿易有限公司"),
-        ("tax_id", "24681357"),
+        ("tax_id", "24681353"),
         ("budget_alert_percent", "85"),
         // Without these the clock-in screens work but decline to say whether
         // anyone was late, which is correct behaviour and a poor
@@ -264,7 +264,7 @@ async fn seed_company(registry: &Registry, ctx: &OpCtx, calls: &mut usize) -> an
     Ok(())
 }
 
-/// The roster, plus two movements so the transfer screen has history.
+/// The roster.
 async fn seed_people(
     registry: &Registry,
     ctx: &OpCtx,
@@ -612,25 +612,36 @@ async fn seed_self_service(
     }
 
     seed_punches(registry, store, boss, today, calls).await?;
+    seed_overtime(registry, store, boss, today, calls).await?;
 
+    // A full day, an afternoon and a two-day absence, so the screens show
+    // that the length of a request comes from its range and not from a
+    // number somebody typed.
     let leaves = [
-        ("E003", "annual", "2", 12, 2, true),
-        ("E002", "personal", "1", 5, 1, true),
-        ("E005", "sick", "1", -3, 1, false),
+        ("E003", "annual", 12, 2, "09:00:00", "18:00:00", true),
+        ("E002", "personal", 5, 1, "13:30:00", "18:00:00", true),
+        ("E005", "sick", -3, 1, "09:00:00", "18:00:00", false),
     ];
-    for (emp_no, kind, days, days_ago, span, decide) in leaves {
+    for (emp_no, kind, days_ago, span, from_time, to_time, decide) in leaves {
         let employee = store.employee(emp_no).await.context("找不到示範員工")?;
         let staff = ctx_for(store, &employee.name, "staff", Some(employee.id), today);
-        let from = plus_days(today, -days_ago);
+        // A weekend is worth no working hours, so a request landing on one
+        // would be refused. Step back to a week that holds the whole span.
+        let mut from = plus_days(today, -days_ago);
+        while [from, plus_days(from, span - 1)]
+            .iter()
+            .any(|day| matches!(day.weekday(), Weekday::Sat | Weekday::Sun))
+        {
+            from = plus_days(from, -1);
+        }
         let out = call(
             registry,
             &staff,
             "request_leave",
             json!({
                 "kind": kind,
-                "from_on": from,
-                "to_on": plus_days(from, span - 1),
-                "days": days,
+                "from_at": format!("{from}T{from_time}"),
+                "to_at": format!("{}T{to_time}", plus_days(from, span - 1)),
                 "reason": "已與主管口頭確認",
             }),
             calls,
@@ -648,6 +659,62 @@ async fn seed_self_service(
                 boss,
                 "decide_leave_request",
                 json!({ "leave_no": leave_no, "approve": true }),
+                calls,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// One approved overtime request in the period payroll will run for, and one
+/// still waiting, so the approval screen and the payslip both have something
+/// to show and the link between them is visible.
+async fn seed_overtime(
+    registry: &Registry,
+    store: &Store,
+    boss: &OpCtx,
+    today: NaiveDate,
+    calls: &mut usize,
+) -> anyhow::Result<()> {
+    // Evenings, because the demo company works 09:00 to 18:00 and overtime
+    // that overlaps normal hours is refused.
+    let requests = [
+        ("E003", back(today, 1, 15), "18:30:00", "20:30:00", true),
+        ("E002", plus_days(today, -2), "18:00:00", "20:00:00", false),
+    ];
+    for (emp_no, day, from_time, to_time, decide) in requests {
+        let mut worked_on = day;
+        while matches!(worked_on.weekday(), Weekday::Sat | Weekday::Sun) {
+            worked_on = plus_days(worked_on, -1);
+        }
+        let employee = store.employee(emp_no).await.context("找不到示範員工")?;
+        let staff = ctx_for(store, &employee.name, "staff", Some(employee.id), today);
+        let out = call(
+            registry,
+            &staff,
+            "submit_my_overtime_request",
+            json!({
+                "from_at": format!("{worked_on}T{from_time}"),
+                "to_at": format!("{worked_on}T{to_time}"),
+                "day_type": "weekday",
+                "reason": "結帳趕件",
+            }),
+            calls,
+        )
+        .await?;
+        if decide {
+            let request_no = out
+                .get("request")
+                .and_then(|r| r.get("request_no"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("加班申請沒有回傳單號"))?
+                .to_string();
+            call(
+                registry,
+                boss,
+                "decide_overtime_request",
+                json!({ "request_no": request_no, "approve": true }),
                 calls,
             )
             .await?;
