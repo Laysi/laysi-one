@@ -181,7 +181,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
             </button>
             {formError && <p className="state-note state-note--error">{formError}</p>}
             <p className="form-note">
-              代表對象與角色取自本人的登入身分。撤銷後下一次呼叫立即失效。
+              撤銷後下一次呼叫立即失效。
             </p>
           </div>
 

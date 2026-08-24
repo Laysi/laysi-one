@@ -105,7 +105,7 @@ impl Operation for GetSecurityPolicy {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀控制規則：職責分離、金額門檻、AI 禁止事項、稽核紀錄。逐條標示是否實際執行；AI 禁止事項依目前的工具開關即時計算，非固定文字。"
+        "讀控制規則：職責分離、金額門檻、AI 禁止事項、稽核紀錄。AI 禁止事項依目前的工具開關即時計算。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -140,9 +140,6 @@ impl Operation for GetSecurityPolicy {
                     short_list(&risky_on)
                 )
             },
-            // This one really does stop a call: the first step of dispatch is the
-            // mcp_tool_grant lookup.
-            "enforced": true,
             "source": "tool_grant",
             "sort_order": 10,
             "blocked_tools": blocked,
@@ -163,7 +160,6 @@ impl Operation for GetSecurityPolicy {
             "label": "金額門檻",
             "value": if thresholds.is_empty() { "未設定門檻".into() } else { thresholds.join("　") },
             "detail": "金額門檻在「角色與核准」調整。",
-            "enforced": true,
             "source": "approval_flow",
             "sort_order": 30,
         }));
@@ -174,21 +170,16 @@ impl Operation for GetSecurityPolicy {
                 "label": r.label,
                 "value": r.value,
                 "detail": r.detail,
-                "enforced": true,
                 "source": "policy",
                 "sort_order": r.sort_order,
             })
         }));
         rows.sort_by_key(|r| r["sort_order"].as_i64().unwrap_or(0));
 
-        let live = rows.iter().filter(|r| r["enforced"] == json!(true)).count();
-        let summary = format!(
-            "讀取控制規則 · {} 條，其中 {live} 條執行中 · AI 關閉 {} 個工具",
-            rows.len(),
-            blocked.len()
-        );
+        let summary =
+            format!("讀取控制規則 · {} 條 · AI 關閉 {} 個工具", rows.len(), blocked.len());
         Ok(OpOutcome::new(
-            json!({ "rules": rows, "enforced_count": live, "total": rows.len() }),
+            json!({ "rules": rows, "total": rows.len() }),
             summary,
         ))
     }

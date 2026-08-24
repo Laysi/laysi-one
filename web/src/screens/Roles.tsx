@@ -244,7 +244,7 @@ export function Roles({ onToast, reloadKey }: Props) {
 
           {tab === 'matrix' && (
           <>
-          <p className="hint">● 完整　○ 有限　— 無。點選欄位可切換，並記錄異動人員與時間。</p>
+          <p className="hint">● 完整　○ 有限　— 無。點選欄位可切換。</p>
 
           <div className="table-scroll table-scroll--sticky">
             <table className="table table--matrix">
@@ -377,7 +377,7 @@ export function Roles({ onToast, reloadKey }: Props) {
                 </div>
               ))}
             </div>
-            <p className="hint">金額門檻可隨時調整。{flow.enforcement_note}</p>
+            <p className="hint">{flow.enforcement_note}</p>
 
             {canEditFlow && (
             <div className="card form-card">
@@ -387,7 +387,7 @@ export function Roles({ onToast, reloadKey }: Props) {
                   : '新增一關'}
               </h3>
               <p className="section-note">
-                沿用既有編號就是編輯，填入新編號就是新增。
+                關卡編號沿用既有的會覆蓋該關，填新的會新增一關。
               </p>
               <div className="field-grid">
                 <label className="field">

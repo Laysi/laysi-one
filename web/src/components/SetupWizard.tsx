@@ -441,7 +441,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         <div className="card wizard-panel">
           <h3 className="section-title">第一個銀行帳戶</h3>
           <p className="section-note">
-            收款、付款與薪資都要指定資金進出帳戶，未建立帳戶前無法使用。之後可於「銀行與現金」續增。
+            收款、付款與薪資都要指定資金進出帳戶，之後可於「銀行與現金」續增。
           </p>
           {!accounts && <p className="state-note">讀取中…</p>}
           {accounts && accounts.length === 0 && (
@@ -502,7 +502,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         <div className="card wizard-panel">
           <h3 className="section-title">第一個部門</h3>
           <p className="section-note">
-            員工名冊與部門損益都要使用部門。請先建立一個常用部門（例如「業務部」），之後可於「基礎設定」續增。
+            員工名冊與部門損益都要使用部門，之後可於「基礎設定」續增。
           </p>
           {deptDimension && deptDimension.values.length > 0 && (
             <p className="section-note">
@@ -539,7 +539,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         <div className="card wizard-panel">
           <h3 className="section-title">上下班時間</h3>
           <p className="section-note">
-            填了上下班時間才判定遲到、才計加班時數；留空只記錄打卡時間。這一項只有系統管理員能改，之後可在「基礎設定」變更。
+            填了上下班時間才判定遲到、才計加班時數；留空只記錄打卡時間，之後可在「基礎設定」補上。
           </p>
           <div className="field-grid">
             <label className="field">
@@ -666,7 +666,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         <div className="card wizard-panel">
           <h3 className="section-title">負責人帳號</h3>
           <p className="section-note">
-            帳務、薪資與簽核門檻屬負責人權限，目前帳號無法查看，也不能將自己變更為負責人。
+            帳務、薪資與簽核門檻只有負責人看得到。
           </p>
 
           {ownerSecret ? (
@@ -795,8 +795,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
           <h3 className="section-title">首次設定完成</h3>
           {ownerExists === false && (
             <p className="section-note">
-              還沒有負責人帳號。帳務、薪資與簽核門檻屬負責人權限，目前帳號無法查看；
-              之後在「帳號管理」建立。
+              帳務、薪資與簽核門檻只有負責人看得到，請到「帳號管理」建立負責人帳號。
             </p>
           )}
           <p className="section-note">員工名冊、會計科目與簽核流程之後隨時可以補。</p>

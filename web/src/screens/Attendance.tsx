@@ -813,9 +813,6 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
             與年資計算（{leave.annual_leave_ruleset.effective_from} 起適用）。
             依據：{leave.annual_leave_ruleset.source_note}
           </p>
-          <p className="hint">
-            僅具簽核權限的角色可核准或駁回，且僅限狀態為「待簽核」的單據。
-          </p>
         </>
       )}
     </div>

@@ -164,11 +164,7 @@ export function Reports({ reloadKey }: Props) {
               </p>
 
               <p className="hint">
-                採間接法：自本期損益出發，逐項加回非現金科目的變動。
-              </p>
-              <p className="hint">
-                不涉及現金但跨活動別的分錄會同時出現在兩段、一正一負相抵；合計正確，
-                該兩段的組成金額會被放大。
+                不涉及現金但跨活動別的分錄會在兩段各出現一次、一正一負相抵，該兩段的組成金額偏大。
               </p>
             </section>
           </div>

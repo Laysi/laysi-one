@@ -252,7 +252,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
             {formError && <p className="state-note state-note--error">{formError}</p>}
 
             <p className="form-note">
-              申請人為{data.employee.name}（{data.employee.emp_no}）。費用科目由會計確認，不在此填寫。收據單檔上限{' '}
+              申請人為{data.employee.name}（{data.employee.emp_no}）。收據單檔上限{' '}
               {fileSizeLabel(MAX_UPLOAD_BYTES)}，送出後仍可在「我的請款」補附。
             </p>
           </div>
@@ -317,7 +317,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
       </div>
 
       <p className="hint">
-        關卡依單據金額比對簽核規則產生，金額較大的單據會多一道關卡。
+        金額較大的單據會多一道關卡。
         完成最後一關才會開立傳票。
       </p>
     </div>

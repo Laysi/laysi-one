@@ -480,7 +480,7 @@ impl Operation for ListPayslips {
                 "run": run_json(run),
                 "rows": rows,
                 "recompute_all_match": all_match,
-                "recompute_note": "各列均以當期薪資作業保存的規則版本重算一次，並與儲存值比對。",
+                "recompute_note": "各列都以當期薪資作業保存的規則版本重算一次，並與儲存值比對。",
                 "periods": runs.iter().map(|r| r.period.clone()).collect::<Vec<_>>(),
             }),
             summary,

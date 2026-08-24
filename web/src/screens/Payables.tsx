@@ -250,8 +250,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
           </div>
 
           <p className="hint">
-            送出付款單會開立一張借應付帳款、貸銀行存款的傳票，每張帳單一行，
-            貸方合併為一行。
+            送出付款單會開立一張借應付帳款、貸銀行存款的傳票，每張帳單一行。
           </p>
         </>
       )}

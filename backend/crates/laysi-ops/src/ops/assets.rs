@@ -695,7 +695,7 @@ impl Operation for RunDepreciation {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "提列某一期的折舊，產生待過帳傳票（借 6152 折舊費用／貸各資產的累計折舊科目）。同一期僅能提列一次，各項均記錄所用耐用年數與規則版本。"
+        "提列某一期的折舊，產生待過帳傳票（借 6152 折舊費用／貸各資產的累計折舊科目）。同一期僅能提列一次，各項都記錄所用耐用年數與規則版本。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RunDepreciationInput>()

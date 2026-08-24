@@ -204,12 +204,7 @@ export function Security({ onToast, reloadKey }: Props) {
             <div className="card fact-card">
               {policy.rules.map((r) => (
                 <div className="fact fact--stacked" key={r.code}>
-                  <span className="fact__key">
-                    {r.label}
-                    <span className={`tag${r.enforced ? ' tag--warn tag--static' : ' tag--pale'}`}>
-                      {r.enforced ? '執行中' : '未啟用'}
-                    </span>
-                  </span>
+                  <span className="fact__key">{r.label}</span>
                   <span className="fact__value">
                     {r.value}
                     {r.detail && <span className="fact__note">{r.detail}</span>}

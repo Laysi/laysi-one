@@ -298,6 +298,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                     value={runPeriod}
                     onChange={(e) => setRunPeriod(e.target.value)}
                   />
+                  <span className="field__hint">勞健保勞退依期末日</span>
                 </label>
                 <label className="field field--date">
                   給付日
@@ -306,6 +307,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                     value={payOn}
                     onChange={(v) => setPayOn(v)}
                   />
+                  <span className="field__hint">扣繳依給付日</span>
                 </label>
                 <span className="spacer" />
               </div>
@@ -318,17 +320,11 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
               </button>
               {alreadyRun && (
                 <p className="form-note">
-                  {runPeriod.trim()} 已計算過。已計薪的人不會再算一次，只有後來到職或
-                  當時漏算的人會算進來，另外產生一張傳票。金額記錯請到「傳票 · 總帳」
-                  開立傳票更正。
+                  {runPeriod.trim()} 已計算過。這次只算後來到職或當時漏算的人，另外產生一張傳票。
                 </p>
               )}
               <p className="form-note">
-                保費依<strong>期末日</strong>、扣繳依<strong>給付日</strong>認定。
-                兩者通常同月，跨月發薪時才分開。
-              </p>
-              <p className="form-note">
-                本操作一次決定全公司當月薪資並產生傳票，傳票狀態為<strong>待過帳</strong>。
+                產生的傳票狀態為<strong>待過帳</strong>。
               </p>
             </div>
 

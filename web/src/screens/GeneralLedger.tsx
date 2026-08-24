@@ -300,34 +300,26 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
 
             <div className="drawer__body">
               {correction.kind === null && (
-                <>
-                  <p className="section-note">
-                    兩種方式的會計意義不同，請依錯誤性質選擇：
-                  </p>
-                  <div className="choice-list">
-                    <button className="choice" onClick={() => setCorrection({ ...correction, kind: 'void' })}>
-                      <div className="choice__title">該傳票不應存在</div>
-                      <div className="choice__desc">
-                        例如重複過帳，或交易對象完全錯誤。傳票將標記為「已作廢」，
-                        理由必填，且無法復原。
-                      </div>
-                    </button>
-                    <button className="choice" onClick={() => setCorrection({ ...correction, kind: 'reverse' })}>
-                      <div className="choice__title">交易確實發生，僅金額或科目記錯</div>
-                      <div className="choice__desc">
-                        例如金額或科目誤植，但款項確實發生。系統將開立並過帳一張借貸相反的
-                        新傳票，原傳票保留不動。
-                      </div>
-                    </button>
-                  </div>
-                </>
+                <div className="choice-list">
+                  <button className="choice" onClick={() => setCorrection({ ...correction, kind: 'void' })}>
+                    <div className="choice__title">該傳票不應存在</div>
+                    <div className="choice__desc">
+                      例如重複過帳，或交易對象完全錯誤。無法復原。
+                    </div>
+                  </button>
+                  <button className="choice" onClick={() => setCorrection({ ...correction, kind: 'reverse' })}>
+                    <div className="choice__title">交易確實發生，僅金額或科目記錯</div>
+                    <div className="choice__desc">
+                      例如金額或科目誤植，款項確實發生。另開一張借貸相反的傳票並過帳，原傳票不動。
+                    </div>
+                  </button>
+                </div>
               )}
 
               {correction.kind === 'void' && (
                 <>
                   <p className="form-warn">
-                    作廢後<strong>無法復原</strong>，{correction.voucher.no} 將立即標記為「已作廢」。
-                    請確認該傳票自始不應開立後再繼續。
+                    作廢後<strong>無法復原</strong>，{correction.voucher.no} 標記為「已作廢」。
                   </p>
                   <label className="field field--full">
                     作廢理由（必填，會寫進稽核摘要）
@@ -345,9 +337,8 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
               {correction.kind === 'reverse' && (
                 <>
                   <p className="form-warn">
-                    會立刻開立並<strong>過帳</strong>一張借貸相反的新傳票，金額與 {correction.voucher.no}
-                    相同、方向相反；{correction.voucher.no} 維持已過帳且不受更動。此步驟同樣
-                    無法復原。
+                    另開一張與 {correction.voucher.no} 借貸相反的傳票並<strong>過帳</strong>，
+                    {correction.voucher.no} 維持不動。<strong>無法復原</strong>。
                   </p>
                   <label className="field field--full">
                     反向傳票日期（通常填發現錯誤的當日）

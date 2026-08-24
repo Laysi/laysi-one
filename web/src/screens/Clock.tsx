@@ -362,7 +362,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
         </div>
         <p className="section-note">
           點時間或空格可以補登或調整。
-          {fixes?.auto_approve ? '送出即寫進紀錄。' : '由人資決定後才寫進紀錄。'}
+          {fixes?.auto_approve ? '自動通過，直接寫進紀錄。' : '送出後由人資審核。'}
         </p>
         <div className="table-scroll">
           <table className="table">

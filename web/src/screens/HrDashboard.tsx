@@ -40,10 +40,6 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
   if (error) return <p className="state-note state-note--error">{error}</p>;
   if (!data) return <p className="state-note">讀取中…</p>;
 
-  const connected = data.links.filter((l) => l.implemented && !l.partial).length;
-  const partial = data.links.filter((l) => l.implemented && l.partial).length;
-  const pending = data.links.filter((l) => !l.implemented).length;
-
   return (
     <div>
       <h1 className="page-title page-title--hero">人資總覽</h1>
@@ -110,10 +106,6 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
 
         <section>
           <h2 className="section-title">人資與財務銜接狀態</h2>
-          <p className="section-note">
-            共 {data.links.length} 條：已接上 {connected} 條、部分接上 {partial} 條、尚未接上{' '}
-            {pending} 條。
-          </p>
           <div className="card fact-card">
             {data.links.map((l) => (
               <div className="fact fact--stacked" key={l.label}>
