@@ -1485,6 +1485,12 @@ ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日�
 沒有設定上下班時間時不做重疊檢查——沒有區間就沒有東西可以重疊，而加班時數不需要
 它就算得出來，這一點與休假相反。
 
+**月上限比對的是「未被駁回」的時數，不是「已核准」的時數**：等簽核的那幾小時已經
+被佔住，核准與否不是申請人決定得了的。兩邊因此共用 `committed_overtime_hours()`，
+而 `list_my_overtime_requests` 回 `month_hours_left`——畫面原本自己拿上限減去已核准
+時數，於是有單在等簽核時它宣告的可申請時數比 `submit_my_overtime_request` 願意收的
+多，按下送出才被擋。申請畫面在超過該數字時不畫送出鈕，改印還剩多少。
+
 `run_payroll` 只認核准的申請；沒有核准紀錄的加班不計入（0059 之後也沒有第二個
 來源可以沿用）。**國定假日與例假不做**：第 39 條與第 40 條
 按日加倍發給而不是按小時計費，而系統沒有國定假日日曆，判定不了某一天屬於哪一種。
@@ -1584,7 +1590,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | `list_my_payslips` | ReadOnly | `{}` | **只有本人的**薪資單 |
 | `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`，以及算時數用的 `schedule` |
 | `request_leave` | NeedsConfirm | `{ kind, from_at, to_at, reason? }` | `{ request, schedule }`，編號 `LV{西元年月}-{三碼}`；時數與天數由後端算 |
-| `list_my_overtime_requests` | ReadOnly | `{}` | 本人加班單、本月已核准時數與上限、`day_types` |
+| `list_my_overtime_requests` | ReadOnly | `{}` | 本人加班單、本月已核准時數、上限與尚可申請時數、`day_types` |
 | `submit_my_overtime_request` | NeedsConfirm | `{ from_at, to_at, day_type?, reason? }` | `{ request }`，編號 `OT{西元年月}-{三碼}`；時數為區間長度 |
 | `list_my_expense_claims` | ReadOnly | `{}` | 本人送出的報支與逐關進度 |
 | `submit_my_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, pay_method?, memo? }` | `{ claim }`，編號 `EX{西元年月}-{三碼}` |

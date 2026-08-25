@@ -1663,6 +1663,7 @@ export interface MyOvertimeList {
   month: string;
   month_approved_hours: string;
   monthly_max_hours: string;
+  month_hours_left: string;
   day_types: OvertimeDayType[];
   schedule: WorkSchedule;
   ruleset: RulesetRef;

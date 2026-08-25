@@ -53,7 +53,7 @@ use laysi_regulation::Ruleset;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES};
 use laysi_store::{
     DocumentRow, Employee, LeaveRequest, NewLeaveRequest, NewOvertimeRequest,
-    NewPunchCorrection, Payslip, ReserveDocument, SubmitExpenseClaim,
+    NewPunchCorrection, OvertimeRequest, Payslip, ReserveDocument, SubmitExpenseClaim,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -577,6 +577,14 @@ impl Operation for RequestLeave {
 
 // My overtime
 
+/// What the monthly ceiling in the overtime ruleset is measured against:
+/// everything not rejected. A pending request is already spoken for, so
+/// counting only the approved ones would offer hours the next submission
+/// refuses.
+fn committed_overtime_hours(requests: &[OvertimeRequest]) -> Money {
+    requests.iter().filter(|o| o.status != "rejected").map(|o| o.hours).sum()
+}
+
 struct ListMyOvertimeRequests;
 
 #[async_trait]
@@ -616,6 +624,7 @@ impl Operation for ListMyOvertimeRequests {
             .map(|o| o.hours)
             .sum();
         let pending = requests.iter().filter(|o| o.status == "pending").count();
+        let left = (ceiling - committed_overtime_hours(&this_month)).max(Money::ZERO);
 
         let summary = format!(
             "讀{}的加班申請 · {} 張（{pending} 張等簽）· {month} 已核准 {} 小時",
@@ -634,6 +643,7 @@ impl Operation for ListMyOvertimeRequests {
                 "month": month,
                 "month_approved_hours": approved_hours.normalize().to_string(),
                 "monthly_max_hours": ceiling.normalize().to_string(),
+                "month_hours_left": left.normalize().to_string(),
                 "day_types": laysi_regulation::overtime_day_types(rs)?
                     .iter()
                     .map(|t| json!({
@@ -737,14 +747,9 @@ impl Operation for SubmitMyOvertimeRequest {
         let employee = actor_employee(ctx).await?;
         let month = worked_on.format("%Y-%m").to_string();
         let ceiling = laysi_regulation::overtime_monthly_max_hours(rs)?;
-        let so_far: Money = ctx
-            .store
-            .overtime_requests(true, Some(employee.id), Some(&month))
-            .await?
-            .iter()
-            .filter(|o| o.status != "rejected")
-            .map(|o| o.hours)
-            .sum();
+        let so_far = committed_overtime_hours(
+            &ctx.store.overtime_requests(true, Some(employee.id), Some(&month)).await?,
+        );
         if so_far + hours > ceiling {
             return Err(OpError::BadInput(format!(
                 "{month} 的加班時數上限為 {} 小時，已送出 {} 小時，這張單再加 {} 小時就超過了",
@@ -1857,6 +1862,36 @@ impl Operation for MarkMyNoticesRead {
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
+
+    /// The monthly ceiling counts pending requests, so the hours a second
+    /// request may still claim are not the approved ones alone. Counting only
+    /// approved hours would let the screen offer hours the submission refuses.
+    #[test]
+    fn committed_overtime_hours_counts_pending_and_drops_rejected() {
+        let one = |status: &str, hours: &str| OvertimeRequest {
+            request_no: "OT2608-001".into(),
+            employee_id: 1,
+            emp_no: "E001".into(),
+            name: "王小明".into(),
+            dept_label: None,
+            day_type: "weekday".into(),
+            from_at: NaiveDate::from_ymd_opt(2026, 8, 25).unwrap().and_hms_opt(18, 0, 0).unwrap(),
+            to_at: NaiveDate::from_ymd_opt(2026, 8, 25).unwrap().and_hms_opt(20, 0, 0).unwrap(),
+            worked_on: NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
+            hours: hours.parse().unwrap(),
+            base_salary: Money::ZERO,
+            reason: String::new(),
+            status: status.into(),
+            decided_by: String::new(),
+            decided_role: String::new(),
+            decided_at: None,
+            decision_note: String::new(),
+            created_at: Utc::now(),
+            created_by: "e001@example.com".into(),
+        };
+        let rows = vec![one("approved", "3"), one("pending", "2"), one("rejected", "8")];
+        assert_eq!(committed_overtime_hours(&rows), "5".parse::<Money>().unwrap());
+    }
 
     /// Leave entitlement is read only from the ruleset payload. Replace the
     /// payload for the applicable band and the same service length must give

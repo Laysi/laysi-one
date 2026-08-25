@@ -84,8 +84,9 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
   const picked = data.day_types.find((t) => t.code === dayType);
   const dailyMax = picked ? Number(picked.max_hours) : 0;
   const overDaily = ordered && dailyMax > 0 && hours > dailyMax;
-  const monthLeft = Number(data.monthly_max_hours) - Number(data.month_approved_hours);
-  const ready = ordered && !overDaily;
+  const monthLeft = Number(data.month_hours_left);
+  const overMonthly = ordered && fromDay.slice(0, 7) === data.month && hours > monthLeft;
+  const ready = ordered && !overDaily && !overMonthly;
 
   async function submit() {
     setBusy(true);
@@ -129,7 +130,7 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
           <div className="stat-card__value num">{trimDecimal(data.month_approved_hours)}</div>
           <div className="stat-card__note num">
             小時 · 本月上限 {trimDecimal(data.monthly_max_hours)}、尚可申請{' '}
-            {round2(Math.max(0, monthLeft))}
+            {trimDecimal(data.month_hours_left)}
           </div>
         </div>
         <div className="card stat-card">
@@ -203,6 +204,12 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
               <p className="state-note state-note--error">
                 {picked.label}加班一天最多 {trimDecimal(picked.max_hours)} 小時，本次為{' '}
                 {round2(hours)} 小時。
+              </p>
+            )}
+            {overMonthly && (
+              <p className="state-note state-note--error">
+                {data.month} 尚可申請 {trimDecimal(data.month_hours_left)} 小時（含等簽核的單），
+                本次為 {round2(hours)} 小時，請縮短時段。
               </p>
             )}
             {ready && (
