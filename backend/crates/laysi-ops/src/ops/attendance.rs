@@ -689,7 +689,7 @@ impl Operation for CorrectPunch {
     }
 
     fn summary(&self) -> &'static str {
-        "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。同一時段已有紀錄時會覆蓋原值。漏打卡沒有其他更正管道。"
+        "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。同一時段已有紀錄時覆蓋原值，原時刻留在補登紀錄。漏打卡沒有其他更正管道。"
     }
 
     fn input_schema(&self) -> Value {
@@ -728,7 +728,7 @@ impl Operation for CorrectPunch {
                     actor: &ctx.actor,
                     offset: ctx.offset,
                 },
-                true,
+                Some(&ctx.actor_role),
             )
             .await?;
 
@@ -953,6 +953,10 @@ impl Operation for DecideLeaveRequest {
 // setting lets it through. Until it is approved nothing that reads the
 // working day can see it: the row lives in `punch_correction`, and only an
 // approval writes an `attendance_punch`.
+//
+// HR's own `correct_punch` writes the punch straight away, and lands a row
+// here already approved. Both directions overwrite whatever the slot held,
+// and `replaced_at` is the only place that value survives.
 
 pub(crate) fn punch_correction_status_label(status: &str) -> &'static str {
     match status {
@@ -981,6 +985,16 @@ pub(crate) fn punch_correction_json(c: &PunchCorrection, offset: FixedOffset) ->
         "decided_role": c.decided_role,
         "decided_at": c.decided_at,
         "decision_note": c.decision_note,
+        // Absent when the slot was empty: the amendment added a time rather
+        // than changing one.
+        "replaced_at": c
+            .replaced_at
+            .map(|at| business_time(at, offset).format(PUNCH_TIME).to_string()),
+        // HR entering a punch directly decides its own row, so the two names
+        // are the same actor from the same call. Comparing display names of
+        // two different people would not be safe; this is one call.
+        "hr_entered": !c.decided_by.is_empty() && c.decided_by == c.created_by,
+        "created_by": c.created_by,
         "created_at": c.created_at,
     })
 }
@@ -1276,7 +1290,7 @@ impl Operation for ListPunchCorrections {
     }
 
     fn summary(&self) -> &'static str {
-        "讀打卡補登申請：申請人、日期與時段、申請時間、理由與目前狀態。核准後才寫入打卡紀錄。"
+        "讀打卡補登紀錄：申請人、日期與時段、補登時間、被覆蓋的原時刻、理由與目前狀態。核准後才寫入打卡紀錄。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1307,7 +1321,7 @@ impl Operation for ListPunchCorrections {
         let waiting = corrections.iter().filter(|c| c.status == "submitted").count();
 
         let summary = format!(
-            "讀補登申請 · {} 張（{waiting} 張待審核）· {}",
+            "讀補登紀錄 · {} 筆（{waiting} 張待審核）· {}",
             rows.len(),
             if auto { CORRECTION_AUTO } else { CORRECTION_REVIEW }
         );

@@ -1189,7 +1189,7 @@ impl Operation for PunchClock {
                     actor: &ctx.actor,
                     offset: ctx.offset,
                 },
-                false,
+                None,
             )
             .await?;
 

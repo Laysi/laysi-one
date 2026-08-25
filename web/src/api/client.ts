@@ -1827,6 +1827,9 @@ export interface PunchCorrection {
   decided_role: string;
   decided_at: string | null;
   decision_note: string;
+  replaced_at: string | null;
+  hr_entered: boolean;
+  created_by: string;
   created_at: string;
   can_decide?: boolean;
   decide_blocked_reason?: string | null;

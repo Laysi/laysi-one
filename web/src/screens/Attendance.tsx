@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import {
   callOp,
   money,
@@ -12,6 +12,7 @@ import {
   type PunchCorrectionList,
 } from '../api/client';
 import { DateField } from '../components/DateField';
+import { PunchTrail } from '../components/PunchTrail';
 import { useCurrentUser } from '../auth';
 
 interface Props {
@@ -42,6 +43,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const [otDone, setOtDone] = useState(false);
   const [otNote, setOtNote] = useState<Record<string, string>>({});
   const [fixNoteById, setFixNoteById] = useState<Record<number, string>>({});
+  const [trailOn, setTrailOn] = useState<string | null>(null);
   const [month, setMonth] = useState<string | undefined>(undefined);
   const [picked, setPicked] = useState<string | null>(null);
   const [fixOn, setFixOn] = useState('');
@@ -112,10 +114,10 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
 
   const loadFixes = useCallback(() => {
     if (!canSeeFixes) return;
-    callOp<PunchCorrectionList>('list_punch_corrections', { include_done: fixDone })
+    callOp<PunchCorrectionList>('list_punch_corrections', { include_done: true })
       .then(setFixes)
       .catch(() => setFixes(null));
-  }, [canSeeFixes, fixDone]);
+  }, [canSeeFixes]);
 
   useEffect(loadFixes, [loadFixes, reloadKey]);
 
@@ -195,6 +197,11 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       setBusy(null);
     }
   }
+
+  const all = fixes?.corrections ?? [];
+  const fixRows = all.filter((c) => fixDone || c.status === 'submitted');
+  const dayTrail = (date: string) =>
+    all.filter((c) => c.emp_no === picked && c.punched_on === date);
 
   return (
     <div>
@@ -300,31 +307,56 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                           </tr>
                         </thead>
                         <tbody>
-                          {punches.days.map((d) => (
-                            <tr key={d.date} className={d.open ? 'row--pending' : undefined}>
-                              <td className="num cell-nowrap">
-                                {d.date.slice(5)}
-                                <span className="cell-hint">（{d.weekday}）</span>
-                              </td>
-                              <td className="num align-right">{d.in_at ?? '—'}</td>
-                              <td className="num align-right">{d.out_at ?? '—'}</td>
-                              <td className="num align-right">{d.worked_hours ?? '—'}</td>
-                              <td>
-                                {d.open && (
-                                  <span className="tag tag--warn tag--static">未打下班</span>
+                          {punches.days.map((d) => {
+                            const trail = dayTrail(d.date);
+                            return (
+                              <Fragment key={d.date}>
+                                <tr className={d.open ? 'row--pending' : undefined}>
+                                  <td className="num cell-nowrap">
+                                    {d.date.slice(5)}
+                                    <span className="cell-hint">（{d.weekday}）</span>
+                                  </td>
+                                  <td className="num align-right">{d.in_at ?? '—'}</td>
+                                  <td className="num align-right">{d.out_at ?? '—'}</td>
+                                  <td className="num align-right">{d.worked_hours ?? '—'}</td>
+                                  <td>
+                                    {d.open && (
+                                      <span className="tag tag--warn tag--static">未打下班</span>
+                                    )}
+                                    {d.late === true && (
+                                      <span className="tag tag--bad tag--static">遲到</span>
+                                    )}
+                                    {trail.length > 0 ? (
+                                      <button
+                                        className="link-cell"
+                                        onClick={() =>
+                                          setTrailOn(trailOn === d.date ? null : d.date)
+                                        }
+                                      >
+                                        {trailOn === d.date
+                                          ? '收合補登紀錄'
+                                          : `補登紀錄 ${trail.length} 筆`}
+                                      </button>
+                                    ) : (
+                                      d.manual && (
+                                        <span className="tag tag--pale tag--static">補登</span>
+                                      )
+                                    )}
+                                    {d.note && (
+                                      <span className="cell-hint cell-hint--block">{d.note}</span>
+                                    )}
+                                  </td>
+                                </tr>
+                                {trailOn === d.date && (
+                                  <tr>
+                                    <td colSpan={5}>
+                                      <PunchTrail corrections={trail} />
+                                    </td>
+                                  </tr>
                                 )}
-                                {d.late === true && (
-                                  <span className="tag tag--bad tag--static">遲到</span>
-                                )}
-                                {d.manual && (
-                                  <span className="tag tag--pale tag--static">補登</span>
-                                )}
-                                {d.note && (
-                                  <span className="cell-hint cell-hint--block">{d.note}</span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
+                              </Fragment>
+                            );
+                          })}
                           {punches.days.length === 0 && (
                             <tr>
                               <td colSpan={5} className="cell-muted">
@@ -400,7 +432,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
 
           {fixes && (
             <>
-              <h3 className="section-title section-title--spaced">補登申請</h3>
+              <h3 className="section-title section-title--spaced">補登紀錄</h3>
               <div className="toolbar">
                 <button
                   className={`chip${fixDone ? ' chip--on' : ''}`}
@@ -424,7 +456,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                     </tr>
                   </thead>
                   <tbody>
-                    {fixes.corrections.map((c) => (
+                    {fixRows.map((c) => (
                       <tr
                         key={c.id}
                         className={c.status === 'submitted' ? 'row--pending' : undefined}
@@ -435,7 +467,14 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                         </td>
                         <td className="num cell-nowrap">{c.punched_on}</td>
                         <td>{c.kind_label}</td>
-                        <td className="num align-right">{c.at}</td>
+                        <td className="num align-right">
+                          {c.at}
+                          {c.replaced_at && (
+                            <span className="cell-hint cell-hint--block num">
+                              原 {c.replaced_at}
+                            </span>
+                          )}
+                        </td>
                         <td className="cell-muted">{c.reason || '—'}</td>
                         <td>
                           {c.status !== 'submitted' ? (
@@ -447,7 +486,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                                     : 'tag tag--static'
                                 }
                               >
-                                {c.status_label}
+                                {c.hr_entered ? '人資補登' : c.status_label}
                               </span>
                               <span className="cell-hint cell-hint--block">
                                 {c.decided_by || '自動通過'}
@@ -489,10 +528,10 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                         </td>
                       </tr>
                     ))}
-                    {fixes.corrections.length === 0 && (
+                    {fixRows.length === 0 && (
                       <tr>
                         <td colSpan={6} className="cell-muted">
-                          {fixDone ? '沒有補登申請。' : '沒有待審核的補登申請。'}
+                          {fixDone ? '沒有補登紀錄。' : '沒有待審核的補登申請。'}
                         </td>
                       </tr>
                     )}

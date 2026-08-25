@@ -12,6 +12,7 @@ import {
   type PunchResult,
   type WorkSchedule,
 } from '../api/client';
+import { PunchTrail } from '../components/PunchTrail';
 import { TimeField } from '../components/TimeField';
 
 interface Props {
@@ -97,6 +98,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
   const [fixAt, setFixAt] = useState('');
   const [fixReason, setFixReason] = useState('');
   const [fixBusy, setFixBusy] = useState(false);
+  const [trailOn, setTrailOn] = useState<string | null>(null);
 
   const loadFixes = useCallback(() => {
     callOp<MyPunchCorrectionList>('list_my_punch_corrections')
@@ -112,6 +114,16 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
     for (const c of fixes?.corrections ?? []) {
       const key = `${c.punched_on}|${c.kind}`;
       if (!map.has(key)) map.set(key, c);
+    }
+    return map;
+  }, [fixes]);
+
+  const byDay = useMemo(() => {
+    const map = new Map<string, PunchCorrection[]>();
+    for (const c of fixes?.corrections ?? []) {
+      const day = map.get(c.punched_on);
+      if (day) day.push(c);
+      else map.set(c.punched_on, [c]);
     }
     return map;
   }, [fixes]);
@@ -378,6 +390,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
             <tbody>
               {data.days.map((d) => {
                 const tag = dayTag(d);
+                const trail = byDay.get(d.date) ?? [];
                 const rest = d.weekday === '六' || d.weekday === '日';
                 const blank = !d.in_at && !d.out_at;
                 return (
@@ -397,10 +410,28 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
                       <td>
                         {tag && <span className={tag.className}>{tag.label}</span>}
 
-                        {d.manual && <span className="tag tag--pale tag--static">補登</span>}
+                        {trail.length > 0 ? (
+                          <button
+                            className="link-cell"
+                            onClick={() => setTrailOn(trailOn === d.date ? null : d.date)}
+                          >
+                            {trailOn === d.date
+                              ? '收合補登紀錄'
+                              : `補登紀錄 ${trail.length} 筆`}
+                          </button>
+                        ) : (
+                          d.manual && <span className="tag tag--pale tag--static">補登</span>
+                        )}
                         {d.note && <span className="cell-hint cell-hint--block">{d.note}</span>}
                       </td>
                     </tr>
+                    {trailOn === d.date && (
+                      <tr>
+                        <td colSpan={5}>
+                          <PunchTrail corrections={trail} />
+                        </td>
+                      </tr>
+                    )}
                     {editing?.date === d.date && (
                       <tr className="row--pending">
                         <td colSpan={5}>

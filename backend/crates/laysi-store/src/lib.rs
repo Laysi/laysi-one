@@ -5478,12 +5478,23 @@ impl Store {
     ///
     /// The two orderings a UNIQUE constraint cannot express are checked here
     /// inside the transaction: a day may not have two arrivals, and a
-    /// departure may not precede the arrival it belongs to. `replace` is what
-    /// separates an employee pressing the button, which must refuse to
-    /// overwrite, from HR correcting a missed punch, which exists to.
-    pub async fn record_punch(&self, p: NewPunch<'_>, replace: bool) -> Result<AttendancePunch> {
+    /// departure may not precede the arrival it belongs to.
+    ///
+    /// `correcting` is what separates an employee pressing the button, which
+    /// must refuse to overwrite, from HR correcting a missed punch, which
+    /// exists to. It carries the corrector's role because that correction is
+    /// logged in `punch_correction` in the same transaction: the overwrite
+    /// destroys the previous time, and this is where it survives.
+    pub async fn record_punch(
+        &self,
+        p: NewPunch<'_>,
+        correcting: Option<&str>,
+    ) -> Result<AttendancePunch> {
         let mut tx = self.pool.begin().await?;
-        punch_in_tx(&mut tx, &p, replace).await?;
+        let replaced = punch_in_tx(&mut tx, &p, correcting.is_some()).await?;
+        if let Some(actor_role) = correcting {
+            log_punch_correction(&mut tx, &p, actor_role, replaced).await?;
+        }
         tx.commit().await?;
 
         let month = p.punched_on.format("%Y-%m").to_string();
@@ -5559,7 +5570,8 @@ impl Store {
                     c.punched_on, c.kind, c.punched_at, c.reason, c.status,
                     c.decided_by,
                     COALESCE(r.name, c.decided_role) AS decided_role,
-                    c.decided_at, c.decision_note, c.created_at, c.created_by
+                    c.decided_at, c.decision_note, c.replaced_at,
+                    c.created_at, c.created_by
                FROM punch_correction c
                JOIN employee e             ON e.id = c.employee_id
                LEFT JOIN dimension_value d ON d.id = e.dept_id
@@ -5587,8 +5599,9 @@ impl Store {
     ) -> Result<PunchCorrection> {
         let mut tx = self.pool.begin().await?;
 
+        let mut replaced = None;
         if auto_approve {
-            punch_in_tx(
+            replaced = punch_in_tx(
                 &mut tx,
                 &NewPunch {
                     employee_id: n.employee_id,
@@ -5608,12 +5621,12 @@ impl Store {
         let inserted = sqlx::query(
             "INSERT INTO punch_correction
                (employee_id, punched_on, kind, punched_at, reason, status,
-                decided_at, decision_note, created_by)
+                decided_at, decision_note, replaced_at, created_by)
              VALUES ($1,$2,$3,$4,$5,
                      CASE WHEN $6 THEN 'approved' ELSE 'submitted' END,
                      CASE WHEN $6 THEN now() END,
                      CASE WHEN $6 THEN '依公司設定自動通過' ELSE '' END,
-                     $7)
+                     $7, $8)
              ON CONFLICT DO NOTHING
              RETURNING id",
         )
@@ -5623,6 +5636,7 @@ impl Store {
         .bind(n.punched_at)
         .bind(n.reason)
         .bind(auto_approve)
+        .bind(replaced)
         .bind(n.actor)
         .fetch_optional(&mut *tx)
         .await?;
@@ -5678,10 +5692,11 @@ impl Store {
             return Err(StoreError::PunchCorrectionDecidedByRequester);
         }
 
+        let mut replaced = None;
         if approve {
             let kind: String = row.get("kind");
             let reason: String = row.get("reason");
-            punch_in_tx(
+            replaced = punch_in_tx(
                 &mut tx,
                 &NewPunch {
                     employee_id,
@@ -5702,7 +5717,7 @@ impl Store {
             "UPDATE punch_correction
                 SET status = CASE WHEN $2 THEN 'approved' ELSE 'rejected' END,
                     decided_by = $3, decided_role = $4, decided_at = now(),
-                    decision_note = $5
+                    decision_note = $5, replaced_at = $6
               WHERE id = $1 AND status = 'submitted'",
         )
         .bind(id)
@@ -5710,6 +5725,7 @@ impl Store {
         .bind(actor)
         .bind(actor_role)
         .bind(note)
+        .bind(replaced)
         .execute(&mut *tx)
         .await?;
 
@@ -7600,8 +7616,9 @@ pub struct NewPunch<'a> {
     pub offset: FixedOffset,
 }
 
-/// One employee's request to have a punch entered or corrected. It is not a
-/// punch: nothing that reads the working day sees it until it is approved.
+/// One amendment to a punch: an employee's request, or HR's own correction,
+/// which arrives already approved. A request is not a punch: nothing that
+/// reads the working day sees it until it is approved.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PunchCorrection {
     pub id: i32,
@@ -7619,6 +7636,9 @@ pub struct PunchCorrection {
     pub decided_role: String,
     pub decided_at: Option<DateTime<Utc>>,
     pub decision_note: String,
+    /// The punch this one overwrote. `None` means the slot was empty, so the
+    /// amendment added a time rather than changing one.
+    pub replaced_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
 }
@@ -8406,7 +8426,7 @@ async fn punch_in_tx(
 tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 p: &NewPunch<'_>,
 replace: bool,
-) -> Result<()> {
+) -> Result<Option<DateTime<Utc>>> {
     let existing = sqlx::query(
         "SELECT kind, punched_at FROM attendance_punch
           WHERE employee_id = $1 AND punched_on = $2
@@ -8425,8 +8445,9 @@ replace: bool,
     let local =
         |at: DateTime<Utc>| laysi_domain::business_time(at, p.offset).format("%H:%M:%S").to_string();
 
+    let replaced = at_of(p.kind);
     if !replace {
-        if let Some(at) = at_of(p.kind) {
+        if let Some(at) = replaced {
             return Err(StoreError::PunchAlreadyRecorded {
                 date: p.punched_on.to_string(),
                 kind: if p.kind == "in" { "上班".into() } else { "下班".into() },
@@ -8484,7 +8505,39 @@ replace: bool,
     .execute(&mut **tx)
     .await?;
 
-Ok(())
+    Ok(replaced)
+}
+
+/// Record that a punch was entered or amended by hand.
+///
+/// `punch_in_tx` overwrites the row in place, so this is the only place the
+/// time it replaced survives. HR's own correction produces a row already
+/// decided: nobody is going to review what HR just typed, but the amendment
+/// still has to be readable afterwards.
+async fn log_punch_correction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    p: &NewPunch<'_>,
+    actor_role: &str,
+    replaced: Option<DateTime<Utc>>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO punch_correction
+           (employee_id, punched_on, kind, punched_at, reason, status,
+            decided_by, decided_role, decided_at, decision_note,
+            replaced_at, created_by)
+         VALUES ($1,$2,$3,$4,$5,'approved',$6,$7,now(),'',$8,$6)",
+    )
+    .bind(p.employee_id)
+    .bind(p.punched_on)
+    .bind(p.kind)
+    .bind(p.punched_at)
+    .bind(p.note)
+    .bind(p.actor)
+    .bind(actor_role)
+    .bind(replaced)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// One item on the bulletin board, as it currently stands.
@@ -8575,6 +8628,7 @@ fn row_to_punch_correction(r: &PgRow) -> PunchCorrection {
         decided_role: r.get("decided_role"),
         decided_at: r.get("decided_at"),
         decision_note: r.get("decision_note"),
+        replaced_at: r.get("replaced_at"),
         created_at: r.get("created_at"),
         created_by: r.get("created_by"),
     }

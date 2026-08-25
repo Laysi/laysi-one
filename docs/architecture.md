@@ -1382,10 +1382,10 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 | `punch_clock` | NeedsConfirm | `{ kind, note? }` | 本人上／下班卡，時間取伺服器時鐘 |
 | `list_my_punches` | ReadOnly | `{ month? }` | 本人逐日明細（該月每一天）與月統計 |
 | `list_attendance_punches` | ReadOnly | `{ month?, emp_no? }` | 全公司逐人統計；帶 `emp_no` 另附逐日明細 |
-| `correct_punch` | NeedsConfirm | `{ emp_no, punched_on, kind, at, note? }` | 補登，`source = manual` |
+| `correct_punch` | NeedsConfirm | `{ emp_no, punched_on, kind, at, note? }` | 補登，`source = manual`；同一交易在 `punch_correction` 留一列已核准的紀錄 |
 | `submit_my_punch_correction` | NeedsConfirm | `{ punched_on, kind, at, reason? }` | 本人送出補登申請；公司設定為自動通過時同一交易寫入打卡 |
 | `list_my_punch_corrections` | ReadOnly | `{}` | 本人送出過的補登申請與狀態 |
-| `list_punch_corrections` | ReadOnly | `{ include_done? }` | 全公司補登申請，逐列回 `can_decide` |
+| `list_punch_corrections` | ReadOnly | `{ include_done? }` | 全公司補登紀錄，逐列回 `can_decide`、`replaced_at` 與 `hr_entered` |
 | `decide_punch_correction` | NeedsConfirm | `{ id, approve, note? }` | 核准即在同一交易寫入打卡 |
 
 `attendance` 一直有欄位放月統計，卻沒有任何東西產生它——0016 補上被彙總的那個
@@ -1539,6 +1539,42 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 
 **`correct_punch` 留著。** 不是每個在薪資冊上的人都有登入帳號——0028 允許一筆
 只有姓名與到職日的員工主檔——而那個人一樣會漏打卡。
+
+### 補登留下歷史紀錄（0007）
+
+`punch_in_tx` 的寫入是 `ON CONFLICT DO UPDATE`，把原本那一列的 `punched_at`、
+`source`、`note` 與 `created_at` 一起覆蓋掉。0045 之前這條路只有人資走，而
+`correct_punch` 不寫任何申請列，於是一次更正之後，被改掉的那個時刻在系統裡不存在
+於任何一個地方。勞基法第 30 條第 6 項要求出勤紀錄保存五年；一份改得動又看不出改過
+的紀錄，正是勞檢會問的那一份。這與 0004→0005 對閱讀確認的判斷是同一條：把「誰在
+哪一天做了什麼」銷毀的路要先堵起來。
+
+**每一次更正都在 `punch_correction` 留一列，兩個方向都是。** 員工送出的申請本來
+就有列；人資的 `correct_punch` 現在也寫一列，寫入當下即為 `approved`——沒有人會回頭
+審核人資剛剛打的字，但那次更動事後要讀得出來。`Store::record_punch` 的第二個參數
+因此由 `replace: bool` 改成 `correcting: Option<&str>`，帶的是更正者的角色代碼：
+會覆蓋的那一次，就是要記錄的那一次，兩件事由同一個值決定，不會各記各的。
+
+**`replaced_at` 是被覆蓋的原時刻，`NULL` 表示該時段原本是空的。** 空格補上一個時間
+與把一個時間改成另一個時間是兩件事，畫面上也只有後者要印出「原 08:05」。
+`decide_punch_correction` 與自動通過的 `submit_punch_correction` 同樣由
+`punch_in_tx` 的回傳值填它。
+
+**人資直接補登與員工申請經核准，在畫面上是兩個標籤。** 判準不是比對兩個顯示名稱
+（兩個人可以同名），而是 `decided_by = created_by` 且不為空——人資補登的那一列，
+兩個欄位是同一次呼叫裡的同一個人。ops 以 `hr_entered` 回給畫面，「出勤與休假」的
+那一段因此叫**補登紀錄**而不是補登申請。
+
+**整條鏈掛在它改的那一天上，不只掛在一張全公司的清單上。** 一格可以更正很多次，
+而看某個人某一天出勤的人不會先去翻另一張表。逐日明細的狀態欄因此把「補登」那個
+標籤換成可按的「補登紀錄 N 筆」，按下去在同一列底下展開 `components/PunchTrail`：
+由舊到新，每一筆印「原時刻 → 新時刻」、是誰以哪一種身分寫的、哪一天、事由。
+駁回與待審核的那幾筆沒有箭頭——它們沒有改動任何東西，但它們是紀錄的一部分。
+人資與員工兩邊用同一個元件，因為那是同一份紀錄。
+
+**畫面一律以 `include_done: true` 取全部，「含已決定」的 chip 在前端過濾。**
+逐日的鏈與待審核的清單讀的是同一份資料，分兩次取會讓其中一邊看到半條鏈；
+`waiting_count` 由後端數 `submitted`，與傳什麼過濾條件無關。
 
 ### 員工自助模組（0009、0015、0016、0020、0045）
 
