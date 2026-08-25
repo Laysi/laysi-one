@@ -143,7 +143,7 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
         <section>
           <h3 className="section-title">申請內容</h3>
           <div className="card form-card">
-            <div className="field-row">
+            <div className="field-row field-row--when">
               <label className="field field--date">
                 從
                 <DateField
@@ -156,13 +156,10 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
                   }}
                 />
               </label>
-              <label className="field">
-                幾點
-                <TimeField label="開始時間" value={fromTime} onChange={setFromTime} />
-              </label>
+              <TimeField label="開始時間" value={fromTime} onChange={setFromTime} />
             </div>
 
-            <div className="field-row">
+            <div className="field-row field-row--when">
               <label className="field field--date">
                 到
                 <DateField
@@ -171,10 +168,7 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
                   onChange={(v) => setToDay(v)}
                 />
               </label>
-              <label className="field">
-                幾點
-                <TimeField label="結束時間" value={toTime} onChange={setToTime} />
-              </label>
+              <TimeField label="結束時間" value={toTime} onChange={setToTime} />
             </div>
 
             <label className="field">

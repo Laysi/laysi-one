@@ -1851,6 +1851,10 @@ textarea {
   margin-bottom: var(--space-4xl);
 }
 
+.field-row--when {
+  align-items: flex-end;
+}
+
 .field {
   font-size: var(--text-sm);
   color: var(--color-ink-muted);
@@ -2765,6 +2769,10 @@ textarea {
   .field-row {
     flex-direction: column;
     gap: var(--space-xl);
+  }
+
+  .field-row--when {
+    align-items: stretch;
   }
 
   .field--date {
