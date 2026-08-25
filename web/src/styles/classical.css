@@ -427,6 +427,14 @@ textarea {
   color: var(--color-accent-darkest);
 }
 
+.tag--alarm {
+  border-color: var(--color-accent-deep);
+  background: var(--color-accent-deep);
+  color: var(--color-ink-inverse);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+}
+
 .card {
   border: var(--rule-width) solid var(--rule);
   border-radius: var(--radius-md);
@@ -1119,6 +1127,17 @@ textarea {
   background: var(--wash-accent-soft);
 }
 
+.recon--alarm {
+  border-left-color: var(--color-accent-deep);
+  color: var(--color-accent-darkest);
+  background: var(--wash-accent-bold);
+}
+
+.recon--alarm strong {
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+}
+
 .due {
   font-variant-numeric: tabular-nums;
   color: var(--color-neutral-800);
@@ -1141,8 +1160,9 @@ textarea {
   margin-top: var(--space-2xs);
 }
 
-.cell-hint--bad {
+.cell-hint--alarm {
   color: var(--color-accent-darkest);
+  font-weight: var(--weight-semibold);
 }
 
 .cell-nowrap {

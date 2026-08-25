@@ -416,7 +416,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
                       <td>
                         {tag && <span className={tag.className}>{tag.label}</span>}
                         {d.over_overtime_limit && (
-                          <span className="tag tag--bad tag--static">
+                          <span className="tag tag--alarm tag--static">
                             加班超過 {d.overtime_limit_hours} 小時
                           </span>
                         )}
@@ -504,10 +504,19 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
         )}
 
         {s.overtime_hours != null && (
-          <p className="recon recon--off">
+          <p
+            className={`recon ${
+              s.over_monthly_limit || s.over_limit_days > 0 ? 'recon--alarm' : 'recon--off'
+            }`}
+          >
             本月加班 {s.overtime_hours} 小時。
-            {s.over_monthly_limit && `已超過每月 ${s.monthly_max_hours} 小時的上限。`}
-            {s.over_limit_days > 0 && `其中 ${s.over_limit_days} 天超過單日上限。`}
+            {(s.over_monthly_limit || s.over_limit_days > 0) && (
+              <strong>
+                勞基法第 32 條：
+                {s.over_monthly_limit && `每月 ${s.monthly_max_hours} 小時的上限已超過。`}
+                {s.over_limit_days > 0 && `有 ${s.over_limit_days} 天超過單日上限。`}
+              </strong>
+            )}
             {s.overtime_note}
           </p>
         )}

@@ -275,7 +275,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                             </span>
                           )}
                           {(r.summary.over_monthly_limit || r.summary.over_limit_days > 0) && (
-                            <span className="cell-hint cell-hint--block cell-hint--bad">
+                            <span className="cell-hint cell-hint--block cell-hint--alarm">
                               {r.summary.over_monthly_limit
                                 ? `本月加班 ${r.summary.overtime_hours} 小時，超過 ${r.summary.monthly_max_hours} 小時的上限`
                                 : `${r.summary.over_limit_days} 天加班超過單日上限`}
@@ -337,7 +337,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                                       <span className="tag tag--bad tag--static">遲到</span>
                                     )}
                                     {d.over_overtime_limit && (
-                                      <span className="tag tag--bad tag--static">
+                                      <span className="tag tag--alarm tag--static">
                                         加班超過 {d.overtime_limit_hours} 小時
                                       </span>
                                     )}
