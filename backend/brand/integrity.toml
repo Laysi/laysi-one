@@ -10,7 +10,7 @@
 # cite BSL 1.1.
 
 version = 1
-signature = "c0b6d924537057cdadc9c69b8661529fce34cc0d828800fd3c319472a9b42b9e91b063365dbd866a08cd1ef916e5717e89d108f982fe489e954e83e50ed0fc08"
+signature = "86e561cf508acd7a922547633cfe1abb532b09e995d6af46e07c9259a9e8c6fd2a071c9cbf7e7c5da0ee9074a89cfaf0cfe5c909f5584e45288d5e4b07bc1e01"
 
 [[entry]]
 path = "LICENSE-BSL.txt"
@@ -18,7 +18,7 @@ blake3 = "ec4cb3574247c10f1d1d3c9fef143fd3b6300876b858d57c438a56f725c2c819"
 
 [[entry]]
 path = "backend/crates/laysi-brand/src/glyphs.rs"
-blake3 = "a3a89528a3ca9a43b122e2591aa042a57a98c86badb4c117938cb288d8aae94f"
+blake3 = "ed41ba2eb01d292f26419511566eda6bd843fde10b1d168066b6605f1555940f"
 
 [[entry]]
 path = "backend/crates/laysi-brand/src/integrity.rs"
@@ -26,4 +26,4 @@ blake3 = "56e35374a098437cfc68d08673e1eedf6ffd0fd6ebcfb19787b0b2cff42f4622"
 
 [[entry]]
 path = "backend/crates/laysi-brand/src/mark.rs"
-blake3 = "01e52bf4d7a12035f9ae26e40cb41a79407b6c74df381da3805c03a31d823244"
+blake3 = "dcc95169ebff64c1e5b880603e677b7f6b2043c290d81e60b7b1cbd1f7f1df18"

@@ -18,8 +18,8 @@
 //! for layouts with no room for the wordmark.
 
 use crate::glyphs::{
-    LETTER_L_HEIGHT, LETTER_L_PATH, LETTER_L_WIDTH, LOGO_HEIGHT, LOGO_WIDTH, LOGO_X, LOGO_Y,
-    ONE_PATH, ONE_STROKE, WORDMARK_PATH,
+    LETTER_L_HEIGHT, LETTER_L_PATH, LETTER_L_WIDTH, LETTER_L_X, LETTER_L_Y, LOGO_HEIGHT,
+    LOGO_WIDTH, LOGO_X, LOGO_Y, ONE_PATH, ONE_STROKE, WORDMARK_PATH,
 };
 use std::fmt::Write as _;
 
@@ -109,10 +109,12 @@ pub fn monogram(opts: &MarkOptions) -> String {
     open_svg(&mut svg, opts, (0.0, 0.0, BOX, BOX), opts.height, opts.height);
     let _ = write!(
         svg,
-        r#"<path fill="{color}" transform="translate({tx:.2} {ty:.2}) scale({s:.4})" d="{LETTER_L_PATH}"/>"#,
+        r#"<path fill="{color}" transform="translate({tx:.2} {ty:.2}) scale({s:.4}) translate({ox:.2} {oy:.2})" d="{LETTER_L_PATH}"/>"#,
         color = escape_attr(&opts.color),
         tx = (BOX - LETTER_L_WIDTH * s) / 2.0,
         ty = (BOX - LETTER_L_HEIGHT * s) / 2.0,
+        ox = -LETTER_L_X,
+        oy = -LETTER_L_Y,
     );
     svg.push_str("</svg>");
     svg
@@ -149,6 +151,26 @@ mod tests {
         let svg = wordmark(&opts);
         assert!(svg.contains("data-laysi-build=\"v1&quot;&gt;&lt;script&gt;\""));
         assert!(!svg.contains("<script>"));
+    }
+
+    #[test]
+    fn the_letter_lands_inside_the_monogram_box() {
+        // LETTER_L_PATH carries the artwork's own coordinates, which start
+        // near x=283. Placing it without subtracting that origin puts the
+        // letter outside the viewBox and the mark renders blank.
+        let svg = monogram(&MarkOptions::default());
+        let t = svg.split(r#"transform=""#).nth(1).unwrap().split('"').next().unwrap();
+        let n: Vec<f64> = t
+            .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let (tx, ty, scale, ox, oy) = (n[0], n[1], n[2], n[3], n[4]);
+        let x = tx + (LETTER_L_X + ox) * scale;
+        let y = ty + (LETTER_L_Y + oy) * scale;
+        assert!(x >= 0.0 && y >= 0.0, "L 的左上角落在畫布外：{x} {y}");
+        assert!(x + LETTER_L_WIDTH * scale <= 100.0, "L 超出右緣");
+        assert!(y + LETTER_L_HEIGHT * scale <= 100.0, "L 超出下緣");
     }
 
     #[test]

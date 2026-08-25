@@ -41,6 +41,11 @@ pub const ONE_CORNER: f64 = 23.18;
 pub const LETTER_L_PATH: &str = "M294.38,159V100.17h-11.1V159A28.72,28.72,0,0,0,312,187.67h23.66v-11.1H312A17.59,17.59,0,0,1,294.38,159Z";
 pub const LETTER_L_WIDTH: f64 = 52.38;
 pub const LETTER_L_HEIGHT: f64 = 87.5;
+/// Top-left of that path's bounding box. The path carries the artwork's own
+/// coordinates, so anything placing the letter in its own box has to subtract
+/// this first.
+pub const LETTER_L_X: f64 = 283.28;
+pub const LETTER_L_Y: f64 = 100.17;
 
 /// The box that contains the wordmark, in the artwork's coordinates. `S`
 /// reaches above the cap line and `A` below the baseline, so the box is not
