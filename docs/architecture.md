@@ -301,8 +301,9 @@ SQL 會讓三張表對「什麼算已過帳」與日期怎麼比各有一套定�
 不能有例外。代價是 base64 膨脹三分之一，因此設 `MAX_OBJECT_BYTES` 上限；要放更大
 的檔案得改成串流上傳，**不是把上限調大**。
 
-**沒有 OCR 引擎**，所以 `document_version.ocr_status` 的 CHECK 只收 `pending`
-與 `not_applicable`，資料庫層面就寫不進「已辨識」。接上引擎時要一起改 migration。
+**沒有 OCR**（0003）。`ocr_status` 原本由上傳當下的 MIME 型別推出 `pending` 或
+`not_applicable`，沒有任何判斷讀它，而畫面上那張統計卡與逐列標籤在每一套安裝上
+都印同一件事。要接引擎時新增欄位，不是留一個永遠停在 `pending` 的欄位等它。
 
 ### 身分證字號完整保存（0032）
 
@@ -799,7 +800,13 @@ Schema 是**一個檔案**：`backend/migrations/0001_initial.sql`，以 `sqlx::
 
 合併之後**每一次 schema 變更都是新的一份 migration**，0001 不再更動——它已經被套用過，
 改一個位元組就會讓現有的資料庫拒絕啟動。目前另有 `0002_dimension_value_rename.sql`
-（`update_dimension_value` 的 permission 與 mcp_tool_grant）。
+（`update_dimension_value` 的 permission 與 mcp_tool_grant）、`0003_drop_ocr_status.sql`、
+`0004_notice.sql`、`0005_notice_versions.sql` 與 `0006_notice_read.sql`（公告與規章）。
+
+**「已套用過的檔案一個位元組都不能改」是實測過的**：0003 曾經在套用之後被補寫一段
+`UPDATE`，於是那個安裝的伺服器每次啟動都停在
+`migration 3 was previously applied but has been modified`。修法是補跑漏掉的那段、
+再把 `_sqlx_migrations.checksum`（檔案的 SHA-384）對齊現在的檔案，不是改檔案。
 
 **新增一份 migration 要同時加進 `laysi-ops` 的 `MIGRATIONS`**：兩個種子比對測試以
 `include_str!` 讀那份清單，算出 permission 與 mcp_tool_grant 的最終狀態再與 Registry
@@ -861,6 +868,12 @@ role / permission / role_permission
 approval_rule               費用簽核流程與金額門檻（公司政策，不是法規）
 api_token                   **不存明文**，只有 BLAKE3 雜湊與前八碼
 
+-- 公告與規章（0004、0005、0006）
+notice                      身分與現行版本；kind ∈ announcement | policy。內容不在
+                            這裡，version_no 以 deferred 外鍵指向現行版本
+notice_version              每一個版本，只增不改。標題、內文、生效日與發布人
+notice_read                 一人一列，只記「看到哪一刻為止」。不是閱讀確認
+
 -- 費用、預算、文件、匯入
 voucher_line.dept_id        分錄的部門分類。以 (id, dimension_code) 複合外鍵
                             綁死只能指向「部門」那一組值
@@ -878,7 +891,7 @@ import_source / import_batch / import_issue
 user_account                登入帳號；可選擇連到 employee，密碼雜湊可為 NULL
 user_identity               以 IdP 的 provider + subject 唯一識別；email 只供稽核
 user_session                只存 token 雜湊、到期與撤銷狀態，明文不落地
-permission.op_names         95 個 Registry 操作各恰好屬於一條 permission
+permission.op_names         116 個 Registry 操作各恰好屬於一條 permission
 account.is_active           0012 新增；停用阻止新分錄，但保留歷史帳
 api_token（0013）           MCP 身分改由 api_token 雜湊驗證與資料列綁定
 voucher.reverses            0014 新增；沖銷傳票指回原傳票，UNIQUE 防止重複沖銷
@@ -997,7 +1010,7 @@ pub trait Operation: Send + Sync + 'static {
 
 pub struct Registry { /* … */ }
 impl Registry {
-    pub fn new() -> Self;             // 註冊目前全部 95 個操作
+    pub fn new() -> Self;             // 註冊目前全部 116 個操作
     pub fn get(&self, name: &str) -> Option<&dyn Operation>;
     pub fn iter(&self) -> impl Iterator<Item = &dyn Operation>;
     /// 統一入口：工具開關 → 風險 → 角色權限 → 執行 → 稽核。
@@ -1156,7 +1169,7 @@ impl Registry {
 | `get_department_pl` | ReadOnly | `{ from?, to? }` | `rows[]`（含 `unallocated`）、`total_profit`、`statement_profit`、`reconciled` |
 | `create_budget_version` | BossOnly | `{ code, label?, fiscal_year?, is_current?, note? }` | `{ version }` |
 | `set_budget` | BossOnly | `{ account_code, amount, version?, dept_code? }` | `{ budget }` |
-| `list_documents` | ReadOnly | `{ q?, limit? }` | `documents[]`、`stats`、`bucket`、`bucket_reconciled`、`ocr_note` |
+| `list_documents` | ReadOnly | `{ q?, limit? }` | `documents[]`、`stats`、`bucket`、`bucket_reconciled` |
 | `upload_document` | NeedsConfirm | `{ file_name, content_base64, kind?, link_type?, link_ref?, doc_no? }` | `{ document, new_version }` |
 | `get_document` | ReadOnly | `{ doc_no, version?, include_content? }` | `{ document, verified, checksum_recomputed }` |
 | `list_imports` | ReadOnly | `{}` | `sources[]`、`batches[]`、`csv_columns` |
@@ -1277,6 +1290,58 @@ column，因此不可能與上面的區間不一致。
 0008 的 `mcp_tool_grant` 名稱必須與上述五個人資操作模組在 Registry 裡的名稱集合
 完全相等；`laysi-ops` 以 `include_str!` 直接讀 migration 的測試守住這條契約，0058
 刪掉的三個工具在該測試裡另以一份名單扣除（`grant_names` 只讀 INSERT）。
+
+### 公告與規章（0004、0005、0006）
+
+| name | risk | input | output 重點 |
+|---|---|---|---|
+| `list_notices` | ReadOnly | `{ id?, kind?, include_ended? }` | 現行版本；帶 `id` 回該則的每一個版本 |
+| `create_notice` | NeedsConfirm | `{ kind, title, body, effective_on?, expires_on? }` | `{ notice }`，記為第 1 版 |
+| `update_notice` | NeedsConfirm | `{ id, title?, body?, effective_on?, expires_on? }` | `{ notice, revised }` |
+| `list_my_notices` | ReadOnly | `{ id? }` | 生效中的內容＋`unread`；帶 `id` 回每一個版本 |
+| `mark_my_notices_read` | NeedsConfirm | `{}` | `{ read_at }` |
+
+公告與規章是**同一張表**：欄位一模一樣，`kind` 是唯一的差別，而狀態由
+`effective_on`／`expires_on` 與當日比較現算。兩種類別對同樣三個狀態各有各的說法
+（公告：未發布／公告中／已下架；規章：未生效／施行中／已廢止），`expires_on` 當天
+仍然算數。
+
+**內容只住在 `notice_version`，而且只增不改。** 標題、內文與生效日都是某一版的事實，
+改動任一項就是新的一版；設定下架或廢止日不是內容，所以不進版（`revised` 回報是哪一種）。
+`notice.version_no` 以一條 **deferred** 外鍵指向現行版本——建立時要先寫 `notice` 才寫得了
+`notice_version`，立即檢查會擋在中間。生效日與廢止日的先後改由 ops 層驗：兩個值從此
+不在同一張表，CHECK 寫不出來。
+
+0004 原本的做法是改寫規章就刪掉 `notice_ack`。**那條路把「誰在哪一天讀過哪一段文字」
+銷毀，而那是勞資雙方事後唯一拿得出來的東西**，所以 0005 把閱讀確認整套移除，改成保存
+版本並讓任何看得到這一頁的人都讀得到舊版。`list_notices` 與 `list_my_notices` 帶 `id`
+時回的是同一份版本清單，兩邊不許有不同的答案。
+
+**未讀是「看到哪一刻為止」，不是簽核（0006）。** `notice_read` 一人一列只記時刻，沒有
+版本，人資那一面也讀不到它，所以它不是換一個名字的閱讀確認。沒有紀錄＝全部未讀：新人
+必須看得到他到職前就貼上的規章。標記掛在 `employee_id` 而不是登入帳號，因為自助操作
+一律以 `ctx.employee_id` 為鍵，MCP Token 也拿得到同一個鍵；換成 `user_account` 會讓兩個
+通道看到不同的未讀數。**替代方案「最近 N 天內發布或修訂」被否決**：那是每個人都一樣的
+數字，讀完也消不掉，而消不掉的提醒沒有人會再看第二次。
+
+權限沿用人資那兩組，不另立一條：`list_notices` 屬 `view_hr`，`create_notice` 與
+`update_notice` 屬 `manage_hr`。員工端的兩個操作定義在 `selfservice.rs`，因此受
+`no_self_service_input_can_select_another_employee` 逐字釘死——`list_my_notices` 的
+`id` 指的是一則公告，而公告不屬於任何人，是那份名單裡唯一不以人縮小範圍的欄位，因為
+裡面沒有人可以縮。`mark_my_notices_read` 與 `create_notice`／`update_notice` 的
+`mcp_tool_grant` 一律關閉。
+
+**內文是 Markdown。** `web/src/components/Markdown.tsx` 直接產生 React 元素，
+**不經 `dangerouslySetInnerHTML`**，所以結構上沒有 HTML 注入的路，也不需要另外接一個
+消毒程式庫。支援的子集是：`#`～`###` 標題、`-`／`*` 與 `1.` 清單、`>` 引述、`**粗體**`、
+`*斜體*`、`` `行內程式碼` ``、`---` 分隔線、`[文字](http(s) 網址)`，空一行分段、段內
+單一換行保留為換行。表格與圖片不支援。**這個子集寫在 `MARKDOWN_HINT` 一處**，編輯畫面
+把那一句直接印給作者看，不另外維護一段說明——說明與實作分成兩份就會漂走。連結只收
+`http`／`https`，所以 `javascript:` 進不來。
+
+**內容一律折疊。** 卡片預設只顯示標題、日期與版次，點標題展開；一頁十則規章全文攤開
+沒有人讀得下去。員工端把**還沒看過的**那幾則預設展開，因為提醒要看的東西就是要讓它
+看得到。
 
 ### 員工自助的 MCP（0017、0018）
 

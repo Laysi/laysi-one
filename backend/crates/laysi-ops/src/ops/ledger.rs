@@ -412,7 +412,7 @@ impl Operation for PostVoucher {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "將傳票過帳。自始不應存在的錯帳請作廢；交易確實發生但記載錯誤請開立反向傳票。預設關閉。"
+        "將傳票過帳。不應存在的錯帳請作廢；交易確實發生但記載錯誤請開立反向傳票。預設關閉。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<PostVoucherInput>()
@@ -455,7 +455,7 @@ impl Operation for VoidVoucher {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "作廢自始不應存在的已過帳傳票（如重複過帳或交易對象完全錯誤）；交易確實發生但金額或科目記載錯誤時，請開立反向傳票。"
+        "作廢不應存在的已過帳傳票（如重複過帳或交易對象完全錯誤）；交易確實發生但金額或科目記載錯誤時，請開立反向傳票。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<VoidVoucherInput>()
@@ -525,7 +525,7 @@ impl Operation for ReverseVoucher {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "以指定日期開立並過帳反向傳票，更正確實發生但金額或科目記載錯誤的交易；原傳票自始不應存在時，請改為作廢。"
+        "以指定日期開立並過帳反向傳票，更正確實發生但金額或科目記載錯誤的交易；原傳票不應存在時，請改為作廢。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ReverseVoucherInput>()
@@ -559,7 +559,7 @@ mod tests {
         let void_summary = VoidVoucher.summary();
         let reverse_summary = ReverseVoucher.summary();
 
-        assert!(void_summary.contains("自始不應存在"));
+        assert!(void_summary.contains("不應存在"));
         assert!(void_summary.contains("反向傳票"));
         assert!(reverse_summary.contains("確實發生"));
         assert!(reverse_summary.contains("作廢"));

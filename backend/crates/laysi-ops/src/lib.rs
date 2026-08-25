@@ -732,6 +732,7 @@ mod tests {
             ops::insurance::ops(),
             ops::payroll::ops(),
             ops::hr_compliance::ops(),
+            ops::notices::ops(),
             ops::selfservice::ops(),
             ops::settings::ops(),
             ops::security::ops(),
@@ -753,6 +754,9 @@ mod tests {
     const MIGRATIONS: &[&str] = &[
         include_str!("../../../migrations/0001_initial.sql"),
         include_str!("../../../migrations/0002_dimension_value_rename.sql"),
+        include_str!("../../../migrations/0004_notice.sql"),
+        include_str!("../../../migrations/0005_notice_versions.sql"),
+        include_str!("../../../migrations/0006_notice_read.sql"),
     ];
 
     /// The rows of one multi-row INSERT, one string per row, without the
@@ -788,6 +792,11 @@ mod tests {
             .collect()
     }
 
+    /// Switches a later migration deleted. `inserted_rows` only reads INSERT
+    /// statements, so a removal has to be named here or the check below still
+    /// expects the operation to exist.
+    const REMOVED_GRANTS: &[&str] = &["acknowledge_notice"];
+
     /// Every operation needs exactly one MCP switch, and every switch needs an
     /// operation. One short and AI sees a tool it cannot call; one too many and
     /// there is no default policy for it.
@@ -795,7 +804,10 @@ mod tests {
     fn every_registry_operation_has_an_mcp_tool_grant() {
         use std::collections::BTreeSet;
 
-        let seeded = first_column_of("mcp_tool_grant");
+        let mut seeded = first_column_of("mcp_tool_grant");
+        for removed in REMOVED_GRANTS {
+            assert!(seeded.remove(removed), "{removed} 不在任何 INSERT 裡，不必扣除");
+        }
         let registry: BTreeSet<&str> = Registry::new().iter().map(|op| op.name()).collect();
 
         assert_eq!(

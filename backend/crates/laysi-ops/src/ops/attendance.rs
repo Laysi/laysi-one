@@ -876,7 +876,7 @@ impl Operation for ListLeaveRequests {
                 "annual_leave_year": ctx.today.year(),
                 "annual_leave_ruleset": ruleset_json(rs),
                 "annual_leave_quota_stored": false,
-                "annual_leave_note": "系統只存已核准、實際休掉的天數；額度每次由年資與特休規則現算。離職員工的年資停在離職日，不會離職後繼續累加。",
+                "annual_leave_note": "已休只計已核准的天數；離職員工的年資停在離職日。",
             }),
             summary,
         ))
@@ -1309,7 +1309,7 @@ impl Operation for ListPunchCorrections {
         let summary = format!(
             "讀補登申請 · {} 張（{waiting} 張待審核）· {}",
             rows.len(),
-            if auto { "送出即通過" } else { "由人資審核" }
+            if auto { CORRECTION_AUTO } else { CORRECTION_REVIEW }
         );
         Ok(OpOutcome::new(
             json!({
@@ -1317,8 +1317,8 @@ impl Operation for ListPunchCorrections {
                 "waiting_count": waiting,
                 "auto_approve": auto,
                 "policy_note": match auto {
-                    true => "目前設定為送出即通過，只留紀錄。要改回逐張審核，請系統管理員在「基礎設定」變更補登申請。",
-                    false => "核准後會把時間寫進打卡紀錄，來源標示為補登。要改成送出即通過，請系統管理員在「基礎設定」變更補登申請。",
+                    true => "補登申請自動通過，時間直接寫進打卡紀錄，來源標示為補登。",
+                    false => "核准後時間才寫進打卡紀錄，來源標示為補登。",
                 },
             }),
             summary,

@@ -209,7 +209,7 @@ export function Tax({ reloadKey }: Props) {
             )}
           </p>
           <p className="hint">
-            稅率 {vat.ruleset.rate_percent}% 與「每 {vat.period_months} 個月一期」均取自營業稅規則
+            稅率 {vat.ruleset.rate_percent}% 與「每 {vat.period_months} 個月一期」都取自營業稅規則
             （<span className="num">{vat.ruleset.version}</span>，{vat.ruleset.effective_from} 起）
             。依據：{vat.ruleset.source_note}
           </p>

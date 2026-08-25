@@ -164,8 +164,7 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
           </div>
 
           <p className="recon">
-            簽核門檻來自{data.thresholds_source}。僅輪到的關卡可以簽核，負責人可代理任一關卡，
-            但<strong>申請人不得核准本人送出的單據</strong>。
+            簽核門檻來自{data.thresholds_source}。
           </p>
 
           <div className="toolbar">
@@ -315,8 +314,8 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
           </div>
 
           <p className="hint">
-            最後一關核准後才開立傳票（借費用科目、貸應付帳款或零用金），狀態為待過帳。
-            月底彙總匯款的單據同時列入應付帳款，以單號為帳單號碼，於「應付帳款」勾選送出付款單匯出。
+            最後一關核准後開立傳票（借費用科目、貸應付帳款或零用金），狀態為待過帳。
+            月底彙總匯款的單據同時成為應付帳單，到「應付帳款」勾選送出付款單匯款。
           </p>
 
         </>

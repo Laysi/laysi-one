@@ -75,6 +75,9 @@ export type OpName =
   | 'run_payroll'
   | 'get_hr_compliance'
   | 'list_withholding_statements'
+  | 'list_notices'
+  | 'create_notice'
+  | 'update_notice'
   | 'get_my_home'
   | 'list_my_payslips'
   | 'list_my_leave_requests'
@@ -88,6 +91,8 @@ export type OpName =
   | 'list_my_punches'
   | 'submit_my_punch_correction'
   | 'list_my_punch_corrections'
+  | 'list_my_notices'
+  | 'mark_my_notices_read'
   | 'issue_my_api_token'
   | 'list_my_api_tokens'
   | 'revoke_my_api_token'
@@ -134,10 +139,10 @@ export const OPS: readonly OpMeta[] = [
   { name: 'list_regulations', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前適用的法規版本：勞健保費率、勞退提繳、營業稅、最低工資等，含法源與生效日" },
   { name: 'draft_voucher', risk: 'needs_confirm', riskLabel: '需人確認', summary: "草擬分錄，存為待確認傳票。不會過帳，要由人員確認科目後才生效。" },
   { name: 'create_voucher', risk: 'high_risk', riskLabel: '高風險', summary: "直接開立待過帳傳票（人工記帳用）。AI 請改用草擬分錄。" },
-  { name: 'post_voucher', risk: 'high_risk', riskLabel: '高風險', summary: "將傳票過帳。自始不應存在的錯帳請作廢；交易確實發生但記載錯誤請開立反向傳票。預設關閉。" },
-  { name: 'void_voucher', risk: 'high_risk', riskLabel: '高風險', summary: "作廢自始不應存在的已過帳傳票（如重複過帳或交易對象完全錯誤）；交易確實發生但金額或科目記載錯誤時，請開立反向傳票。" },
+  { name: 'post_voucher', risk: 'high_risk', riskLabel: '高風險', summary: "將傳票過帳。不應存在的錯帳請作廢；交易確實發生但記載錯誤請開立反向傳票。預設關閉。" },
+  { name: 'void_voucher', risk: 'high_risk', riskLabel: '高風險', summary: "作廢不應存在的已過帳傳票（如重複過帳或交易對象完全錯誤）；交易確實發生但金額或科目記載錯誤時，請開立反向傳票。" },
   { name: 'discard_voucher', risk: 'needs_confirm', riskLabel: '需人確認', summary: "刪除一張還沒過帳的手工傳票。已過帳的不能刪除：不應存在的請作廢，記錯的請開立反向傳票。由應收、應付、薪資、折舊、報支或匯入產生的傳票也不能單獨刪除，請到產生它的那一頁處理。" },
-  { name: 'reverse_voucher', risk: 'high_risk', riskLabel: '高風險', summary: "以指定日期開立並過帳反向傳票，更正確實發生但金額或科目記載錯誤的交易；原傳票自始不應存在時，請改為作廢。" },
+  { name: 'reverse_voucher', risk: 'high_risk', riskLabel: '高風險', summary: "以指定日期開立並過帳反向傳票，更正確實發生但金額或科目記載錯誤的交易；原傳票不應存在時，請改為作廢。" },
   { name: 'get_ar_aging', risk: 'read_only', riskLabel: '唯讀', summary: "讀應收帳齡：未到期與各逾期區間的未收金額，並與 1131 應收帳款的總帳餘額對帳" },
   { name: 'list_receivables', risk: 'read_only', riskLabel: '唯讀', summary: "讀應收明細：客戶、發票號碼、到期日與未收金額，逾期者予以標示" },
   { name: 'create_ar_invoice', risk: 'needs_confirm', riskLabel: '需人確認', summary: "建立應收單據，並一併產生待過帳傳票（借應收帳款／貸指定收益科目＋代收營業稅）。營業稅依發生日適用的稅率拆出，零稅率與免稅填 0；傳票過帳後才列入未收合計。" },
@@ -154,7 +159,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'list_fixed_assets', risk: 'read_only', riskLabel: '唯讀', summary: "讀固定資產：成本、累計折舊、帳面淨額與耐用年數（年數查自耐用年數表，不逐筆設定），並與各資產科目與累計折舊科目的總帳餘額對帳" },
   { name: 'create_fixed_asset', risk: 'needs_confirm', riskLabel: '需人確認', summary: "登記固定資產並產生取得傳票（借資產科目與 1284 進項稅額／貸付款科目）。成本填未稅金額，營業稅依取得日適用的稅率拆出，免稅填 0；賒購則改在應付帳款開單、以 1601 為借方科目，再填入該傳票號。耐用年數查自耐用年數表，不逐筆設定。" },
   { name: 'preview_depreciation', risk: 'read_only', riskLabel: '唯讀', summary: "試算某一期的折舊：逐項列出提列金額、適用耐用年數與所依據的年數表版本。僅試算，不產生傳票。" },
-  { name: 'run_depreciation', risk: 'needs_confirm', riskLabel: '需人確認', summary: "提列某一期的折舊，產生待過帳傳票（借 6152 折舊費用／貸各資產的累計折舊科目）。同一期僅能提列一次，各項均記錄所用耐用年數與規則版本。" },
+  { name: 'run_depreciation', risk: 'needs_confirm', riskLabel: '需人確認', summary: "提列某一期的折舊，產生待過帳傳票（借 6152 折舊費用／貸各資產的累計折舊科目）。同一期僅能提列一次，各項都記錄所用耐用年數與規則版本。" },
   { name: 'list_expense_claims', risk: 'read_only', riskLabel: '唯讀', summary: "讀費用報支單：各單目前關卡、應經關卡（門檻查自公司簽核規則）、AI 建議科目與人員確認科目" },
   { name: 'submit_expense_claim', risk: 'needs_confirm', riskLabel: '需人確認', summary: "送出費用報支單（申請人送件關卡）。可帶入 AI 建議的科目與收據文件編號。不產生任何分錄。" },
   { name: 'approve_expense_claim', risk: 'high_risk', riskLabel: '高風險', summary: "簽核費用報支單目前所在的關卡。會計關卡要帶入費用科目；最後一關會產生待過帳的費用傳票（借費用科目／貸應付帳款或零用金）。付款方式為月底彙總匯款時，同時列入應付帳款，由付款單匯出。申請人不得核准本人送出的單據。" },
@@ -198,6 +203,9 @@ export const OPS: readonly OpMeta[] = [
   { name: 'run_payroll', risk: 'high_risk', riskLabel: '高風險', summary: "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。已計薪的人不會再算一次，同一期可以為後來到職或漏算的人補算，各自產生一張傳票。" },
   { name: 'get_hr_compliance', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算、每月延長工時上限與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。" },
   { name: 'list_withholding_statements', risk: 'boss_only', riskLabel: '限負責人', summary: "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限負責人；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。" },
+  { name: 'list_notices', risk: 'read_only', riskLabel: '唯讀', summary: "讀公告與規章，含生效期間與版次；帶 id 則回該則的每一個版本" },
+  { name: 'create_notice', risk: 'needs_confirm', riskLabel: '需人確認', summary: "發布一則公告或規章，記為第 1 版" },
+  { name: 'update_notice', risk: 'needs_confirm', riskLabel: '需人確認', summary: "修改公告或規章，或設定下架與廢止日期。改動標題、內容或生效日會發布新的一版，先前版本留著供查閱。" },
   { name: 'get_my_home', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前呼叫者本人的員工首頁：基本資料（不含身分證字號，銀行帳戶僅留尾碼）、年資、本月出勤、特休餘額，以及本人送出的休假與報支的目前關卡。無任何參數可指定他人。" },
   { name: 'list_my_payslips', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由登入身分決定，查不到他人的薪資單。" },
   { name: 'list_my_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人的全部休假單與本年度特休額度、已休、剩餘。額度由查詢日適用的特休規則與年資現算，不逐人設定。" },
@@ -209,8 +217,10 @@ export const OPS: readonly OpMeta[] = [
   { name: 'attach_my_expense_receipt', risk: 'needs_confirm', riskLabel: '需人確認', summary: "為本人送出的費用報支單附上收據檔案。內容以 base64 傳入，存進物件儲存並記下內容雜湊；報支單號要屬於目前登入帳號所連結的員工，別人的單號一律查無此單。已核准或已產生傳票的單不再收件。" },
   { name: 'punch_clock', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分打上班或下班卡。時間一律取伺服器當下的時刻並記錄到秒，輸入不能指定時間，也不能指定員工。一天只記一次上班與一次下班；漏打或打錯請送出補登申請，或由人資補登。" },
   { name: 'list_my_punches', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人某個月的逐日打卡明細與統計，並與匯入的出勤月統計對帳。輸入只有月份，沒有任何可指定他人的欄位。" },
-  { name: 'submit_my_punch_correction', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為送出即通過時，在同一個交易寫進打卡紀錄。" },
+  { name: 'submit_my_punch_correction', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為自動通過時，在同一個交易寫進打卡紀錄。" },
   { name: 'list_my_punch_corrections', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人送出的打卡補登申請與目前狀態。只回登入身分所連結的員工，輸入不含任何欄位。" },
+  { name: 'list_my_notices', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前公告中與施行中的公告與規章，並標出本人還沒看過的；帶 id 則回該則的每一個版本" },
+  { name: 'mark_my_notices_read', risk: 'needs_confirm', riskLabel: '需人確認', summary: "把目前的公告與規章標為本人已看過。只記時刻，不記看了哪幾則，人資讀不到這一筆。" },
   { name: 'issue_my_api_token', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入者本人的身分核發一組 MCP Token。輸入只有名稱、用途與輪替天數，不能指定代表對象與角色，兩者都取自 session，因此這組 Token 能做的事與本人完全相同。明文僅回傳一次。" },
   { name: 'list_my_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人自助核發的 MCP Token，以及本人在 MCP 上實際能呼叫的工具清單。不含負責人代發的 Token，輸入不含可指定他人的欄位。" },
   { name: 'revoke_my_api_token', risk: 'needs_confirm', riskLabel: '需人確認', summary: "撤銷一組本人自助核發的 MCP Token。只能撤銷本人核發的 Token，別人核發的一律查無此筆。撤銷後不可復原。" },
@@ -231,7 +241,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_oidc_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀外部登入設定：供應商、用戶端 ID、公司電子郵件網域、自動建立帳號的角色、是否停用帳號密碼登入與上次驗證結果。用戶端密鑰不在回應內，設定後也無法取回。" },
   { name: 'update_oidc_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "設定外部登入：供應商、用戶端 ID 與密鑰、轉址網址、公司電子郵件網域，以及網域內首次登入是否自動建立帳號。存檔後立即生效，不必重新啟動。用戶端密鑰留空表示沿用原設定。" },
   { name: 'list_approval_rules', risk: 'read_only', riskLabel: '唯讀', summary: "讀費用報支的簽核流程：關卡數、各關卡簽核角色與金額門檻。金額門檻可隨時調整。" },
-  { name: 'get_security_policy', risk: 'read_only', riskLabel: '唯讀', summary: "讀控制規則：職責分離、金額門檻、AI 禁止事項、稽核紀錄。逐條標示是否實際執行；AI 禁止事項依目前的工具開關即時計算，非固定文字。" },
+  { name: 'get_security_policy', risk: 'read_only', riskLabel: '唯讀', summary: "讀控制規則：職責分離、金額門檻、AI 禁止事項、稽核紀錄。AI 禁止事項依目前的工具開關即時計算。" },
   { name: 'list_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀 API 與 MCP Token 清單：名稱、用途範圍、代表對象、最後使用時間、輪替期限。只保留前八碼與雜湊。" },
   { name: 'issue_api_token', risk: 'admin_only', riskLabel: '限系統管理員', summary: "核發一組新的 API 或 MCP Token。明文僅出現於本次回應。" },
   { name: 'revoke_api_token', risk: 'high_risk', riskLabel: '高風險', summary: "撤銷一組 Token。撤銷後不能復原，需要時重新核發。" },
@@ -278,7 +288,7 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'get_department_pl': {"$schema":"http://json-schema.org/draft-07/schema#","description":"Resolve the period, defaulting to the fiscal year to date since budgets are annual.","properties":{"from":{"default":null,"description":"Period start (YYYY-MM-DD). Defaults to 1 January of that year.","format":"date","type":["string","null"]},"to":{"default":null,"description":"Period end (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"BudgetPeriodInput","type":"object"},
   'create_budget_version': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"code":{"description":"Short code, e.g. `V1`. Unique across every year.","type":"string"},"fiscal_year":{"default":null,"description":"Fiscal year. Defaults to the year of today.","format":"int32","type":["integer","null"]},"is_current":{"default":true,"description":"Make this the version utilisation is measured against. Only one version per year can be current; the previous one is stood down.","type":"boolean"},"label":{"default":null,"description":"Name shown on screen, e.g. 「2026 年度預算」.","type":["string","null"]},"note":{"default":null,"type":["string","null"]}},"required":["code"],"title":"CreateBudgetVersionInput","type":"object"},
   'set_budget': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"account_code":{"description":"Account code.","type":"string"},"amount":{"description":"Annual budget amount.","type":"string"},"dept_code":{"default":null,"description":"Department code. Omit for the company-wide row.","type":["string","null"]},"note":{"default":null,"type":["string","null"]},"version":{"default":null,"description":"Budget version code. Defaults to the current version.","type":["string","null"]}},"required":["account_code","amount"],"title":"SetBudgetInput","type":"object"},
-  'list_documents': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"limit":{"default":null,"description":"Maximum rows, default 50.","format":"int64","type":["integer","null"]},"q":{"default":null,"description":"Search file name, document number or linked record number.\n\nFull text is not searched: without OCR there is no text to search.","type":["string","null"]}},"title":"ListDocumentsInput","type":"object"},
+  'list_documents': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"limit":{"default":null,"description":"Maximum rows, default 50.","format":"int64","type":["integer","null"]},"q":{"default":null,"description":"Search file name, document number or linked record number. File contents are not searched.","type":["string","null"]}},"title":"ListDocumentsInput","type":"object"},
   'upload_document': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"content_base64":{"description":"File contents, base64.","type":"string"},"doc_no":{"default":null,"description":"When set, adds a revision to an existing document instead of creating a new one.","type":["string","null"]},"file_name":{"description":"File name. Non-ASCII names are kept; the object key is transliterated.","type":"string"},"kind":{"default":null,"description":"One of `receipt`, `vendor_bill`, `expense_receipt`, `bank`, `contract`, `closing`, `other`.","type":["string","null"]},"link_ref":{"default":null,"description":"Linked record number, e.g. `V2607-018`.","type":["string","null"]},"link_type":{"default":null,"description":"Kind of linked record: `voucher`, `ap_bill`, `ar_invoice`, `expense_claim`, `bank_account`, `import_batch`, `period` or `other`.","type":["string","null"]},"name":{"default":null,"description":"Display name. Defaults to the file name.","type":["string","null"]},"note":{"default":null,"type":["string","null"]}},"required":["content_base64","file_name"],"title":"UploadDocumentInput","type":"object"},
   'get_document': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"doc_no":{"description":"Document number, e.g. `D2607-001`.","type":"string"},"include_content":{"default":false,"description":"Whether to return the content as base64. Off by default, which only verifies the hash.","type":"boolean"},"version":{"default":null,"description":"Revision. Defaults to the latest.","format":"int32","type":["integer","null"]}},"required":["doc_no"],"title":"GetDocumentInput","type":"object"},
   'list_imports': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
@@ -313,6 +323,9 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'run_payroll': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"bank_account_id":{"default":null,"description":"Which bank account pays. Defaults to the first 1102 bank account.","format":"int32","type":["integer","null"]},"note":{"default":null,"type":["string","null"]},"pay_on":{"default":null,"description":"Payment date (YYYY-MM-DD). Defaults to today; withholding resolves on it.","format":"date","type":["string","null"]},"period":{"default":null,"description":"Period (YYYY-MM). Defaults to this month.","type":["string","null"]}},"title":"RunPayrollInput","type":"object"},
   'get_hr_compliance': {"$schema":"http://json-schema.org/draft-07/schema#","description":"Query as of a date. Needed by the regulation and balance operations.","properties":{"as_of":{"default":null,"description":"Cut-off date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"AsOfInput","type":"object"},
   'list_withholding_statements': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"year":{"default":null,"description":"Income year. Defaults to the current year.","format":"int32","type":["integer","null"]}},"title":"WithholdingStatementsInput","type":"object"},
+  'list_notices': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"id":{"default":null,"description":"One notice, from a previous listing. Given, the reply is that notice with every version it has ever had instead of the list.","format":"int32","type":["integer","null"]},"include_ended":{"default":false,"description":"Include the ones already taken down or repealed.","type":"boolean"},"kind":{"default":null,"description":"Restrict to one kind, `announcement` or `policy`. Omit for both.","type":["string","null"]}},"title":"ListNoticesInput","type":"object"},
+  'create_notice': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"body":{"description":"Plain text. Line breaks are kept as written.","type":"string"},"effective_on":{"default":null,"description":"Publication date, or the date a rule takes effect. Defaults to today.","format":"date","type":["string","null"]},"expires_on":{"default":null,"description":"The day it comes down or is repealed. Omit to leave it standing.","format":"date","type":["string","null"]},"kind":{"description":"`announcement` for a notice board post, `policy` for a company rule.","type":"string"},"title":{"type":"string"}},"required":["body","kind","title"],"title":"CreateNoticeInput","type":"object"},
+  'update_notice': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"body":{"default":null,"description":"Changing this publishes a new version.","type":["string","null"]},"effective_on":{"default":null,"description":"Changing this publishes a new version.","format":"date","type":["string","null"]},"expires_on":{"default":null,"description":"`YYYY-MM-DD` to set the end date, an empty string to clear it, omitted to leave it alone. This one is not part of the content, so it does not publish a version.","type":["string","null"]},"id":{"description":"Which notice, from `list_notices`.","format":"int32","type":"integer"},"title":{"default":null,"description":"Changing this publishes a new version.","type":["string","null"]}},"required":["id"],"title":"UpdateNoticeInput","type":"object"},
   'get_my_home': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_my_payslips': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_my_leave_requests': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
@@ -326,6 +339,8 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'list_my_punches': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"month":{"default":null,"description":"Month (YYYY-MM). Defaults to this month. This chooses a period, never a person: the person is always ctx.employee_id.","type":["string","null"]}},"title":"ListMyPunchesInput","type":"object"},
   'submit_my_punch_correction': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"at":{"description":"The time it was, `HH:MM:SS` or `HH:MM`. A remembered time rarely has a second, so `HH:MM` is stored as second zero.","type":"string"},"kind":{"description":"`in` for arrival, `out` for departure.","type":"string"},"punched_on":{"description":"The working day the punch belongs to.","format":"date","type":"string"},"reason":{"default":null,"description":"Why it is being asked for. Kept on the record and shown to whoever decides.","type":["string","null"]}},"required":["at","kind","punched_on"],"title":"SubmitMyPunchCorrectionInput","type":"object"},
   'list_my_punch_corrections': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
+  'list_my_notices': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"id":{"default":null,"description":"One notice, from a previous listing. Given, the reply is that notice with every version it has ever had instead of the list.","format":"int32","type":["integer","null"]}},"title":"ListMyNoticesInput","type":"object"},
+  'mark_my_notices_read': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'issue_my_api_token': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"label":{"description":"What to call this token, so it can be told apart in the list later. Named `label` rather than `name` because in this module every field called `name` has meant a person, and the test that forbids those should not have to carry an exception.","type":"string"},"rotate_days":{"default":null,"description":"Days until rotation is due. Omitted means no fixed cycle.","format":"int32","type":["integer","null"]},"scope":{"default":null,"description":"What it is for, kept as a label. It records intent and does not restrict anything; the role does that.","type":["string","null"]}},"required":["label"],"title":"IssueMyApiTokenInput","type":"object"},
   'list_my_api_tokens': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_revoked":{"default":false,"description":"Include tokens already revoked.","type":"boolean"}},"title":"ListMyApiTokensInput","type":"object"},
   'revoke_my_api_token': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"id":{"description":"Token id from `list_my_api_tokens`.","format":"int32","type":"integer"}},"required":["id"],"title":"RevokeMyApiTokenInput","type":"object"},

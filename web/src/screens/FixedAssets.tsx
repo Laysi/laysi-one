@@ -222,7 +222,7 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
                 <span className="num">{money(data.accumulated_difference)}</span>）。請先暫緩本月折舊提列。
               </>
             )}
-            {' '}本頁的總帳餘額計入全部已過帳傳票，不分日期；資產負債表結算至當天，日期在當天之後的傳票落在該表期間外。
+            {' '}總帳餘額計入全部已過帳傳票，不分日期；資產負債表只結算至當天。
             {!isZero(data.not_yet_posted) && (
               <>
                 {' '}另有 <span className="num">{money(data.not_yet_posted)}</span> 的資產，

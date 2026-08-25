@@ -1,8 +1,11 @@
 //! Employee self-service: the caller's own home, payslips, leave and claims.
 //!
-//! "Own" can only come from `ctx.employee_id`. None of these twelve
-//! operations accepts an employee number, a name, an employee_id, an actor or
-//! a claimant — authorisation rests on the shape of the input, not on `Risk`.
+//! "Own" can only come from `ctx.employee_id`. None of these operations
+//! accepts an employee number, a name, an employee_id, an actor or a
+//! claimant — authorisation rests on the shape of the input, not on `Risk`.
+//! `list_my_notices` is the one that reads nothing personal at all: the
+//! bulletin board is the same board for everyone, so it has no person in it
+//! to get wrong.
 //! The account resolved from the UI session supplies
 //! `user_account.employee_id`, and every read and write uses that primary key.
 //! An account with no linked employee record gets an explicit error rather
@@ -40,6 +43,7 @@ use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
 use crate::ops::expenses::{checked_pay_method, claim_json, required_steps};
 use crate::ops::insurance::ruleset_json;
+use crate::ops::notices::{history_outcome, missing_notice, notice_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::Engine;
@@ -74,6 +78,8 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListMyPunches),
         Box::new(SubmitMyPunchCorrection),
         Box::new(ListMyPunchCorrections),
+        Box::new(ListMyNotices),
+        Box::new(MarkMyNoticesRead),
         Box::new(IssueMyApiToken),
         Box::new(ListMyApiTokens),
         Box::new(RevokeMyApiToken),
@@ -1092,16 +1098,9 @@ impl Operation for AttachMyExpenseReceipt {
         );
         let content_type = storage::guess_content_type(file_name);
         let stored = objects.put(&key, &body, content_type, file_name).await?;
-        let ocr_status = if content_type.starts_with("application/pdf")
-            || content_type.starts_with("image/")
-        {
-            "pending"
-        } else {
-            "not_applicable"
-        };
         let document = ctx
             .store
-            .record_document_version(&slot, &stored, file_name, ocr_status, &ctx.actor)
+            .record_document_version(&slot, &stored, file_name, &ctx.actor)
             .await?;
         ctx.store
             .set_claim_document_if_absent(&claim.claim_no, slot.document_id)
@@ -1640,7 +1639,7 @@ impl Operation for SubmitMyPunchCorrection {
     }
 
     fn summary(&self) -> &'static str {
-        "以目前登入帳號所連結的員工身分送出打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為送出即通過時，在同一個交易寫進打卡紀錄。"
+        "以目前登入帳號所連結的員工身分送出打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為自動通過時，在同一個交易寫進打卡紀錄。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1751,6 +1750,109 @@ impl Operation for ListMyPunchCorrections {
     }
 }
 
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ListMyNoticesInput {
+    /// One notice, from a previous listing. Given, the reply is that notice
+    /// with every version it has ever had instead of the list.
+    #[serde(default)]
+    pub id: Option<i32>,
+}
+
+struct ListMyNotices;
+
+#[async_trait]
+impl Operation for ListMyNotices {
+    fn name(&self) -> &'static str {
+        "list_my_notices"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+
+    fn summary(&self) -> &'static str {
+        "讀目前公告中與施行中的公告與規章，並標出本人還沒看過的；帶 id 則回該則的每一個版本"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<ListMyNoticesInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: ListMyNoticesInput = parse(input)?;
+        if let Some(id) = i.id {
+            let notice = ctx.store.notice(id).await?.ok_or_else(missing_notice)?;
+            return history_outcome(
+                ctx,
+                &notice,
+                Some("修訂紀錄不分身分，看得到公告與規章的人讀到的是同一份。"),
+            )
+            .await;
+        }
+
+        let employee = actor_employee(ctx).await?;
+        let read_at = ctx.store.notices_read_at(employee.id).await?;
+        let rows = ctx.store.current_notices(ctx.today).await?;
+        // Never opened it: everything is still to be read. A first visit that
+        // claimed nothing was new would hide the rules that were posted
+        // before the person joined.
+        let unread = |n: &laysi_store::Notice| read_at.is_none_or(|at| n.published_at > at);
+        let unread_count = rows.iter().filter(|n| unread(n)).count();
+
+        let summary = format!("讀本人公告與規章 · {} 則（未讀 {unread_count} 則）", rows.len());
+        Ok(OpOutcome::new(
+            json!({
+                "notices": rows
+                    .iter()
+                    .map(|n| {
+                        let mut value = notice_json(n, ctx.today);
+                        value["unread"] = json!(unread(n));
+                        value
+                    })
+                    .collect::<Vec<_>>(),
+                "unread_count": unread_count,
+                "read_at": read_at,
+                "scope_note": "已讀標記綁定已驗證 session 的 ctx.employee_id，僅本人看得到。",
+            }),
+            summary,
+        ))
+    }
+}
+
+struct MarkMyNoticesRead;
+
+#[async_trait]
+impl Operation for MarkMyNoticesRead {
+    fn name(&self) -> &'static str {
+        "mark_my_notices_read"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "把目前的公告與規章標為本人已看過。只記時刻，不記看了哪幾則，人資讀不到這一筆。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<crate::Empty>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
+        let employee = actor_employee(ctx).await?;
+        let read_at = ctx.store.mark_notices_read(employee.id).await?;
+        Ok(OpOutcome::new(
+            json!({
+                "read_at": read_at,
+                "unread_count": 0,
+                "scope_note": "寫在 ctx.employee_id，輸入不含任何欄位。",
+            }),
+            "標記公告與規章為已看過".to_string(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1847,6 +1949,12 @@ mod tests {
                 BTreeSet::from(["punched_on", "kind", "at", "reason"]),
             ),
             ("list_my_punch_corrections", BTreeSet::new()),
+            // `id` names one notice, and a notice belongs to nobody: the
+            // board is the same board for everyone, and this operation only
+            // reads. It is the one entry here that does not narrow by person
+            // because there is no person in it to narrow by.
+            ("list_my_notices", BTreeSet::from(["id"])),
+            ("mark_my_notices_read", BTreeSet::new()),
             (
                 "issue_my_api_token",
                 BTreeSet::from(["label", "scope", "rotate_days"]),

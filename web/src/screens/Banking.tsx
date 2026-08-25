@@ -223,7 +223,7 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
           <section>
             <h2 className="section-title">系統帳候選傳票</h2>
             <p className="section-note">
-              以金額為主、日期為輔比對。入帳日期常有一至兩日落差，金額則應一致。
+              以金額為主、日期為輔比對。
             </p>
 
             {selected === null && (

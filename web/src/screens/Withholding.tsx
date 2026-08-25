@@ -157,7 +157,7 @@ export function Withholding({ onToast, reloadKey }: Props) {
           {statementError && (
             <>
               <p className="recon recon--off">
-                扣繳憑單含個人全年所得，僅負責人可檢視。每次嘗試都會留下稽核紀錄。
+                扣繳憑單含個人全年所得，僅負責人可檢視。
               </p>
               <p className="state-note state-note--error">{statementError}</p>
               <div className="toolbar">

@@ -551,8 +551,6 @@ impl Operation for ListRoles {
                 "roles": roles,
                 "permissions": perms,
                 "grants": cells,
-                "enforced": true,
-                "enforcement_note": "「限負責人」是對照表之外的額外限制。",
                 "actor_role": ctx.actor_role,
             }),
             summary,
@@ -610,11 +608,25 @@ impl Operation for SetRolePermission {
             Some("limited") => "有限",
             _ => "收回",
         };
-        let summary = format!(
-            "改權限 · {} 的「{}」設為{}（下一次呼叫立即生效）",
-            i.role_code, i.permission_code, what
-        );
-        Ok(OpOutcome::new(json!({ "cell": cell, "enforced": true }), summary))
+        let role_name = ctx
+            .store
+            .roles()
+            .await?
+            .into_iter()
+            .find(|r| r.code == i.role_code)
+            .map(|r| r.name)
+            .unwrap_or_else(|| i.role_code.clone());
+        let perm_label = ctx
+            .store
+            .permissions()
+            .await?
+            .into_iter()
+            .find(|p| p.code == i.permission_code)
+            .map(|p| p.label)
+            .unwrap_or_else(|| i.permission_code.clone());
+        let summary =
+            format!("改權限 · {role_name}的「{perm_label}」設為{what}（下一次呼叫立即生效）");
+        Ok(OpOutcome::new(json!({ "cell": cell }), summary))
     }
 }
 
@@ -1776,8 +1788,7 @@ impl Operation for ListApprovalRules {
         Ok(OpOutcome::new(
             json!({
                 "steps": steps,
-                "enforced": true,
-                "enforcement_note": "同一個關卡編號可覆寫或刪除，流程至少保留一關。",
+                "enforcement_note": "流程至少保留一關。",
             }),
             summary,
         ))

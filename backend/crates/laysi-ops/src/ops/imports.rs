@@ -560,7 +560,7 @@ impl Operation for CommitImport {
                 "batch": batch,
                 "total": total.to_string(),
                 "posted": false,
-                "note": "傳票為待過帳狀態，尚未進入總帳。如需出具報表，請先至「傳票 · 總帳」過帳。",
+                "note": "要出具報表請先到「傳票 · 總帳」過帳。",
             }),
             summary,
         ))

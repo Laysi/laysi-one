@@ -81,6 +81,18 @@ TEST_DB=laysi_function_test TEST_PORT=8091 bun scripts/function-test.ts   # 可�
 | A1 | `create_fixed_asset` | 登記成本為未稅；營業稅另拆到 1284；傳票借資產科目與進項稅額、貸付款科目；資產一定指向一張傳票 |
 | A2 | `list_fixed_assets` | 登記簿成本合計等於總帳資產科目餘額，差額為零 |
 
+## N 公告與規章
+
+| 編號 | 檢查項目 | 期望 |
+|---|---|---|
+| N1 | `create_notice` 公告 | 員工端看得到，記為第 1 版 |
+| N2 | `create_notice` 規章 | 員工端讀得到全文，且標為未讀 |
+| N3 | `update_notice` 改內容 | `revised` 為 true，進到第 2 版；帶 `id` 查得到第 1 版原文 |
+| N4 | `update_notice` 只改廢止日 | `revised` 為 false，版次不動 |
+| N5 | 員工與人資各自帶 `id` 查修訂紀錄 | 兩邊的版本清單逐字相同，每一版都記得住發布人 |
+| N6 | `mark_my_notices_read` | 未讀歸零；之後再修訂又變回未讀 |
+| N7 | `update_notice` 設廢止日 | 員工端與預設清單都不再列出；`include_ended` 才看得到，且不刪任何版本 |
+
 ## Z 收尾
 
 | 編號 | 檢查項目 | 期望 |
@@ -89,9 +101,12 @@ TEST_DB=laysi_function_test TEST_PORT=8091 bun scripts/function-test.ts   # 可�
 
 ## 其他兩層
 
-- `cargo test --workspace`：220 個單元測試。另有 9 個需要資料庫的案例，
+- `cargo test --workspace`：240 個單元測試。另有 9 個需要資料庫的案例，
   用 `TEST_DATABASE_URL=... cargo test --workspace -- --ignored` 跑。
   **改過欄位或 SQL 之後 `--workspace` 可能沿用舊的測試二進位**（時鐘偏移會讓
   cargo 誤判 Fresh），單獨跑該 crate 會通過而 workspace 仍紅——先
   `cargo clean -p <crate>` 再跑。
+- `bun scripts/markdown-test.ts`：公告與規章內文的 Markdown 子集。走的是
+  `Markdown.tsx` 產生的 React 元素樹，不需要瀏覽器，也順帶釘住兩件事——原始 HTML
+  一律當成文字，`javascript:` 不會變成連結。
 - MCP 介面：見 [mcp-test-checklist.md](mcp-test-checklist.md)。

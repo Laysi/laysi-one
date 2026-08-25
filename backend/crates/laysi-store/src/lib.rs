@@ -160,6 +160,9 @@ pub enum StoreError {
     #[error("找不到資產 {code}")]
     FixedAssetNotFound { code: String },
 
+    #[error("這則公告或規章已經不存在，請重新整理本頁。")]
+    NoticeNotFound,
+
     #[error("{no} 由本人送出，要由另一個帳號簽核。目前沒有其他可簽核的帳號，請系統管理員在「帳號管理」建立。")]
     LeaveDecidedByRequester { no: String },
 
@@ -4094,7 +4097,7 @@ impl Store {
             "SELECT d.doc_no, d.name, d.kind, d.link_type, d.link_ref, d.archived,
                     d.note, d.created_at, d.created_by,
                     v.version_no, v.object_key, v.file_name, v.byte_size, v.content_type,
-                    v.checksum, v.ocr_status, v.uploaded_at, v.uploaded_by,
+                    v.checksum, v.uploaded_at, v.uploaded_by,
                     n.versions, n.total_bytes
                FROM document d
                JOIN LATERAL (SELECT * FROM document_version dv
@@ -4418,7 +4421,7 @@ impl Store {
             "SELECT d.doc_no, d.name, d.kind, d.link_type, d.link_ref, d.archived,
                     d.note, d.created_at, d.created_by,
                     v.version_no, v.object_key, v.file_name, v.byte_size, v.content_type,
-                    v.checksum, v.ocr_status, v.uploaded_at, v.uploaded_by,
+                    v.checksum, v.uploaded_at, v.uploaded_by,
                     n.versions, n.total_bytes
                FROM document d
                JOIN LATERAL (SELECT * FROM document_version dv
@@ -4463,7 +4466,7 @@ impl Store {
             "SELECT d.doc_no, d.name, d.kind, d.link_type, d.link_ref, d.archived,
                     d.note, d.created_at, d.created_by,
                     v.version_no, v.object_key, v.file_name, v.byte_size, v.content_type,
-                    v.checksum, v.ocr_status, v.uploaded_at, v.uploaded_by,
+                    v.checksum, v.uploaded_at, v.uploaded_by,
                     n.versions, n.total_bytes
                FROM document d
                JOIN document_version v ON v.document_id = d.id
@@ -4550,14 +4553,13 @@ impl Store {
         slot: &DocumentSlot,
         object: &storage::StoredObject,
         file_name: &str,
-        ocr_status: &str,
         actor: &str,
     ) -> Result<DocumentRow> {
         sqlx::query(
             "INSERT INTO document_version
                (document_id, version_no, object_key, file_name, byte_size, content_type,
-                checksum, ocr_status, uploaded_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                checksum, uploaded_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(slot.document_id)
         .bind(slot.version_no)
@@ -4566,15 +4568,13 @@ impl Store {
         .bind(object.byte_size)
         .bind(&object.content_type)
         .bind(&object.checksum)
-        .bind(ocr_status)
         .bind(actor)
         .execute(&self.pool)
         .await?;
         self.document_version(&slot.doc_no, Some(slot.version_no)).await
     }
 
-    /// Document statistics: documents, revisions, bytes, and how many await
-    /// OCR.
+    /// Document statistics: documents, revisions and bytes.
     ///
     /// The byte count is the database side's sum; the bucket side is measured
     /// separately by `ObjectStore::usage`. Reporting both makes a mismatch
@@ -4585,7 +4585,6 @@ impl Store {
                (SELECT COUNT(*) FROM document)                                    AS documents,
                (SELECT COUNT(*) FROM document_version)                            AS versions,
                (SELECT COALESCE(SUM(byte_size),0)::bigint FROM document_version)   AS bytes,
-               (SELECT COUNT(*) FROM document_version WHERE ocr_status = 'pending') AS ocr_pending,
                (SELECT COUNT(*) FROM document WHERE archived)                      AS archived,
                (SELECT COUNT(*) FROM voucher v
                  WHERE v.status IN ('pending','posted')
@@ -4599,7 +4598,6 @@ impl Store {
             documents: r.get("documents"),
             versions: r.get("versions"),
             bytes: r.get("bytes"),
-            ocr_pending: r.get("ocr_pending"),
             archived: r.get("archived"),
             vouchers_without_doc: r.get("vouchers_without_doc"),
         })
@@ -6046,6 +6044,226 @@ impl Store {
             .await?
             .ok_or_else(|| StoreError::NobodyToPay { period: req.period.to_string() })
     }
+
+    // Bulletin board: announcements and company rules.
+
+    /// Every notice, newest first, carrying its current version.
+    ///
+    /// `versions` counts how many revisions exist; the bodies of the older
+    /// ones are only read by [`Store::notice_history`], so a list of twenty
+    /// long rules does not ship twenty times its own length.
+    pub async fn notices(
+        &self,
+        kind: Option<&str>,
+        include_ended: bool,
+        today: NaiveDate,
+    ) -> Result<Vec<Notice>> {
+        Ok(sqlx::query(
+            "SELECT n.id, n.kind, n.expires_on, n.version_no,
+                    v.title, v.body, v.effective_on, v.published_at, v.published_by,
+                    (SELECT count(*) FROM notice_version a WHERE a.notice_id = n.id) AS versions
+               FROM notice n
+               JOIN notice_version v
+                 ON v.notice_id = n.id AND v.version_no = n.version_no
+              WHERE ($1::text IS NULL OR n.kind = $1)
+                AND ($2 OR n.expires_on IS NULL OR n.expires_on >= $3)
+              ORDER BY v.effective_on DESC, n.id DESC",
+        )
+        .bind(kind)
+        .bind(include_ended)
+        .bind(today)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(row_to_notice)
+        .collect())
+    }
+
+    /// When this employee last opened the board, if ever.
+    pub async fn notices_read_at(&self, employee_id: i32) -> Result<Option<DateTime<Utc>>> {
+        Ok(sqlx::query("SELECT read_at FROM notice_read WHERE employee_id = $1")
+            .bind(employee_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|r| r.get("read_at")))
+    }
+
+    /// Move the mark to now. One row per person: this records what they have
+    /// seen, not what they agreed to, so there is nothing here per notice.
+    pub async fn mark_notices_read(&self, employee_id: i32) -> Result<DateTime<Utc>> {
+        Ok(sqlx::query(
+            "INSERT INTO notice_read (employee_id) VALUES ($1)
+             ON CONFLICT (employee_id) DO UPDATE SET read_at = now()
+             RETURNING read_at",
+        )
+        .bind(employee_id)
+        .fetch_one(&self.pool)
+        .await?
+        .get("read_at"))
+    }
+
+    /// The notices in force today: published on or before today and not yet
+    /// taken down. Announcements first, then rules.
+    pub async fn current_notices(&self, today: NaiveDate) -> Result<Vec<Notice>> {
+        Ok(sqlx::query(
+            "SELECT n.id, n.kind, n.expires_on, n.version_no,
+                    v.title, v.body, v.effective_on, v.published_at, v.published_by,
+                    (SELECT count(*) FROM notice_version a WHERE a.notice_id = n.id) AS versions
+               FROM notice n
+               JOIN notice_version v
+                 ON v.notice_id = n.id AND v.version_no = n.version_no
+              WHERE v.effective_on <= $1
+                AND (n.expires_on IS NULL OR n.expires_on >= $1)
+              ORDER BY n.kind, v.effective_on DESC, n.id DESC",
+        )
+        .bind(today)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(row_to_notice)
+        .collect())
+    }
+
+    pub async fn notice(&self, id: i32) -> Result<Option<Notice>> {
+        Ok(sqlx::query(
+            "SELECT n.id, n.kind, n.expires_on, n.version_no,
+                    v.title, v.body, v.effective_on, v.published_at, v.published_by,
+                    (SELECT count(*) FROM notice_version a WHERE a.notice_id = n.id) AS versions
+               FROM notice n
+               JOIN notice_version v
+                 ON v.notice_id = n.id AND v.version_no = n.version_no
+              WHERE n.id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(row_to_notice))
+    }
+
+    /// Every version of one notice, newest first. This is what anyone who can
+    /// see the board reads to find out what the rule said last month.
+    pub async fn notice_history(&self, id: i32) -> Result<Vec<NoticeVersion>> {
+        Ok(sqlx::query(
+            "SELECT notice_id, version_no, title, body, effective_on,
+                    published_at, published_by
+               FROM notice_version
+              WHERE notice_id = $1
+              ORDER BY version_no DESC",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| NoticeVersion {
+            notice_id: r.get("notice_id"),
+            version_no: r.get("version_no"),
+            title: r.get("title"),
+            body: r.get("body"),
+            effective_on: r.get("effective_on"),
+            published_at: r.get("published_at"),
+            published_by: r.get("published_by"),
+        })
+        .collect())
+    }
+
+    pub async fn create_notice(&self, n: NewNotice<'_>) -> Result<Notice> {
+        let mut tx = self.pool.begin().await?;
+
+        let id: i32 = sqlx::query(
+            "INSERT INTO notice (kind, expires_on, version_no) VALUES ($1,$2,1)
+             RETURNING id",
+        )
+        .bind(n.kind)
+        .bind(n.expires_on)
+        .fetch_one(&mut *tx)
+        .await?
+        .get("id");
+
+        sqlx::query(
+            "INSERT INTO notice_version
+                (notice_id, version_no, title, body, effective_on, published_by)
+             VALUES ($1,1,$2,$3,$4,$5)",
+        )
+        .bind(id)
+        .bind(n.title)
+        .bind(n.body)
+        .bind(n.effective_on)
+        .bind(n.actor)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        self.notice(id).await?.ok_or(StoreError::NoticeNotFound)
+    }
+
+    /// Apply the edit and report which version is now current.
+    ///
+    /// Changing the title, the body or the effective date publishes a new
+    /// version rather than overwriting the old one — that is the whole point
+    /// of the table. Setting or clearing the end date is not a change of
+    /// content, so it leaves the version alone.
+    pub async fn update_notice(&self, u: NoticeEdit<'_>) -> Result<(Notice, bool)> {
+        let mut tx = self.pool.begin().await?;
+
+        let current = sqlx::query(
+            "SELECT n.version_no, v.title, v.body, v.effective_on
+               FROM notice n
+               JOIN notice_version v
+                 ON v.notice_id = n.id AND v.version_no = n.version_no
+              WHERE n.id = $1
+                FOR UPDATE OF n",
+        )
+        .bind(u.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::NoticeNotFound)?;
+
+        let version_no: i32 = current.get("version_no");
+        let title: String = current.get("title");
+        let body: String = current.get("body");
+        let effective_on: NaiveDate = current.get("effective_on");
+
+        let next_title = u.title.unwrap_or(&title);
+        let next_body = u.body.unwrap_or(&body);
+        let next_effective = u.effective_on.unwrap_or(effective_on);
+        let revised =
+            next_title != title || next_body != body || next_effective != effective_on;
+
+        if revised {
+            sqlx::query(
+                "INSERT INTO notice_version
+                    (notice_id, version_no, title, body, effective_on, published_by)
+                 VALUES ($1,$2,$3,$4,$5,$6)",
+            )
+            .bind(u.id)
+            .bind(version_no + 1)
+            .bind(next_title)
+            .bind(next_body)
+            .bind(next_effective)
+            .bind(u.actor)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            "UPDATE notice
+                SET version_no = $2,
+                    expires_on = CASE WHEN $3 THEN NULL
+                                      ELSE COALESCE($4, expires_on) END
+              WHERE id = $1",
+        )
+        .bind(u.id)
+        .bind(if revised { version_no + 1 } else { version_no })
+        .bind(matches!(u.expires_on, Some(None)))
+        .bind(u.expires_on.flatten())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        self.notice(u.id).await?.ok_or(StoreError::NoticeNotFound).map(|n| (n, revised))
+    }
+
 }
 
 // Return types
@@ -7111,9 +7329,6 @@ pub struct DocumentRow {
     pub content_type: String,
     /// BLAKE3 computed at upload time, recomputed and compared on retrieval.
     pub checksum: String,
-    /// `pending` (not recognised; the system has no OCR engine) or
-    /// `not_applicable`.
-    pub ocr_status: String,
     pub uploaded_at: DateTime<Utc>,
     pub uploaded_by: String,
 }
@@ -7147,7 +7362,6 @@ pub struct DocumentStats {
     /// Bytes registered on the database side. The bucket side is measured
     /// separately by `ObjectStore::usage`.
     pub bytes: i64,
-    pub ocr_pending: i64,
     pub archived: i64,
     /// Saved or posted vouchers with no document attached.
     pub vouchers_without_doc: i64,
@@ -8273,6 +8487,78 @@ replace: bool,
 Ok(())
 }
 
+/// One item on the bulletin board, as it currently stands.
+///
+/// `kind` is the whole difference between an announcement and a company rule.
+/// The content belongs to a version, so what this carries is the current one;
+/// [`Store::notice_history`] returns every version there has ever been.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Notice {
+    pub id: i32,
+    pub kind: String,
+    /// When it comes down, or is repealed. `None` means it stays.
+    pub expires_on: Option<NaiveDate>,
+    pub version_no: i32,
+    /// How many versions exist, this one included.
+    pub versions: i64,
+    pub title: String,
+    pub body: String,
+    /// Publication date of this version, or the date this version of a rule
+    /// takes effect.
+    pub effective_on: NaiveDate,
+    pub published_at: DateTime<Utc>,
+    pub published_by: String,
+}
+
+/// One version, as kept for good.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NoticeVersion {
+    pub notice_id: i32,
+    pub version_no: i32,
+    pub title: String,
+    pub body: String,
+    pub effective_on: NaiveDate,
+    pub published_at: DateTime<Utc>,
+    pub published_by: String,
+}
+
+/// A notice to be written. It always starts at version 1.
+pub struct NewNotice<'a> {
+    pub kind: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub effective_on: NaiveDate,
+    pub expires_on: Option<NaiveDate>,
+    pub actor: &'a str,
+}
+
+/// Fields to change. `None` leaves a field alone; `expires_on` carries a
+/// second level because clearing the end date is a different instruction from
+/// not touching it.
+pub struct NoticeEdit<'a> {
+    pub id: i32,
+    pub title: Option<&'a str>,
+    pub body: Option<&'a str>,
+    pub effective_on: Option<NaiveDate>,
+    pub expires_on: Option<Option<NaiveDate>>,
+    pub actor: &'a str,
+}
+
+fn row_to_notice(r: &PgRow) -> Notice {
+    Notice {
+        id: r.get("id"),
+        kind: r.get("kind"),
+        expires_on: r.get("expires_on"),
+        version_no: r.get("version_no"),
+        versions: r.get("versions"),
+        title: r.get("title"),
+        body: r.get("body"),
+        effective_on: r.get("effective_on"),
+        published_at: r.get("published_at"),
+        published_by: r.get("published_by"),
+    }
+}
+
 fn row_to_punch_correction(r: &PgRow) -> PunchCorrection {
     PunchCorrection {
         id: r.get("id"),
@@ -8384,7 +8670,6 @@ fn row_to_document(r: &PgRow) -> DocumentRow {
         total_bytes: r.get("total_bytes"),
         content_type: r.get("content_type"),
         checksum: r.get("checksum"),
-        ocr_status: r.get("ocr_status"),
         uploaded_at: r.get("uploaded_at"),
         uploaded_by: r.get("uploaded_by"),
     }

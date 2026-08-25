@@ -27,7 +27,9 @@ import { MyExpenses } from './screens/MyExpenses';
 import { MyLeave } from './screens/MyLeave';
 import { MyOvertime } from './screens/MyOvertime';
 import { MyMcp } from './screens/MyMcp';
+import { MyNotices } from './screens/MyNotices';
 import { MyPayslips } from './screens/MyPayslips';
+import { Notices } from './screens/Notices';
 import { Payables } from './screens/Payables';
 import { Payroll } from './screens/Payroll';
 import { Receivables } from './screens/Receivables';
@@ -57,6 +59,7 @@ import {
   getMeta,
   OpFailed,
   type Meta,
+  type MyNoticeList,
   type MyPunchList,
   type PunchResult,
   type Voucher,
@@ -159,6 +162,7 @@ function Workspace() {
   const [toast, setToast] = useState<string | null>(null);
   const [drawer, setDrawer] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
+  const [unreadCount, setUnreadCount] = useState(0);
   const [punch, setPunch] = useState<MyPunchList | null>(null);
   const [punching, setPunching] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -220,6 +224,20 @@ function Workspace() {
       })
       .catch(() => setMeta(null));
   }, [reloadKey, canSetUp]);
+
+  useEffect(() => {
+    if (section !== 'me' || !permissions.includes('list_my_notices')) {
+      setUnreadCount(0);
+      return;
+    }
+    let live = true;
+    callOp<MyNoticeList>('list_my_notices')
+      .then((d) => live && setUnreadCount(d.unread_count))
+      .catch(() => live && setUnreadCount(0));
+    return () => {
+      live = false;
+    };
+  }, [reloadKey, section]);
 
   useEffect(() => {
     if (section !== 'me' || !permissions.includes('list_my_punches')) {
@@ -322,6 +340,9 @@ function Workspace() {
                 <span>{e.label}</span>
                 {e.badge === 'pending' && pendingCount > 0 && (
                   <span className="nav-item__badge num">{pendingCount}</span>
+                )}
+                {e.badge === 'unread' && unreadCount > 0 && (
+                  <span className="nav-item__badge num">{unreadCount}</span>
                 )}
               </button>
             ),
@@ -497,6 +518,13 @@ function Workspace() {
               )}
               {screen === 'ins' && <Insurance onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'wht' && <Withholding onToast={showToast} reloadKey={reloadKey} />}
+              {screen === 'notice' && (
+                <Notices
+                  onToast={showToast}
+                  reloadKey={reloadKey}
+                  canManage={permissions.includes('create_notice')}
+                />
+              )}
 
               {screen === 'me' && <Me onGo={go} reloadKey={reloadKey} />}
               {screen === 'meclock' && (
@@ -533,6 +561,9 @@ function Workspace() {
               {screen === 'meleave' && <MyLeave onGo={go} reloadKey={reloadKey} />}
               {screen === 'meot' && <MyOvertime onGo={go} reloadKey={reloadKey} />}
               {screen === 'memcp' && <MyMcp onToast={showToast} reloadKey={reloadKey} />}
+              {screen === 'menotice' && (
+                <MyNotices reloadKey={reloadKey} onRead={() => setUnreadCount(0)} />
+              )}
             </>
           )}
         </div>

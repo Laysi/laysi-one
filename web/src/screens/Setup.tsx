@@ -419,7 +419,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
       {ownerMissing && (
         <div className="placeholder placeholder--inline">
           <div className="placeholder__title">下一步：建立負責人帳號</div>
-          <p>帳務、薪資與簽核門檻屬負責人權限，本帳號無法查看，也不能將自己變更為負責人。</p>
+          <p>帳務、薪資與簽核門檻只有負責人看得到。</p>
           <button className="btn" onClick={() => onGo('acc')}>
             前往帳號管理
           </button>
@@ -518,7 +518,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
 
               <p className="hint">
                 {canEditSettings
-                  ? '標有編輯圖示的項目可修改，變更立即套用到全系統。'
+                  ? '變更立即套用到全系統。'
                   : '公司設定由系統管理員維護。'}
               </p>
 
@@ -642,7 +642,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
               <section>
                 <h3 className="section-title">會計科目表</h3>
                 <p className="section-note">
-                  每個科目都要指定報表段落與現金流量活動別。缺少這兩欄的科目不會出現在報表上。
+                  每個科目都要指定報表段落與現金流量活動別。
                 </p>
                 <div className="toolbar">
                   {showBalances && (

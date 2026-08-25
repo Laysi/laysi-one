@@ -185,7 +185,7 @@ impl Operation for GetHrDashboard {
             {
                 "label": "薪資費用 → 部門損益",
                 "implemented": true,
-                "detail": "薪資傳票的借方逐部門各一行，因此「預算與管理」的部門損益可看到各部門人事成本。未指定部門的員工彙總為「未指定」一行，不分攤。",
+                "detail": "薪資傳票的借方逐部門各一行。未指定部門的員工彙總為「未指定」一行，不分攤。",
                 "screen": "budget",
             },
             {

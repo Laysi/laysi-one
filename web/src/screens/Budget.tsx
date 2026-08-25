@@ -122,7 +122,7 @@ export function Budget({ onToast, reloadKey }: Props) {
           預算版本 {status.version_label}。
           {status.alert_percent
             ? `執行率超過 ${status.alert_percent}% 會標示出來。`
-            : '尚未設定提醒門檻，超支仍會標示出來。'}
+            : '超支會標示出來。'}
         </p>
       )}
 
@@ -134,7 +134,7 @@ export function Budget({ onToast, reloadKey }: Props) {
           <div className="placeholder__title">尚未建立預算</div>
           <p>
             {canCreateVersion
-              ? '建立一版之後，逐個科目填入年度金額；實際數一律由已過帳分錄現算。'
+              ? '建立一版之後，逐個科目填入年度金額。'
               : '建立預算版本限負責人，請洽負責人。'}
           </p>
           {canCreateVersion && (
@@ -177,7 +177,7 @@ export function Budget({ onToast, reloadKey }: Props) {
             <div className="card form-card">
               <h3 className="section-title">編列科目預算</h3>
               <p className="section-note">
-                {status.version_label}。已編列過的科目再選一次就是修改。
+                {status.version_label}。已編列的科目再選一次會覆蓋原本的金額。
               </p>
               <div className="field-row">
                 <label className="field field--grow">
