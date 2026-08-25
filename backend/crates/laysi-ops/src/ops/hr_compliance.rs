@@ -24,6 +24,7 @@
 //! module's per-person annual totals are listed separately for reconciliation
 //! and never used to fill the gap.
 
+use crate::ops::attendance::{punch_days, summarise, OvertimeLimits, WorkSchedule};
 use crate::ops::employees::service_months;
 use crate::ops::insurance::{missing_brackets, premiums_on, ruleset_json};
 use crate::ops::payroll::SALARY_INCOME_CODE;
@@ -122,7 +123,7 @@ impl Operation for GetHrCompliance {
     }
 
     fn summary(&self) -> &'static str {
-        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算、每月延長工時上限與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。"
+        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算、延長工時上限（已核准的加班申請與打卡推算各一項）與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。"
     }
 
     fn input_schema(&self) -> Value {
@@ -267,6 +268,52 @@ impl Operation for GetHrCompliance {
         }
         let overtime_failure_count = overtime_failures.len();
 
+        // The same ceilings against the punch record. Approved requests are
+        // what the company agreed to; punches are what an inspection reads,
+        // and a day worked past article 32 is a finding whether or not anyone
+        // filed for it. Unanswerable without a working day to measure from.
+        let schedule = WorkSchedule::load(ctx).await?;
+        let limits = OvertimeLimits::resolve(as_of)?;
+        let mut punched: BTreeMap<i32, Vec<laysi_store::AttendancePunch>> = BTreeMap::new();
+        for punch in ctx.store.punches(&month, None).await? {
+            punched.entry(punch.employee_id).or_default().push(punch);
+        }
+        let mut punch_failures = Vec::new();
+        for employee in &staff {
+            let Some(punches) = punched.get(&employee.id) else {
+                continue;
+            };
+            let stats = summarise(&punch_days(punches, ctx.offset), &schedule, &limits);
+            let hours = stats
+                .overtime_seconds
+                .map(|seconds| Money::from(seconds) / Money::from(3600))
+                .unwrap_or(Money::ZERO)
+                .round_dp(1);
+            let message = match (stats.over_monthly_limit, stats.over_limit_days) {
+                (true, _) => Some(format!(
+                    "{month} 打卡推算的加班 {} 小時，比規則上限多 {} 小時",
+                    hours.normalize(),
+                    (hours - stats.monthly_max_hours).normalize()
+                )),
+                (false, days) if days > 0 => {
+                    Some(format!("{month} 有 {days} 天打卡推算的加班超過單日上限"))
+                }
+                _ => None,
+            };
+            if let Some(message) = message {
+                punch_failures.push(json!({
+                    "emp_no": employee.emp_no,
+                    "name": employee.name,
+                    "hours": hours.normalize().to_string(),
+                    "over_limit_days": stats.over_limit_days,
+                    "ceiling": stats.monthly_max_hours.normalize().to_string(),
+                    "message": message,
+                }));
+            }
+        }
+        let punch_failure_count = punch_failures.len();
+        let punch_checked = schedule.counts_overtime();
+
         let mut checks = vec![
             json!({
                 "name": "最低工資",
@@ -321,6 +368,16 @@ impl Operation for GetHrCompliance {
                 "scope_note": format!("逐人加總 {month} 已核准的加班時數，與規則上限比較。等簽核的申請不計入。"),
             }),
             json!({
+                "name": "打卡推算的延長工時",
+                "checked": punch_checked,
+                "passed": punch_checked.then_some(punch_failures.is_empty()),
+                "rulesets": [ruleset_json(overtime_rs)],
+                "failures": punch_failures,
+                "not_checked_reason": (!punch_checked)
+                    .then_some("尚未設定上下班時間，打卡算不出加班時數。請系統管理員於「基礎設定」填寫。"),
+                "scope_note": format!("逐人以 {month} 的打卡推算加班時數，與規則的單日與每月上限比較。不論有沒有加班申請。"),
+            }),
+            json!({
                 "name": "特休額度與已核准天數",
                 "checked": true,
                 "passed": annual_failures.is_empty(),
@@ -355,6 +412,7 @@ impl Operation for GetHrCompliance {
             + unfiled_failure_count
             + labor_cap_failure_count
             + overtime_failure_count
+            + punch_failure_count
             + annual_failure_count;
         let checked_all_passed = failure_count == usize::default();
         let summary = format!(

@@ -1141,6 +1141,10 @@ textarea {
   margin-top: var(--space-2xs);
 }
 
+.cell-hint--bad {
+  color: var(--color-accent-darkest);
+}
+
 .cell-nowrap {
   white-space: nowrap;
 }

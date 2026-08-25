@@ -1771,6 +1771,9 @@ export interface PunchDay {
    *  with their arrival. */
   expected_end: string | null;
   overtime_seconds: number | null;
+  day_type_label: string | null;
+  overtime_limit_hours: string | null;
+  over_overtime_limit: boolean;
   note: string;
 }
 
@@ -1784,6 +1787,9 @@ export interface PunchSummary {
   overtime_seconds: number | null;
   overtime_hours: string | null;
   manual_days: number;
+  over_limit_days: number;
+  over_monthly_limit: boolean;
+  monthly_max_hours: string;
   overtime_pay_computed: boolean;
   overtime_note: string;
 }

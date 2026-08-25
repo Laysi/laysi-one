@@ -245,6 +245,12 @@ impl WorkSchedule {
         Some((attended - self.break_seconds(arrived, left) - normal).max(0))
     }
 
+    /// Whether overtime can be derived at all: it is measured against the
+    /// length of the working day, and without both times there is none.
+    pub fn counts_overtime(&self) -> bool {
+        self.daily_seconds().is_some()
+    }
+
     /// How long a working day is, break excluded, or `None` without both
     /// times.
     pub fn daily_seconds(&self) -> Option<i64> {
@@ -298,7 +304,7 @@ impl WorkSchedule {
             "flexible": self.flexible(),
             "latest_start": self.latest_start().map(hhmm),
             "judges_lateness": self.starts_at.is_some(),
-            "counts_overtime": self.daily_seconds().is_some(),
+            "counts_overtime": self.counts_overtime(),
             "source": "company_setting 的 work_start／work_end／break_start／break_end／flex_window_minutes／late_grace_minutes",
             "note": match (self.starts_at, self.ends_at) {
                 (None, None) => "尚未設定上下班時間，因此只記錄打卡時間，不判定遲到也不計加班時數。",
@@ -309,6 +315,41 @@ impl WorkSchedule {
                 (Some(_), Some(_)) => "遲到與加班時數依公司設定的上下班時間判定。",
             },
         })
+    }
+}
+
+/// What article 32 allows, as the overtime ruleset states it: extended time in
+/// one day, by the kind of day it is, and extended time in one month. Punches
+/// are the record an inspection reads, so the hours derived from them are
+/// worth nothing unless something compares them against these two numbers.
+pub(crate) struct OvertimeLimits {
+    day_types: Vec<laysi_regulation::OvertimeDayType>,
+    monthly_hours: Money,
+}
+
+impl OvertimeLimits {
+    pub fn resolve(as_of: NaiveDate) -> Result<Self, OpError> {
+        let rs = laysi_regulation::resolve("overtime", as_of)?;
+        Ok(Self {
+            day_types: laysi_regulation::overtime_day_types(rs)?,
+            monthly_hours: laysi_regulation::overtime_monthly_max_hours(rs)?,
+        })
+    }
+
+    /// The kind of day a date is, on the same reading the overtime request
+    /// screen uses: Saturday and Sunday are rest days.
+    fn day_type(&self, date: NaiveDate) -> Option<&laysi_regulation::OvertimeDayType> {
+        let code = default_overtime_day_type(date);
+        self.day_types.iter().find(|t| t.code == code)
+    }
+
+    fn over_daily(&self, date: NaiveDate, seconds: i64) -> bool {
+        self.day_type(date)
+            .is_some_and(|t| Decimal::from(seconds) > t.max_hours * Decimal::from(3600))
+    }
+
+    fn over_monthly(&self, seconds: i64) -> bool {
+        Decimal::from(seconds) > self.monthly_hours * Decimal::from(3600)
     }
 }
 
@@ -338,9 +379,11 @@ impl PunchDay {
         self.arrived.is_some() && self.left.is_none()
     }
 
-    pub fn json(&self, schedule: &WorkSchedule) -> Value {
+    pub fn json(&self, schedule: &WorkSchedule, limits: &OvertimeLimits) -> Value {
         let clock = |t: Option<NaiveDateTime>| t.map(|t| t.format(PUNCH_TIME).to_string());
         let late = self.arrived.and_then(|a| schedule.late(a));
+        let overtime = self.left.and_then(|l| schedule.overtime_seconds(self.arrived, l));
+        let day_type = limits.day_type(self.date);
         json!({
             "date": self.date,
             "weekday": weekday_label(self.date),
@@ -358,7 +401,10 @@ impl PunchDay {
             "expected_end": schedule
                 .expected_end(self.date, self.arrived)
                 .map(|t| t.format(PUNCH_TIME).to_string()),
-            "overtime_seconds": self.left.and_then(|l| schedule.overtime_seconds(self.arrived, l)),
+            "overtime_seconds": overtime,
+            "day_type_label": day_type.map(|t| t.label.clone()),
+            "overtime_limit_hours": day_type.map(|t| t.max_hours.normalize().to_string()),
+            "over_overtime_limit": overtime.is_some_and(|s| limits.over_daily(self.date, s)),
             "note": self.note,
         })
     }
@@ -468,9 +514,20 @@ pub(crate) struct PunchSummary {
     pub late_days: Option<i64>,
     pub overtime_seconds: Option<i64>,
     pub manual_days: i64,
+    /// Days whose overtime is past what that kind of day allows.
+    pub over_limit_days: i64,
+    /// Whether the month's overtime is past the monthly ceiling.
+    pub over_monthly_limit: bool,
+    pub monthly_max_hours: Money,
 }
 
-pub(crate) fn summarise(days: &[PunchDay], schedule: &WorkSchedule) -> PunchSummary {
+pub(crate) fn summarise(
+    days: &[PunchDay],
+    schedule: &WorkSchedule,
+    limits: &OvertimeLimits,
+) -> PunchSummary {
+    let overtime = |d: &PunchDay| d.left.and_then(|l| schedule.overtime_seconds(d.arrived, l));
+    let overtime_seconds = schedule.daily_seconds().map(|_| days.iter().filter_map(overtime).sum());
     PunchSummary {
         days_with_arrival: days.iter().filter(|d| d.arrived.is_some()).count() as i64,
         complete_days: days.iter().filter_map(|d| d.worked_seconds(schedule)).count() as i64,
@@ -481,11 +538,7 @@ pub(crate) fn summarise(days: &[PunchDay], schedule: &WorkSchedule) -> PunchSumm
                 .filter(|d| d.arrived.and_then(|a| schedule.late(a)) == Some(true))
                 .count() as i64
         }),
-        overtime_seconds: schedule.daily_seconds().map(|_| {
-            days.iter()
-                .filter_map(|d| d.left.and_then(|l| schedule.overtime_seconds(d.arrived, l)))
-                .sum()
-        }),
+        overtime_seconds,
         manual_days: days
             .iter()
             .filter(|d| {
@@ -493,6 +546,12 @@ pub(crate) fn summarise(days: &[PunchDay], schedule: &WorkSchedule) -> PunchSumm
                     || d.left_source.as_deref() == Some("manual")
             })
             .count() as i64,
+        over_limit_days: days
+            .iter()
+            .filter(|d| overtime(d).is_some_and(|s| limits.over_daily(d.date, s)))
+            .count() as i64,
+        over_monthly_limit: overtime_seconds.is_some_and(|s| limits.over_monthly(s)),
+        monthly_max_hours: limits.monthly_hours,
     }
 }
 
@@ -508,6 +567,9 @@ impl PunchSummary {
             "overtime_seconds": self.overtime_seconds,
             "overtime_hours": self.overtime_seconds.map(|s| hours(s).to_string()),
             "manual_days": self.manual_days,
+            "over_limit_days": self.over_limit_days,
+            "over_monthly_limit": self.over_monthly_limit,
+            "monthly_max_hours": self.monthly_max_hours.normalize().to_string(),
             "overtime_pay_computed": false,
             "overtime_note": "加班費請送出加班申請。",
         })
@@ -661,6 +723,7 @@ impl Operation for ListAttendancePunches {
         };
 
         let schedule = WorkSchedule::load(ctx).await?;
+        let limits = OvertimeLimits::resolve(ctx.today)?;
         let punches = ctx
             .store
             .punches(&month, only.as_ref().map(|e| e.id))
@@ -677,7 +740,7 @@ impl Operation for ListAttendancePunches {
         let mut detail = Value::Null;
         for (employee_id, punches) in &by_employee {
             let days = punch_days(punches, ctx.offset);
-            let summary = summarise(&days, &schedule);
+            let summary = summarise(&days, &schedule, &limits);
             let first = &punches[0];
             rows.push(json!({
                 "emp_no": first.emp_no,
@@ -686,7 +749,8 @@ impl Operation for ListAttendancePunches {
                 "summary": summary.json(),
             }));
             if only.as_ref().is_some_and(|e| e.id == *employee_id) {
-                detail = json!(days.iter().map(|d| d.json(&schedule)).collect::<Vec<_>>());
+                detail =
+                    json!(days.iter().map(|d| d.json(&schedule, &limits)).collect::<Vec<_>>());
             }
         }
 
@@ -794,6 +858,7 @@ impl Operation for CorrectPunch {
         let month = i.punched_on.format("%Y-%m").to_string();
         let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
         let day = days.iter().find(|d| d.date == i.punched_on);
+        let limits = OvertimeLimits::resolve(ctx.today)?;
 
         let summary = format!(
             "{} {} 的{}卡補登為 {} · 由 {} 手動輸入",
@@ -807,7 +872,7 @@ impl Operation for CorrectPunch {
         Ok(OpOutcome::new(
             json!({
                 "employee": { "emp_no": employee.emp_no, "name": employee.name },
-                "day": day.map(|d| d.json(&schedule)),
+                "day": day.map(|d| d.json(&schedule, &limits)),
                 "schedule": schedule.json(),
                 "source": "manual",
                 "note": "補登的打卡在明細上標示為手動輸入，並記錄補登的人。",
@@ -1582,6 +1647,37 @@ mod tests {
         assert_eq!(flex.latest_start().map(|t| t.to_string()), Some("10:00:00".into()));
     }
 
+    fn limits() -> OvertimeLimits {
+        OvertimeLimits::resolve(NaiveDate::from_ymd_opt(2026, 8, 6).unwrap()).unwrap()
+    }
+
+    /// A punch record is what an inspection reads, so overtime the law does
+    /// not allow has to be marked where the hours are printed. The maxima are
+    /// the ruleset's: change the weekday one and the same day stops failing.
+    #[test]
+    fn a_day_past_the_statutory_maximum_is_counted_on_the_summary() {
+        let sched = schedule(Some("09:00"), Some("18:00"), 0);
+        // 2026-08-06 is a Thursday, so four hours of extended time are allowed.
+        let over = punch_days(&[
+            punch("2026-08-06", "in", "09:00", "self"),
+            punch("2026-08-06", "out", "23:00", "self"),
+        ], tz());
+        let stats = summarise(&over, &sched, &limits());
+        assert_eq!(stats.overtime_seconds, Some(5 * 3600));
+        assert_eq!(stats.over_limit_days, 1, "平日加班五小時超過單日上限");
+        assert!(!stats.over_monthly_limit, "五小時還不到月上限");
+
+        let exact = punch_days(&[
+            punch("2026-08-06", "in", "09:00", "self"),
+            punch("2026-08-06", "out", "22:00", "self"),
+        ], tz());
+        assert_eq!(
+            summarise(&exact, &sched, &limits()).over_limit_days,
+            0,
+            "剛好做滿上限不算超過"
+        );
+    }
+
     fn break_schedule(start: &str, end: &str, pause: (&str, &str)) -> WorkSchedule {
         let time = |v: &str| NaiveTime::parse_from_str(v, "%H:%M").unwrap();
         WorkSchedule {
@@ -1732,7 +1828,7 @@ mod tests {
         assert_eq!(days[1].worked_seconds(&sched), None);
         assert!(days[1].open());
 
-        let stats = summarise(&days, &sched);
+        let stats = summarise(&days, &sched, &limits());
         assert_eq!(stats.days_with_arrival, 2);
         assert_eq!(stats.complete_days, 1, "只打了上班的那天不算工作日");
         assert_eq!(stats.open_days, 1);
@@ -1776,7 +1872,7 @@ mod tests {
         assert!(sixth.arrived.is_none() && sixth.left.is_none());
         assert!(!sixth.open(), "沒有上班卡的一天不是未打下班");
 
-        let stats = summarise(&days, &schedule(Some("09:00"), Some("18:00"), 0));
+        let stats = summarise(&days, &schedule(Some("09:00"), Some("18:00"), 0), &limits());
         assert_eq!(stats.complete_days, 1, "空白的日子不算工作日");
         assert_eq!(stats.open_days, 1, "只有 08-01 那天是未打下班");
     }

@@ -415,6 +415,11 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
                       <td className="num align-right">{d.worked_hours ?? '—'}</td>
                       <td>
                         {tag && <span className={tag.className}>{tag.label}</span>}
+                        {d.over_overtime_limit && (
+                          <span className="tag tag--bad tag--static">
+                            加班超過 {d.overtime_limit_hours} 小時
+                          </span>
+                        )}
 
                         {trail.length > 0 ? (
                           <button
@@ -500,7 +505,10 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
 
         {s.overtime_hours != null && (
           <p className="recon recon--off">
-            本月加班 {s.overtime_hours} 小時。{s.overtime_note}
+            本月加班 {s.overtime_hours} 小時。
+            {s.over_monthly_limit && `已超過每月 ${s.monthly_max_hours} 小時的上限。`}
+            {s.over_limit_days > 0 && `其中 ${s.over_limit_days} 天超過單日上限。`}
+            {s.overtime_note}
           </p>
         )}
       </section>

@@ -37,7 +37,7 @@ use crate::ops::attendance::{
     business_instant, correction_auto_approves, default_overtime_day_type, leave_kind_label,
     leave_status_label, month_days, overtime_json, punch_correction_json,
     punch_correction_status_label, punch_days, punch_kind_label, summarise,
-    valid_leave_kind, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
+    valid_leave_kind, OvertimeLimits, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
@@ -1199,6 +1199,7 @@ impl Operation for PunchClock {
             .await?;
 
         let schedule = WorkSchedule::load(ctx).await?;
+        let limits = OvertimeLimits::resolve(ctx.today)?;
         let month = local.date().format("%Y-%m").to_string();
         let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
         let today = days.iter().find(|d| d.date == local.date());
@@ -1228,7 +1229,7 @@ impl Operation for PunchClock {
                     "kind_label": punch_kind_label(&punch.kind),
                     "source": punch.source,
                 },
-                "today": today.map(|d| d.json(&schedule)),
+                "today": today.map(|d| d.json(&schedule, &limits)),
                 "schedule": schedule.json(),
                 "scope_note": "員工由已驗證 session 的 ctx.employee_id 決定，時間取自伺服器時鐘；輸入不含員工欄位，也不含時間欄位。",
             }),
@@ -1281,7 +1282,8 @@ impl Operation for ListMyPunches {
         let employee = actor_employee(ctx).await?;
         let schedule = WorkSchedule::load(ctx).await?;
         let punched = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
-        let stats = summarise(&punched, &schedule);
+        let limits = OvertimeLimits::resolve(ctx.today)?;
+        let stats = summarise(&punched, &schedule, &limits);
 
         let local_today = laysi_domain::business_time(Utc::now(), ctx.offset).date();
         // Days without a punch are rows too: they are the ones a correction is
@@ -1331,10 +1333,10 @@ impl Operation for ListMyPunches {
                 "employee": { "emp_no": employee.emp_no, "name": employee.name },
                 "month": month,
                 "today": local_today,
-                "today_punches": today.map(|d| d.json(&schedule)),
+                "today_punches": today.map(|d| d.json(&schedule, &limits)),
                 "next_kind": next_kind,
                 "next_kind_label": next_kind.map(punch_kind_label),
-                "days": days.iter().map(|d| d.json(&schedule)).collect::<Vec<_>>(),
+                "days": days.iter().map(|d| d.json(&schedule, &limits)).collect::<Vec<_>>(),
                 "summary": stats.json(),
                 "schedule": schedule.json(),
                 "scope_note": "僅查詢已驗證 session 的 ctx.employee_id；輸入只有月份。",
