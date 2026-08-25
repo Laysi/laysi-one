@@ -101,6 +101,11 @@ pub(crate) struct WorkSchedule {
     /// forgives a late arrival and still expects the same departure,
     /// flexitime moves the whole day and keeps its length.
     pub flex_minutes: i64,
+    /// The unpaid break inside the working day. Both ends or neither: the
+    /// two settings are written one at a time, and half a range is not a
+    /// break.
+    pub break_start: Option<NaiveTime>,
+    pub break_end: Option<NaiveTime>,
 }
 
 impl WorkSchedule {
@@ -124,11 +129,41 @@ impl WorkSchedule {
             grace_minutes: grace.unwrap_or(0).max(0),
             grace_stated: grace.is_some(),
             flex_minutes: minutes("flex_window_minutes").unwrap_or(0).max(0),
+            break_start: time("break_start"),
+            break_end: time("break_end"),
         })
     }
 
     pub fn flexible(&self) -> bool {
         self.flex_minutes > 0
+    }
+
+    /// The break as a range, or `None` when it is not stated or does not
+    /// describe one. A half-entered break reads as no break: the two settings
+    /// are saved one at a time, so the state between them is normal.
+    fn break_window(&self) -> Option<(NaiveTime, NaiveTime)> {
+        let (start, end) = (self.break_start?, self.break_end?);
+        (end > start).then_some((start, end))
+    }
+
+    /// Seconds of the break that fall inside a range, counted once for every
+    /// date the range touches.
+    pub fn break_seconds(&self, from: NaiveDateTime, to: NaiveDateTime) -> i64 {
+        let Some((start, end)) = self.break_window() else {
+            return 0;
+        };
+        let mut total = 0;
+        let mut day = from.date();
+        while day <= to.date() {
+            let open = day.and_time(start).max(from);
+            let close = day.and_time(end).min(to);
+            total += (close - open).num_seconds().max(0);
+            let Some(next) = day.succ_opt() else {
+                break;
+            };
+            day = next;
+        }
+        total
     }
 
     /// The latest an arrival may be and still count as on time, before grace.
@@ -183,23 +218,41 @@ impl WorkSchedule {
         Some((arrived - self.arrival_deadline(arrived.date())?).num_seconds().max(0))
     }
 
-    /// Seconds worked past the end of *this person's* day, or `None` when no
-    /// end time is stated. Under flexitime a later start means a later end,
-    /// so the arrival is part of the answer. Hours only: turning them into pay
-    /// needs the article 24 multipliers, which are regulation values and are
-    /// not in the rule library.
+    /// Attendance beyond the normal working day, or `None` without both work
+    /// times or without an arrival. The break is taken out first, so time in
+    /// the middle of the day is not paid twice.
+    ///
+    /// Measured against the length of the day rather than the moment it ends,
+    /// because those two answers differ whenever someone arrives before the
+    /// day opens: an attendance record is what the hours are read from, and
+    /// the alternative reports a fifteen-hour day as an hour and a half.
+    /// Whether any of it is paid is a separate question with a separate
+    /// answer -- an approved overtime request, priced by the article 24
+    /// multipliers in the rule library.
+    //
+    // ponytail: the normal day is the company window, not the statutory eight
+    // hours, so a window longer than that reports too little overtime. The cap
+    // is a dated regulation value and belongs in overtime.toml beside the
+    // multipliers before it can be applied here.
     pub fn overtime_seconds(
         &self,
         arrived: Option<NaiveDateTime>,
         left: NaiveDateTime,
     ) -> Option<i64> {
-        let end = self.expected_end(left.date(), arrived)?;
-        Some((left - end).num_seconds().max(0))
+        let arrived = arrived?;
+        let normal = self.daily_seconds()?;
+        let attended = (left - arrived).num_seconds().max(0);
+        Some((attended - self.break_seconds(arrived, left) - normal).max(0))
     }
 
-    /// How long a working day is, or `None` without both times.
+    /// How long a working day is, break excluded, or `None` without both
+    /// times.
     pub fn daily_seconds(&self) -> Option<i64> {
-        Some((self.ends_at? - self.starts_at?).num_seconds())
+        let (starts_at, ends_at) = (self.starts_at?, self.ends_at?);
+        let paused = self.break_window().map_or(0, |(start, end)| {
+            (end.min(ends_at) - start.max(starts_at)).num_seconds().max(0)
+        });
+        Some((ends_at - starts_at).num_seconds() - paused)
     }
 
     /// Working seconds inside a leave range.
@@ -225,7 +278,7 @@ impl WorkSchedule {
             if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
                 let open = day.and_time(starts_at).max(from);
                 let close = day.and_time(ends_at).min(to);
-                total += (close - open).num_seconds().max(0);
+                total += (close - open).num_seconds().max(0) - self.break_seconds(open, close);
             }
             day = day.succ_opt()?;
         }
@@ -237,17 +290,19 @@ impl WorkSchedule {
         json!({
             "work_start": self.starts_at.map(hhmm),
             "work_end": self.ends_at.map(hhmm),
+            "break_start": self.break_window().map(|(start, _)| hhmm(start)),
+            "break_end": self.break_window().map(|(_, end)| hhmm(end)),
             "grace_minutes": self.grace_minutes,
             "grace_stated": self.grace_stated,
             "flex_minutes": self.flex_minutes,
             "flexible": self.flexible(),
             "latest_start": self.latest_start().map(hhmm),
             "judges_lateness": self.starts_at.is_some(),
-            "counts_overtime": self.ends_at.is_some(),
-            "source": "company_setting 的 work_start／work_end／flex_window_minutes／late_grace_minutes",
+            "counts_overtime": self.daily_seconds().is_some(),
+            "source": "company_setting 的 work_start／work_end／break_start／break_end／flex_window_minutes／late_grace_minutes",
             "note": match (self.starts_at, self.ends_at) {
                 (None, None) => "尚未設定上下班時間，因此只記錄打卡時間，不判定遲到也不計加班時數。",
-                (None, Some(_)) => "尚未設定上班時間，因此不判定遲到。",
+                (None, Some(_)) => "尚未設定上班時間，因此不判定遲到，也不計加班時數。",
                 (Some(_), None) => "尚未設定下班時間，因此不計加班時數。",
                 (Some(_), Some(_)) if self.flexible() =>
                     "採彈性工時：在彈性區間內開始上班都算準時，下班時間同步順延，工作總時數不變。",
@@ -268,9 +323,12 @@ pub(crate) struct PunchDay {
 }
 
 impl PunchDay {
-    pub fn worked_seconds(&self) -> Option<i64> {
+    /// Attendance with the break taken out. A day holds one punch pair, so
+    /// the break sits inside it whenever the pair covers it.
+    pub fn worked_seconds(&self, schedule: &WorkSchedule) -> Option<i64> {
         let (arrived, left) = (self.arrived?, self.left?);
-        Some((left - arrived).num_seconds().max(0))
+        let attended = (left - arrived).num_seconds().max(0);
+        Some((attended - schedule.break_seconds(arrived, left)).max(0))
     }
 
     /// A day with an arrival and no departure. Common and worth naming: it is
@@ -292,8 +350,8 @@ impl PunchDay {
             "out_source": self.left_source,
             "manual": self.arrived_source.as_deref() == Some("manual")
                 || self.left_source.as_deref() == Some("manual"),
-            "worked_seconds": self.worked_seconds(),
-            "worked_hours": self.worked_seconds().map(|s| hours(s).to_string()),
+            "worked_seconds": self.worked_seconds(schedule),
+            "worked_hours": self.worked_seconds(schedule).map(|s| hours(s).to_string()),
             "open": self.open(),
             "late": late,
             "late_seconds": self.arrived.and_then(|a| schedule.late_by_seconds(a)),
@@ -415,15 +473,15 @@ pub(crate) struct PunchSummary {
 pub(crate) fn summarise(days: &[PunchDay], schedule: &WorkSchedule) -> PunchSummary {
     PunchSummary {
         days_with_arrival: days.iter().filter(|d| d.arrived.is_some()).count() as i64,
-        complete_days: days.iter().filter_map(PunchDay::worked_seconds).count() as i64,
+        complete_days: days.iter().filter_map(|d| d.worked_seconds(schedule)).count() as i64,
         open_days: days.iter().filter(|d| d.open()).count() as i64,
-        worked_seconds: days.iter().filter_map(PunchDay::worked_seconds).sum(),
+        worked_seconds: days.iter().filter_map(|d| d.worked_seconds(schedule)).sum(),
         late_days: schedule.starts_at.map(|_| {
             days.iter()
                 .filter(|d| d.arrived.and_then(|a| schedule.late(a)) == Some(true))
                 .count() as i64
         }),
-        overtime_seconds: schedule.ends_at.map(|_| {
+        overtime_seconds: schedule.daily_seconds().map(|_| {
             days.iter()
                 .filter_map(|d| d.left.and_then(|l| schedule.overtime_seconds(d.arrived, l)))
                 .sum()
@@ -1452,6 +1510,8 @@ mod tests {
             grace_minutes: grace,
             grace_stated: true,
             flex_minutes: flex,
+            break_start: None,
+            break_end: None,
         }
     }
 
@@ -1522,10 +1582,21 @@ mod tests {
         assert_eq!(flex.latest_start().map(|t| t.to_string()), Some("10:00:00".into()));
     }
 
-    /// The window is a cap in one direction only: past it you are late, and
-    /// arriving early never shortens the day.
+    fn break_schedule(start: &str, end: &str, pause: (&str, &str)) -> WorkSchedule {
+        let time = |v: &str| NaiveTime::parse_from_str(v, "%H:%M").unwrap();
+        WorkSchedule {
+            break_start: Some(time(pause.0)),
+            break_end: Some(time(pause.1)),
+            ..schedule(Some(start), Some(end), 0)
+        }
+    }
+
+    /// The window caps lateness in one direction only, and arriving early
+    /// still never moves the expected end. The hours are a separate question:
+    /// attendance before the day opens is attendance, and what comes out of it
+    /// is the stated break, not the part of the day nobody asked for.
     #[test]
-    fn the_flex_window_caps_lateness_but_early_arrival_earns_nothing() {
+    fn the_flex_window_caps_lateness_and_attendance_carries_the_hours() {
         let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at, tz());
         let day = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
         let flex = flex_schedule(Some("09:00"), Some("18:00"), 5, 60);
@@ -1541,8 +1612,8 @@ mod tests {
         );
         assert_eq!(
             flex.overtime_seconds(Some(early), at("18:00:00")),
-            Some(0),
-            "早到的那一小時不算加班"
+            Some(3600),
+            "八點到、十八點走，比九小時的正常工時多做一小時"
         );
 
         let late_start = at("10:00:00");
@@ -1554,6 +1625,43 @@ mod tests {
         assert_eq!(
             flex.overtime_seconds(Some(late_start), at("19:30:00")),
             Some(30 * 60)
+        );
+    }
+
+    /// The break comes out of both sides of the comparison: out of the day it
+    /// is the length of, and out of the attendance that is measured against
+    /// it. A day worked exactly as agreed is therefore never overtime, and the
+    /// hour taken for lunch is never worked hours.
+    #[test]
+    fn the_break_leaves_both_the_working_day_and_the_hours_worked() {
+        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at, tz());
+        let sched = break_schedule("09:00", "18:00", ("12:00", "13:00"));
+        assert_eq!(sched.daily_seconds(), Some(8 * 3600));
+
+        assert_eq!(
+            sched.overtime_seconds(Some(at("09:00:00")), at("18:00:00")),
+            Some(0),
+            "照上下班時間出勤不是加班"
+        );
+        assert_eq!(
+            sched.overtime_seconds(Some(at("09:00:00")), at("19:30:00")),
+            Some(90 * 60)
+        );
+        assert_eq!(
+            sched.overtime_seconds(Some(at("08:00:00")), at("18:00:00")),
+            Some(3600),
+            "早到的一小時算，中午那一小時不算"
+        );
+
+        let days = punch_days(&[
+            punch("2026-08-06", "in", "09:00:00", "self"),
+            punch("2026-08-06", "out", "18:00:00", "self"),
+        ], tz());
+        assert_eq!(days[0].worked_seconds(&sched), Some(8 * 3600), "工作時數不含休息");
+        assert_eq!(
+            sched.leave_seconds(at("09:00:00"), at("18:00:00")),
+            Some(8 * 3600),
+            "有休息時間，整天假就是八小時"
         );
     }
 
@@ -1585,7 +1693,7 @@ mod tests {
             punch("2026-08-06", "in", "09:00:00", "self"),
             punch("2026-08-06", "out", "18:00:30", "self"),
         ], tz());
-        assert_eq!(days[0].worked_seconds(), Some(9 * 3600 + 30));
+        assert_eq!(days[0].worked_seconds(&sched), Some(9 * 3600 + 30));
         assert_eq!(sched.overtime_seconds(days[0].arrived, days[0].left.unwrap()), Some(30));
     }
 
@@ -1619,9 +1727,9 @@ mod tests {
             punch("2026-08-06", "in", "09:20", "self"),
         ], tz());
         assert_eq!(days.len(), 2);
-        assert_eq!(days[0].worked_seconds(), Some(632 * 60));
+        assert_eq!(days[0].worked_seconds(&sched), Some(632 * 60));
         assert!(!days[0].open());
-        assert_eq!(days[1].worked_seconds(), None);
+        assert_eq!(days[1].worked_seconds(&sched), None);
         assert!(days[1].open());
 
         let stats = summarise(&days, &sched);
@@ -1629,7 +1737,11 @@ mod tests {
         assert_eq!(stats.complete_days, 1, "只打了上班的那天不算工作日");
         assert_eq!(stats.open_days, 1);
         assert_eq!(stats.late_days, Some(1), "9:20 超過 9:00 加五分鐘");
-        assert_eq!(stats.overtime_seconds, Some(90 * 60), "19:30 比 18:00 晚 90 分鐘");
+        assert_eq!(
+            stats.overtime_seconds,
+            Some(92 * 60),
+            "8:58 到 19:30 共 632 分鐘，扣掉九小時的正常工時"
+        );
     }
 
     /// A day nobody clocked in on still needs a row: it is the day a
@@ -1659,7 +1771,7 @@ mod tests {
             "到職前的打卡留著，到職日到今天之間每天都有一列，今天之後沒有"
         );
         let fifth = days.iter().find(|d| d.date == day("2026-08-05")).unwrap();
-        assert_eq!(fifth.worked_seconds(), Some(9 * 3600));
+        assert_eq!(fifth.worked_seconds(&schedule(Some("09:00"), Some("18:00"), 0)), Some(9 * 3600));
         let sixth = days.iter().find(|d| d.date == day("2026-08-06")).unwrap();
         assert!(sixth.arrived.is_none() && sixth.left.is_none());
         assert!(!sixth.open(), "沒有上班卡的一天不是未打下班");

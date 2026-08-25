@@ -1741,6 +1741,8 @@ export interface AttachReceiptResult {
 export interface WorkSchedule {
   work_start: string | null;
   work_end: string | null;
+  break_start: string | null;
+  break_end: string | null;
   grace_minutes: number;
   grace_stated: boolean;
   flex_minutes: number;

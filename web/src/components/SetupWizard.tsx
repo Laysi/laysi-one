@@ -18,7 +18,7 @@ interface Props {
 
 type Step = 'company' | 'bank' | 'dept' | 'hours' | 'sso' | 'owner' | 'done';
 
-type HourCode = 'work_start' | 'work_end' | 'late_grace_minutes';
+type HourCode = 'work_start' | 'work_end' | 'break_start' | 'break_end' | 'late_grace_minutes';
 
 const STEPS: { id: Step; label: string }[] = [
   { id: 'company', label: '① 公司資料' },
@@ -63,12 +63,16 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         const stored = {
           work_start: d.settings.find((s) => s.code === 'work_start')?.value ?? '',
           work_end: d.settings.find((s) => s.code === 'work_end')?.value ?? '',
+          break_start: d.settings.find((s) => s.code === 'break_start')?.value ?? '',
+          break_end: d.settings.find((s) => s.code === 'break_end')?.value ?? '',
           late_grace_minutes:
             d.settings.find((s) => s.code === 'late_grace_minutes')?.value ?? '',
         };
         setSavedHours(stored);
         setWorkStart(stored.work_start);
         setWorkEnd(stored.work_end);
+        setBreakStart(stored.break_start);
+        setBreakEnd(stored.break_end);
         setGraceMinutes(stored.late_grace_minutes);
       })
       .catch(() => setSettings([]));
@@ -153,10 +157,14 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
 
   const [workStart, setWorkStart] = useState('');
   const [workEnd, setWorkEnd] = useState('');
+  const [breakStart, setBreakStart] = useState('');
+  const [breakEnd, setBreakEnd] = useState('');
   const [graceMinutes, setGraceMinutes] = useState('');
   const [savedHours, setSavedHours] = useState<Record<HourCode, string>>({
     work_start: '',
     work_end: '',
+    break_start: '',
+    break_end: '',
     late_grace_minutes: '',
   });
   const [savingHours, setSavingHours] = useState(false);
@@ -323,6 +331,8 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
     const fields: { code: HourCode; label: string; value: string; unit: string }[] = [
       { code: 'work_start', label: '上班時間', value: workStart.trim(), unit: '' },
       { code: 'work_end', label: '下班時間', value: workEnd.trim(), unit: '' },
+      { code: 'break_start', label: '休息開始時間', value: breakStart.trim(), unit: '' },
+      { code: 'break_end', label: '休息結束時間', value: breakEnd.trim(), unit: '' },
       { code: 'late_grace_minutes', label: '遲到寬限', value: graceMinutes.trim(), unit: ' 分鐘' },
     ];
     const changed = fields.filter((f) => f.value !== savedHours[f.code]);
@@ -540,6 +550,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
           <h3 className="section-title">上下班時間</h3>
           <p className="section-note">
             填了上下班時間才判定遲到、才計加班時數；留空只記錄打卡時間，之後可在「基礎設定」補上。
+            上班到下班之間扣掉休息時間，就是一天的正常工時。
           </p>
           <div className="field-grid">
             <label className="field">
@@ -549,6 +560,15 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
             <label className="field">
               下班時間
               <TimeField label="下班時間" value={workEnd} onChange={setWorkEnd} />
+            </label>
+            <label className="field">
+              休息開始時間
+              <TimeField label="休息開始時間" value={breakStart} onChange={setBreakStart} />
+            </label>
+            <label className="field">
+              休息結束時間
+              <TimeField label="休息結束時間" value={breakEnd} onChange={setBreakEnd} />
+              <span className="field__hint">兩端都填了才從工作時數扣除。</span>
             </label>
             <label className="field">
               遲到寬限（分鐘）

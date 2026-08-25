@@ -246,8 +246,14 @@ fn setting_options(code: &str) -> Vec<&'static str> {
 /// where `None` means nobody has said when work starts, which is different
 /// from nobody being late. A company that has not decided has to be able to
 /// say so, and to take it back after having set one.
-const CLEARABLE_SETTINGS: [&str; 4] =
-    ["work_start", "work_end", "late_grace_minutes", "flex_window_minutes"];
+const CLEARABLE_SETTINGS: [&str; 6] = [
+    "work_start",
+    "work_end",
+    "break_start",
+    "break_end",
+    "late_grace_minutes",
+    "flex_window_minutes",
+];
 
 /// Settings whose shape is a fact about the outside world rather than a
 /// preference. Anything not listed here is stored as typed.
@@ -259,7 +265,7 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
         "fiscal_year" if !matches!(value.parse::<u32>(), Ok(1..=12)) => {
             Err(OpError::BadInput("會計年度起始月份要填 1 到 12".into()))
         }
-        "work_start" | "work_end" if !is_clock_time(value) => {
+        "work_start" | "work_end" | "break_start" | "break_end" if !is_clock_time(value) => {
             Err(OpError::BadInput(format!("「{value}」不是時刻，格式是 HH:MM，例如 09:00")))
         }
         "late_grace_minutes" | "flex_window_minutes" if value.parse::<u32>().is_err() => {
@@ -301,7 +307,7 @@ impl Operation for UpdateCompanySetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "變更一項公司設定。只有標示為可編輯的項目能改；統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班時間收 HH:MM 且可以留空表示不判定遲到；法規決定的數值由規則檔提供，不在這個操作變更。"
+        "變更一項公司設定。只有標示為可編輯的項目能改；統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班與休息時間收 HH:MM 且可以留空表示不判定遲到；法規決定的數值由規則檔提供，不在這個操作變更。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateCompanySettingInput>()
@@ -1837,7 +1843,14 @@ mod tests {
     fn the_working_day_can_be_cleared_but_the_company_name_cannot() {
         assert_eq!(
             CLEARABLE_SETTINGS,
-            ["work_start", "work_end", "late_grace_minutes", "flex_window_minutes"],
+            [
+                "work_start",
+                "work_end",
+                "break_start",
+                "break_end",
+                "late_grace_minutes",
+                "flex_window_minutes"
+            ],
             "可清空的設定變了：每一項的空值都要在畫面上有意義"
         );
         for code in ["company_name", "tax_id", "fiscal_year", "currency"] {

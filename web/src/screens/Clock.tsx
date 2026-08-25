@@ -45,6 +45,12 @@ function ScheduleNote({ schedule }: { schedule: WorkSchedule }) {
           <span className="num">{schedule.work_end}</span>。
         </>
       )}
+      {schedule.break_start && (
+        <>
+          休息 <span className="num">{schedule.break_start}</span> 到{' '}
+          <span className="num">{schedule.break_end}</span>，不計工作時數。
+        </>
+      )}
       {schedule.grace_minutes > 0 && (
         <>
           遲到寬限 <span className="num">{schedule.grace_minutes}</span> 分鐘。

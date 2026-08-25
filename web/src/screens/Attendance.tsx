@@ -234,6 +234,9 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                   : (punches.schedule.flexible
                       ? `彈性工時 ${punches.schedule.work_start}–${punches.schedule.latest_start} 開始，下班同步順延`
                       : `上班 ${punches.schedule.work_start}、下班 ${punches.schedule.work_end}`) +
+                    (punches.schedule.break_start
+                      ? `，休息 ${punches.schedule.break_start}–${punches.schedule.break_end}`
+                      : '') +
                     (punches.schedule.grace_minutes > 0
                       ? `，遲到寬限 ${punches.schedule.grace_minutes} 分鐘。`
                       : '。')}

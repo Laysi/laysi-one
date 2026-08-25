@@ -20,7 +20,7 @@ interface Props {
   reloadKey: number;
 }
 
-const CLOCK_SETTINGS = new Set(['work_start', 'work_end']);
+const CLOCK_SETTINGS = new Set(['work_start', 'work_end', 'break_start', 'break_end']);
 const TIMEZONE_SETTING = 'business_utc_offset';
 const UTC_OFFSETS = [
   '-12:00', '-11:00', '-10:00', '-09:30', '-09:00', '-08:00', '-07:00', '-06:00',
