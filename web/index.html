@@ -6,7 +6,7 @@
     <!--
       品牌字標不放在前端。頁面上的 logo 一律向後端取得：
       GET /v1/brand/mark.svg —— 由 Rust 即時產生，受 BSL 1.1 與完整性驗證保護。
-      因此本目錄下沒有、也不得有任何 logo 檔案或 favicon 字標。
+      因此本目錄下沒有、也不得有任何 logo 檔案。
     -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -19,6 +19,13 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Noto+Sans+TC:wght@400;600&display=swap"
     />
+    <meta name="theme-color" content="#f3f2f2" />
+    <link rel="manifest" href="/manifest.json" />
+    <!--
+      唯一的例外是 favicon.svg：分頁圖示在應用程式載入之前就要畫出來，走 /v1 等於把它
+      綁在後端與代理上，而瀏覽器又把 favicon 快取得特別久。該檔帶著 BSL 1.1 的授權聲明。
+    -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Laysi One</title>
   </head>
   <body>

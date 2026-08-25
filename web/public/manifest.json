@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "Laysi One",
+  "short_name": "Laysi One",
+  "description": "台灣中小企業的財務與人資系統",
+  "lang": "zh-Hant-TW",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3f2f2",
+  "theme_color": "#f3f2f2",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
