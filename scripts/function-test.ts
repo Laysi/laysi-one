@@ -514,6 +514,89 @@ async function main() {
       return `成本合計 ${list.cost_total}`;
     });
 
+    console.log("\nN 公告與規章");
+    let policyId = 0;
+    await check("N1", "公告發布後員工看得到，記為第 1 版", async () => {
+      const data = await must("create_notice", {
+        kind: "announcement", title: "中秋節放假一日", body: "9/25 全日休假。", effective_on: TODAY,
+      });
+      expectEq(data.notice.version_no, 1, "版次");
+      expectEq(data.notice.status_label, "公告中", "狀態");
+      const mine = await must("list_my_notices");
+      expect(mine.notices.some((n: any) => n.title === "中秋節放假一日"), "員工端看不到這則公告");
+      return `第 ${data.notice.version_no} 版 · ${data.notice.status_label}`;
+    });
+
+    await check("N2", "規章發布後在員工端讀得到全文，且標為未讀", async () => {
+      const data = await must("create_notice", {
+        kind: "policy", title: "出勤管理辦法", body: "上班 09:00，下班 18:00。", effective_on: TODAY,
+      });
+      policyId = data.notice.id;
+      const mine = await must("list_my_notices");
+      const row = mine.notices.find((n: any) => n.id === policyId);
+      expectEq(row.body, "上班 09:00，下班 18:00。", "內文");
+      expectEq(row.versions, 1, "版本數");
+      expectEq(row.unread, true, "沒看過的應標為未讀");
+      return `${row.kind_label}第 ${row.version_no} 版`;
+    });
+
+    await check("N3", "改動內容會發布新的一版，舊版仍讀得到原文", async () => {
+      const data = await must("update_notice", { id: policyId, body: "上班 09:30，下班 18:30。" });
+      expectEq(data.revised, true, "應判定為改版");
+      expectEq(data.notice.version_no, 2, "版次");
+      const history = await must("list_notices", { id: policyId });
+      expectEq(history.versions.length, 2, "版本數");
+      expectEq(history.versions[0].version_no, 2, "第一列應為最新版");
+      expectEq(history.versions[1].body, "上班 09:00，下班 18:00。", "第 1 版的原文");
+      return `共 ${history.versions.length} 版，第 1 版原文仍在`;
+    });
+
+    await check("N4", "只改廢止日不算改版", async () => {
+      const later = new Date(Date.parse(`${TODAY}T00:00:00Z`) + 30 * 86400000).toISOString().slice(0, 10);
+      const data = await must("update_notice", { id: policyId, expires_on: later });
+      expectEq(data.revised, false, "設定廢止日不該進版");
+      expectEq(data.notice.version_no, 2, "版次應不變");
+      expectEq(data.notice.expires_on, later, "廢止日");
+      return `仍為第 ${data.notice.version_no} 版`;
+    });
+
+    await check("N5", "員工讀到的修訂紀錄與人資是同一份", async () => {
+      const mine = await must("list_my_notices", { id: policyId });
+      const hr = await must("list_notices", { id: policyId });
+      expectEq(JSON.stringify(mine.versions), JSON.stringify(hr.versions), "兩邊的版本清單");
+      expect(mine.versions.every((v: any) => v.published_by), "每一版都要記得住是誰發布的");
+      return `${mine.versions.length} 版，兩邊相同`;
+    });
+
+    await check("N6", "標為已看過之後未讀歸零，之後的修訂又是未讀", async () => {
+      const before = await must("list_my_notices");
+      expect(before.unread_count > 0, "標記之前應該有未讀");
+      await must("mark_my_notices_read");
+      const after = await must("list_my_notices");
+      expectEq(after.unread_count, 0, "標記之後的未讀數");
+      expect(after.notices.every((n: any) => n.unread === false), "還有標成未讀的");
+      await must("update_notice", { id: policyId, body: "改過的內容，應重新變成未讀。" });
+      const again = await must("list_my_notices");
+      expectEq(again.unread_count, 1, "修訂之後的未讀數");
+      expectEq(again.notices.find((n: any) => n.id === policyId).unread, true, "被修訂的那一則");
+      return `${before.unread_count} → 0 → 1`;
+    });
+
+    await check("N7", "廢止之後員工端看不到，人資仍查得到全部版本", async () => {
+      const yesterday = new Date(Date.parse(`${TODAY}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+      await must("update_notice", { id: policyId, effective_on: yesterday, expires_on: yesterday });
+      const mine = await must("list_my_notices");
+      expect(!mine.notices.some((n: any) => n.id === policyId), "已廢止的規章還留在員工端");
+      const visible = await must("list_notices");
+      expect(!visible.notices.some((n: any) => n.id === policyId), "預設清單不該列出已廢止的");
+      const all = await must("list_notices", { include_ended: true });
+      const row = all.notices.find((n: any) => n.id === policyId);
+      expectEq(row.status_label, "已廢止", "狀態");
+      const history = await must("list_notices", { id: policyId });
+      expectEq(history.versions.length, 4, "廢止不刪任何版本");
+      return `${row.status_label}，仍存 ${history.versions.length} 版`;
+    });
+
     console.log("\nZ 收尾");
     await check("Z1", "所有寫入之後試算表仍然平衡", async () => {
       const tb = await must("get_trial_balance", { as_of: TODAY });

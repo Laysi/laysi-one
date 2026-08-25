@@ -24,6 +24,7 @@ export type ScreenId =
   | 'pay'
   | 'ins'
   | 'wht'
+  | 'notice'
 
   | 'me'
   | 'meclock'
@@ -34,7 +35,8 @@ export type ScreenId =
   | 'mepay'
   | 'meleave'
   | 'meot'
-  | 'memcp';
+  | 'memcp'
+  | 'menotice';
 
 export interface NavItem {
   kind: 'item';
@@ -42,7 +44,7 @@ export interface NavItem {
   label: string;
   op: string;
   ready?: boolean;
-  badge?: 'pending' | 'draft';
+  badge?: 'pending' | 'draft' | 'unread';
 }
 
 export interface NavHead {
@@ -90,6 +92,7 @@ export const HR_NAV: NavEntry[] = [
   { kind: 'item', id: 'ins', label: '勞健保與勞退', op: 'get_insurance_summary', ready: true },
   { kind: 'head', label: '人員' },
   { kind: 'item', id: 'hr', label: '員工名冊', op: 'list_employees', ready: true },
+  { kind: 'item', id: 'notice', label: '公告與規章', op: 'list_notices', ready: true },
   { kind: 'head', label: '法遵' },
   { kind: 'item', id: 'wht', label: '扣繳與法遵', op: 'get_hr_compliance', ready: true },
 ];
@@ -99,6 +102,14 @@ export const ME_NAV: NavEntry[] = [
 
   { kind: 'item', id: 'meclock', label: '打卡', op: 'punch_clock', ready: true },
   { kind: 'item', id: 'me', label: '個人專區', op: 'get_my_home', ready: true },
+  {
+    kind: 'item',
+    id: 'menotice',
+    label: '公告與規章',
+    op: 'list_my_notices',
+    ready: true,
+    badge: 'unread',
+  },
   { kind: 'head', label: '提出申請' },
 
   { kind: 'item', id: 'meleavenew', label: '休假申請', op: 'request_leave', ready: true },
@@ -156,6 +167,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   meexp: '/me/expense',
   mepay: '/me/payslip',
   memcp: '/me/mcp',
+  menotice: '/me/notices',
 
   dash: '/finance',
   gl: '/finance/ledger',
@@ -176,6 +188,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   ins: '/hr/insurance',
   hr: '/hr/employees',
   wht: '/hr/withholding',
+  notice: '/hr/notices',
 
   setup: '/system/settings',
   acc: '/system/accounts',

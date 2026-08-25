@@ -1611,6 +1611,51 @@ export interface OvertimeRequestRow {
   decide_blocked_reason?: string | null;
 }
 
+export interface NoticeRow {
+  id: number;
+  kind: string;
+  kind_label: string;
+  title: string;
+  body: string;
+  effective_on: string;
+  expires_on: string | null;
+  status: string;
+  status_label: string;
+  version_no: number;
+  versions: number;
+  published_at: string;
+  published_by: string;
+  unread?: boolean;
+}
+
+export interface NoticeVersionRow {
+  version_no: number;
+  title: string;
+  body: string;
+  effective_on: string;
+  published_at: string;
+  published_by: string;
+}
+
+export interface NoticeList {
+  notices: NoticeRow[];
+  kinds: { kind: string; label: string }[];
+  announcement_count: number;
+  policy_count: number;
+}
+
+export interface MyNoticeList {
+  notices: NoticeRow[];
+  unread_count: number;
+  read_at: string | null;
+  scope_note: string;
+}
+
+export interface NoticeHistory {
+  notice: NoticeRow;
+  versions: NoticeVersionRow[];
+}
+
 export interface MyOvertimeList {
   employee: { emp_no: string; name: string };
   requests: OvertimeRequestRow[];

@@ -75,6 +75,9 @@ export type OpName =
   | 'run_payroll'
   | 'get_hr_compliance'
   | 'list_withholding_statements'
+  | 'list_notices'
+  | 'create_notice'
+  | 'update_notice'
   | 'get_my_home'
   | 'list_my_payslips'
   | 'list_my_leave_requests'
@@ -88,6 +91,8 @@ export type OpName =
   | 'list_my_punches'
   | 'submit_my_punch_correction'
   | 'list_my_punch_corrections'
+  | 'list_my_notices'
+  | 'mark_my_notices_read'
   | 'issue_my_api_token'
   | 'list_my_api_tokens'
   | 'revoke_my_api_token'
@@ -198,6 +203,9 @@ export const OPS: readonly OpMeta[] = [
   { name: 'run_payroll', risk: 'high_risk', riskLabel: '高風險', summary: "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。已計薪的人不會再算一次，同一期可以為後來到職或漏算的人補算，各自產生一張傳票。" },
   { name: 'get_hr_compliance', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算、每月延長工時上限與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。" },
   { name: 'list_withholding_statements', risk: 'boss_only', riskLabel: '限負責人', summary: "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限負責人；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。" },
+  { name: 'list_notices', risk: 'read_only', riskLabel: '唯讀', summary: "讀公告與規章，含生效期間與版次；帶 id 則回該則的每一個版本" },
+  { name: 'create_notice', risk: 'needs_confirm', riskLabel: '需人確認', summary: "發布一則公告或規章，記為第 1 版" },
+  { name: 'update_notice', risk: 'needs_confirm', riskLabel: '需人確認', summary: "修改公告或規章，或設定下架與廢止日期。改動標題、內容或生效日會發布新的一版，先前版本留著供查閱。" },
   { name: 'get_my_home', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前呼叫者本人的員工首頁：基本資料（不含身分證字號，銀行帳戶僅留尾碼）、年資、本月出勤、特休餘額，以及本人送出的休假與報支的目前關卡。無任何參數可指定他人。" },
   { name: 'list_my_payslips', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由登入身分決定，查不到他人的薪資單。" },
   { name: 'list_my_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人的全部休假單與本年度特休額度、已休、剩餘。額度由查詢日適用的特休規則與年資現算，不逐人設定。" },
@@ -211,6 +219,8 @@ export const OPS: readonly OpMeta[] = [
   { name: 'list_my_punches', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人某個月的逐日打卡明細與統計，並與匯入的出勤月統計對帳。輸入只有月份，沒有任何可指定他人的欄位。" },
   { name: 'submit_my_punch_correction', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出打卡補登申請。對象與建立者都由登入身分決定，輸入不能指定他人。公司設定為自動通過時，在同一個交易寫進打卡紀錄。" },
   { name: 'list_my_punch_corrections', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人送出的打卡補登申請與目前狀態。只回登入身分所連結的員工，輸入不含任何欄位。" },
+  { name: 'list_my_notices', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前公告中與施行中的公告與規章，並標出本人還沒看過的；帶 id 則回該則的每一個版本" },
+  { name: 'mark_my_notices_read', risk: 'needs_confirm', riskLabel: '需人確認', summary: "把目前的公告與規章標為本人已看過。只記時刻，不記看了哪幾則，人資讀不到這一筆。" },
   { name: 'issue_my_api_token', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入者本人的身分核發一組 MCP Token。輸入只有名稱、用途與輪替天數，不能指定代表對象與角色，兩者都取自 session，因此這組 Token 能做的事與本人完全相同。明文僅回傳一次。" },
   { name: 'list_my_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人自助核發的 MCP Token，以及本人在 MCP 上實際能呼叫的工具清單。不含負責人代發的 Token，輸入不含可指定他人的欄位。" },
   { name: 'revoke_my_api_token', risk: 'needs_confirm', riskLabel: '需人確認', summary: "撤銷一組本人自助核發的 MCP Token。只能撤銷本人核發的 Token，別人核發的一律查無此筆。撤銷後不可復原。" },
@@ -313,6 +323,9 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'run_payroll': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"bank_account_id":{"default":null,"description":"Which bank account pays. Defaults to the first 1102 bank account.","format":"int32","type":["integer","null"]},"note":{"default":null,"type":["string","null"]},"pay_on":{"default":null,"description":"Payment date (YYYY-MM-DD). Defaults to today; withholding resolves on it.","format":"date","type":["string","null"]},"period":{"default":null,"description":"Period (YYYY-MM). Defaults to this month.","type":["string","null"]}},"title":"RunPayrollInput","type":"object"},
   'get_hr_compliance': {"$schema":"http://json-schema.org/draft-07/schema#","description":"Query as of a date. Needed by the regulation and balance operations.","properties":{"as_of":{"default":null,"description":"Cut-off date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"AsOfInput","type":"object"},
   'list_withholding_statements': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"year":{"default":null,"description":"Income year. Defaults to the current year.","format":"int32","type":["integer","null"]}},"title":"WithholdingStatementsInput","type":"object"},
+  'list_notices': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"id":{"default":null,"description":"One notice, from a previous listing. Given, the reply is that notice with every version it has ever had instead of the list.","format":"int32","type":["integer","null"]},"include_ended":{"default":false,"description":"Include the ones already taken down or repealed.","type":"boolean"},"kind":{"default":null,"description":"Restrict to one kind, `announcement` or `policy`. Omit for both.","type":["string","null"]}},"title":"ListNoticesInput","type":"object"},
+  'create_notice': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"body":{"description":"Plain text. Line breaks are kept as written.","type":"string"},"effective_on":{"default":null,"description":"Publication date, or the date a rule takes effect. Defaults to today.","format":"date","type":["string","null"]},"expires_on":{"default":null,"description":"The day it comes down or is repealed. Omit to leave it standing.","format":"date","type":["string","null"]},"kind":{"description":"`announcement` for a notice board post, `policy` for a company rule.","type":"string"},"title":{"type":"string"}},"required":["body","kind","title"],"title":"CreateNoticeInput","type":"object"},
+  'update_notice': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"body":{"default":null,"description":"Changing this publishes a new version.","type":["string","null"]},"effective_on":{"default":null,"description":"Changing this publishes a new version.","format":"date","type":["string","null"]},"expires_on":{"default":null,"description":"`YYYY-MM-DD` to set the end date, an empty string to clear it, omitted to leave it alone. This one is not part of the content, so it does not publish a version.","type":["string","null"]},"id":{"description":"Which notice, from `list_notices`.","format":"int32","type":"integer"},"title":{"default":null,"description":"Changing this publishes a new version.","type":["string","null"]}},"required":["id"],"title":"UpdateNoticeInput","type":"object"},
   'get_my_home': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_my_payslips': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_my_leave_requests': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
@@ -326,6 +339,8 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'list_my_punches': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"month":{"default":null,"description":"Month (YYYY-MM). Defaults to this month. This chooses a period, never a person: the person is always ctx.employee_id.","type":["string","null"]}},"title":"ListMyPunchesInput","type":"object"},
   'submit_my_punch_correction': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"at":{"description":"The time it was, `HH:MM:SS` or `HH:MM`. A remembered time rarely has a second, so `HH:MM` is stored as second zero.","type":"string"},"kind":{"description":"`in` for arrival, `out` for departure.","type":"string"},"punched_on":{"description":"The working day the punch belongs to.","format":"date","type":"string"},"reason":{"default":null,"description":"Why it is being asked for. Kept on the record and shown to whoever decides.","type":["string","null"]}},"required":["at","kind","punched_on"],"title":"SubmitMyPunchCorrectionInput","type":"object"},
   'list_my_punch_corrections': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
+  'list_my_notices': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"id":{"default":null,"description":"One notice, from a previous listing. Given, the reply is that notice with every version it has ever had instead of the list.","format":"int32","type":["integer","null"]}},"title":"ListMyNoticesInput","type":"object"},
+  'mark_my_notices_read': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'issue_my_api_token': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"label":{"description":"What to call this token, so it can be told apart in the list later. Named `label` rather than `name` because in this module every field called `name` has meant a person, and the test that forbids those should not have to carry an exception.","type":"string"},"rotate_days":{"default":null,"description":"Days until rotation is due. Omitted means no fixed cycle.","format":"int32","type":["integer","null"]},"scope":{"default":null,"description":"What it is for, kept as a label. It records intent and does not restrict anything; the role does that.","type":["string","null"]}},"required":["label"],"title":"IssueMyApiTokenInput","type":"object"},
   'list_my_api_tokens': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_revoked":{"default":false,"description":"Include tokens already revoked.","type":"boolean"}},"title":"ListMyApiTokensInput","type":"object"},
   'revoke_my_api_token': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"id":{"description":"Token id from `list_my_api_tokens`.","format":"int32","type":"integer"}},"required":["id"],"title":"RevokeMyApiTokenInput","type":"object"},
