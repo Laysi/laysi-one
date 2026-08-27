@@ -5,7 +5,7 @@
 //! 1. Brand integrity verification, first of all. Failing it refuses to boot
 //!    without even connecting to the database.
 //! 2. Migrations.
-//! 3. Project the rulesets into `reg_ruleset`.
+//! 3. Load the rulesets out of `reg_ruleset`.
 //! 4. Start serving.
 //!
 //! Step 1 being strict is a product decision. Its cost is that editing a
@@ -225,9 +225,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(version = ?store.migration_version().await?, "migrations 完成");
 
 
-    // 3. Ruleset projection
-    let n = store.sync_regulations().await?;
-    tracing::info!(rulesets = n, "法規規則已同步到 reg_ruleset");
+    // 3. Rulesets
+    //
+    // `reg_ruleset` is the authority; the embedded factory set only fills
+    // rows the table does not have. Nothing may compute before this runs.
+    let n = store.reload_regulations().await?;
+    tracing::info!(rulesets = n, "法規版本已載入");
 
     // 4. Object storage
     //

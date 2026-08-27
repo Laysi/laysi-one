@@ -7,9 +7,9 @@
 //! amendment would mean editing code and redeploying, and there would be no
 //! way to answer which version last year's figure was computed under.
 //!
-//! Hence the rule: regulation values may exist only in the TOML under
-//! `backend/regulation/` and must never appear in Rust source. The code
-//! describes how to compute, never what numbers to compute with.
+//! Hence the rule: regulation values may exist only in the `reg_ruleset`
+//! table and must never appear in Rust source. The code describes how to
+//! compute, never what numbers to compute with.
 //!
 //! Three consequences:
 //!
@@ -19,20 +19,27 @@
 //! 2. [`resolve`] returns an error when no rule applies, never a default.
 //!    The system refuses to compute rather than computing someone's pay from
 //!    a guess.
-//! 3. Every computed amount is stored with its ruleset version (see the
-//!    `reg_ruleset` table), so an audit can say which version produced it.
+//! 3. Every computed amount is stored with its ruleset version, so an audit
+//!    can say which version produced it.
 //!
-//! Updating regulation end to end: add a TOML with a later `effective_from`,
-//! rebuild. Results for earlier dates are unchanged and later dates pick up
-//! the new rules automatically.
+//! This crate stays synchronous and knows nothing about SQL: the server
+//! reads `reg_ruleset` at boot and after every edit and hands the rows to
+//! [`install`]. [`seed`] is the factory set shipped with the image, written
+//! once into an empty table and never again.
+//!
+//! Updating regulation end to end: save a ruleset with a later
+//! `effective_from`. Results for earlier dates are unchanged and later dates
+//! pick up the new rules automatically, with no release.
 
 use chrono::NaiveDate;
 use rust_decimal::{Decimal, RoundingStrategy};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 pub type Money = Decimal;
 
-/// Rule files embedded at compile time. Register a new year or domain here.
+/// The factory set, embedded at compile time. It fills an empty `reg_ruleset`
+/// and is the answer before the server has installed anything. Register a new
+/// domain here; a newly published year is added as a version on the screen.
 const SOURCES: &[(&str, &str)] = &[
     ("2026/labor_insurance.toml", include_str!("../../../regulation/2026/labor_insurance.toml")),
     ("2026/health_insurance.toml", include_str!("../../../regulation/2026/health_insurance.toml")),
@@ -81,15 +88,12 @@ pub struct Ruleset {
     /// Legal source. Audits and reports must be able to cite the article.
     pub source_note: String,
     pub payload: serde_json::Value,
-    /// Raw rule file text, for the `reg_ruleset.checksum` and manual
-    /// comparison.
-    pub raw: &'static str,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegulationError {
     #[error(
-        "找不到「{domain}」在 {as_of} 適用的法規版本，請補上涵蓋該日期的規則檔。"
+        "找不到「{domain}」在 {as_of} 適用的法規版本，請在法規版本新增涵蓋該日期的版本。"
     )]
     NotFound { domain: String, as_of: NaiveDate },
 
@@ -103,35 +107,63 @@ pub enum RegulationError {
     WrongDomain { expected: &'static str, found: String },
 }
 
-fn rulesets() -> &'static [Ruleset] {
-    static CELL: OnceLock<Vec<Ruleset>> = OnceLock::new();
-    CELL.get_or_init(|| {
-        let mut out = Vec::with_capacity(SOURCES.len());
-        for (file, text) in SOURCES {
-            let raw: RawRuleset =
-                toml::from_str(text).unwrap_or_else(|e| panic!("規則檔 {file} 無法解析：{e}"));
-            assert!(
-                DOMAINS.contains(&raw.domain.as_str()),
-                "規則檔 {file} 的 domain「{}」不在本系統認得的清單中",
-                raw.domain
-            );
-            out.push(Ruleset {
-                domain: raw.domain,
-                version: raw.version,
-                effective_from: raw.effective_from,
-                effective_to: raw.effective_to,
-                source_note: raw.source_note,
-                payload: raw.payload,
-                raw: text,
-            });
-        }
-        out.sort_by(|a, b| a.domain.cmp(&b.domain).then(a.effective_from.cmp(&b.effective_from)));
-        out
-    })
+fn sorted(mut v: Vec<Ruleset>) -> Vec<Ruleset> {
+    v.sort_by(|a, b| a.domain.cmp(&b.domain).then(a.effective_from.cmp(&b.effective_from)));
+    v
 }
 
-/// Every loaded ruleset. Used by the `list_regulations` operation and to
-/// populate the `reg_ruleset` table.
+/// The factory set shipped with the image, parsed from the embedded files.
+///
+/// The server writes these into `reg_ruleset` only while that table is empty.
+/// From the first boot onwards the table answers, so a corrected rate and a
+/// deleted version both survive the next start.
+pub fn seed() -> Vec<Ruleset> {
+    sorted(
+        SOURCES
+            .iter()
+            .map(|(file, text)| {
+                let raw: RawRuleset =
+                    toml::from_str(text).unwrap_or_else(|e| panic!("規則檔 {file} 無法解析：{e}"));
+                assert!(
+                    DOMAINS.contains(&raw.domain.as_str()),
+                    "規則檔 {file} 的 domain「{}」不在本系統認得的清單中",
+                    raw.domain
+                );
+                Ruleset {
+                    domain: raw.domain,
+                    version: raw.version,
+                    effective_from: raw.effective_from,
+                    effective_to: raw.effective_to,
+                    source_note: raw.source_note,
+                    payload: raw.payload,
+                }
+            })
+            .collect(),
+    )
+}
+
+static INSTALLED: RwLock<Option<&'static [Ruleset]>> = RwLock::new(None);
+
+/// Replace the rules in force with what the database holds. Called at boot
+/// and after every edit, so a saved rate applies without a restart.
+///
+/// ponytail: the vector is leaked so `resolve` can hand back `&'static` and
+/// no calculator needs an `Arc`. Regulation is edited a few times a year, so
+/// this leaks kilobytes a year; swap in `arc-swap` if that stops being true.
+pub fn install(rulesets: Vec<Ruleset>) {
+    let leaked: &'static [Ruleset] = Vec::leak(sorted(rulesets));
+    *INSTALLED.write().expect("法規快取") = Some(leaked);
+}
+
+fn rulesets() -> &'static [Ruleset] {
+    if let Some(installed) = *INSTALLED.read().expect("法規快取") {
+        return installed;
+    }
+    static FACTORY: OnceLock<Vec<Ruleset>> = OnceLock::new();
+    FACTORY.get_or_init(seed)
+}
+
+/// Every ruleset in force. Used by the `list_regulations` operation.
 pub fn all() -> &'static [Ruleset] {
     rulesets()
 }
@@ -549,7 +581,7 @@ mod tests {
         // from a guess.
         let err = resolve("labor_insurance", d(2025, 12, 31)).unwrap_err();
         assert!(matches!(err, RegulationError::NotFound { .. }));
-        assert!(err.to_string().contains("補上涵蓋該日期的規則檔"));
+        assert!(err.to_string().contains("新增涵蓋該日期的版本"));
     }
 
     #[test]
@@ -589,7 +621,7 @@ mod tests {
     fn rulesets_expose_their_source_for_audit() {
         for rs in all() {
             assert!(!rs.source_note.is_empty(), "{} 沒有標註法源", rs.domain);
-            assert!(rs.raw.contains("domain"), "{} 的原文沒有保留", rs.domain);
+            assert!(rs.payload.is_object(), "{} 的規則內容不是物件", rs.domain);
         }
     }
 }

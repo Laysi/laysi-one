@@ -36,6 +36,7 @@ import { Receivables } from './screens/Receivables';
 import { Reports } from './screens/Reports';
 import { Roles } from './screens/Roles';
 import { Security } from './screens/Security';
+import { Regulations } from './screens/Regulations';
 import { Setup } from './screens/Setup';
 import { Tax } from './screens/Tax';
 import { Withholding } from './screens/Withholding';
@@ -505,6 +506,7 @@ function Workspace() {
               {screen === 'roles' && <Roles onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'mcp' && <McpTools reloadKey={reloadKey} />}
               {screen === 'sec' && <Security onToast={showToast} reloadKey={reloadKey} />}
+              {screen === 'reg' && <Regulations onToast={showToast} reloadKey={reloadKey} />}
 
               {screen === 'hrdash' && <HrDashboard onGo={go} reloadKey={reloadKey} />}
               {screen === 'hr' && (

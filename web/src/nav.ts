@@ -17,6 +17,7 @@ export type ScreenId =
   | 'roles'
   | 'mcp'
   | 'sec'
+  | 'reg'
 
   | 'hrdash'
   | 'hr'
@@ -79,6 +80,7 @@ export const SYSTEM_NAV: NavEntry[] = [
   { kind: 'item', id: 'setup', label: '基礎設定', op: 'get_company_settings', ready: true },
   { kind: 'item', id: 'acc', label: '帳號管理', op: 'list_user_accounts', ready: true },
   { kind: 'item', id: 'roles', label: '角色與核准', op: 'list_roles', ready: true },
+  { kind: 'item', id: 'reg', label: '法規版本', op: 'list_regulations', ready: true },
   { kind: 'head', label: 'AI 與監控' },
   { kind: 'item', id: 'mcp', label: 'MCP 與 AI', op: 'list_ai_audit', ready: true },
   { kind: 'item', id: 'sec', label: '安全與營運', op: 'get_security_policy', ready: true },
@@ -195,6 +197,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   roles: '/system/roles',
   mcp: '/system/mcp',
   sec: '/system/security',
+  reg: '/system/regulations',
 };
 
 const PATH_SCREEN: Record<string, ScreenId> = Object.fromEntries(

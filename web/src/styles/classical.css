@@ -2363,6 +2363,15 @@ textarea {
   line-height: var(--leading-normal);
 }
 
+.reg-group {
+  border-left: var(--rule-width-marker) solid var(--rule-soft);
+  padding-left: var(--space-xl);
+}
+
+.reg-group > .section-title {
+  margin-bottom: var(--space-lg);
+}
+
 .wizard-steps {
   display: flex;
   gap: var(--space-6xl);

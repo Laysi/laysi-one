@@ -684,6 +684,6 @@ mod tests {
     fn a_date_with_no_ruleset_is_refused_never_guessed() {
         let err = premiums_on(d(2025, 12, 31), n("45800"), n("53000"), n("53000")).unwrap_err();
         assert!(matches!(err, OpError::Regulation(_)));
-        assert!(err.to_string().contains("補上涵蓋該日期的規則檔"));
+        assert!(err.to_string().contains("新增涵蓋該日期的版本"));
     }
 }

@@ -26,8 +26,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(SearchVouchers),
         Box::new(ListAccounts),
         Box::new(ListAiAudit),
-        Box::new(ListRegulations),
-        Box::new(DraftVoucher),
+                Box::new(DraftVoucher),
         Box::new(CreateVoucher),
         Box::new(PostVoucher),
         Box::new(VoidVoucher),
@@ -279,47 +278,6 @@ impl Operation for ListAiAudit {
         let entries = ctx.store.recent_audit(i.limit.unwrap_or(50).clamp(1, 500)).await?;
         let summary = format!("讀取稽核紀錄 · {} 筆", entries.len());
         Ok(OpOutcome::new(json!({ "entries": entries }), summary))
-    }
-}
-
-struct ListRegulations;
-
-#[async_trait]
-impl Operation for ListRegulations {
-    fn name(&self) -> &'static str {
-        "list_regulations"
-    }
-    fn risk(&self) -> Risk {
-        Risk::ReadOnly
-    }
-    fn summary(&self) -> &'static str {
-        "讀目前適用的法規版本：勞健保費率、勞退提繳、營業稅、最低工資等，含法源與生效日"
-    }
-    fn input_schema(&self) -> Value {
-        schema_of::<AsOfInput>()
-    }
-
-    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let i: AsOfInput = parse(input)?;
-        let as_of = i.as_of.unwrap_or(ctx.today);
-        let rulesets: Vec<Value> = laysi_regulation::DOMAINS
-            .iter()
-            .map(|domain| {
-                // A domain with no rule on that date is a fact worth showing,
-                // not an error.
-                let found = laysi_regulation::resolve(domain, as_of).ok();
-                json!({
-                    "domain": domain,
-                    "version": found.map(|r| r.version.clone()),
-                    "effective_from": found.map(|r| r.effective_from),
-                    "effective_to": found.and_then(|r| r.effective_to),
-                    "source_note": found.map(|r| r.source_note.clone()),
-                    "applicable": found.is_some(),
-                })
-            })
-            .collect();
-        let summary = format!("讀取 {as_of} 適用的法規版本 · {} 個領域", rulesets.len());
-        Ok(OpOutcome::new(json!({ "as_of": as_of, "rulesets": rulesets }), summary))
     }
 }
 

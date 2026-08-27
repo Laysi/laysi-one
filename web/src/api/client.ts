@@ -480,6 +480,37 @@ export interface CashFlow {
   unposted: Unposted;
 }
 
+export interface RegulationField {
+  path: string;
+  label: string;
+  value?: string;
+  editable?: boolean;
+  children?: RegulationField[];
+}
+
+export interface RegulationVersion {
+  version: string;
+  effective_from: string;
+  effective_to: string | null;
+  source_note: string;
+  in_force: boolean;
+  payload: Record<string, unknown>;
+  fields: RegulationField[];
+}
+
+export interface RegulationDomain {
+  domain: string;
+  label: string;
+  applicable: boolean;
+  version: string | null;
+  versions: RegulationVersion[];
+}
+
+export interface RegulationList {
+  as_of: string;
+  domains: RegulationDomain[];
+}
+
 export interface CompanySettingRow {
   code: string;
   label: string;

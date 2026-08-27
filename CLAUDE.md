@@ -90,19 +90,31 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 `post_voucher` 對 AI 關掉，不應該讓會計也不能過帳。加新操作時想清楚它在
 兩個 channel 下各自該是什麼行為。
 
-### 3. 法規數值只能存在於 TOML
+### 3. 法規數值只能存在於 `reg_ruleset` 資料表
 
 **任何法規數字（費率、級距、上限、天數）都不得出現在 Rust 原始碼中。**
-它們住在 `backend/regulation/<年度>/<domain>.toml`，由 `laysi-regulation`
-以 `include_str!` 編譯期嵌入。
+它們住在 `reg_ruleset`（0009），畫面在「法規版本」，操作是 `save_regulation`／
+`delete_regulation`（`AdminOnly`）。
 
 - 計算子一律接收 `&Ruleset`，而 ruleset 是用 `as_of` 日期解析出來的。
   沒有「當前費率」，只有「某日適用的費率」。
-- `resolve()` 找不到適用規則時**回錯誤，絕不回退到預設值**。
-- 法規更新 = 新增一份 `effective_from` 較晚的 TOML，不改程式。
+- `resolve()` 找不到適用規則時**回錯誤，絕不回退到預設值**。所以
+  `delete_regulation` 拒絕刪掉一個領域的最後一版。
+- 法規更新 = 新增一版 `effective_from` 較晚的規則，不改程式、不發版、不重啟。
+  `save_regulation` 寫完就重讀重裝。
+
+**`laysi-regulation` 仍然不碰 SQL**：伺服器啟動時把整張表交給 `install()`，
+`resolve()` 回 `&'static Ruleset`，計算子維持同步純函式，`cargo test` 不需要資料庫。
+`backend/regulation/<年度>/<domain>.toml` 只是**出廠預設值**，`seed_regulations()`
+**只在表空的時候寫入**——逐列補寫會讓刪掉的舊版在下一次重新載入時自己回來。
 
 `laysi-regulation` 的測試把原型畫面上的實際數字（3527／2647／822／1008／3180）
 當基準；對不上就是計算子錯了。
+
+**存進去之前先算一次**：`save_regulation` 用該領域自己的計算子跑 `probe()`，
+少一個欄位的 payload 在存檔當下就被擋下，而不是等到發薪那天。畫面上只有字串葉節點
+編得動（欄位名與排序共用 `ops/regulations.rs` 的 `FIELDS`，識別字不進畫面）；
+改結構走 `save_regulation` 本身，它收整份 `payload`。
 
 ### 4. 品牌完整性：不通過就拒絕啟動
 
@@ -227,13 +239,13 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、品牌完整性、
-RustFS 物件儲存，以及 **35 個畫面、116 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **36 個畫面、118 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
   費用報支／預算／財務報表、文件管理／資料匯入。**不做電子發票**：開立統一發票是
   加值中心的事（0031 拿掉了那個模組），銷項稅額改由應收單自己拆到 2211。
-- **系統 5 畫面**：基礎設定／帳號管理／角色核准／MCP／安全營運。原本掛在財務樹底下，
+- **系統 6 畫面**：基礎設定／帳號管理／角色核准／法規版本／MCP／安全營運。原本掛在財務樹底下，
   但那是管理這套系統，不是財務工作。**它不是第四個分頁**：前三個是每天待著的
   地方，這個是偶爾去一次的地方，所以放在左下角帳號列旁邊，角色開不起任何一個
   畫面時連按鈕都不出現。

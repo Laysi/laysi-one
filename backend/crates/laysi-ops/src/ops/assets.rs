@@ -75,7 +75,7 @@ fn to_dollars(v: Money) -> Money {
 
 /// Display label for a category. Presentation only; the useful life is
 /// always looked up in the ruleset.
-fn category_label(category: &str) -> &'static str {
+pub(crate) fn category_label(category: &str) -> &'static str {
     match category {
         "building_improvement" => "房屋建築及設備",
         "vehicle" => "運輸設備",

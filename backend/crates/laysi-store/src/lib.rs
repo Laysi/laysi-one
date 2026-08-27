@@ -357,36 +357,99 @@ impl Store {
         Ok(row.and_then(|r| r.try_get::<Option<i64>, _>("v").ok().flatten()))
     }
 
-    /// Project the compile-time embedded rulesets into `reg_ruleset`.
+    /// Fill an empty `reg_ruleset` with the factory set.
     ///
-    /// The authority is always the TOML under `backend/regulation/`; this
-    /// table only makes the rules queryable from SQL and citable from audit
-    /// reports. Upserted on (domain, version), so re-running is idempotent.
-    pub async fn sync_regulations(&self) -> Result<u64> {
+    /// Only when it is empty. The table is the authority from the first boot
+    /// onwards: a corrected rate has to survive the next start, and so does a
+    /// deleted version -- seeding row by row would put a superseded version
+    /// back the moment anything reloaded. A newly published year is added as a
+    /// version on the 法規版本 screen, or as a migration. Returns how many rows
+    /// were written.
+    pub async fn seed_regulations(&self) -> Result<u64> {
+        let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reg_ruleset")
+            .fetch_one(&self.pool)
+            .await?;
+        if existing > 0 {
+            return Ok(0);
+        }
         let mut n = 0;
-        for rs in laysi_regulation::all() {
-            let r = sqlx::query(
-                "INSERT INTO reg_ruleset (domain, version, effective_from, effective_to,
-                                          source_note, payload, checksum)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7)
-                 ON CONFLICT (domain, version) DO UPDATE
-                   SET effective_from = EXCLUDED.effective_from,
-                       effective_to   = EXCLUDED.effective_to,
-                       source_note    = EXCLUDED.source_note,
-                       payload        = EXCLUDED.payload,
-                       checksum       = EXCLUDED.checksum",
-            )
-            .bind(&rs.domain)
-            .bind(&rs.version)
-            .bind(rs.effective_from)
-            .bind(rs.effective_to)
-            .bind(&rs.source_note)
-            .bind(&rs.payload)
-            .bind(format!("{:016x}", fnv1a(rs.raw)))
+        for rs in laysi_regulation::seed() {
+            n += self.write_regulation(&rs, false).await?;
+        }
+        Ok(n)
+    }
+
+    /// Write one ruleset. `replace` decides whether an existing
+    /// (domain, version) is overwritten or left alone.
+    pub async fn write_regulation(
+        &self,
+        rs: &laysi_regulation::Ruleset,
+        replace: bool,
+    ) -> Result<u64> {
+        let conflict = if replace {
+            "DO UPDATE SET effective_from = EXCLUDED.effective_from,
+                           effective_to   = EXCLUDED.effective_to,
+                           source_note    = EXCLUDED.source_note,
+                           payload        = EXCLUDED.payload,
+                           checksum       = EXCLUDED.checksum"
+        } else {
+            "DO NOTHING"
+        };
+        let r = sqlx::query(&format!(
+            "INSERT INTO reg_ruleset (domain, version, effective_from, effective_to,
+                                      source_note, payload, checksum)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (domain, version) {conflict}"
+        ))
+        .bind(&rs.domain)
+        .bind(&rs.version)
+        .bind(rs.effective_from)
+        .bind(rs.effective_to)
+        .bind(&rs.source_note)
+        .bind(&rs.payload)
+        .bind(format!("{:016x}", fnv1a(&rs.payload.to_string())))
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected())
+    }
+
+    /// Remove one version. Returns how many rows went.
+    pub async fn delete_regulation(&self, domain: &str, version: &str) -> Result<u64> {
+        let r = sqlx::query("DELETE FROM reg_ruleset WHERE domain = $1 AND version = $2")
+            .bind(domain)
+            .bind(version)
             .execute(&self.pool)
             .await?;
-            n += r.rows_affected();
-        }
+        Ok(r.rows_affected())
+    }
+
+    /// Every ruleset the table holds, for `laysi_regulation::install`.
+    pub async fn regulations(&self) -> Result<Vec<laysi_regulation::Ruleset>> {
+        Ok(sqlx::query(
+            "SELECT domain, version, effective_from, effective_to, source_note, payload
+               FROM reg_ruleset ORDER BY domain, effective_from",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|r| laysi_regulation::Ruleset {
+            domain: r.get("domain"),
+            version: r.get("version"),
+            effective_from: r.get("effective_from"),
+            effective_to: r.get("effective_to"),
+            source_note: r.get("source_note"),
+            payload: r.get("payload"),
+        })
+        .collect())
+    }
+
+    /// Seed, read back and install. The table is the authority, so every
+    /// path that changes it ends here.
+    pub async fn reload_regulations(&self) -> Result<usize> {
+        self.seed_regulations().await?;
+        let rulesets = self.regulations().await?;
+        let n = rulesets.len();
+        laysi_regulation::install(rulesets);
         Ok(n)
     }
 
@@ -8898,11 +8961,11 @@ fn row_to_bank_txn(r: &PgRow) -> BankTxn {
     }
 }
 
-/// Short digest of a rule file's contents for `reg_ruleset.checksum`.
+/// Short digest of a ruleset's payload for `reg_ruleset.checksum`.
 ///
 /// Cryptographic strength is not needed here: brand integrity uses BLAKE3
 /// plus a signature (see `laysi-brand`), and this column only makes it
-/// obvious at a glance whether a rule file changed.
+/// obvious at a glance whether a ruleset changed.
 fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
@@ -8997,6 +9060,60 @@ mod tests {
         assert!(!fresh.is_expired(Utc::now()), "建立後 1 天、輪替 30 天的 token 不該過期");
     }
 
+
+    /// An installation that corrects a rate keeps the correction: the factory
+    /// seed fills gaps and never writes over a row. Without that, every
+    /// upgrade would silently restore the shipped figure and payroll would
+    /// move without anyone touching it.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// an_edited_rate_survives_the_factory_seed -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn an_edited_rate_survives_the_factory_seed() {
+        use chrono::NaiveDate;
+
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2).await.expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let seeded = store.reload_regulations().await.expect("應載入法規");
+        assert_eq!(seeded, laysi_regulation::seed().len(), "出廠版本應全數種入");
+
+        let mut edited = laysi_regulation::seed()
+            .into_iter()
+            .find(|r| r.domain == "labor_insurance")
+            .expect("出廠版本應有勞保");
+        edited.payload["premium_rate"] = "0.13".into();
+        store.write_regulation(&edited, true).await.expect("應寫得進去");
+
+        // The seed runs on every boot; it must leave the table alone once it
+        // holds anything.
+        assert_eq!(store.seed_regulations().await.expect("應可重種"), 0);
+        store.reload_regulations().await.expect("應重新載入");
+        let in_force = laysi_regulation::resolve(
+            "labor_insurance",
+            NaiveDate::from_ymd_opt(2026, 7, 25).unwrap(),
+        )
+        .expect("應解析得到勞保");
+        assert_eq!(in_force.decimal("premium_rate").unwrap(), "0.13".parse().unwrap());
+
+        store
+            .delete_regulation("labor_insurance", &edited.version)
+            .await
+            .expect("應刪得掉");
+        store.reload_regulations().await.expect("應重新載入");
+        assert!(
+            laysi_regulation::resolve(
+                "labor_insurance",
+                NaiveDate::from_ymd_opt(2026, 7, 25).unwrap()
+            )
+            .is_err(),
+            "刪掉唯一一版之後應該算不出來，而不是回退到出廠值"
+        );
+    }
 
     /// Run with:
     /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store

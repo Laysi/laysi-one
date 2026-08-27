@@ -735,6 +735,7 @@ mod tests {
             ops::notices::ops(),
             ops::selfservice::ops(),
             ops::settings::ops(),
+            ops::regulations::ops(),
             ops::security::ops(),
         ];
         let mut declared = 0;
@@ -757,6 +758,7 @@ mod tests {
         include_str!("../../../migrations/0004_notice.sql"),
         include_str!("../../../migrations/0005_notice_versions.sql"),
         include_str!("../../../migrations/0006_notice_read.sql"),
+        include_str!("../../../migrations/0009_regulation_in_db.sql"),
     ];
 
     /// The rows of one multi-row INSERT, one string per row, without the
@@ -963,11 +965,13 @@ mod tests {
             BTreeSet::from([
                 "change_user_role",
                 "create_user_account",
+                "delete_regulation",
                 "delete_user_account",
                 "get_oidc_setting",
                 "issue_api_token",
                 "list_user_accounts",
                 "reset_user_password",
+                "save_regulation",
                 "set_company_timezone",
                 "set_role_permission",
                 "unlink_user_identity",

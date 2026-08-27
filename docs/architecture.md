@@ -107,7 +107,17 @@ pub struct TrialBalanceRow {
 
 ## laysi-regulation 公開介面
 
-規則檔在 `backend/regulation/<年度>/<domain>.toml`，**TOML 不是 YAML**。
+**權威是 `reg_ruleset` 資料表**，不是檔案（0009）。伺服器啟動時讀出整張表交給
+`laysi_regulation::install()`，計算子仍然是同步純函式、`resolve()` 仍然回
+`&'static Ruleset`，所以 `cargo test` 不需要資料庫。`save_regulation` 寫完一版
+之後重讀重裝，修法**不必發版也不必重新啟動**。
+
+`backend/regulation/<年度>/<domain>.toml` 從此只是**出廠預設值**：`seed()` 由
+`include_str!` 編譯期嵌入，而 `Store::seed_regulations()` **只在整張表是空的時候
+才寫入**。逐列補寫會讓刪掉的舊版在下一次重新載入時自己回來，而「刪除」按下去必須
+是真的刪掉。新的年度由畫面新增版本，或由 migration 寫進去。
+
+規則檔格式（**TOML 不是 YAML**）：
 
 ```toml
 domain = "labor_insurance"
@@ -190,9 +200,25 @@ pub fn vat(rs: &Ruleset, net_amount: Money) -> Result<Money, RegulationError>;
 `source = "regulation"`、`editable = false`，並帶上 `ruleset { version,
 effective_from, source_note }`。
 
-理由是生效日：設定表只有一個當前值，規則庫則有有效期間。把稅率放進設定表，初期
-行為一樣，差別到修法時才出現：舊期間的申報書會跟著新稅率一起變，而這正是「法規
-更新空間」這個需求要避免的情況。
+理由是生效日：設定表只有一個當前值，`reg_ruleset` 則有有效期間。把稅率放進設定表，
+初期行為一樣，差別到修法時才出現：舊期間的申報書會跟著新稅率一起變，而這正是「法規
+更新空間」這個需求要避免的情況。兩者都在資料庫裡，界線在**資料模型**不在存放位置。
+
+### 法規版本畫面（0009）
+
+`list_regulations` 回九個領域各自的每一版，含 `payload` 與攤平後的 `fields`
+（`{path, label, value, editable}`，群組節點帶 `children`）。**欄位顯示名與排序
+同一份 `FIELDS` 表**：`jsonb` 的鍵是字典序回來的，照原樣印會把「員工負擔比率」排在
+它所適用的「投保薪資上限」前面；識別字（`max_insured_salary`）也不得進畫面。
+
+`save_regulation`／`delete_regulation` 是 `AdminOnly`，`list_regulations` 移到新的
+`manage_regulations` 權限（系統管理員、負責人、會計），畫面掛在系統分頁。讀費率與
+改費率是兩件事：申報的人要查得到，改的人是裝機的人。
+
+寫入前先跑 `probe()`——用該領域自己的計算子算一次。少一個欄位的 payload 在存檔當下
+就被擋下，而不是等到發薪那天。`delete_regulation` 拒絕刪掉一個領域的最後一版：
+`resolve()` 找不到就回錯誤、絕不回退到預設值，所以空的領域等於薪資、申報與折舊
+全部算不出來。
 
 ## 財務報表：唯一的資料來源是分錄
 
@@ -859,7 +885,7 @@ depreciation_entry          逐項金額，含當時解析出的 useful_life_yea
 -- 報表分組、角色權限、安全
 account.report_group        資產負債表／損益表的分段，NOT NULL，以 CHECK 與 kind 綁死
 account.cash_flow_section   現金流量表活動別；損益科目必須為 NULL（CHECK 強制）
-company_setting             公司與帳務設定。**法規決定的值不得進這張表**
+company_setting             公司與帳務設定。**法規決定的值進 reg_ruleset，不進這張表**（進 reg_ruleset）
 dimension / dimension_value 部門。0060 刪掉專案、成本中心與付款條件三個沒有
                             消費者的分類；department 以複合外鍵掛到分錄與員工
 role / permission / role_permission
@@ -977,7 +1003,8 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
   「分類」「類別」「項目」——「維度」是 BI 與對岸 ERP 的講法，資料表與操作名
   維持英文 `dimension` 不動。
 - `company_setting`：保留設定鍵與標籤，值一律為空字串，等公司自行填寫。
-- `import_source`、`reg_ruleset`：保留匯入來源與法規投影。
+- `import_source`：保留匯入來源。
+- `reg_ruleset`：法規的權威資料，不是投影（0009）。
 
 正式安裝不預載銀行帳戶、傳票、應收應付、固定資產、預算、報支、員工、差勤、
 薪資、API Token、分類項目或單據流水起始值。
@@ -1039,7 +1066,9 @@ impl Registry {
 | `get_cash_position` | ReadOnly | `{}` | `{ accounts: [{name, account_no, balance}], total }` |
 | `search_vouchers` | ReadOnly | `{ status?, q?, limit? }` | `{ vouchers: Voucher[] }` |
 | `list_ai_audit` | ReadOnly | `{ limit? }` | `{ entries: [...] }` |
-| `list_regulations` | ReadOnly | `{ as_of?: date }` | `{ rulesets: [{domain, version, effective_from, effective_to, source_note}] }` |
+| `list_regulations` | ReadOnly | `{ as_of?: date }` | `{ as_of, domains: [{domain, label, applicable, version, versions: [{version, effective_from, effective_to, source_note, in_force, payload, fields}]}] }` |
+| `save_regulation` | AdminOnly | `{ domain, version, effective_from, effective_to?, source_note, payload }` | `{ domain, label, version, effective_from, rulesets }` |
+| `delete_regulation` | AdminOnly | `{ domain, version }` | `{ domain, label, version, rulesets }` |
 | `draft_voucher` | NeedsConfirm | `{ date, memo, lines: LineInput[] }` | `{ voucher }` 狀態 `draft` |
 | `post_voucher` | HighRisk | `{ no: string }` | `{ voucher }` 狀態 `posted` |
 | `void_voucher` | HighRisk | `{ no, reason }` | `{ voucher }` 狀態 `void`；分錄不動，理由進稽核摘要 |

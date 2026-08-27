@@ -22,6 +22,7 @@ pub mod notices;
 pub mod payables;
 pub mod payroll;
 pub mod receivables;
+pub mod regulations;
 pub mod reports;
 pub mod security;
 pub mod selfservice;
@@ -51,6 +52,7 @@ pub fn all() -> Vec<Box<dyn Operation>> {
     out.extend(notices::ops());
     out.extend(selfservice::ops());
     out.extend(settings::ops());
+    out.extend(regulations::ops());
     out.extend(security::ops());
     out
 }
