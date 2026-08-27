@@ -34,7 +34,7 @@
 //! two numbers on the request cannot disagree with the range above them.
 
 use crate::ops::attendance::{
-    business_instant, correction_auto_approves, default_overtime_day_type, leave_kind_label,
+    business_instant, correction_auto_approves, leave_kind_label,
     leave_status_label, month_days, overtime_json, punch_correction_json,
     punch_correction_status_label, punch_days, punch_kind_label, summarise,
     valid_leave_kind, OvertimeLimits, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
@@ -709,10 +709,11 @@ impl Operation for SubmitMyOvertimeRequest {
 
         let rs = laysi_regulation::resolve("overtime", worked_on)?;
         let day_types = laysi_regulation::overtime_day_types(rs)?;
+        let schedule = WorkSchedule::load(ctx).await?;
         let code = i
             .day_type
             .clone()
-            .unwrap_or_else(|| default_overtime_day_type(worked_on).to_string());
+            .unwrap_or_else(|| schedule.overtime_day_type(worked_on).to_string());
         let Some(day_type) = day_types.iter().find(|t| t.code == code) else {
             let names = day_types
                 .iter()
@@ -735,7 +736,6 @@ impl Operation for SubmitMyOvertimeRequest {
         // Normal working hours are already paid by the salary, so a weekday
         // request that overlaps them would be paid twice. Without a stated
         // working window there is nothing to overlap and nothing to check.
-        let schedule = WorkSchedule::load(ctx).await?;
         if code == "weekday" && schedule.leave_seconds(i.from_at, i.to_at).is_some_and(|s| s > 0) {
             return Err(OpError::BadInput(format!(
                 "所選時段與上班時間（{} 至 {}）重疊，加班要填上班時間以外的時段",

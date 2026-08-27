@@ -106,6 +106,89 @@ pub(crate) struct WorkSchedule {
     /// break.
     pub break_start: Option<NaiveTime>,
     pub break_end: Option<NaiveTime>,
+    /// The dates that differ from the Monday-to-Friday default, and nothing
+    /// else. Around twenty rows a year, so the whole table is carried here
+    /// rather than queried per date.
+    pub calendar: BTreeMap<NaiveDate, (DayKind, String)>,
+}
+
+/// What one date is, for leave, attendance and overtime.
+///
+/// The default is the week the Labor Standards Act describes for a five-day
+/// week: Monday to Friday work, Saturday a rest day, Sunday a regular leave
+/// day. `work_calendar` states only the dates that differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DayKind {
+    Workday,
+    RestDay,
+    RegularLeave,
+    Holiday,
+    /// A day the local authority stopped work on. Not a statutory holiday:
+    /// the Labor Standards Act says nothing about it, so nothing here may
+    /// treat it as one beyond it not being a working day.
+    NaturalDisaster,
+}
+
+impl DayKind {
+    pub fn code(self) -> &'static str {
+        match self {
+            DayKind::Workday => "workday",
+            DayKind::RestDay => "rest_day",
+            DayKind::RegularLeave => "regular_leave",
+            DayKind::Holiday => "holiday",
+            DayKind::NaturalDisaster => "natural_disaster",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DayKind::Workday => "工作日",
+            DayKind::RestDay => "休息日",
+            DayKind::RegularLeave => "例假",
+            DayKind::Holiday => "國定假日",
+            DayKind::NaturalDisaster => "天災停班",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        DAY_KINDS.iter().copied().find(|k| k.code() == code)
+    }
+
+    pub fn works(self) -> bool {
+        self == DayKind::Workday
+    }
+
+    /// The `overtime.toml` day type this is priced under.
+    //
+    // ponytail: every day off is priced as a rest day. Articles 39 and 40 pay
+    // a doubled day rather than an hourly band, which the payload has no shape
+    // for; adding it means a new field on day_types and a daily wage, both
+    // dated regulation values. A 天災停班 day has no statutory rate at all --
+    // it is what the two sides agree -- so it stays here until the payload can
+    // say "as agreed".
+    fn overtime_code(self) -> &'static str {
+        match self {
+            DayKind::Workday => "weekday",
+            _ => "rest_day",
+        }
+    }
+}
+
+pub const DAY_KINDS: [DayKind; 5] = [
+    DayKind::Workday,
+    DayKind::RestDay,
+    DayKind::RegularLeave,
+    DayKind::Holiday,
+    DayKind::NaturalDisaster,
+];
+
+/// The kind a date has when the calendar says nothing about it.
+pub fn default_day_kind(day: NaiveDate) -> DayKind {
+    match day.weekday() {
+        Weekday::Sat => DayKind::RestDay,
+        Weekday::Sun => DayKind::RegularLeave,
+        _ => DayKind::Workday,
+    }
 }
 
 impl WorkSchedule {
@@ -131,7 +214,31 @@ impl WorkSchedule {
             flex_minutes: minutes("flex_window_minutes").unwrap_or(0).max(0),
             break_start: time("break_start"),
             break_end: time("break_end"),
+            calendar: ctx
+                .store
+                .work_calendar()
+                .await?
+                .into_iter()
+                .filter_map(|d| {
+                    DayKind::from_code(&d.kind).map(|k| (d.on_date, (k, d.name)))
+                })
+                .collect(),
         })
+    }
+
+    /// What this date is. The calendar states only the exceptions.
+    pub fn day_kind(&self, day: NaiveDate) -> DayKind {
+        self.calendar.get(&day).map_or_else(|| default_day_kind(day), |(k, _)| *k)
+    }
+
+    /// The name the calendar gives this date, for a screen to print.
+    pub fn day_name(&self, day: NaiveDate) -> Option<&str> {
+        self.calendar.get(&day).map(|(_, name)| name.as_str()).filter(|n| !n.is_empty())
+    }
+
+    /// The `overtime.toml` day type a date is priced under.
+    pub fn overtime_day_type(&self, day: NaiveDate) -> &'static str {
+        self.day_kind(day).overtime_code()
     }
 
     pub fn flexible(&self) -> bool {
@@ -240,7 +347,10 @@ impl WorkSchedule {
         left: NaiveDateTime,
     ) -> Option<i64> {
         let arrived = arrived?;
-        let normal = self.daily_seconds()?;
+        // Nothing is owed on a day nobody was asked to work, so the whole of
+        // the attendance is beyond the normal day.
+        let normal =
+            if self.day_kind(arrived.date()).works() { self.daily_seconds()? } else { 0 };
         let attended = (left - arrived).num_seconds().max(0);
         Some((attended - self.break_seconds(arrived, left) - normal).max(0))
     }
@@ -264,24 +374,20 @@ impl WorkSchedule {
     /// Working seconds inside a leave range.
     ///
     /// Each date the range touches contributes the overlap between the range
-    /// and that date's working window, and Saturday and Sunday contribute
-    /// nothing. Evenings and the weekend are not leave, so a Friday afternoon
-    /// through Monday morning is worth the two half days it covers.
+    /// and that date's working window, and a day the calendar does not call a
+    /// working day contributes nothing. Evenings, the week off and public
+    /// holidays are not leave, so a Friday afternoon through Monday morning is
+    /// worth the two half days it covers.
     ///
     /// `None` without both work times. The window is the only thing that
     /// turns a range into hours and there is nothing to fall back on that
     /// would not amount to inventing a working day.
-    //
-    // ponytail: the week off is Saturday and Sunday, and public holidays are
-    // not known at all. A calendar of non-working days belongs beside the
-    // other dated facts in the regulation rulesets; until it is there, leave
-    // spanning a public holiday counts that day as taken.
     pub fn leave_seconds(&self, from: NaiveDateTime, to: NaiveDateTime) -> Option<i64> {
         let (starts_at, ends_at) = (self.starts_at?, self.ends_at?);
         let mut total = 0;
         let mut day = from.date();
         while day <= to.date() {
-            if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+            if self.day_kind(day).works() {
                 let open = day.and_time(starts_at).max(from);
                 let close = day.and_time(ends_at).min(to);
                 total += (close - open).num_seconds().max(0) - self.break_seconds(open, close);
@@ -337,14 +443,18 @@ impl OvertimeLimits {
     }
 
     /// The kind of day a date is, on the same reading the overtime request
-    /// screen uses: Saturday and Sunday are rest days.
-    fn day_type(&self, date: NaiveDate) -> Option<&laysi_regulation::OvertimeDayType> {
-        let code = default_overtime_day_type(date);
+    /// screen uses: the work calendar decides it.
+    fn day_type(
+        &self,
+        schedule: &WorkSchedule,
+        date: NaiveDate,
+    ) -> Option<&laysi_regulation::OvertimeDayType> {
+        let code = schedule.overtime_day_type(date);
         self.day_types.iter().find(|t| t.code == code)
     }
 
-    fn over_daily(&self, date: NaiveDate, seconds: i64) -> bool {
-        self.day_type(date)
+    fn over_daily(&self, schedule: &WorkSchedule, date: NaiveDate, seconds: i64) -> bool {
+        self.day_type(schedule, date)
             .is_some_and(|t| Decimal::from(seconds) > t.max_hours * Decimal::from(3600))
     }
 
@@ -383,7 +493,7 @@ impl PunchDay {
         let clock = |t: Option<NaiveDateTime>| t.map(|t| t.format(PUNCH_TIME).to_string());
         let late = self.arrived.and_then(|a| schedule.late(a));
         let overtime = self.left.and_then(|l| schedule.overtime_seconds(self.arrived, l));
-        let day_type = limits.day_type(self.date);
+        let day_type = limits.day_type(schedule, self.date);
         json!({
             "date": self.date,
             "weekday": weekday_label(self.date),
@@ -404,7 +514,7 @@ impl PunchDay {
             "overtime_seconds": overtime,
             "day_type_label": day_type.map(|t| t.label.clone()),
             "overtime_limit_hours": day_type.map(|t| t.max_hours.normalize().to_string()),
-            "over_overtime_limit": overtime.is_some_and(|s| limits.over_daily(self.date, s)),
+            "over_overtime_limit": overtime.is_some_and(|s| limits.over_daily(schedule, self.date, s)),
             "note": self.note,
         })
     }
@@ -548,7 +658,7 @@ pub(crate) fn summarise(
             .count() as i64,
         over_limit_days: days
             .iter()
-            .filter(|d| overtime(d).is_some_and(|s| limits.over_daily(d.date, s)))
+            .filter(|d| overtime(d).is_some_and(|s| limits.over_daily(schedule, d.date, s)))
             .count() as i64,
         over_monthly_limit: overtime_seconds.is_some_and(|s| limits.over_monthly(s)),
         monthly_max_hours: limits.monthly_hours,
@@ -1143,21 +1253,6 @@ pub(crate) async fn correction_auto_approves(ctx: &OpCtx) -> Result<bool, OpErro
 
 // Overtime requests
 
-/// Which kind of day the ruleset prices this overtime at, before the
-/// requester says otherwise. Saturday and Sunday are the days off everywhere
-/// else in this system, so they are the rest days here too.
-//
-// ponytail: public holidays are not known, because there is no holiday
-// calendar. Articles 39 and 40 pay a doubled day rather than an hourly band,
-// so that calendar has to arrive before those rates can, and until then a
-// request on a public holiday is priced as the weekday it falls on.
-pub(crate) fn default_overtime_day_type(day: NaiveDate) -> &'static str {
-    match day.weekday() {
-        Weekday::Sat | Weekday::Sun => "rest_day",
-        _ => "weekday",
-    }
-}
-
 /// One overtime request, with the pay derived from the ruleset in force on
 /// the day worked.
 ///
@@ -1577,7 +1672,80 @@ mod tests {
             flex_minutes: flex,
             break_start: None,
             break_end: None,
+            calendar: BTreeMap::new(),
         }
+    }
+
+    /// The whole point of the calendar: a public holiday inside a leave range
+    /// is not charged against the entitlement, and a 補行上班 Saturday is.
+    #[test]
+    fn leave_skips_the_days_the_calendar_calls_days_off() {
+        let day = |d: &str, t: &str| {
+            NaiveDateTime::parse_from_str(&format!("{d}T{t}"), "%Y-%m-%dT%H:%M:%S").unwrap()
+        };
+        let on = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+        let mut sched = schedule(Some("09:00"), Some("18:00"), 0);
+
+        // 2026-06-18 is a Thursday and 06-19 the Friday after it.
+        assert_eq!(
+            sched.leave_seconds(day("2026-06-18", "09:00:00"), day("2026-06-19", "18:00:00")),
+            Some(18 * 3600),
+            "日曆還沒說之前，兩天都是工作日"
+        );
+
+        sched
+            .calendar
+            .insert(on("2026-06-19"), (DayKind::Holiday, "端午節".into()));
+        assert_eq!(
+            sched.leave_seconds(day("2026-06-18", "09:00:00"), day("2026-06-19", "18:00:00")),
+            Some(9 * 3600),
+            "跨到國定假日的休假不扣那一天"
+        );
+        assert_eq!(sched.day_name(on("2026-06-19")), Some("端午節"));
+
+        // 2026-02-21 is a Saturday the government moved back to work.
+        assert_eq!(
+            sched.leave_seconds(day("2026-02-21", "09:00:00"), day("2026-02-21", "18:00:00")),
+            Some(0)
+        );
+        sched
+            .calendar
+            .insert(on("2026-02-21"), (DayKind::Workday, "補行上班".into()));
+        assert_eq!(
+            sched.leave_seconds(day("2026-02-21", "09:00:00"), day("2026-02-21", "18:00:00")),
+            Some(9 * 3600),
+            "補行上班的星期六請假要扣"
+        );
+        assert_eq!(sched.overtime_day_type(on("2026-02-21")), "weekday");
+    }
+
+    /// Nothing was asked of anyone on a day off, so the whole of the
+    /// attendance is beyond the normal day rather than the part past its
+    /// length.
+    #[test]
+    fn attendance_on_a_day_off_is_overtime_from_the_first_second() {
+        let day = |d: &str, t: &str| {
+            NaiveDateTime::parse_from_str(&format!("{d}T{t}"), "%Y-%m-%dT%H:%M:%S").unwrap()
+        };
+        let sched = schedule(Some("09:00"), Some("18:00"), 0);
+
+        // 2026-08-21 Friday: four hours is short of the nine-hour day.
+        assert_eq!(
+            sched.overtime_seconds(
+                Some(day("2026-08-21", "09:00:00")),
+                day("2026-08-21", "13:00:00")
+            ),
+            Some(0)
+        );
+        // 2026-08-22 is the Saturday after it.
+        assert_eq!(
+            sched.overtime_seconds(
+                Some(day("2026-08-22", "09:00:00")),
+                day("2026-08-22", "13:00:00")
+            ),
+            Some(4 * 3600),
+            "休息日出勤四小時就是四小時加班"
+        );
     }
 
     /// A leave range is worth the working time inside it and nothing else:

@@ -10,6 +10,7 @@ pub mod assets;
 pub mod attendance;
 pub mod banking;
 pub mod budget;
+pub mod calendar;
 pub mod documents;
 pub mod employees;
 pub mod expenses;
@@ -53,6 +54,7 @@ pub fn all() -> Vec<Box<dyn Operation>> {
     out.extend(selfservice::ops());
     out.extend(settings::ops());
     out.extend(regulations::ops());
+    out.extend(calendar::ops());
     out.extend(security::ops());
     out
 }

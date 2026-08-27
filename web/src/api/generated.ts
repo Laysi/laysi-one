@@ -115,6 +115,9 @@ export type OpName =
   | 'list_regulations'
   | 'save_regulation'
   | 'delete_regulation'
+  | 'list_work_calendar'
+  | 'set_work_calendar_day'
+  | 'refresh_work_calendar'
   | 'get_security_policy'
   | 'list_api_tokens'
   | 'issue_api_token'
@@ -245,6 +248,9 @@ export const OPS: readonly OpMeta[] = [
   { name: 'list_regulations', risk: 'read_only', riskLabel: '唯讀', summary: "讀法規版本：勞健保費率、勞退提繳、營業稅、最低工資等每一版的內容、法源與生效日" },
   { name: 'save_regulation', risk: 'admin_only', riskLabel: '限系統管理員', summary: "存法規版本：新增或改寫一個領域某一版的費率、級距與上限，存檔後立即適用" },
   { name: 'delete_regulation', risk: 'admin_only', riskLabel: '限系統管理員', summary: "刪除法規版本：移除一個領域的某一版，該領域至少要留下一版" },
+  { name: 'list_work_calendar', risk: 'read_only', riskLabel: '唯讀', summary: "讀工作日曆：一年逐日的工作日、休息日、例假、國定假日與天災停班，含節日名稱與來源" },
+  { name: 'set_work_calendar_day', risk: 'needs_confirm', riskLabel: '需人確認', summary: "改工作日曆一天：指定該日的日別，颱風停班亦由此登記；留空則回到星期決定的日別" },
+  { name: 'refresh_work_calendar', risk: 'needs_confirm', riskLabel: '需人確認', summary: "更新工作日曆：向政府資料開放平臺取該年度的辦公日曆表並寫入，自行設定過的日期保留不動" },
   { name: 'get_security_policy', risk: 'read_only', riskLabel: '唯讀', summary: "讀控制規則：職責分離、金額門檻、AI 禁止事項、稽核紀錄。AI 禁止事項依目前的工具開關即時計算。" },
   { name: 'list_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀 API 與 MCP Token 清單：名稱、用途範圍、代表對象、最後使用時間、輪替期限。只保留前八碼與雜湊。" },
   { name: 'issue_api_token', risk: 'admin_only', riskLabel: '限系統管理員', summary: "核發一組新的 API 或 MCP Token。明文僅出現於本次回應。" },
@@ -367,6 +373,9 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'list_regulations': {"$schema":"http://json-schema.org/draft-07/schema#","description":"Query as of a date. Needed by the regulation and balance operations.","properties":{"as_of":{"default":null,"description":"Cut-off date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"AsOfInput","type":"object"},
   'save_regulation': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"domain":{"description":"Regulation domain, one of the codes `list_regulations` returns.","type":"string"},"effective_from":{"description":"First date this version applies to.","format":"date","type":"string"},"effective_to":{"default":null,"description":"Last date it applies to. Leave empty while it is still in force.","format":"date","type":["string","null"]},"payload":{"description":"The rules themselves. Every number is a string."},"source_note":{"description":"The article or schedule this comes from.","type":"string"},"version":{"description":"Version label, unique within the domain. Saving an existing one replaces it.","type":"string"}},"required":["domain","effective_from","payload","source_note","version"],"title":"SaveRegulationInput","type":"object"},
   'delete_regulation': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"domain":{"description":"Regulation domain.","type":"string"},"version":{"description":"Version to remove.","type":"string"}},"required":["domain","version"],"title":"DeleteRegulationInput","type":"object"},
+  'list_work_calendar': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"year":{"default":null,"description":"Calendar year (西元). Defaults to this year.","format":"int32","type":["integer","null"]}},"title":"YearInput","type":"object"},
+  'set_work_calendar_day': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"kind":{"description":"`workday`, `rest_day`, `regular_leave`, `holiday` or `natural_disaster`. Empty puts the date back to what the day of the week says.","type":"string"},"name":{"default":null,"description":"What the day is called, for example 「中秋節」.","type":["string","null"]},"on_date":{"description":"The date to state (YYYY-MM-DD).","format":"date","type":"string"}},"required":["kind","on_date"],"title":"SetWorkCalendarDayInput","type":"object"},
+  'refresh_work_calendar': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"year":{"default":null,"description":"Calendar year (西元) to fetch. Defaults to this year.","format":"int32","type":["integer","null"]}},"title":"RefreshInput","type":"object"},
   'get_security_policy': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_api_tokens': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_revoked":{"default":false,"description":"Include revoked tokens; excluded by default.","type":"boolean"}},"title":"ListApiTokensInput","type":"object"},
   'issue_api_token': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"actor":{"description":"Who this token acts as. AI connecting with it is never more privileged than that person.","type":"string"},"actor_role":{"description":"That person's role code, e.g. `acct`.","type":"string"},"expiry_note":{"default":null,"description":"Description of the expiry condition, e.g. \"expires at period close\".","type":["string","null"]},"kind":{"description":"`api` or `mcp`.","type":"string"},"name":{"description":"Name of this token, e.g. \"website orders\".","type":"string"},"rotate_days":{"default":null,"description":"Rotation period in days. Omit for no fixed cycle and explain in expiry_note.","format":"int32","type":["integer","null"]},"scope":{"description":"Scope, as one human-readable line, e.g. \"read-only plus drafts\".","type":"string"}},"required":["actor","actor_role","kind","name","scope"],"title":"IssueApiTokenInput","type":"object"},

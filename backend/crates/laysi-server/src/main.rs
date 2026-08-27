@@ -232,6 +232,16 @@ async fn main() -> anyhow::Result<()> {
     let n = store.reload_regulations().await?;
     tracing::info!(rulesets = n, "法規版本已載入");
 
+    // The work calendar, once, on the first boot that finds it empty and can
+    // reach the open-data platform. Spawned rather than awaited: a new
+    // installation should not wait on a government website to start, and one
+    // with no way out to the internet should not fail to.
+    {
+        let store = store.clone();
+        let today = laysi_domain::business_today(offset);
+        tokio::spawn(async move { laysi_ops::ops::calendar::seed(&store, today).await });
+    }
+
     // 4. Object storage
     //
     // Create the bucket if it does not exist. RustFS being down does not

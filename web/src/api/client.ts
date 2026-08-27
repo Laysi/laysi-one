@@ -480,6 +480,24 @@ export interface CashFlow {
   unposted: Unposted;
 }
 
+export interface WorkCalendarDay {
+  on_date: string;
+  weekday: string;
+  kind: string;
+  kind_label: string;
+  name: string | null;
+  source: 'government' | 'company' | null;
+  default: boolean;
+}
+
+export interface WorkCalendarYear {
+  year: number;
+  months: { month: number; days: WorkCalendarDay[] }[];
+  workdays: number;
+  holidays: number;
+  kinds: { code: string; label: string }[];
+}
+
 export interface RegulationField {
   path: string;
   label: string;

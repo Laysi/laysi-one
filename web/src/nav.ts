@@ -26,6 +26,7 @@ export type ScreenId =
   | 'ins'
   | 'wht'
   | 'notice'
+  | 'cal'
 
   | 'me'
   | 'meclock'
@@ -90,6 +91,7 @@ export const HR_NAV: NavEntry[] = [
   { kind: 'head', label: '每月作業' },
   { kind: 'item', id: 'hrdash', label: '人資總覽', op: 'get_hr_dashboard', ready: true },
   { kind: 'item', id: 'att', label: '出勤與休假', op: 'list_attendance_punches', ready: true },
+  { kind: 'item', id: 'cal', label: '工作日曆', op: 'list_work_calendar', ready: true },
   { kind: 'item', id: 'pay', label: '薪資作業', op: 'get_payroll_summary', ready: true },
   { kind: 'item', id: 'ins', label: '勞健保與勞退', op: 'get_insurance_summary', ready: true },
   { kind: 'head', label: '人員' },
@@ -191,6 +193,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   hr: '/hr/employees',
   wht: '/hr/withholding',
   notice: '/hr/notices',
+  cal: '/hr/calendar',
 
   setup: '/system/settings',
   acc: '/system/accounts',

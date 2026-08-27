@@ -1784,6 +1784,7 @@ dependencies = [
  "laysi-domain",
  "laysi-regulation",
  "laysi-store",
+ "reqwest",
  "rust_decimal",
  "schemars 0.8.22",
  "serde",

@@ -736,6 +736,7 @@ mod tests {
             ops::selfservice::ops(),
             ops::settings::ops(),
             ops::regulations::ops(),
+            ops::calendar::ops(),
             ops::security::ops(),
         ];
         let mut declared = 0;
@@ -759,6 +760,7 @@ mod tests {
         include_str!("../../../migrations/0005_notice_versions.sql"),
         include_str!("../../../migrations/0006_notice_read.sql"),
         include_str!("../../../migrations/0009_regulation_in_db.sql"),
+        include_str!("../../../migrations/0010_work_calendar.sql"),
     ];
 
     /// The rows of one multi-row INSERT, one string per row, without the

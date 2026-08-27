@@ -2345,6 +2345,102 @@ impl Store {
         })
         .collect())
     }
+    // Work calendar
+
+    /// Every day that differs from the Monday-to-Friday default. Around
+    /// twenty rows a year, so callers read the whole table rather than a
+    /// range.
+    pub async fn work_calendar(&self) -> Result<Vec<WorkCalendarDay>> {
+        Ok(sqlx::query(
+            "SELECT on_date, kind, name, source, updated_at, updated_by
+               FROM work_calendar ORDER BY on_date",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| WorkCalendarDay {
+            on_date: r.get("on_date"),
+            kind: r.get("kind"),
+            name: r.get("name"),
+            source: r.get("source"),
+            updated_at: r.get("updated_at"),
+            updated_by: r.get("updated_by"),
+        })
+        .collect())
+    }
+
+    pub async fn set_work_calendar_day(
+        &self,
+        on_date: NaiveDate,
+        kind: &str,
+        name: &str,
+        source: &str,
+        by: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO work_calendar (on_date, kind, name, source, updated_at, updated_by)
+             VALUES ($1,$2,$3,$4, now(), $5)
+             ON CONFLICT (on_date) DO UPDATE
+               SET kind = EXCLUDED.kind, name = EXCLUDED.name, source = EXCLUDED.source,
+                   updated_at = now(), updated_by = EXCLUDED.updated_by",
+        )
+        .bind(on_date)
+        .bind(kind)
+        .bind(name)
+        .bind(source)
+        .bind(by)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Drop a day back to the weekday default. Returns whether a row went.
+    pub async fn clear_work_calendar_day(&self, on_date: NaiveDate) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM work_calendar WHERE on_date = $1")
+            .bind(on_date)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Replace the official calendar for the dates given, in one transaction.
+    ///
+    /// Days the company set by hand are left alone -- that edit is a decision,
+    /// and re-importing the published file must not undo it. Returns how many
+    /// rows were written and how many company days were kept.
+    pub async fn import_work_calendar(
+        &self,
+        days: &[(NaiveDate, String, String)],
+        by: &str,
+    ) -> Result<(u64, u64)> {
+        let mut tx = self.pool.begin().await?;
+        let mut written = 0;
+        let mut kept = 0;
+        for (on_date, kind, name) in days {
+            let r = sqlx::query(
+                "INSERT INTO work_calendar (on_date, kind, name, source, updated_at, updated_by)
+                 VALUES ($1,$2,$3,'government', now(), $4)
+                 ON CONFLICT (on_date) DO UPDATE
+                   SET kind = EXCLUDED.kind, name = EXCLUDED.name,
+                       updated_at = now(), updated_by = EXCLUDED.updated_by
+                 WHERE work_calendar.source = 'government'",
+            )
+            .bind(on_date)
+            .bind(kind)
+            .bind(name)
+            .bind(by)
+            .execute(&mut *tx)
+            .await?;
+            if r.rows_affected() > 0 {
+                written += 1;
+            } else {
+                kept += 1;
+            }
+        }
+        tx.commit().await?;
+        Ok((written, kept))
+    }
+
     // Company settings and dimensions
 
     pub async fn company_settings(&self) -> Result<Vec<CompanySetting>> {
@@ -6787,6 +6883,19 @@ impl AccountMovement {
     pub fn is_cash(&self) -> bool {
         self.cash_flow_section.as_deref() == Some("cash")
     }
+}
+
+/// One day the calendar states explicitly, because it differs from the
+/// Monday-to-Friday default.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkCalendarDay {
+    pub on_date: NaiveDate,
+    pub kind: String,
+    pub name: String,
+    /// `government` from the published file, `company` set by hand.
+    pub source: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
 }
 
 /// One company setting. Regulation values never appear here (see

@@ -204,6 +204,47 @@ effective_from, source_note }`。
 初期行為一樣，差別到修法時才出現：舊期間的申報書會跟著新稅率一起變，而這正是「法規
 更新空間」這個需求要避免的情況。兩者都在資料庫裡，界線在**資料模型**不在存放位置。
 
+### 工作日曆（0010）
+
+`work_calendar` 只存**與星期不同**的日期。預設是週一至週五工作日、週六休息日、
+週日例假，而政府辦公日曆表增加的資訊剛好就是例外：國定假日、調整放假、補行上班，
+一年約二十列。`WorkSchedule::load` 因此整張表帶著走，之後每一次問日期都不再查庫。
+
+五種日別：`workday`／`rest_day`／`regular_leave`／`holiday`／`natural_disaster`。
+三個消費端：
+
+- `leave_seconds()`：非工作日不計時數。跨到春節的休假原本每一天都扣抵特休。
+- `overtime_seconds()`：非工作日不扣「一天的長度」，出勤第一秒就是加班。
+- `overtime_day_type()`：決定 `overtime.toml` 用哪一種日別計價。
+
+**不內建任何日期**，日期年年不同，內建一份等於印一份沒人看得出錯在哪的假日曆。
+`refresh_work_calendar` 向政府資料開放平臺（資料集 14718）取：先讀 metadata、依
+`resourceDescription` 的民國年前綴挑檔案，再抓 CSV。**取最後一筆符合的**——更正版是
+附加在原檔之後而不是取代它；跳過 `_Google行事曆專用`（欄位不同）與非 UTF-8 的檔案。
+欄位（`西元日期`／`是否放假`／`備註`）依欄名找而不是依位置，因為年度之間換過順序，
+而且檔案帶 BOM，比對欄名前要去掉。網址是 Rust 常數不收參數，所以沒有 SSRF 面。
+
+**第一次啟動自動抓一次**（`ops::calendar::seed`）：表是空的才抓，抓當年與次年——
+十二月裝機的公司否則會在一月開年時面對一張空日曆。整段是 `tokio::spawn` 出去的，
+**不擋啟動也不讓啟動失敗**：新安裝不該等一個政府網站才起得來，連不出去的安裝也不該
+因此起不來。失敗只寫一行 log，而表仍然空著，所以下一次啟動會再試——第一天沒有對外
+連線的安裝不會就此永遠沒有日曆。
+
+`source` 分 `government` 與 `company`：匯入只覆寫 `government` 列，自行設定過的日期
+保留不動——那是公司的決定，重新匯入官方檔案不該把它抹掉。回傳的 `kept` 說出保留了幾天。
+`set_work_calendar_day` 的 `kind` 留空＝刪掉該列，回到星期決定的日別。
+
+**天災停班（颱風假）不在政府檔案裡，也永遠不會在**：辦公日曆表提前一年公布，停止上班
+是前一晚由各縣市宣布的。它由人資在畫面上登記，`source` 記 `company`，所以下一次更新
+不會把它蓋掉。**它不是國定假日**：勞基法對天災停班日的工資與出勤加給都沒有明文
+（屬勞資協商），與國定假日的「工資照給、出勤加倍」是兩件事，所以它是第五種日別而不是
+換個名字的國定假日。目前兩者共同的效果只有「不是工作日」。
+
+**每一種休息日都以休息日費率計價**（`DayKind::overtime_code`）。勞基法第 39、40 條
+是按日加倍而不是時數級距，payload 沒有那個形狀，加上去要新增 day_types 的欄位與一個
+日薪基數，兩者都是有生效日的法規值；天災停班日更是連法定費率都沒有。程式裡以
+`ponytail:` 註記。
+
 ### 法規版本畫面（0009）
 
 `list_regulations` 回九個領域各自的每一版，含 `payload` 與攤平後的 `fields`
@@ -1005,6 +1046,7 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 - `company_setting`：保留設定鍵與標籤，值一律為空字串，等公司自行填寫。
 - `import_source`：保留匯入來源。
 - `reg_ruleset`：法規的權威資料，不是投影（0009）。
+- `work_calendar`：與星期不同的日期，只存例外（0010）。
 
 正式安裝不預載銀行帳戶、傳票、應收應付、固定資產、預算、報支、員工、差勤、
 薪資、API Token、分類項目或單據流水起始值。
@@ -1066,6 +1108,9 @@ impl Registry {
 | `get_cash_position` | ReadOnly | `{}` | `{ accounts: [{name, account_no, balance}], total }` |
 | `search_vouchers` | ReadOnly | `{ status?, q?, limit? }` | `{ vouchers: Voucher[] }` |
 | `list_ai_audit` | ReadOnly | `{ limit? }` | `{ entries: [...] }` |
+| `list_work_calendar` | ReadOnly | `{ year?: int }` | `{ year, months[], workdays, holidays, kinds[] }` |
+| `set_work_calendar_day` | NeedsConfirm | `{ on_date, kind, name? }` | `{ on_date, kind, kind_label, default, changed }` |
+| `refresh_work_calendar` | NeedsConfirm | `{ year?: int }` | `{ year, source, read, written, kept }` |
 | `list_regulations` | ReadOnly | `{ as_of?: date }` | `{ as_of, domains: [{domain, label, applicable, version, versions: [{version, effective_from, effective_to, source_note, in_force, payload, fields}]}] }` |
 | `save_regulation` | AdminOnly | `{ domain, version, effective_from, effective_to?, source_note, payload }` | `{ domain, label, version, effective_from, rulesets }` |
 | `delete_regulation` | AdminOnly | `{ domain, version }` | `{ domain, label, version, rulesets }` |

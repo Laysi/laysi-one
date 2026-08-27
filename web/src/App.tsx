@@ -37,6 +37,7 @@ import { Reports } from './screens/Reports';
 import { Roles } from './screens/Roles';
 import { Security } from './screens/Security';
 import { Regulations } from './screens/Regulations';
+import { WorkCalendar } from './screens/WorkCalendar';
 import { Setup } from './screens/Setup';
 import { Tax } from './screens/Tax';
 import { Withholding } from './screens/Withholding';
@@ -520,6 +521,7 @@ function Workspace() {
               )}
               {screen === 'ins' && <Insurance onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'wht' && <Withholding onToast={showToast} reloadKey={reloadKey} />}
+              {screen === 'cal' && <WorkCalendar onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'notice' && (
                 <Notices
                   onToast={showToast}
