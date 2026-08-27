@@ -116,6 +116,7 @@
   --wizard-panel-height: 480px;
   --chart-height: 150px;
   --date-input-col: 158px;
+  --reg-field-col: 148px;
   --time-input-col: 116px;
   --entry-amount-col: 130px;
   --entry-dept-col: 120px;
@@ -1352,7 +1353,7 @@ textarea {
 }
 
 .split-columns--wide-right {
-  grid-template-columns: 1fr 1.4fr;
+  grid-template-columns: var(--aside-width) 1fr;
 }
 
 .split-columns--aside {
@@ -2444,6 +2445,12 @@ textarea {
 
 .reg-group > .section-title {
   margin-bottom: var(--space-lg);
+}
+
+.reg-group .field-grid {
+  grid-template-columns: repeat(auto-fit, minmax(var(--reg-field-col), 1fr));
+  gap: var(--space-lg) var(--space-xl);
+  margin-bottom: var(--space-xl);
 }
 
 .wizard-steps {

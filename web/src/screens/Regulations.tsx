@@ -210,7 +210,7 @@ export function Regulations({ onToast, reloadKey }: Props) {
                         <th>生效日</th>
                         <th>終止日</th>
                         <th>法源</th>
-                        <th className="cell-actions" />
+                        <th className="align-right" />
                       </tr>
                     </thead>
                     <tbody>
@@ -223,19 +223,24 @@ export function Regulations({ onToast, reloadKey }: Props) {
                           <td className="num">{v.effective_from}</td>
                           <td className="num cell-muted">{v.effective_to ?? '仍適用'}</td>
                           <td className="cell-muted">{v.source_note}</td>
-                          <td className="cell-actions">
-                            <button className="btn btn--ghost btn--compact" onClick={() => edit(v, false)}>
-                              {canEdit ? '編輯' : '檢視'}
-                            </button>
-                            {canDelete && chosen.versions.length > 1 && (
+                          <td className="align-right">
+                            <span className="cell-actions">
                               <button
                                 className="btn btn--ghost btn--compact"
-                                disabled={busy}
-                                onClick={() => void remove(v.version)}
+                                onClick={() => edit(v, false)}
                               >
-                                刪除
+                                {canEdit ? '編輯' : '檢視'}
                               </button>
-                            )}
+                              {canDelete && chosen.versions.length > 1 && (
+                                <button
+                                  className="btn btn--ghost btn--compact"
+                                  disabled={busy}
+                                  onClick={() => void remove(v.version)}
+                                >
+                                  刪除
+                                </button>
+                              )}
+                            </span>
                           </td>
                         </tr>
                       ))}
