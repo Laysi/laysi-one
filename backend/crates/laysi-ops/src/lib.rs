@@ -21,6 +21,7 @@ use laysi_store::Store;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 pub mod ops;
 
@@ -56,6 +57,63 @@ static BUSINESS_OFFSET_MINUTES: std::sync::atomic::AtomicI32 =
 pub fn business_offset() -> FixedOffset {
     let minutes = BUSINESS_OFFSET_MINUTES.load(std::sync::atomic::Ordering::Relaxed);
     FixedOffset::east_opt(minutes * 60).unwrap_or_else(laysi_domain::default_business_offset)
+}
+
+/// Policy values that live in `company_setting` but are read on paths that
+/// have no `Store` at hand: the cookie a login writes, the check a request
+/// makes, the counter `/mcp` consults. Same shape as the business offset
+/// above -- read once at start-up, republished by `update_company_setting`,
+/// so REST and MCP both follow a change without a restart.
+///
+/// The fallbacks are what 0014 seeds, so an install that predates the
+/// settings behaves as it did.
+static SESSION_IDLE_MINUTES: AtomicI64 = AtomicI64::new(60);
+static SESSION_MAX_HOURS: AtomicI64 = AtomicI64::new(168);
+static MCP_RATE_LIMIT_PER_MINUTE: AtomicU32 = AtomicU32::new(60);
+
+/// Codes of the `company_setting` rows the three atomics above mirror.
+pub const SESSION_IDLE_SETTING: &str = "session_idle_minutes";
+pub const SESSION_MAX_SETTING: &str = "session_max_hours";
+pub const MCP_RATE_LIMIT_SETTING: &str = "mcp_rate_limit_per_minute";
+
+pub fn session_idle_minutes() -> i64 {
+    SESSION_IDLE_MINUTES.load(Ordering::Relaxed)
+}
+
+pub fn session_max_hours() -> i64 {
+    SESSION_MAX_HOURS.load(Ordering::Relaxed)
+}
+
+/// Calls per token per minute; 0 means unlimited.
+pub fn mcp_rate_limit_per_minute() -> u32 {
+    MCP_RATE_LIMIT_PER_MINUTE.load(Ordering::Relaxed)
+}
+
+/// Read the three settings and publish them to the process.
+///
+/// A row that is missing or does not parse leaves the current value alone: a
+/// typo in one setting must not silently reset a session policy, and the
+/// write path validates before storing anyway.
+pub async fn load_policy_settings(store: &Store) {
+    let Ok(settings) = store.company_settings().await else {
+        return;
+    };
+    let value = |code: &str| {
+        settings.iter().find(|s| s.code == code).map(|s| s.value.trim().to_string())
+    };
+    if let Some(v) = value(SESSION_IDLE_SETTING).and_then(|v| v.parse::<i64>().ok()) {
+        if v > 0 {
+            SESSION_IDLE_MINUTES.store(v, Ordering::Relaxed);
+        }
+    }
+    if let Some(v) = value(SESSION_MAX_SETTING).and_then(|v| v.parse::<i64>().ok()) {
+        if v > 0 {
+            SESSION_MAX_HOURS.store(v, Ordering::Relaxed);
+        }
+    }
+    if let Some(v) = value(MCP_RATE_LIMIT_SETTING).and_then(|v| v.parse::<u32>().ok()) {
+        MCP_RATE_LIMIT_PER_MINUTE.store(v, Ordering::Relaxed);
+    }
 }
 
 /// Publish a newly resolved business time zone to the whole process.
@@ -444,7 +502,7 @@ const MAX_AUDITED_STRING: usize = 512;
 /// it is personal data for life. Which employee a call was about is still
 /// answerable: `emp_no` travels in the same parameters. A bank account number
 /// is the same case, and nothing about a past call needs it either.
-const REDACTED_FIELDS: [&str; 3] = ["id_no", "client_secret", "account_no"];
+const REDACTED_FIELDS: [&str; 4] = ["id_no", "client_secret", "account_no", "secret_key"];
 
 /// Parameters as the audit trail should hold them.
 ///
@@ -738,6 +796,7 @@ mod tests {
             ops::regulations::ops(),
             ops::calendar::ops(),
             ops::security::ops(),
+            ops::backup::ops(),
         ];
         let mut declared = 0;
         for module in modules {
@@ -761,6 +820,9 @@ mod tests {
         include_str!("../../../migrations/0006_notice_read.sql"),
         include_str!("../../../migrations/0009_regulation_in_db.sql"),
         include_str!("../../../migrations/0010_work_calendar.sql"),
+        include_str!("../../../migrations/0011_drop_security_policy.sql"),
+        include_str!("../../../migrations/0013_backup_setting.sql"),
+        include_str!("../../../migrations/0014_session_and_mcp_policy.sql"),
     ];
 
     /// The rows of one multi-row INSERT, one string per row, without the
@@ -799,7 +861,7 @@ mod tests {
     /// Switches a later migration deleted. `inserted_rows` only reads INSERT
     /// statements, so a removal has to be named here or the check below still
     /// expects the operation to exist.
-    const REMOVED_GRANTS: &[&str] = &["acknowledge_notice"];
+    const REMOVED_GRANTS: &[&str] = &["acknowledge_notice", "get_security_policy"];
 
     /// Every operation needs exactly one MCP switch, and every switch needs an
     /// operation. One short and AI sees a tool it cannot call; one too many and
@@ -966,9 +1028,11 @@ mod tests {
             admin,
             BTreeSet::from([
                 "change_user_role",
+                "confirm_backup_key",
                 "create_user_account",
                 "delete_regulation",
                 "delete_user_account",
+                "get_backup_setting",
                 "get_oidc_setting",
                 "issue_api_token",
                 "list_user_accounts",
@@ -977,6 +1041,7 @@ mod tests {
                 "set_company_timezone",
                 "set_role_permission",
                 "unlink_user_identity",
+                "update_backup_setting",
                 "update_company_setting",
                 "update_oidc_setting",
                 "update_user_account",

@@ -11,21 +11,27 @@ PostgreSQL 17 ＋ RustFS，以 Docker Compose 自架。
 
 ## 快速開始
 
-需要 Docker 與 Docker Compose。
+需要 Podman 或 Docker，以及對應的 Compose。
 
 ```bash
 git clone <repo> && cd laysi_one
-cp .env.example .env        # 先改掉密碼與金鑰
 docker compose up -d --build
 ```
 
+**不需要 `.env`，也沒有任何值要自己想。** `secrets` 服務在第一次啟動時產生資料庫密碼
+與初始化代碼，寫進一個共用資料卷，其餘服務讀檔取用；已經產生過就不再產生，所以重跑
+不會把既有資料庫的密碼換掉。
+
 前端在 http://localhost:8088。第一次開啟會出現「建立系統管理員帳號」畫面，
-建立帳號並自訂密碼後進入公司資料設定；該畫面在第一個帳號建立後關閉。
+輸入 `setup/初始化代碼.txt` 裡的代碼，建立帳號並自訂密碼後進入公司資料設定；該畫面
+在第一個帳號建立後關閉。
+
+代碼只在第一個帳號建立前有用，之後那個檔案可以刪除；刪掉就不會再產生（真的要找回來
+是 `docker compose logs secrets`）。
 
 第一個帳號是**系統管理員**：管帳號、權限與系統設定，看不到薪資，不能簽核或設預算。
 負責人與其他成員的帳號由系統管理員在「角色與核准」建立。
 
-部署在公開位址前，請在 `.env` 設 `SETUP_TOKEN` 為一段長亂數，初始化畫面會要求輸入；
 不用網頁初始化就設 `SETUP_ALLOW_WEB=false`，改用指令：
 
 ```bash
@@ -46,8 +52,11 @@ backend/crates/
   laysi-store       sqlx repository、RustFS 存取
   laysi-ops         Operation trait + 註冊表 + 各業務模組
   laysi-server      axum：/v1 REST、/mcp、/healthz
-backend/regulation/ 法規規則檔（依年度分目錄）
+backend/regulation/ 法規規則檔出廠預設值（依年度分目錄）
+backend/regulation-updates/ 隨版本送出的法規新版，與 migrations 各記各的
 backend/migrations/ SQL migration，啟動時自動套用
+backup/             異地備份容器：pg_dump、age、S3
+setup/              首次啟動寫入的初始化代碼，建立帳號後可刪
 web/                Vite + React + TypeScript 前端
 docs/architecture.md 跨層契約，動型別或端點前先讀
 ```
@@ -116,6 +125,21 @@ npm run build              # tsc --noEmit && vite build
    ```
 
 claude.ai 網頁版還連不進來：它要的是 OAuth 2.1。
+
+## 異地備份
+
+備份的目的地在畫面上：「安全與營運」填相容 S3 介面的儲存位置、桶子與存取金鑰，`backup`
+服務每天把加密後的資料庫備份與文件副本送過去。設定改了不必重新啟動。
+
+第一次啟用時系統產生一組還原金鑰，**私鑰只顯示一次**，按下「已保存」之後系統不再留存，
+備份才開始執行——確認之前不備份，是為了讓沒有任何一份備份含有開啟它自己的鑰匙。
+金鑰遺失就無法還原，請保存在系統之外。
+
+還原：
+
+```bash
+age -d -i <保存的還原金鑰檔> laysi-<時間>.dump.age | pg_restore -d <目標資料庫>
+```
 
 ## 升級須知
 

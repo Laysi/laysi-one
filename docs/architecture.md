@@ -712,8 +712,15 @@ Rust 那側的 `bootstrap_open()` 只是為了給出比違反約束更好的錯�
 **停用檢查 → 安裝狀態 → 欄位驗證 → 速率 → 代碼 → Argon2id → 交易**：
 表單打錯字不消耗額度，只有進到代碼比對與雜湊計算的嘗試才算。
 
-`SETUP_TOKEN` 存在的理由是那段時間差：`docker compose up` 到負責人打開瀏覽器
-之間，先到的人就是負責人。內網無所謂，公開位址不是。錯誤的代碼寫 tracing
+`SETUP_TOKEN` 存在的理由是那段時間差：容器起來到負責人打開瀏覽器之間，先到的人
+就是負責人。內網無所謂，公開位址不是。**它由 compose 的 `secrets` 服務隨機產生**，
+程式從 `SETUP_TOKEN_FILE` 讀。不必人自己想一段亂數——那條路的實際結果是留空。
+
+代碼要送到的是**瀏覽器前面那個人**，不是終端機前面那個人，所以它寫進
+`setup/初始化代碼.txt`（bind mount，SELinux 用 `:Z`），初始化畫面的欄位提示直接指那個
+路徑。**刪掉就不再產生**（`.written` 標記），因為第一個帳號建立之後那段字串沒有任何
+用途——`install_bootstrap` 是單列表，事後清空 `user_account` 也打不開那個端點。容器日誌
+仍留一行當退路。錯誤的代碼寫 tracing
 警告而**不寫稽核**——此時安裝上一個帳號都沒有，任何連得到那個埠的人都能灌爆
 `ai_audit_log`。成功那一次會寫，`tool_name = 'bootstrap_install'`，
 `channel = 'ui'`，在交易提交**之後**寫：帳號已經存在了，因為留不下痕跡就讓整個
@@ -737,15 +744,9 @@ Rust 那側的 `bootstrap_open()` 只是為了給出比違反約束更好的錯�
 
 `limited` 仍代表可以進入該組操作，部門或本人範圍由各操作的查詢條件繼續縮小。
 兩道風險底線保留為權限矩陣之外的額外限制，權限資料列不會把任何角色提升上去。
-0011 先涵蓋原有 76 個操作，0012 再加入 9 個主檔與應收應付建立操作，0014
-加入作廢與反向沖銷，0023 加入 `create_user_account`，0025 加入
-`list_user_accounts`，0026 與 0027 加入 `update_user_account` 與
-`delete_user_account`，0029 加入 `reset_user_password`，0031 移除三個電子發票操作，
-0034 加入 `create_budget_version`、0039 加入 `create_fixed_asset`、0044 加入
-`change_user_role`；目前 105 個 Registry 操作各恰好屬於一條 permission。
-純字串測試會依序重播 0006、0008、0009、0011、0012、0014、0015、0016、0017、0020、
-0023、0025、0026、0027、0029、0031、0034、0039、0044 的 INSERT／UPDATE／DELETE，
-缺漏與重複都不准通過。
+**每個 Registry 操作恰好屬於一條 permission**，由 `laysi-ops` 的純字串測試釘住：它
+`include_str!` 讀 `MIGRATIONS` 列出的每一份 migration，重播其中的 INSERT／UPDATE／
+DELETE 算出最終狀態，缺漏與重複都不准通過。新增一份 migration 就要加進那個清單。
 
 ### 角色只在帳號上，員工主檔沒有角色（0040）
 
@@ -958,7 +959,7 @@ import_source / import_batch / import_issue
 user_account                登入帳號；可選擇連到 employee，密碼雜湊可為 NULL
 user_identity               以 IdP 的 provider + subject 唯一識別；email 只供稽核
 user_session                只存 token 雜湊、到期與撤銷狀態，明文不落地
-permission.op_names         116 個 Registry 操作各恰好屬於一條 permission
+permission.op_names         每個 Registry 操作恰好屬於一條 permission
 account.is_active           0012 新增；停用阻止新分錄，但保留歷史帳
 api_token（0013）           MCP 身分改由 api_token 雜湊驗證與資料列綁定
 voucher.reverses            0014 新增；沖銷傳票指回原傳票，UNIQUE 防止重複沖銷
@@ -1079,7 +1080,7 @@ pub trait Operation: Send + Sync + 'static {
 
 pub struct Registry { /* … */ }
 impl Registry {
-    pub fn new() -> Self;             // 註冊目前全部 116 個操作
+    pub fn new() -> Self;             // 註冊全部操作
     pub fn get(&self, name: &str) -> Option<&dyn Operation>;
     pub fn iter(&self) -> impl Iterator<Item = &dyn Operation>;
     /// 統一入口：工具開關 → 風險 → 角色權限 → 執行 → 稽核。
@@ -1154,7 +1155,9 @@ impl Registry {
 | `delete_user_account` | AdminOnly | `{ username, confirm: true }` | `{ user, remaining }`；session 與外部身分連帶刪除，最後一個帳號與最後一個啟用中的管理員擋下 |
 | `list_user_accounts` | AdminOnly | `{}` | `accounts[]`：登入名稱、角色、連結員工與其在職狀態、帳號狀態、`must_change_password`、`has_password`、最後登入；**無密碼雜湊** |
 | `list_approval_rules` | ReadOnly | `{}` | `steps[]`、`enforced: true` |
-| `get_security_policy` | ReadOnly | `{}` | `rules[]`，每條帶 `source`；四條全部 `enforced` |
+| `get_backup_setting` | AdminOnly | `{}` | 目的地、保留天數、上次結果、`blocked_reason`、`restore_key_to_save`（只回一次）；**無存取密鑰** |
+| `update_backup_setting` | AdminOnly | `{ enabled?, endpoint?, region?, bucket?, prefix?, access_key?, secret_key?, keep_days? }` | `{ bucket, enabled, blocked_reason }`；`secret_key` 不帶＝沿用 |
+| `confirm_backup_key` | AdminOnly | `{}` | `{ blocked_reason }`；清掉待保存的私鑰，備份隨即開始 |
 | `list_api_tokens` | ReadOnly | `{ include_revoked? }` | `tokens[]`（**無明文**）、`storage_note`、`wiring_note` |
 | `issue_api_token` | AdminOnly | `{ name, kind, scope, actor, actor_role, rotate_days?, expiry_note? }` | `{ token, secret }`，`secret` 只顯示這一次 |
 | `revoke_api_token` | HighRisk | `{ id }` | `{ token }` |
@@ -1762,10 +1765,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 自助的 `mcp_tool_grant` **一律 `enabled = false`**：MCP token 沒有
 `user_account.employee_id` 連結，而且它代表的系統身分與坐在畫面前的人是兩回事，
 預設對 AI 開放沒有道理。
-上節的 migration parity 測試同時涵蓋 0008、0009 與 0015。完成 0009 後 Registry
-共 **76 個操作**；0012 再加入 9 個主檔與應收應付建立操作，0014 加入作廢與
-反向沖銷，0015 加入 `submit_my_expense_claim`，0016 加入四個打卡操作，0017 加入三個自助 MCP 操作，
-0020 加入 `attach_my_expense_receipt`，目前共 **96 個**。
+自助操作與其他操作一樣受上節那個 migration parity 測試涵蓋。
 
 `Voucher` 的 JSON 形狀：
 
@@ -2195,3 +2195,114 @@ offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），�
 - 欄位字級在 560px 以下是 `--text-field-touch`（16px）：iOS 在此之下會在聚焦時
   自動放大整頁。
 - `.shell` 用 `100dvh`（`100vh` 為 fallback），否則最後一列會被手機網址列蓋住。
+
+## 法規更新的兩條路
+
+`reg_ruleset` 有兩個寫入來源，兩者都不會覆寫既有的 `(domain, version)`。
+
+**管理員自己建**：「法規版本」畫面的 `save_regulation`，存檔前跑 `probe()`。修法當天
+就能上線，不必等發版。
+
+**廠商隨版本送**：`backend/regulation-updates/*.sql`，由 `Store::REGULATION_UPDATES`
+逐檔 `include_str!`，啟動時經 `apply_regulation_updates` 套用，套用過的檔名記在
+`reg_update`（0012）。
+
+**它不放在 `migrations/`**：費率是資料不是 schema。0001 把六十三份 migration 合併成
+一份，下一次合併時一則費率修正會擋在路上，而合併保不住「這個安裝已經收過那一版並且
+把它刪掉了」。兩套各記各的，版本號永遠不會撞。
+
+三個約束：
+
+- **一個檔一條敘述**。`sqlx::query` 走 extended protocol 只收一條；`raw_sql` 收得下
+  多條，但會讓 `laysi-ops` 那邊的 async trait 邊界證不出 `Send`。兩個領域就兩個檔。
+- **`ON CONFLICT (domain, version) DO NOTHING`**。管理員搶先自己建過同一版就不動它。
+- **一個資料庫只套用一次**。記錄列與檔案內容同一個交易，先寫記錄再跑檔案，所以兩台
+  伺服器同時啟動時第二台會擋在主鍵上、然後看到零列。刪掉的版本不會在下次啟動回來——
+  這正是 `seed_regulations()` 的「只在表空時寫」要守的性質，改用一次性的記錄之後不必
+  再要求整張表是空的。
+
+檔案由 `scripts/regulation-sql.ts` 從出廠 TOML 產出，不要手抄 payload：TOML 是人編輯
+的來源，也是 `laysi-regulation` 測試與 `probe()` 唯一涵蓋得到的形式。
+
+`reg_ruleset.checksum` 在 0012 刪除。它是寫入時算的 FNV-1a，而 `regulations()` 的
+SELECT 不取它、`resolve()` 也看不到它，一個沒人讀的 `NOT NULL` 欄位正好擋著手寫的
+INSERT。
+
+## 異地備份（0013）
+
+備份的目的地是設定，不是部署佈線——這個產品沒有任何一項需要人去主機上編檔案。
+`backup_setting` 是單列表，形狀與 `oidc_setting` 相同：`secret_key` 進得去、出不來，
+稽核紀錄依欄位名遮蔽（`REDACTED_FIELDS`）。畫面在「安全與營運」，操作是
+`get_backup_setting`／`update_backup_setting`／`confirm_backup_key`，三個都是
+`AdminOnly`。
+
+**金鑰是非對稱的**。備份檔裡有完整身分證字號，放進別人家的桶子一定要加密；而對稱金鑰
+必須留給加密的那一方讀得到，也就是存進資料庫——但資料庫本身就在那份加密檔裡，還原時
+需要的鑰匙只存在於它要打開的東西裡面。`age_recipient` 是公鑰，備份工作只需要它。
+
+**私鑰由備份容器產生，不由伺服器產生**。容器是持有 `age` 的那一方，也就是唯一不會把
+金鑰格式寫錯的那一方——格式錯了要到有人嘗試還原的那一天才會發現。私鑰落在
+`age_identity_pending`，畫面顯示一次；`confirm_backup_key` 是管理員說「已經抄下來了」，
+而**在那之前備份不執行**，所以沒有任何一份備份含有開啟它的鑰匙。
+
+伺服器因此不必引入 `age` crate：那會為了三行金鑰產生多帶進約六十個 crate（含 fluent
+i18n 與已被標記未來會被 Rust 拒絕的 `proc-macro-error2`）。
+
+**順序是先資料庫再文件**。物件是先配鍵、位元組進桶子成功才寫資料庫那一列，所以桶子
+只增不改。先 dump 的話，備份檔可能指到還沒複製過去的物件，下一輪補上；反過來則會留下
+一列指向任何副本都沒有的物件。
+
+**文件也加密，而且只加密一次**。掃描的合約不比 dump 不敏感。物件寫進去之後永不改變，
+所以「遠端已經有了」就等於「已經做過了」——即使 `age` 每次輸出都不同，整個流程仍是
+增量的。保留天數只套用在 dump 上：物件是資料庫仍然指著的那份文件的唯一副本。
+
+`backup` 容器同時持有兩組憑證（本地物件儲存讀、遠端目的地寫），兩組都不 export——
+export 其中一組會被另一組的指令默默拿去用。
+
+
+## 沒有 `.env` 的部署（compose 自己產生密鑰）
+
+`docker compose up` 需要的值全部有預設，唯二必須每個安裝不同的——資料庫密碼與初始化
+代碼——由 `secrets` 服務在第一次啟動時產生，寫進 `secrets` 資料卷。
+
+**為什麼是檔案而不是環境變數**：compose 在任何容器啟動之前就完成插值，所以它插得進去
+的值只能是某個人事先寫好的。反過來，一個一次性的服務可以把值寫進資料卷，其餘服務讀檔
+——postgres 本身就支援 `POSTGRES_PASSWORD_FILE`，而 `laysi_store::env_or_file` 讓伺服器
+的任何設定都收 `NAME_FILE`。**用 entrypoint 包一層也做得到，但那樣
+`compose exec api laysi-admin …` 就拿不到連線字串**，而那是離線逃生門。
+
+**產生過就不再產生**（`[ -s ]` 判斷）。換掉密碼而 `pgdata` 還在，留下的是一個誰也打
+不開的資料庫。檔案模式 0444：api 以 uid 10001 執行，root 寫的 0600 它讀不到。
+
+**`RUSTFS_SECRET_KEY` 是唯一的例外**，它由 RustFS 在啟動時從環境讀取、沒有檔案形式，
+而覆寫別人映像的 entrypoint 會在下一次改版時壞掉。那個桶子關著靠的不是這組密鑰，而是
+9000 與 9001 都不發布。要換就在環境裡覆寫它。
+
+
+## 政策值搬離環境變數（0014）
+
+三項進 `company_setting`：`session_idle_minutes`、`session_max_hours`、
+`mcp_rate_limit_per_minute`。**不另建表**——那張表已經有 label、note、`editable`、
+`AdminOnly` 的寫入路徑與畫面，而基礎設定的欄位是泛型渲染的，所以前端一行都不用改。
+
+它們同時被沒有 `Store` 可用的路徑讀到（登入寫出的 cookie、每次請求的閒置判定、`/mcp`
+的計數器），所以走 `business_offset` 那條路：啟動時 `load_policy_settings` 讀進行程內的
+atomic，`update_company_setting` 寫完重新發布。`RateLimiter` 因此分成 `Fixed` 與 `Live`
+兩種額度來源——**設定改了要在下一次呼叫生效，不是下一次重啟**，否則畫面上那個數字是假的。
+逾時填 0 會被寫入端擋下：那等於所有人下一次點擊就登出，而且沒有路可以回來改。
+
+**`SESSION_COOKIE_SECURE` 整個刪掉，改由請求推導**。判準是 `X-Forwarded-Proto` 是否為
+`https`（多層 proxy 會串接，取第一段，那是客戶端自己的協定）。兩條都不成立：
+
+- 留成旗標，就是要人記得在搬到 HTTPS 那天去翻它，而忘了翻的後果是 session cookie 以
+  明文送出；
+- 一律加上 `Secure`，`http://localhost` 因為是 secure context 仍然可用，但區域網路 IP
+  上的純 HTTP 內部主機會登不進去，而那是中小企業的常見部署。
+
+Caddyfile 因此加上 `trusted_proxies static private_ranges`：這個容器只講純 HTTP，不設
+這一行的話它會用自己的協定覆蓋掉前面那層 TLS proxy 送來的標頭。限制在私有網段，所以
+從公網來的標頭決定不了任何事。
+
+**兩項留在環境變數，因為它們不是設定**：`CORS_ALLOWED_ORIGIN` 只對 Vite 開發伺服器有
+意義（compose 部署下前端與 API 同源，不產生 CORS 標頭）；`MCP_ALLOWED_ORIGINS` 守的是
+部署者自己決定要發布的那個埠，與埠號同一層。

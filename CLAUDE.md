@@ -41,8 +41,9 @@ npm run dev        # 5173，proxy /v1 與 /mcp 到 localhost:8080
 npm run build      # tsc --noEmit && vite build
 npm run typecheck
 
-# 整套部署
-cp .env.example .env && docker compose up -d --build   # 前端在 :8088
+# 整套部署（不需要 .env，沒有任何值要人自己想）
+docker compose up -d --build     # 前端在 :8088
+                                 # 初始化代碼寫在 setup/初始化代碼.txt
 
 # 開發時只起資料庫與物件儲存，伺服器與前端跑在本機（不必重建映像）
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres rustfs
@@ -62,11 +63,16 @@ scripts/dev stop       # 停掉兩個容器
 `laysi-store/build.rs` 會 `rerun-if-changed=../../migrations`——**沒有它，新增一個
 migration 檔不會觸發重編**，伺服器會帶著舊的 migration 集合啟動且不報錯。
 
-**Schema 是一個檔案**：`migrations/0001_initial.sql`。上線前的 63 份已經合併進去，
-單一決定的來龍去脈在 git 歷史裡（`git log --diff-filter=D -- backend/migrations`），
-文件與本檔的四位數編號指的是那段歷史，不是還存在的檔案。**0001 從此不再更動**——
-已經套用過的 migration 改一個位元組，現有的資料庫就會拒絕啟動；schema 要變就新增
-`0002_*.sql`。
+**上線前的 63 份 migration 已經合併進 `migrations/0001_initial.sql`**，單一決定的
+來龍去脈在 git 歷史裡（`git log --diff-filter=D -- backend/migrations`）。**0001
+從此不再更動**——已經套用過的 migration 改一個位元組，現有的資料庫就會拒絕啟動；
+schema 要變就新增下一個編號。
+
+**四位數編號有兩套，而且會撞**。合併重設了編號，所以文件裡的數字可能指現存的檔案，
+也可能指合併前的那段歷史，同一個數字兩邊都有：`0009_regulation_in_db.sql` 是現存檔案，
+而 `docs/architecture.md` 的「員工自助模組（0009、…）」指的是合併前的另一件事。
+**引用編號之前先 `ls backend/migrations/` 對一下**；對不上就翻
+`git log --diff-filter=D -- backend/migrations`。新寫的文字一律引用現存檔案。
 
 ## 架構：四個關鍵設計
 
@@ -103,7 +109,17 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 - 法規更新 = 新增一版 `effective_from` 較晚的規則，不改程式、不發版、不重啟。
   `save_regulation` 寫完就重讀重裝。
 
-**`laysi-regulation` 仍然不碰 SQL**：伺服器啟動時把整張表交給 `install()`，
+****廠商送新版走 `backend/regulation-updates/`，不走 `migrations/`**：費率是資料不是
+schema，而 0001 合併過六十三份 migration，下一次合併時一則費率修正會擋在路上。
+`Store::REGULATION_UPDATES` 逐檔 `include_str!`，套用過的檔名記在 `reg_update`
+（0012），**一個資料庫只跑一次**——所以管理員刪掉的版本不會在下次啟動回來，而這正是
+`seed_regulations()` 那條「只在表空時寫」要守的性質。一個檔一條敘述（`sqlx::query`
+只收一條；`raw_sql` 會讓 `laysi-ops` 的 async trait 邊界證不出 `Send`），一律
+`ON CONFLICT (domain, version) DO NOTHING`，檔案由 `scripts/regulation-sql.ts` 從
+出廠 TOML 產出，不要手抄 payload。`reg_ruleset.checksum` 在 0012 刪掉：寫入時算的
+FNV-1a，讀取端從來不取它。
+
+`laysi-regulation` 仍然不碰 SQL**：伺服器啟動時把整張表交給 `install()`，
 `resolve()` 回 `&'static Ruleset`，計算子維持同步純函式，`cargo test` 不需要資料庫。
 `backend/regulation/<年度>/<domain>.toml` 只是**出廠預設值**，`seed_regulations()`
 **只在表空的時候寫入**——逐列補寫會讓刪掉的舊版在下一次重新載入時自己回來。
@@ -173,7 +189,7 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
 - **UI 文案一律繁體中文，語氣為清晰簡潔的商務風格**。不使用原型的口語腔
   （「今天的帳，還好嗎？」「別人還沒付我」已全數改為「財務總覽」「應收帳款」）。
   畫面文字包含後端 ops 產出的 `kicker`／`label`／`note`、`OpError` 訊息，
-  以及 migration 種下的 `role.name`／`security_policy.detail` 這類會被畫面讀出
+  以及 migration 種下的 `role.name`／`permission.detail` 這類會被畫面讀出
   的欄位，以及 `Operation::summary()`（MCP 畫面會把它列出來）——**只要看得到就是
   UI 文案**，四處同一套語氣。八條判準：
   1. 講使用者要做什麼，不講系統處在什麼狀態；
@@ -198,6 +214,10 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
   `permission.note`／`integration.detail`／`mcp_tool_grant.note` 這些會被畫面讀出的
   欄位，以及權限錯誤訊息（0037）——「另由 `adjust_entry` 管理」「限系統管理員執行，
   目前身分為「boss」」都是同一個毛病。
+  **一個未決的例外**：`ops/selfservice.rs` 的 `scope_note` 與 `identity_note` 帶著
+  `ctx.employee_id`、`created_by`、`claimant`、`BLAKE3`。畫面不讀這兩個欄位，它們是
+  回應裡寫給 AI 看的授權契約說明，所以不算違規。要嘛換成中文說法、要嘛整組刪掉，
+  兩件事都還沒決定；在決定之前**不要照著它們的寫法擴散到會被畫面讀出的欄位**。
 - **看得到就要按得動**。畫不畫入口一律看 `/v1/auth/me` 的 `permissions`；叫不動的
   操作不要叫（會留下被擋下的稽核，而畫面把錯誤吃掉就成了整段無聲消失），也不要在
   它原地留白——寫一句誰維護。**分頁與畫面之外的入口也算**：header 的「＋ 建立傳票」
@@ -239,7 +259,7 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、品牌完整性、
-RustFS 物件儲存，以及 **37 個畫面、121 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、123 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -256,8 +276,8 @@ RustFS 物件儲存，以及 **37 個畫面、121 個操作**，分成三個分�
   因為填表與查進度是兩件事。
 
 原型是 30 個畫面，但兩邊的數字不是同一組：人資段原先估為 9 個，目前的人資操作
-攤在 6 個畫面上，差的 3 個沒有對應操作，**不確定原型上那兩個是什麼**；自助段
-則多出休假申請、請款申請與打卡三個畫面。要補人資那兩個之前先回去讀
+攤在 6 個畫面上，差的 3 個沒有對應操作，**不確定原型上那三個是什麼**；自助段
+則多出休假申請、請款申請與打卡三個畫面。要補人資那三個之前先回去讀
 `財務系統原型.dc.html`，不要自行補兩個畫面。
 
 **公告與規章是同一張表，每一版都留著（0004、0005、0006）**：`notice` 只存身分
@@ -353,8 +373,13 @@ Token。三件事要一起做——session 查詢帶 `u.status = 'active'`，但
 把它當成選配——那個問題「文件管理」本來就現查現答。`import_source` 六列有五列
 `supported = false`；那一欄留著（它決定檔案交給哪個解析器），列刪掉。
 `security_policy` 在 0035 刪掉最後一列「只是宣稱」之後，`enforced` 全為 true，
-分辨不了任何東西，兩列搬進 `ops/security.rs` 的 `FIXED_RULES`，與另外兩條現算的
-規則並排。
+分辨不了任何東西，兩列搬進 `ops/security.rs` 的 `FIXED_RULES`。
+
+**「控制規則」整張卡與 `get_security_policy` 刪掉（0011）**：同一條判準往下一層。
+四列裡兩列是編進 Rust 的常數，另外兩列（AI 禁止事項、金額門檻）由 `mcp_tool_grant`
+與 `approval_rule` 現算，而改得動它們的開關在「MCP 與 AI」與「角色與核准」——那張卡
+只是把別頁的設定再念一次，念完還得附一句叫人去別頁調整，違反「看得到就要按得動」。
+`view_system` 少一個操作，側邊「安全與營運」改由 `list_api_tokens` 決定畫不畫。
 
 **異動單整套刪掉（0058）**：`hr_flow_step`／`employee_movement`／
 `employee_movement_step` 三張表與三個操作、「到離職與異動」畫面全數移除。四種異動
@@ -478,6 +503,22 @@ actor 或 role。MCP 身分由 Bearer token 所對應的 `api_token` 資料列�
 OIDC 四項設定齊全時採 discovery + Authorization Code + PKCE，登入的鑰匙永遠是
 `(issuer, sub)`。
 
+**不要新增需要人自己想一個值的環境變數**。密鑰由 compose 的 `secrets` 服務產生、寫進
+資料卷，各服務讀檔取用（`laysi_store::env_or_file` 收任何設定的 `NAME_FILE`）；**產生過
+就不再產生**。`RUSTFS_SECRET_KEY` 是唯一的例外。政策值進 `company_setting`，
+`BIND_ADDR`／埠號是 compose 佈線、不是設定。
+
+**新政策值進 `company_setting`，不另建鍵值表**（0014 的三項：閒置逾時、一次登入最長
+時數、MCP 每分鐘呼叫上限）。沒有 `Store` 可用的路徑要照 `business_offset` 那條路：啟動
+時讀進行程內的 atomic，`update_company_setting` 寫完重新發布，不必重啟。
+**session cookie 的 `Secure` 由 `X-Forwarded-Proto` 推導，不是設定**；
+`CORS_ALLOWED_ORIGIN` 與 `MCP_ALLOWED_ORIGINS` 留在環境變數，它們不是設定。
+
+**異地備份的目的地在畫面上（0013）**：`backup_setting` 單列表，`AdminOnly` 的三個操作
+在「安全與營運」。金鑰非對稱，**私鑰由 `backup` 容器產生**（持有 `age` 的那一方），
+顯示一次，`confirm_backup_key` 之前**備份不執行**——不然第一份備份會含有開啟它自己的
+鑰匙。伺服器不引入 `age` crate。
+
 **外部登入的設定在畫面上，不在環境變數（0047）**：`oidc_setting` 單列表，安全與營運頁
 由系統管理員填；存檔推進 `updated_at`，伺服器以它當快取指紋重建 client，**不必重啟**。
 `client_secret` 不經任何操作回傳，且列在 `REDACTED_FIELDS`。建立成敗寫回
@@ -547,7 +588,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 那個操作不收密碼，密碼由系統產生、只回一次、強制首次登入變更。`SETUP_ALLOW_WEB=false`
 關掉整條路，`SETUP_TOKEN` 非空時要求輸入代碼（行程內只留 BLAKE3 雜湊）。
 未登入的判斷資料來自 `/v1/auth/me` 的 `setup` 欄位。**這不是 Registry 操作，
-也不是導覽畫面**，所以不計入 111 個操作與 33 個畫面。
+也不是導覽畫面**，所以不計入操作與畫面的數量。
 
 **忘記密碼由 `reset_user_password`（0029）重發一組臨時密碼**，它同時撤銷該帳號所有
 登入工作階段——不撤等於沒換。兩個拒絕：`password_hash IS NULL` 的帳號只用外部身分

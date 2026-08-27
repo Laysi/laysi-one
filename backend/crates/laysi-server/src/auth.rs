@@ -5,7 +5,7 @@
 //! absolute expiry from the creation time caps a session's total lifetime.
 
 use crate::Shared;
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -20,69 +20,56 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 const SESSION_COOKIE_NAME: &str = "laysi_session";
-const DEFAULT_SESSION_IDLE_MINUTES: i64 = 60;
-const DEFAULT_SESSION_ABSOLUTE_HOURS: i64 = 168;
 pub(crate) const MIN_PASSWORD_CHARS: usize = 8;
 const LOGIN_FAILED_MESSAGE: &str = "登入名稱或密碼不正確";
 
-/// Tunable settings for REST sessions.
-#[derive(Debug, Clone, Copy)]
-pub struct SessionConfig {
-    pub cookie_secure: bool,
-    pub idle_timeout: Duration,
-    pub absolute_timeout: Duration,
+/// How long a session may sit idle, from `company_setting`.
+pub fn idle_timeout() -> Duration {
+    Duration::minutes(laysi_ops::session_idle_minutes())
+}
+
+/// How long a session may live at all, from `company_setting`.
+pub fn absolute_timeout() -> Duration {
+    Duration::hours(laysi_ops::session_max_hours())
+}
+
+/// Whether the session cookie gets the `Secure` flag.
+///
+/// Derived from the request rather than configured. A flag somebody has to
+/// remember to flip when the site moves behind TLS is a flag that ships a
+/// session cookie in the clear, and always setting it would break the office
+/// server reached over plain HTTP at a LAN address, where `localhost` does not
+/// apply. `X-Forwarded-Proto` is what a TLS proxy says, and the bundled Caddy
+/// preserves it from private ranges only.
+fn cookie_secure(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').next().is_some_and(|p| p.trim().eq_ignore_ascii_case("https")))
 }
 
 /// Authentication settings. The dummy password hash makes a non-existent
 /// account run Argon2id too, reducing the timing difference.
 #[derive(Clone)]
 pub struct AuthConfig {
-    pub session: SessionConfig,
     dummy_password_hash: Arc<str>,
 }
 
 impl AuthConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let cookie_secure = env_bool("SESSION_COOKIE_SECURE", false)?;
-        let idle_minutes =
-            env_positive_i64("SESSION_IDLE_MINUTES", DEFAULT_SESSION_IDLE_MINUTES)?;
-        let absolute_hours =
-            env_positive_i64("SESSION_ABSOLUTE_HOURS", DEFAULT_SESSION_ABSOLUTE_HOURS)?;
-        Self::new(SessionConfig {
-            cookie_secure,
-            idle_timeout: Duration::minutes(idle_minutes),
-            absolute_timeout: Duration::hours(absolute_hours),
-        })
+        Self::new()
     }
 
-    fn new(session: SessionConfig) -> anyhow::Result<Self> {
+    fn new() -> anyhow::Result<Self> {
         let dummy_password_hash = password::hash_password("這不是任何使用者的登入密碼")
             .map_err(|e| anyhow!("無法建立登入時間差防護用的 Argon2id 雜湊：{e}"))?;
-        Ok(Self { session, dummy_password_hash: dummy_password_hash.into() })
+        Ok(Self { dummy_password_hash: dummy_password_hash.into() })
     }
 
     #[cfg(test)]
     fn for_tests() -> Self {
-        Self::new(SessionConfig {
-            cookie_secure: false,
-            idle_timeout: Duration::minutes(30),
-            absolute_timeout: Duration::hours(24),
-        })
-        .expect("測試認證設定必須有效")
+        Self::new().expect("測試認證設定必須有效")
     }
-}
-
-fn env_positive_i64(name: &str, default: i64) -> anyhow::Result<i64> {
-    let Some(raw) = std::env::var(name).ok().filter(|value| !value.trim().is_empty()) else {
-        return Ok(default);
-    };
-    let value = raw
-        .parse::<i64>()
-        .with_context(|| format!("{name} 必須是正整數，收到「{raw}」"))?;
-    if value <= 0 {
-        return Err(anyhow!("{name} 必須大於零，收到「{raw}」"));
-    }
-    Ok(value)
 }
 
 pub(crate) fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
@@ -190,19 +177,17 @@ fn session_token() -> String {
     format!("lys_s_{}", hex::encode(bytes))
 }
 
-fn session_cookie(secret: &str, config: SessionConfig) -> String {
-    let secure = if config.cookie_secure { "; Secure" } else { "" };
+fn session_cookie(secret: &str, secure_flag: bool) -> String {
+    let secure = if secure_flag { "; Secure" } else { "" };
     format!(
         "{SESSION_COOKIE_NAME}={secret}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{secure}",
-        config.absolute_timeout.num_seconds()
+        absolute_timeout().num_seconds()
     )
 }
 
-fn clear_session_cookie(config: SessionConfig) -> String {
-    let secure = if config.cookie_secure { "; Secure" } else { "" };
-    format!(
-        "{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}"
-    )
+fn clear_session_cookie(secure_flag: bool) -> String {
+    let secure = if secure_flag { "; Secure" } else { "" };
+    format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}")
 }
 
 fn set_cookie(response: &mut Response, value: String) {
@@ -232,7 +217,7 @@ pub(crate) async fn issue_session(
         .chars()
         .take(512)
         .collect::<String>();
-    let expires_at = Utc::now() + state.auth.session.absolute_timeout;
+    let expires_at = Utc::now() + absolute_timeout();
     state
         .store
         .create_session(CreateSession {
@@ -255,8 +240,8 @@ pub(crate) async fn issue_session(
 }
 
 /// Attach the session cookie to a login or OIDC callback response.
-pub(crate) fn attach_session_cookie(response: &mut Response, secret: &str, state: &Shared) {
-    set_cookie(response, session_cookie(secret, state.auth.session));
+pub(crate) fn attach_session_cookie(response: &mut Response, secret: &str, headers: &HeaderMap) {
+    set_cookie(response, session_cookie(secret, cookie_secure(headers)));
 }
 
 /// Resolve the UI identity from the session cookie alone; no other request
@@ -267,7 +252,7 @@ pub async fn authenticate_session(
 ) -> Result<VerifiedSession, AuthError> {
     let secret = cookie_secret(headers).ok_or(AuthError::Unauthorized)?;
     let token_hash = laysi_store::token_hash(secret);
-    let idle_cutoff = Utc::now() - state.auth.session.idle_timeout;
+    let idle_cutoff = Utc::now() - idle_timeout();
     let session = state
         .store
         .session_by_hash(&token_hash, idle_cutoff)
@@ -411,7 +396,7 @@ pub async fn login(
         "user": user_json_with_role(&state, &user).await,
     }))
     .into_response();
-    attach_session_cookie(&mut response, &secret, &state);
+    attach_session_cookie(&mut response, &secret, &headers);
     response
 }
 
@@ -429,7 +414,7 @@ pub async fn logout(State(state): State<Shared>, headers: HeaderMap) -> Response
     }
 
     let mut response = StatusCode::NO_CONTENT.into_response();
-    set_cookie(&mut response, clear_session_cookie(state.auth.session));
+    set_cookie(&mut response, clear_session_cookie(cookie_secure(&headers)));
     response
 }
 
@@ -756,18 +741,31 @@ mod tests {
 
     #[test]
     fn cookie_flags_match_the_session_security_contract() {
-        let config = AuthConfig::for_tests().session;
-        let cookie = session_cookie("secret", config);
+        let cookie = session_cookie("secret", false);
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Strict"));
         assert!(cookie.contains("Path=/"));
         assert!(!cookie.contains("Secure"));
+        assert!(session_cookie("secret", true).contains("; Secure"));
+    }
 
-        let secure = session_cookie(
-            "secret",
-            SessionConfig { cookie_secure: true, ..config },
-        );
-        assert!(secure.contains("; Secure"));
+    /// `Secure` follows the request rather than a setting, so the office
+    /// server reached over plain HTTP still logs in and the same build behind
+    /// TLS still marks the cookie.
+    #[test]
+    fn secure_follows_the_proxy_rather_than_a_setting() {
+        let with = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-proto", HeaderValue::from_str(value).unwrap());
+            cookie_secure(&headers)
+        };
+        assert!(!cookie_secure(&HeaderMap::new()), "沒有標頭就是明文，不加 Secure");
+        assert!(!with("http"));
+        assert!(with("https"));
+        assert!(with("HTTPS"), "協定名稱不分大小寫");
+        // A chain of proxies appends, and the client's own protocol is first.
+        assert!(with("https, http"));
+        assert!(!with("http, https"));
     }
 
     /// Run with:

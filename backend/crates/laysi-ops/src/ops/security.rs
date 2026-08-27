@@ -1,15 +1,4 @@
-//! Security policy, API and MCP tokens, system health.
-//!
-//! A security policy must not be prose, so every rule [`GetSecurityPolicy`]
-//! returns is one the system applies:
-//!
-//! - What AI may not do is derived from `mcp_tool_grant`, and high-risk tools
-//!   that are still enabled are listed alongside.
-//! - Amount thresholds are derived from `approval_rule`, so editing the table
-//!   changes the screen.
-//! - The two in [`FIXED_RULES`] hold by construction. A rule this page could
-//!   only describe would not belong on it, which is why 0062 could drop the
-//!   table they used to live in.
+//! API and MCP tokens, system health.
 //!
 //! `api_token` stores only a BLAKE3 hash and the first eight characters: the
 //! prefix lets a person recognise which token a row is, the hash lets the
@@ -32,157 +21,11 @@ use serde_json::{json, Value};
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
     vec![
-        Box::new(GetSecurityPolicy),
         Box::new(ListApiTokens),
         Box::new(IssueApiToken),
         Box::new(RevokeApiToken),
         Box::new(GetSystemHealth),
     ]
-}
-
-/// Join a few names into one sentence, eliding the rest. Display only.
-/// What a tool is called on 「安全與營運」.
-///
-/// The reader of that page is deciding what AI may do, not wiring anything to
-/// it, so the switch's own note carries the name; the registry key belongs on
-/// 「MCP 與 AI」 where the switch is. A grant without a note falls back to the
-/// key rather than to nothing.
-fn grant_label(grant: &laysi_store::ToolGrant) -> String {
-    let note = grant.note.trim();
-    if note.is_empty() {
-        grant.tool_name.clone()
-    } else {
-        crate::op_label(note).to_string()
-    }
-}
-
-fn short_list(names: &[String]) -> String {
-    match names.len() {
-        0 => "（無）".into(),
-        1..=3 => names.join("、"),
-        n => format!("{}、{}、{} 等 {n} 項", names[0], names[1], names[2]),
-    }
-}
-
-// Control rules
-
-/// A rule that holds by construction rather than by a setting somebody can
-/// change. Both are enforced, which is why neither carries a flag: a rule
-/// this page can only describe does not belong on it.
-struct FixedRule {
-    code: &'static str,
-    label: &'static str,
-    value: &'static str,
-    detail: &'static str,
-    sort_order: i64,
-}
-
-const FIXED_RULES: [FixedRule; 2] = [
-    FixedRule {
-        code: "separation_of_duties",
-        label: "職責分離",
-        value: "建立傳票的人不能自行核准；會計不能執行匯款",
-        detail: "每次呼叫都即時檢查角色權限；會計沒有實際匯款權限，出納沒有開立、調整或過帳分錄權限。",
-        sort_order: 20,
-    },
-    FixedRule {
-        code: "audit_retention",
-        label: "稽核紀錄",
-        value: "每一次呼叫都留下紀錄，含被擋下的",
-        detail: "唯讀查詢與被權限擋下的呼叫同樣寫入。",
-        sort_order: 50,
-    },
-];
-
-struct GetSecurityPolicy;
-
-#[async_trait]
-impl Operation for GetSecurityPolicy {
-    fn name(&self) -> &'static str {
-        "get_security_policy"
-    }
-    fn risk(&self) -> Risk {
-        Risk::ReadOnly
-    }
-    fn summary(&self) -> &'static str {
-        "讀控制規則：職責分離、金額門檻、AI 禁止事項、稽核紀錄。AI 禁止事項依目前的工具開關即時計算。"
-    }
-    fn input_schema(&self) -> Value {
-        schema_of::<crate::Empty>()
-    }
-
-    async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
-        let grants = ctx.store.tool_grant_details().await?;
-        let rules = ctx.store.approval_rules().await?;
-
-        // "What AI may not do" is the set of tools currently disabled. The
-        // sentence changes with the switches because it is the switches, not
-        // a description of them.
-        let blocked: Vec<String> = grants.iter().filter(|g| !g.enabled).map(grant_label).collect();
-        // Tools still enabled that move money or change the books. This matters
-        // more than the line above: what the user needs to know is not which
-        // tools are off, but which are still on.
-        let risky_on: Vec<String> = grants
-            .iter()
-            .filter(|g| g.enabled && matches!(g.risk.as_str(), "high_risk" | "boss_only"))
-            .map(grant_label)
-            .collect();
-
-        let mut rows = vec![json!({
-            "code": "ai_limits",
-            "label": "AI 禁止事項",
-            "value": format!("AI 目前不能呼叫：{}", short_list(&blocked)),
-            "detail": if risky_on.is_empty() {
-                "會動到錢或帳的工具都已對 AI 關閉。".to_string()
-            } else {
-                format!(
-                    "{} 對 AI 開著，可在「MCP 與 AI」關閉。",
-                    short_list(&risky_on)
-                )
-            },
-            "source": "tool_grant",
-            "sort_order": 10,
-            "blocked_tools": blocked,
-            "risky_enabled_tools": risky_on,
-        })];
-
-        // The amount thresholds are the ones in the approval flow, not a copy.
-        let thresholds: Vec<String> = rules
-            .iter()
-            .filter_map(|r| {
-                r.min_amount.map(|a| {
-                    format!("{} 以上{}", crate::money(a), r.role_name.as_deref().unwrap_or("核准"))
-                })
-            })
-            .collect();
-        rows.push(json!({
-            "code": "amount_threshold",
-            "label": "金額門檻",
-            "value": if thresholds.is_empty() { "未設定門檻".into() } else { thresholds.join("　") },
-            "detail": "金額門檻在「角色與核准」調整。",
-            "source": "approval_flow",
-            "sort_order": 30,
-        }));
-
-        rows.extend(FIXED_RULES.iter().map(|r| {
-            json!({
-                "code": r.code,
-                "label": r.label,
-                "value": r.value,
-                "detail": r.detail,
-                "source": "policy",
-                "sort_order": r.sort_order,
-            })
-        }));
-        rows.sort_by_key(|r| r["sort_order"].as_i64().unwrap_or(0));
-
-        let summary =
-            format!("讀取控制規則 · {} 條 · AI 關閉 {} 個工具", rows.len(), blocked.len());
-        Ok(OpOutcome::new(
-            json!({ "rules": rows, "total": rows.len() }),
-            summary,
-        ))
-    }
 }
 
 // Tokens
@@ -493,15 +336,6 @@ mod tests {
         let op = ops().into_iter().find(|o| o.name() == "list_api_tokens").unwrap();
         assert_eq!(op.risk(), Risk::ReadOnly);
         assert!(op.summary().contains("只保留前八碼與雜湊"));
-    }
-
-    #[test]
-    fn short_list_stays_readable_when_there_are_many() {
-        let names = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("t{i}")).collect() };
-        assert_eq!(short_list(&names(0)), "（無）");
-        assert_eq!(short_list(&names(1)), "t1");
-        assert_eq!(short_list(&names(3)), "t1、t2、t3");
-        assert_eq!(short_list(&names(7)), "t1、t2、t3 等 7 項");
     }
 
     /// A sentinel: figures on the security screen may come only from the

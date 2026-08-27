@@ -130,8 +130,8 @@ impl ObjectStore {
             .map_err(|_| StorageError::NotConfigured("RUSTFS_ENDPOINT".into()))?;
         let access_key = std::env::var("RUSTFS_ACCESS_KEY")
             .map_err(|_| StorageError::NotConfigured("RUSTFS_ACCESS_KEY".into()))?;
-        let secret_key = std::env::var("RUSTFS_SECRET_KEY")
-            .map_err(|_| StorageError::NotConfigured("RUSTFS_SECRET_KEY".into()))?;
+        let secret_key = crate::env_or_file("RUSTFS_SECRET_KEY")
+            .ok_or_else(|| StorageError::NotConfigured("RUSTFS_SECRET_KEY".into()))?;
         let bucket = std::env::var("RUSTFS_BUCKET").unwrap_or_else(|_| DEFAULT_BUCKET.into());
         let region = std::env::var("RUSTFS_REGION").unwrap_or_else(|_| DEFAULT_REGION.into());
         Ok(Self::new(&endpoint, &access_key, &secret_key, &bucket, &region))

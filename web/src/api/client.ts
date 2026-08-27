@@ -650,21 +650,6 @@ export interface ApprovalRules {
   enforcement_note: string;
 }
 
-export interface SecurityRule {
-  code: string;
-  label: string;
-  value: string;
-  detail: string;
-  source: 'policy' | 'tool_grant' | 'approval_flow';
-  blocked_tools?: string[];
-  risky_enabled_tools?: string[];
-}
-
-export interface SecurityPolicy {
-  rules: SecurityRule[];
-  total: number;
-}
-
 export interface UserAccountRow {
   username: string;
   display_name: string;
@@ -705,6 +690,31 @@ export interface OidcSetting {
   verified_at: string | null;
   verify_error: string;
   roles: RoleRow[];
+}
+
+export interface BackupSetting {
+  enabled: boolean;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  access_key: string;
+  has_secret_key: boolean;
+  keep_days: number;
+  age_recipient: string;
+  restore_key_to_save: string;
+  blocked_reason: string | null;
+  last_run_at: string | null;
+  last_error: string;
+  last_bytes: number | null;
+  updated_at: string;
+  updated_by: string;
+}
+
+export interface UpdatedBackupSetting {
+  bucket: string;
+  enabled: boolean;
+  blocked_reason: string | null;
 }
 
 export interface UpdatedOidcSetting {

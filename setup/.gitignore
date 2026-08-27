@@ -1,0 +1,4 @@
+# The initialisation code the secrets service writes here on first start.
+# It belongs to one installation and is worthless to any other.
+*
+!.gitignore
