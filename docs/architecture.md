@@ -745,8 +745,8 @@ Rust 那側的 `bootstrap_open()` 只是為了給出比違反約束更好的錯�
 `limited` 仍代表可以進入該組操作，部門或本人範圍由各操作的查詢條件繼續縮小。
 兩道風險底線保留為權限矩陣之外的額外限制，權限資料列不會把任何角色提升上去。
 **每個 Registry 操作恰好屬於一條 permission**，由 `laysi-ops` 的純字串測試釘住：它
-`include_str!` 讀 `MIGRATIONS` 列出的每一份 migration，重播其中的 INSERT／UPDATE／
-DELETE 算出最終狀態，缺漏與重複都不准通過。新增一份 migration 就要加進那個清單。
+`include_str!` 讀 `0001_initial.sql` 的 `INSERT INTO permission`，缺漏與重複都不准
+通過。
 
 ### 角色只在帳號上，員工主檔沒有角色（0040）
 
@@ -856,30 +856,31 @@ Token 還能不能用，一個只是提醒該換了。撤銷與過期的原因�
 `list_api_tokens` 同時回傳 `expires_at`／`expired` 與既有的
 `rotate_due_on`／`overdue`，兩組數字不要混用。
 
-## 資料庫 schema（PostgreSQL 17）
+## 資料庫 schema（PostgreSQL 18）
 
 Schema 是**一個檔案**：`backend/migrations/0001_initial.sql`，以 `sqlx::migrate!()`
-在啟動時執行。上線前那 63 份 migration 已經合併進去，因為當時還沒有任何一個安裝需要
-沿用，而新裝的人讀一份 SQL 比讀 63 份差異合理。
+在啟動時執行。上線前的 migration 已經兩度合併進去（先是 63 份，後來是 0002 到 0014
+這 13 份），因為當時還沒有任何一個安裝需要沿用，而新裝的人讀一份 SQL 比讀一串差異
+合理。合併只在還沒有安裝要沿用時做得了；有了第一個正式安裝，這條路就關上。
 
 **本文與 `CLAUDE.md` 裡的四位數編號（0016、0044、0057……）指的是 git 歷史，不是檔案。**
 單一決定的來龍去脈用 `git log --diff-filter=D -- backend/migrations` 找得回來；會影響
 跨層契約的結論寫在本文，不靠那些檔案保存。
 
-合併之後**每一次 schema 變更都是新的一份 migration**，0001 不再更動——它已經被套用過，
-改一個位元組就會讓現有的資料庫拒絕啟動。目前另有 `0002_dimension_value_rename.sql`
-（`update_dimension_value` 的 permission 與 mcp_tool_grant）、`0003_drop_ocr_status.sql`、
-`0004_notice.sql`、`0005_notice_versions.sql` 與 `0006_notice_read.sql`（公告與規章）。
+合併之後**每一次 schema 變更都是新的一份 migration**，0001 不再更動——它一旦被套用過，
+改一個位元組就會讓現有的資料庫拒絕啟動。
 
 **「已套用過的檔案一個位元組都不能改」是實測過的**：0003 曾經在套用之後被補寫一段
 `UPDATE`，於是那個安裝的伺服器每次啟動都停在
 `migration 3 was previously applied but has been modified`。修法是補跑漏掉的那段、
 再把 `_sqlx_migrations.checksum`（檔案的 SHA-384）對齊現在的檔案，不是改檔案。
 
-**新增一份 migration 要同時加進 `laysi-ops` 的 `MIGRATIONS`**：兩個種子比對測試以
-`include_str!` 讀那份清單，算出 permission 與 mcp_tool_grant 的最終狀態再與 Registry
-對照。permission 的最終狀態取「最後一個提到該 `code` 的敘述」，所以 0002 之後的
-migration 要改權限就整份重寫 `op_names` 陣列，不要用陣列附加。
+**種子資料的最終狀態就是 0001 的 INSERT**：`laysi-ops` 兩個比對測試以 `include_str!`
+讀這一份檔案（`SCHEMA`），算出 permission 與 mcp_tool_grant 的名稱集合再與 Registry
+對照。合併前它們要重播十幾份 migration 的 `UPDATE` 與 `DELETE` 才算得出最終狀態。
+**下一份 migration 若改動 permission 或 mcp_tool_grant，要把重播那段一併加回
+`SCHEMA` 旁邊**：新增的操作少了種子會讓測試變紅，但拿掉一個種子不會，那一側要靠
+重播才看得見。
 
 ```
 account(code PK text, name text, kind text, normal_side text,
@@ -983,6 +984,25 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
    `SUM(debit) = SUM(credit)`，且行數 ≥ 2。
 3. `status = 'posted'` 的傳票不可 UPDATE／DELETE（trigger 擋下），唯一狀態例外是
    `posted → void`；確實發生但記錯的交易則另開反向分錄。
+4. 同一位員工的休假單彼此不得在時間上重疊，加班申請亦然：
+   `EXCLUDE USING gist (employee_id WITH =, tsrange(from_at, to_at, '[)') WITH &&)
+   WHERE (status <> 'rejected')`。
+
+### 一個人不能在同一段時間裡休兩次假
+
+兩張重疊的休假單各自扣一次特休、各自進一次薪資；兩張重疊的加班申請由 `run_payroll`
+各付一次。這件事原本沒有任何一層在管——`submit_my_overtime_request` 只比對申請時段與
+上下班時間有沒有重疊，兩張申請之間從來沒有比過。
+
+**時段是半開區間 `[)`**，所以前一張到 18:00、後一張從 18:00 開始並存；真正重疊的那
+一秒才擋。**被駁回的單不在約束範圍內**：同一段日期被駁回之後要能重送，而 PostgreSQL 18
+的 `WITHOUT OVERLAPS` 是 `UNIQUE`／`PRIMARY KEY` 的一種，**不收 `WHERE`**，會把重送
+一併擋掉，所以這裡用排除約束而不是它。相等欄位（`employee_id`）與範圍要進同一個 GiST
+索引，`btree_gist` 因此在 0001 的開頭啟用。
+
+`create_leave_request` 與 `create_overtime_request` 在寫入前各查一次擋路的那張單，
+**那一步只決定錯誤訊息說什麼**——兩個同時送出的申請都查得過，把它擋下來的是約束。
+測試是 `requests_cannot_overlap_for_one_employee`。
 
 ### 單據編號
 
@@ -2277,6 +2297,13 @@ export 其中一組會被另一組的指令默默拿去用。
 **`RUSTFS_SECRET_KEY` 是唯一的例外**，它由 RustFS 在啟動時從環境讀取、沒有檔案形式，
 而覆寫別人映像的 entrypoint 會在下一次改版時壞掉。那個桶子關著靠的不是這組密鑰，而是
 9000 與 9001 都不發布。要換就在環境裡覆寫它。
+
+**`pgdata` 掛在 `/var/lib/postgresql`，不是 `/var/lib/postgresql/data`**：PostgreSQL 18
+的官方映像把 `PGDATA` 移到 `/var/lib/postgresql/18/docker`，資料卷宣告也跟著上移一層。
+**PostgreSQL 17 留下的資料卷不能直接換上 18 的映像**——資料目錄格式逐個大版本不同，
+起不來的伺服器不會自己升級。既有安裝要先在 17 上 `pg_dump`，換映像、清掉資料卷，再
+`psql` 灌回去；備份容器的 `postgresql18-client` 就是為此而升的（`pg_dump` 的版本不得
+低於伺服器）。
 
 
 ## 政策值搬離環境變數（0014）

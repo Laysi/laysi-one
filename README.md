@@ -1,7 +1,7 @@
 # Laysi One
 
 面向台灣中小企業的財務＋人資系統。Rust（axum + sqlx）＋ React（Vite + TS）＋
-PostgreSQL 17 ＋ RustFS，以 Docker Compose 自架。
+PostgreSQL 18 ＋ RustFS，以 Docker Compose 自架。
 
 **授權：Business Source License 1.1** · **狀態：0.1.0，開發中**
 

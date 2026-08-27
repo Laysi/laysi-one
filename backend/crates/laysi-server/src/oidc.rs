@@ -517,6 +517,8 @@ struct ExternalIdentity<'a> {
 /// than building a second one beside it. The match is not limited to active
 /// accounts on purpose — a suspended account has to be found and refused,
 /// not quietly replaced by a fresh one.
+// The error is the response to send; see `auth::issue_session`.
+#[allow(clippy::result_large_err)]
 async fn resolve_account(
     state: &Shared,
     oidc: &OidcState,

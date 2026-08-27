@@ -56,6 +56,8 @@ const DUPLICATE_MESSAGES: &[(&str, &str)] = &[
     ("budget_version_code_account_code_dept_id_key", "這個科目在本版預算已經編過了，請改用編輯。"),
     ("attendance_employee_id_month_key", "這位員工這個月的出勤彙總已經存在。"),
     ("bank_txn_external_ref_key", "這筆銀行明細已經匯入過了。"),
+    ("leave_request_no_overlap", "這段時間已經有一張休假單，請改選其他時段。"),
+    ("overtime_request_no_overlap", "這段時間已經有一張加班申請，請改選其他時段。"),
 ];
 
 /// The message for a violated constraint, or `None` to let the caller keep the
@@ -64,13 +66,17 @@ fn duplicate_message(constraint: &str) -> Option<&'static str> {
     DUPLICATE_MESSAGES.iter().find(|(name, _)| *name == constraint).map(|(_, msg)| *msg)
 }
 
-/// Turn the two database rules a person can actually break into sentences they
-/// can act on.
+/// Turn the database rules a person can actually break into sentences they can
+/// act on.
 ///
 /// Without this the raw driver message reaches the screen: English, with the
-/// table and index names in it, and no statement of what to do. Both codes are
+/// table and index names in it, and no statement of what to do. The codes are
 /// mapped here rather than at each call site because every insert can raise
 /// them and a per-site check would cover only the ones somebody remembered.
+///
+/// The overlap rule (23P01) is also checked before the insert, which is what
+/// names the request in the way; this arm covers two requests arriving at once
+/// and anything writing to the tables without going through those functions.
 impl From<sqlx::Error> for StoreError {
     fn from(err: sqlx::Error) -> Self {
         if let Some(db) = err.as_database_error() {
@@ -86,6 +92,13 @@ impl From<sqlx::Error> for StoreError {
                 Some("23503") => {
                     return StoreError::StillReferenced {
                         message: "這筆資料還被其他紀錄引用，不能刪除。".to_string(),
+                    }
+                }
+                Some("23P01") => {
+                    return StoreError::Duplicate {
+                        message: duplicate_message(&constraint)
+                            .unwrap_or("這段時間已經有另一張單，請改選其他時段。")
+                            .to_string(),
                     }
                 }
                 _ => {}
@@ -282,8 +295,14 @@ pub enum StoreError {
     #[error("找不到休假單 {no}")]
     LeaveNotFound { no: String },
 
+    #[error("所選時段與休假單 {no}（{from} 至 {to}）重疊，請改選其他時段")]
+    LeaveOverlaps { no: String, from: String, to: String },
+
     #[error("找不到加班申請 {no}")]
     OvertimeNotFound { no: String },
+
+    #[error("所選時段與加班申請 {no}（{from} 至 {to}）重疊，請改選其他時段")]
+    OvertimeOverlaps { no: String, from: String, to: String },
 
     #[error("加班申請 {no} 已為「{status}」，不能重複簽核")]
     OvertimeAlreadyDecided { no: String, status: String },
@@ -394,12 +413,12 @@ impl Store {
         } else {
             "DO NOTHING"
         };
-        let r = sqlx::query(&format!(
+        let r = sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO reg_ruleset (domain, version, effective_from, effective_to,
                                       source_note, payload)
              VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT (domain, version) {conflict}"
-        ))
+        )))
         .bind(&rs.domain)
         .bind(&rs.version)
         .bind(rs.effective_from)
@@ -2576,12 +2595,12 @@ impl Store {
             ("attendance_punch", "attendance_punch_day_matches_time"),
             ("punch_correction", "punch_correction_day_matches_time"),
         ] {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "ALTER TABLE {table}
                    DROP CONSTRAINT {constraint},
                    ADD CONSTRAINT {constraint}
                        CHECK (punched_on = (punched_at AT TIME ZONE INTERVAL '{offset}')::date)"
-            ))
+            )))
             .execute(&mut *tx)
             .await?;
         }
@@ -5538,6 +5557,31 @@ impl Store {
         req: NewLeaveRequest<'_>,
     ) -> Result<LeaveRequest> {
         let mut tx = self.pool.begin().await?;
+
+        // `leave_request_no_overlap` refuses this anyway; asking first is what
+        // turns the refusal into a sentence naming the request in the way.
+        if let Some(clash) = sqlx::query(
+            "SELECT leave_no, from_at, to_at
+               FROM leave_request
+              WHERE employee_id = $1
+                AND status <> 'rejected'
+                AND tsrange(from_at, to_at, '[)') && tsrange($2, $3, '[)')
+              ORDER BY from_at
+              LIMIT 1",
+        )
+        .bind(req.employee_id)
+        .bind(req.from_at)
+        .bind(req.to_at)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            return Err(StoreError::LeaveOverlaps {
+                no: clash.get("leave_no"),
+                from: local_span(clash.get("from_at")),
+                to: local_span(clash.get("to_at")),
+            });
+        }
+
         let period = req.from_at.format("%y%m").to_string();
         let seq = next_doc_no(&mut tx, "LV", &period).await?;
         let leave_no = format!("LV{period}-{seq:03}");
@@ -5638,6 +5682,31 @@ impl Store {
         req: NewOvertimeRequest<'_>,
     ) -> Result<OvertimeRequest> {
         let mut tx = self.pool.begin().await?;
+
+        // As with leave: `overtime_request_no_overlap` is the guarantee, this
+        // is the message.
+        if let Some(clash) = sqlx::query(
+            "SELECT request_no, from_at, to_at
+               FROM overtime_request
+              WHERE employee_id = $1
+                AND status <> 'rejected'
+                AND tsrange(from_at, to_at, '[)') && tsrange($2, $3, '[)')
+              ORDER BY from_at
+              LIMIT 1",
+        )
+        .bind(req.employee_id)
+        .bind(req.from_at)
+        .bind(req.to_at)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            return Err(StoreError::OvertimeOverlaps {
+                no: clash.get("request_no"),
+                from: local_span(clash.get("from_at")),
+                to: local_span(clash.get("to_at")),
+            });
+        }
+
         let period = req.from_at.format("%y%m").to_string();
         let seq = next_doc_no(&mut tx, "OT", &period).await?;
         let request_no = format!("OT{period}-{seq:03}");
@@ -8695,6 +8764,13 @@ fn row_to_account(r: &PgRow) -> Account {
     }
 }
 
+/// One end of a leave or overtime period, as it reads in an error message.
+/// These columns are wall-clock local times already, so there is no offset to
+/// apply.
+fn local_span(at: chrono::NaiveDateTime) -> String {
+    at.format("%Y-%m-%d %H:%M").to_string()
+}
+
 fn row_to_leave(r: &PgRow) -> LeaveRequest {
     LeaveRequest {
         leave_no: r.get("leave_no"),
@@ -9335,6 +9411,11 @@ mod tests {
     }
 
 
+    /// The two regulation tests below share one `reg_ruleset` and one
+    /// process-wide installed ruleset, so running them at the same time has one
+    /// counting rows the other is still writing.
+    static REGULATION_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// A shipped amendment applies once and never again, so a version the
     /// administrator deleted on 「法規版本」 does not come back on the next
     /// start. This is the whole reason the channel has its own table instead
@@ -9346,6 +9427,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
     async fn a_shipped_amendment_applies_once() {
+        let _serial = REGULATION_TESTS.lock().await;
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
         let store = Store::connect(&database_url, 2).await.expect("應可連上測試資料庫");
@@ -9391,6 +9473,8 @@ mod tests {
     async fn an_edited_rate_survives_the_factory_seed() {
         use chrono::NaiveDate;
 
+        let _serial = REGULATION_TESTS.lock().await;
+
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
         let store = Store::connect(&database_url, 2).await.expect("應可連上測試資料庫");
@@ -9430,6 +9514,17 @@ mod tests {
             .is_err(),
             "刪掉唯一一版之後應該算不出來，而不是回退到出廠值"
         );
+
+        // Put the factory row back. `seed_regulations` only writes while the
+        // table is empty, so a deleted version stays deleted -- which is the
+        // property above, and which leaves the next run of this test one row
+        // short of the count it opens with.
+        let factory = laysi_regulation::seed()
+            .into_iter()
+            .find(|r| r.domain == "labor_insurance")
+            .expect("出廠版本應有勞保");
+        store.write_regulation(&factory, false).await.expect("應寫得回去");
+        store.reload_regulations().await.expect("應重新載入");
     }
 
     /// Run with:
@@ -9504,6 +9599,101 @@ mod tests {
             .expect("應可清除密鑰");
         assert_eq!(cleared.client_secret, "", "空字串代表清除");
         assert!(cleared.verified_at.is_none(), "設定變更後驗證結果要作廢");
+    }
+
+    /// Nobody is on leave twice over the same hours, and nobody is paid twice
+    /// for the same overtime. Both are exclusion constraints rather than a
+    /// check in this file, because MCP and a future importer reach the tables
+    /// without passing through it; the query above only decides what the
+    /// message says.
+    ///
+    /// Adjacent periods are not overlapping ones: the ranges are half-open, so
+    /// leave ending at 18:00 and leave starting at 18:00 both stand.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// requests_cannot_overlap_for_one_employee -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn requests_cannot_overlap_for_one_employee() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2).await.expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let emp_no = format!("T{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let employee = store
+            .create_employee(WriteEmployee {
+                emp_no: &emp_no,
+                name: "重疊測試",
+                dept_code: None,
+                title: "",
+                employment_type: "full_time",
+                hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                left_on: None,
+                status: "active",
+                base_salary: None,
+                labor_insured_salary: None,
+                health_insured_salary: None,
+                pension_wage: None,
+                id_no: "",
+                bank_accounts: None,
+                note: "",
+                actor: "測試",
+                keep_active_role: "admin",
+            })
+            .await
+            .expect("應建得了員工");
+
+        let at = |day: u32, hour: u32| {
+            NaiveDate::from_ymd_opt(2026, 8, day)
+                .unwrap()
+                .and_hms_opt(hour, 0, 0)
+                .unwrap()
+        };
+        let leave = |from_at, to_at| NewLeaveRequest {
+            employee_id: employee.id,
+            kind: "annual",
+            from_at,
+            to_at,
+            hours: "8".parse().unwrap(),
+            days: "1".parse().unwrap(),
+            reason: "測試",
+            actor: "測試",
+        };
+
+        store.create_leave_request(leave(at(10, 9), at(10, 18))).await.expect("第一張應收下");
+        let clash = store
+            .create_leave_request(leave(at(10, 13), at(11, 18)))
+            .await
+            .expect_err("重疊的休假單不該收下");
+        assert!(
+            matches!(clash, StoreError::LeaveOverlaps { .. }),
+            "重疊要說出擋住它的那一張單，而不是資料庫錯誤：{clash}"
+        );
+        store
+            .create_leave_request(leave(at(10, 18), at(11, 18)))
+            .await
+            .expect("接在後面的時段不算重疊");
+
+        let overtime = |from_at, to_at| NewOvertimeRequest {
+            employee_id: employee.id,
+            day_type: "weekday",
+            from_at,
+            to_at,
+            hours: "2".parse().unwrap(),
+            reason: "測試",
+            actor: "測試",
+        };
+        store.create_overtime_request(overtime(at(12, 19), at(12, 21))).await.expect("第一張應收下");
+        let clash = store
+            .create_overtime_request(overtime(at(12, 20), at(12, 22)))
+            .await
+            .expect_err("重疊的加班申請不該收下");
+        assert!(
+            matches!(clash, StoreError::OvertimeOverlaps { .. }),
+            "重疊要說出擋住它的那一張單：{clash}"
+        );
     }
 
     /// Run with:

@@ -808,30 +808,18 @@ mod tests {
         assert_eq!(before, declared, "註冊表裡有不屬於任何模組的操作");
     }
 
-    /// Every migration, in order, as text. The assertions below read the seed
-    /// data straight out of them, so a switch or a permission that the schema
-    /// does not actually seed cannot pass by being described in a test.
-    /// A new migration file has to be listed here.
-    const MIGRATIONS: &[&str] = &[
-        include_str!("../../../migrations/0001_initial.sql"),
-        include_str!("../../../migrations/0002_dimension_value_rename.sql"),
-        include_str!("../../../migrations/0004_notice.sql"),
-        include_str!("../../../migrations/0005_notice_versions.sql"),
-        include_str!("../../../migrations/0006_notice_read.sql"),
-        include_str!("../../../migrations/0009_regulation_in_db.sql"),
-        include_str!("../../../migrations/0010_work_calendar.sql"),
-        include_str!("../../../migrations/0011_drop_security_policy.sql"),
-        include_str!("../../../migrations/0013_backup_setting.sql"),
-        include_str!("../../../migrations/0014_session_and_mcp_policy.sql"),
-    ];
+    /// The schema, as text. The assertions below read the seed data straight
+    /// out of it, so a switch or a permission that the schema does not actually
+    /// seed cannot pass by being described in a test.
+    const SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
 
     /// The rows of one multi-row INSERT, one string per row, without the
     /// leading `('`.
     fn inserted_rows(table: &str) -> Vec<&'static str> {
         let head = format!("INSERT INTO {table} (");
-        let rows: Vec<&str> = MIGRATIONS
-            .iter()
-            .flat_map(|sql| sql.split(head.as_str()).skip(1))
+        let rows: Vec<&str> = SCHEMA
+            .split(head.as_str())
+            .skip(1)
             .flat_map(|block| {
                 block
                     .split_once(";\n")
@@ -841,13 +829,13 @@ mod tests {
             })
             .filter_map(|line| line.trim().strip_prefix("('"))
             .collect();
-        assert!(!rows.is_empty(), "migrations 裡沒有 {table} 的 INSERT");
+        assert!(!rows.is_empty(), "0001 裡沒有 {table} 的 INSERT");
         rows
     }
 
-    /// Whether any migration contains this literal.
+    /// Whether the schema contains this literal.
     fn seeded(needle: &str) -> bool {
-        MIGRATIONS.iter().any(|sql| sql.contains(needle))
+        SCHEMA.contains(needle)
     }
 
     /// Values of the first column of every row of one multi-row INSERT.
@@ -858,11 +846,6 @@ mod tests {
             .collect()
     }
 
-    /// Switches a later migration deleted. `inserted_rows` only reads INSERT
-    /// statements, so a removal has to be named here or the check below still
-    /// expects the operation to exist.
-    const REMOVED_GRANTS: &[&str] = &["acknowledge_notice", "get_security_policy"];
-
     /// Every operation needs exactly one MCP switch, and every switch needs an
     /// operation. One short and AI sees a tool it cannot call; one too many and
     /// there is no default policy for it.
@@ -870,10 +853,7 @@ mod tests {
     fn every_registry_operation_has_an_mcp_tool_grant() {
         use std::collections::BTreeSet;
 
-        let mut seeded = first_column_of("mcp_tool_grant");
-        for removed in REMOVED_GRANTS {
-            assert!(seeded.remove(removed), "{removed} 不在任何 INSERT 裡，不必扣除");
-        }
+        let seeded = first_column_of("mcp_tool_grant");
         let registry: BTreeSet<&str> = Registry::new().iter().map(|op| op.name()).collect();
 
         assert_eq!(
@@ -910,22 +890,6 @@ mod tests {
         for row in inserted_rows("permission") {
             let code = row.split_once('\'').expect("permission 的代碼沒有結尾").0;
             granted.insert(code, op_names_of(row));
-        }
-        // A later migration rewrites the whole array rather than appending, so
-        // the final state is the last statement that named the permission.
-        for statement in MIGRATIONS
-            .iter()
-            .flat_map(|sql| sql.split("UPDATE permission").skip(1))
-            .filter_map(|chunk| chunk.split_once(';').map(|(s, _)| s))
-        {
-            let code = statement
-                .split_once("WHERE code = '")
-                .expect("UPDATE permission 沒有指定 code")
-                .1
-                .split_once('\'')
-                .expect("code 沒有結尾")
-                .0;
-            granted.insert(code, op_names_of(statement));
         }
         assert!(!granted.is_empty(), "permission 沒有解析到任何資料列");
 

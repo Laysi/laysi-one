@@ -12,7 +12,6 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use laysi_brand::integrity::{self, canonical_bytes, Entry, MANIFEST_VERSION, PROTECTED};
-use rand::RngCore;
 use std::path::{Path, PathBuf};
 
 const BRAND_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../brand");
@@ -52,7 +51,7 @@ fn init_keys() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(BRAND_DIR)?;
 
     let mut seed = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut seed);
+    getrandom::fill(&mut seed)?;
     let sk = SigningKey::from_bytes(&seed);
 
     std::fs::write(&key_path, format!("{}\n", hex::encode(sk.to_bytes())))?;

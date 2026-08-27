@@ -2,7 +2,7 @@
 # compiles LICENSE-BSL.txt into the binary with include_str!, so the licence has
 # to be reachable inside the context.
 
-FROM rust:1-slim-bookworm AS build
+FROM rust:1-slim-trixie AS build
 WORKDIR /src
 
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config \
@@ -30,7 +30,7 @@ RUN --mount=type=cache,id=laysi-cargo-registry,target=/usr/local/cargo/registry 
     && mkdir -p /out \
     && cp target/release/laysi-server target/release/laysi-admin /out/
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 laysi

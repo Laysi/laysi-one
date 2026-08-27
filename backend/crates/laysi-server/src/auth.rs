@@ -13,8 +13,6 @@ use axum::Json;
 use chrono::{Duration, Utc};
 use laysi_server::password;
 use laysi_store::{CreateSession, StoreError, UserAccount, UserSession};
-use rand::rngs::OsRng;
-use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -173,7 +171,7 @@ fn cookie_secret(headers: &HeaderMap) -> Option<&str> {
 
 fn session_token() -> String {
     let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("OS entropy is unavailable");
     format!("lys_s_{}", hex::encode(bytes))
 }
 
@@ -203,6 +201,9 @@ fn set_cookie(response: &mut Response, value: String) {
 
 /// Create a session for a verified account, returning the plaintext token
 /// that is handed to the browser exactly once.
+// The error is the response to send, which is how an axum handler carries a
+// refusal; 128 bytes on a login path is not worth boxing and unboxing.
+#[allow(clippy::result_large_err)]
 pub(crate) async fn issue_session(
     state: &Shared,
     user: &UserAccount,
@@ -287,6 +288,8 @@ fn login_failure_response(_reason: LoginFailure) -> Response {
     )
 }
 
+// The error is the response to send; see `issue_session`.
+#[allow(clippy::result_large_err)]
 async fn password_matches(password: String, encoded: String) -> Result<bool, Response> {
     tokio::task::spawn_blocking(move || password::verify_password(&password, &encoded))
         .await
