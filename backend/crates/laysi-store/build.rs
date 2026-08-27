@@ -6,4 +6,8 @@
 // migration version and silently serves without the new schema.
 fn main() {
     println!("cargo:rerun-if-changed=../../migrations");
+    // Same reason for the regulation channel: its files are embedded with
+    // include_str!, and a new one that does not force a rebuild ships a
+    // binary that reports success while writing no amendment.
+    println!("cargo:rerun-if-changed=../../regulation-updates");
 }

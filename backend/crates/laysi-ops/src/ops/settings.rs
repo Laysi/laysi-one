@@ -271,6 +271,16 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
         "late_grace_minutes" | "flex_window_minutes" if value.parse::<u32>().is_err() => {
             Err(OpError::BadInput(format!("「{value}」不是分鐘數")))
         }
+        // Zero would log everyone out on their next click, and there would be
+        // no way back in to undo it.
+        crate::SESSION_IDLE_SETTING | crate::SESSION_MAX_SETTING
+            if !matches!(value.parse::<i64>(), Ok(1..)) =>
+        {
+            Err(OpError::BadInput(format!("「{value}」不是大於 0 的數字")))
+        }
+        crate::MCP_RATE_LIMIT_SETTING if value.parse::<u32>().is_err() => {
+            Err(OpError::BadInput(format!("「{value}」不是次數，不限就填 0")))
+        }
         "punch_correction_policy"
             if !crate::ops::attendance::CORRECTION_POLICIES.contains(&value) =>
         {
@@ -323,6 +333,14 @@ impl Operation for UpdateCompanySetting {
             validate_setting(&i.code, value)?;
         }
         let s = ctx.store.update_company_setting(&i.code, value, &ctx.actor).await?;
+        // The three policy settings are also read on paths with no Store at
+        // hand, so the process copy has to follow the row.
+        if matches!(
+            i.code.as_str(),
+            crate::SESSION_IDLE_SETTING | crate::SESSION_MAX_SETTING | crate::MCP_RATE_LIMIT_SETTING
+        ) {
+            crate::load_policy_settings(&ctx.store).await;
+        }
         let summary = match s.value.is_empty() {
             true => format!("改設定 · {} 清為尚未設定", s.label),
             false => format!("改設定 · {} 改成「{}」", s.label, s.value),

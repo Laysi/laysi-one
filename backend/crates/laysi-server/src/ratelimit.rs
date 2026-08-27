@@ -18,10 +18,20 @@ struct Bucket {
     count: u32,
 }
 
+/// Where a limiter's allowance comes from.
+///
+/// `/mcp` reads it fresh on every call because it is a setting on a screen,
+/// and a limit that only took effect after a restart would be a setting the
+/// screen lies about. Login's is a constant of the login flow.
+enum Allowance {
+    Fixed(u32),
+    Live(fn() -> u32),
+}
+
 /// Fixed-window (per minute) counter. The bucket key is the caller's choice:
 /// `/mcp` counts per token id, login counts per login name.
 pub struct RateLimiter {
-    limit_per_minute: u32,
+    allowance: Allowance,
     buckets: Mutex<HashMap<String, Bucket>>,
 }
 
@@ -29,13 +39,26 @@ impl RateLimiter {
     /// `limit_per_minute = 0` means unlimited, which turns the whole layer off
     /// for local development or testing.
     pub fn new(limit_per_minute: u32) -> Self {
-        Self { limit_per_minute, buckets: Mutex::new(HashMap::new()) }
+        Self { allowance: Allowance::Fixed(limit_per_minute), buckets: Mutex::new(HashMap::new()) }
+    }
+
+    /// A limiter whose allowance is whatever the setting currently says.
+    pub fn from_setting(read: fn() -> u32) -> Self {
+        Self { allowance: Allowance::Live(read), buckets: Mutex::new(HashMap::new()) }
+    }
+
+    fn limit_per_minute(&self) -> u32 {
+        match self.allowance {
+            Allowance::Fixed(n) => n,
+            Allowance::Live(read) => read(),
+        }
     }
 
     /// Record a call and report whether it is still within the allowance.
     /// `true` allows, `false` should be blocked.
     pub fn allow(&self, key: &str) -> bool {
-        if self.limit_per_minute == 0 {
+        let limit_per_minute = self.limit_per_minute();
+        if limit_per_minute == 0 {
             return true;
         }
         let window = current_window();
@@ -50,7 +73,7 @@ impl RateLimiter {
             bucket.count = 0;
         }
         bucket.count += 1;
-        bucket.count <= self.limit_per_minute
+        bucket.count <= limit_per_minute
     }
 }
 
@@ -61,18 +84,6 @@ fn current_window() -> i64 {
 /// Read the per-minute limit from the environment. Unset uses the default;
 /// set to anything other than a non-negative integer is a configuration
 /// error.
-pub fn limit_from_env(default: u32) -> anyhow::Result<u32> {
-    let Some(raw) = std::env::var("MCP_RATE_LIMIT_PER_MINUTE")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    else {
-        return Ok(default);
-    };
-    raw.trim()
-        .parse::<u32>()
-        .map_err(|_| anyhow::anyhow!("MCP_RATE_LIMIT_PER_MINUTE 必須是非負整數，收到「{raw}」"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,11 +115,20 @@ mod tests {
         }
     }
 
+    /// The MCP allowance is a setting, so a change has to bite on the next
+    /// call rather than the next restart.
     #[test]
-    fn limit_from_env_rejects_non_numeric_values() {
-        // Rather than setting the environment variable (tests run in parallel
-        // and would clash), test the underlying string parsing directly.
-        assert_eq!("60".trim().parse::<u32>().ok(), Some(60));
-        assert!("abc".trim().parse::<u32>().is_err());
+    fn a_live_allowance_is_read_on_every_call() {
+        static LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        fn read() -> u32 {
+            LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        let limiter = RateLimiter::from_setting(read);
+        assert!(limiter.allow("t"));
+        assert!(!limiter.allow("t"), "超過上限就要擋下");
+
+        LIMIT.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(limiter.allow("t"), "改成不限之後不必重新啟動就要放行");
     }
 }

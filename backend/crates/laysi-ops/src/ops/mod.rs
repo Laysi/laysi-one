@@ -8,6 +8,7 @@ use crate::Operation;
 
 pub mod assets;
 pub mod attendance;
+pub mod backup;
 pub mod banking;
 pub mod budget;
 pub mod calendar;
@@ -56,5 +57,6 @@ pub fn all() -> Vec<Box<dyn Operation>> {
     out.extend(regulations::ops());
     out.extend(calendar::ops());
     out.extend(security::ops());
+    out.extend(backup::ops());
     out
 }

@@ -5,11 +5,13 @@ import {
   callOp,
   getHealthz,
   OpFailed,
+  fileSizeLabel,
   type ApiTokenList,
+  type BackupSetting,
   type Healthz,
   type OidcSetting,
-  type SecurityPolicy,
   type SystemHealth,
+  type UpdatedBackupSetting,
   type UpdatedOidcSetting,
 } from '../api/client';
 
@@ -48,8 +50,31 @@ function formFrom(setting: OidcSetting): OidcForm {
   };
 }
 
+interface BackupForm {
+  enabled: boolean;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  access_key: string;
+  secret_key: string;
+  keep_days: string;
+}
+
+function backupFormFrom(setting: BackupSetting): BackupForm {
+  return {
+    enabled: setting.enabled,
+    endpoint: setting.endpoint,
+    region: setting.region,
+    bucket: setting.bucket,
+    prefix: setting.prefix,
+    access_key: setting.access_key,
+    secret_key: '',
+    keep_days: String(setting.keep_days),
+  };
+}
+
 export function Security({ onToast, reloadKey }: Props) {
-  const [policy, setPolicy] = useState<SecurityPolicy | null>(null);
   const [tokens, setTokens] = useState<ApiTokenList | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [hz, setHz] = useState<Healthz | null>(null);
@@ -57,22 +82,25 @@ export function Security({ onToast, reloadKey }: Props) {
   const [busy, setBusy] = useState<number | null>(null);
   const [issued, setIssued] = useState<{ name: string; secret: string } | null>(null);
   const [oidc, setOidc] = useState<OidcSetting | null>(null);
+  const [backup, setBackup] = useState<BackupSetting | null>(null);
+  const [backupForm, setBackupForm] = useState<BackupForm | null>(null);
+  const [savingBackup, setSavingBackup] = useState(false);
   const [oidcForm, setOidcForm] = useState<OidcForm | null>(null);
   const [savingOidc, setSavingOidc] = useState(false);
 
   const me = useCurrentUser();
   const canReadOidc = me.permissions.includes('get_oidc_setting');
   const canEditOidc = me.permissions.includes('update_oidc_setting');
+  const canReadBackup = me.permissions.includes('get_backup_setting');
+  const canEditBackup = me.permissions.includes('update_backup_setting');
 
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<SecurityPolicy>('get_security_policy'),
       callOp<ApiTokenList>('list_api_tokens'),
       callOp<SystemHealth>('get_system_health'),
     ])
-      .then(([p, t, h]) => {
-        setPolicy(p);
+      .then(([t, h]) => {
         setTokens(t);
         setHealth(h);
       })
@@ -85,7 +113,13 @@ export function Security({ onToast, reloadKey }: Props) {
         .then(setOidc)
         .catch(() => setOidc(null));
     }
-  }, [canReadOidc]);
+
+    if (canReadBackup) {
+      callOp<BackupSetting>('get_backup_setting')
+        .then(setBackup)
+        .catch(() => setBackup(null));
+    }
+  }, [canReadOidc, canReadBackup]);
 
   useEffect(load, [load, reloadKey]);
 
@@ -157,6 +191,53 @@ export function Security({ onToast, reloadKey }: Props) {
     }
   }
 
+  async function saveBackup() {
+    if (!backup || !backupForm) return;
+    const input: Record<string, string | boolean | number> = {};
+    if (backupForm.endpoint.trim() !== backup.endpoint) input.endpoint = backupForm.endpoint.trim();
+    if (backupForm.region.trim() !== backup.region) input.region = backupForm.region.trim();
+    if (backupForm.bucket.trim() !== backup.bucket) input.bucket = backupForm.bucket.trim();
+    if (backupForm.prefix.trim() !== backup.prefix) input.prefix = backupForm.prefix.trim();
+    if (backupForm.access_key.trim() !== backup.access_key) {
+      input.access_key = backupForm.access_key.trim();
+    }
+    if (backupForm.secret_key.trim()) input.secret_key = backupForm.secret_key.trim();
+    if (Number(backupForm.keep_days) !== backup.keep_days) {
+      input.keep_days = Number(backupForm.keep_days);
+    }
+    if (backupForm.enabled !== backup.enabled) input.enabled = backupForm.enabled;
+    if (Object.keys(input).length === 0) {
+      onToast('沒有變更');
+      setBackupForm(null);
+      return;
+    }
+
+    setSavingBackup(true);
+    try {
+      const d = await callOp<UpdatedBackupSetting>('update_backup_setting', input, '設定異地備份');
+      onToast(d.blocked_reason ?? `已儲存，備份目的地 ${d.bucket}`);
+      setBackupForm(null);
+      setBackup(await callOp<BackupSetting>('get_backup_setting'));
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingBackup(false);
+    }
+  }
+
+  async function confirmBackupKey() {
+    setSavingBackup(true);
+    try {
+      await callOp('confirm_backup_key', {}, '確認還原金鑰已保存');
+      onToast('系統已不再留存還原金鑰');
+      setBackup(await callOp<BackupSetting>('get_backup_setting'));
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingBackup(false);
+    }
+  }
+
   async function issue() {
     try {
       const d = await callOp<{ token: { name: string }; secret: string }>('issue_api_token', {
@@ -179,7 +260,7 @@ export function Security({ onToast, reloadKey }: Props) {
       <h1 className="page-title">安全與營運</h1>
 
       {error && <p className="state-note state-note--error">{error}</p>}
-      {!policy && !error && <p className="state-note">讀取中…</p>}
+      {!tokens && !error && <p className="state-note">讀取中…</p>}
 
       {issued && (
         <div className="card secret-card">
@@ -197,24 +278,10 @@ export function Security({ onToast, reloadKey }: Props) {
         </div>
       )}
 
-      {policy && tokens && health && (
+      {tokens && health && (
         <div className="split-columns">
           <section>
-            <h3 className="section-title">控制規則</h3>
-            <div className="card fact-card">
-              {policy.rules.map((r) => (
-                <div className="fact fact--stacked" key={r.code}>
-                  <span className="fact__key">{r.label}</span>
-                  <span className="fact__value">
-                    {r.value}
-                    {r.detail && <span className="fact__note">{r.detail}</span>}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <p className="recon">「AI 禁止事項」在「MCP 與 AI」調整。</p>
-
-            <h3 className="section-title section-title--spaced">系統健康</h3>
+            <h3 className="section-title">系統健康</h3>
             <div className="card fact-card">
               <div className="fact">
                 <span className="fact__key">PostgreSQL</span>
@@ -479,7 +546,188 @@ export function Security({ onToast, reloadKey }: Props) {
               </>
             )}
 
-            <h3 className={`section-title${oidc ? ' section-title--spaced' : ''}`}>Token 與連線</h3>
+            {backup && (
+              <>
+                <h3 className={`section-title${oidc ? ' section-title--spaced' : ''}`}>異地備份</h3>
+                {backup.restore_key_to_save && (
+                  <div className="card secret-card">
+                    <div className="secret-card__head">
+                      <strong>還原金鑰（僅顯示一次）</strong>
+                    </div>
+                    <code className="secret-card__value num">{backup.restore_key_to_save}</code>
+                    <p className="form-note">
+                      備份檔以這組金鑰加密，遺失後任何人都無法還原。請先複製保存於系統之外，
+                      再按下方按鈕；確認後備份開始執行。
+                    </p>
+                    {canEditBackup && (
+                      <div className="toolbar doc-card__actions">
+                        <button
+                          className="btn btn--compact"
+                          disabled={savingBackup}
+                          onClick={() => void confirmBackupKey()}
+                        >
+                          已保存，不再顯示
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {backupForm ? (
+                  <div className="card form-card">
+                    <div className="field-grid">
+                      <label className="field field--full">
+                        儲存位置
+                        <input
+                          className="input"
+                          value={backupForm.endpoint}
+                          placeholder="https://s3.ap-northeast-1.amazonaws.com"
+                          onChange={(e) =>
+                            setBackupForm({ ...backupForm, endpoint: e.target.value })
+                          }
+                        />
+                        <span className="field__hint">相容 S3 介面的儲存服務皆可。</span>
+                      </label>
+                      <label className="field">
+                        桶子名稱
+                        <input
+                          className="input"
+                          value={backupForm.bucket}
+                          onChange={(e) => setBackupForm({ ...backupForm, bucket: e.target.value })}
+                        />
+                      </label>
+                      <label className="field">
+                        區域
+                        <input
+                          className="input"
+                          value={backupForm.region}
+                          onChange={(e) => setBackupForm({ ...backupForm, region: e.target.value })}
+                        />
+                      </label>
+                      <label className="field">
+                        路徑
+                        <input
+                          className="input"
+                          value={backupForm.prefix}
+                          placeholder="laysi"
+                          onChange={(e) => setBackupForm({ ...backupForm, prefix: e.target.value })}
+                        />
+                        <span className="field__hint">留空表示寫在桶子最上層。</span>
+                      </label>
+                      <label className="field">
+                        保留天數
+                        <input
+                          className="input num"
+                          value={backupForm.keep_days}
+                          onChange={(e) =>
+                            setBackupForm({ ...backupForm, keep_days: e.target.value })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        存取金鑰
+                        <input
+                          className="input num"
+                          value={backupForm.access_key}
+                          onChange={(e) =>
+                            setBackupForm({ ...backupForm, access_key: e.target.value })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        存取密鑰
+                        <input
+                          className="input num"
+                          type="password"
+                          value={backupForm.secret_key}
+                          placeholder={backup.has_secret_key ? '留空表示沿用原設定' : ''}
+                          onChange={(e) =>
+                            setBackupForm({ ...backupForm, secret_key: e.target.value })
+                          }
+                        />
+                      </label>
+                      <label className="field field--full">
+                        執行備份
+                        <select
+                          className="input"
+                          value={backupForm.enabled ? 'on' : 'off'}
+                          onChange={(e) =>
+                            setBackupForm({ ...backupForm, enabled: e.target.value === 'on' })
+                          }
+                        >
+                          <option value="off">暫停</option>
+                          <option value="on">每日備份</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="wizard-actions">
+                      <button className="btn btn--ghost" onClick={() => setBackupForm(null)}>
+                        取消
+                      </button>
+                      <button
+                        className="btn"
+                        disabled={savingBackup}
+                        onClick={() => void saveBackup()}
+                      >
+                        儲存
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="card fact-card">
+                      <div className="fact">
+                        <span className="fact__key">狀態</span>
+                        <span className="fact__value">
+                          {backup.blocked_reason ?? '每日備份'}
+                        </span>
+                      </div>
+                      {backup.bucket && (
+                        <div className="fact">
+                          <span className="fact__key">目的地</span>
+                          <span className="fact__value">
+                            {backup.bucket}
+                            {backup.prefix ? ` / ${backup.prefix}` : ''}
+                            <span className="fact__note">{backup.endpoint}</span>
+                          </span>
+                        </div>
+                      )}
+                      <div className="fact">
+                        <span className="fact__key">上次備份</span>
+                        <span className="fact__value">
+                          <span className="num">{businessTime(backup.last_run_at, '尚未備份')}</span>
+                          {backup.last_bytes !== null && (
+                            <span className="fact__note num">
+                              {fileSizeLabel(backup.last_bytes)}
+                            </span>
+                          )}
+                          {backup.last_error && (
+                            <span className="fact__note">{backup.last_error}</span>
+                          )}
+                        </span>
+                      </div>
+                      {backup.bucket && (
+                        <div className="fact">
+                          <span className="fact__key">保留天數</span>
+                          <span className="fact__value num">{backup.keep_days}</span>
+                        </div>
+                      )}
+                    </div>
+                    {canEditBackup && (
+                      <div className="toolbar doc-card__actions">
+                        <button
+                          className="btn btn--compact"
+                          onClick={() => setBackupForm(backupFormFrom(backup))}
+                        >
+                          {backup.bucket ? '變更設定' : '設定異地備份'}
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            <h3 className={`section-title${oidc || backup ? ' section-title--spaced' : ''}`}>Token 與連線</h3>
             <p className="section-note">{tokens.storage_note}</p>
             <div className="card fact-card">
               {tokens.tokens.map((t) => (

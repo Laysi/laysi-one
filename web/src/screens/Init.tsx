@@ -91,7 +91,9 @@ export function Init() {
                 value={setupToken}
                 onChange={(e) => setSetupToken(e.target.value)}
               />
-              <span className="login__hint">請向部署人員索取。</span>
+              <span className="login__hint">
+                在伺服器的 <span className="num">setup/初始化代碼.txt</span>。
+              </span>
             </label>
           )}
 

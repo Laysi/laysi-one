@@ -192,8 +192,8 @@ async fn main() -> anyhow::Result<()> {
     let serve_role = ServeRole::from_env()?;
     tracing::info!(role = serve_role.label(), "LAYSI_SERVE 決定要掛哪些路由");
 
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/laysi".into());
+    let database_url = laysi_store::env_or_file("DATABASE_URL")
+        .unwrap_or_else(|| "postgres://postgres:postgres@localhost:5432/laysi".into());
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let rustfs_endpoint =
         std::env::var("RUSTFS_ENDPOINT").unwrap_or_else(|_| "http://rustfs:9000".into());
@@ -203,8 +203,6 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "http://localhost:5173".into());
     let cors_origin = HeaderValue::from_str(&cors_origin)
         .map_err(|e| anyhow::anyhow!("CORS_ALLOWED_ORIGIN 不是有效的 HTTP origin：{e}"))?;
-    // Calls per token per minute; 0 means unlimited.
-    let mcp_rate_limit = ratelimit::limit_from_env(60)?;
     // MCP Origin allow list, comma separated, empty by default. That accepts
     // only clients that send no Origin (normal AI connectors do not send it),
     // while a browser sending one must appear in the list.
@@ -221,6 +219,10 @@ async fn main() -> anyhow::Result<()> {
     // Before anything can date a document. `today()` reads it, and the
     // constant it falls back to is the one the CHECK constraints hold.
     let offset = laysi_ops::load_business_offset(&store).await;
+    // Session timeouts and the MCP allowance are settings on a screen, read on
+    // paths that have no Store at hand. update_company_setting republishes
+    // them, so a change needs no restart.
+    laysi_ops::load_policy_settings(&store).await;
     tracing::info!(offset = %laysi_domain::format_business_offset(offset), "記帳時區");
     tracing::info!(version = ?store.migration_version().await?, "migrations 完成");
 
@@ -272,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(operations = registry.len(), "操作註冊表就緒（REST 與 MCP 共用）");
 
     tracing::info!(
-        limit_per_minute = mcp_rate_limit,
+        limit_per_minute = laysi_ops::mcp_rate_limit_per_minute(),
         allowed_origins = mcp_allowed_origins.len(),
         "MCP 速率限制與 Origin 白名單設定完成"
     );
@@ -286,7 +288,9 @@ async fn main() -> anyhow::Result<()> {
         oidc: tokio::sync::RwLock::new(oidc::OidcCache::default()),
         objects,
         rustfs_endpoint,
-        mcp_rate_limiter: ratelimit::RateLimiter::new(mcp_rate_limit),
+        mcp_rate_limiter: ratelimit::RateLimiter::from_setting(
+            laysi_ops::mcp_rate_limit_per_minute,
+        ),
         setup_rate_limiter: ratelimit::RateLimiter::new(setup::ATTEMPTS_PER_MINUTE),
         login_rate_limiter: ratelimit::RateLimiter::new(auth::LOGIN_ATTEMPTS_PER_MINUTE),
         mcp_allowed_origins,

@@ -84,7 +84,7 @@ export const SYSTEM_NAV: NavEntry[] = [
   { kind: 'item', id: 'reg', label: '法規版本', op: 'list_regulations', ready: true },
   { kind: 'head', label: 'AI 與監控' },
   { kind: 'item', id: 'mcp', label: 'MCP 與 AI', op: 'list_ai_audit', ready: true },
-  { kind: 'item', id: 'sec', label: '安全與營運', op: 'get_security_policy', ready: true },
+  { kind: 'item', id: 'sec', label: '安全與營運', op: 'list_api_tokens', ready: true },
 ];
 
 export const HR_NAV: NavEntry[] = [

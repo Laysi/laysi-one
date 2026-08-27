@@ -118,11 +118,13 @@ export type OpName =
   | 'list_work_calendar'
   | 'set_work_calendar_day'
   | 'refresh_work_calendar'
-  | 'get_security_policy'
   | 'list_api_tokens'
   | 'issue_api_token'
   | 'revoke_api_token'
   | 'get_system_health'
+  | 'get_backup_setting'
+  | 'update_backup_setting'
+  | 'confirm_backup_key'
 ;
 
 export type Risk = 'read_only' | 'needs_confirm' | 'high_risk' | 'boss_only' | 'admin_only';
@@ -251,11 +253,13 @@ export const OPS: readonly OpMeta[] = [
   { name: 'list_work_calendar', risk: 'read_only', riskLabel: '唯讀', summary: "讀工作日曆：一年逐日的工作日、休息日、例假、國定假日與天災停班，含節日名稱與來源" },
   { name: 'set_work_calendar_day', risk: 'needs_confirm', riskLabel: '需人確認', summary: "改工作日曆一天：指定該日的日別，颱風停班亦由此登記；留空則回到星期決定的日別" },
   { name: 'refresh_work_calendar', risk: 'needs_confirm', riskLabel: '需人確認', summary: "更新工作日曆：向政府資料開放平臺取該年度的辦公日曆表並寫入，自行設定過的日期保留不動" },
-  { name: 'get_security_policy', risk: 'read_only', riskLabel: '唯讀', summary: "讀控制規則：職責分離、金額門檻、AI 禁止事項、稽核紀錄。AI 禁止事項依目前的工具開關即時計算。" },
   { name: 'list_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀 API 與 MCP Token 清單：名稱、用途範圍、代表對象、最後使用時間、輪替期限。只保留前八碼與雜湊。" },
   { name: 'issue_api_token', risk: 'admin_only', riskLabel: '限系統管理員', summary: "核發一組新的 API 或 MCP Token。明文僅出現於本次回應。" },
   { name: 'revoke_api_token', risk: 'high_risk', riskLabel: '高風險', summary: "撤銷一組 Token。撤銷後不能復原，需要時重新核發。" },
   { name: 'get_system_health', risk: 'read_only', riskLabel: '唯讀', summary: "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。品牌指紋與物件儲存連線由 /healthz 回答。" },
+  { name: 'get_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀異地備份設定：儲存位置、桶子、路徑、保留天數與上次備份結果。存取金鑰不在回應內，設定後也無法取回。" },
+  { name: 'update_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "設定異地備份：儲存位置、桶子、路徑、存取金鑰與保留天數。存取密鑰留空表示沿用原設定。" },
+  { name: 'confirm_backup_key', risk: 'admin_only', riskLabel: '限系統管理員', summary: "確認還原金鑰已保存。確認後系統不再留存該金鑰，備份隨即開始執行。" },
 ] as const;
 
 /** 每個操作的輸入 JSON Schema，可供表單產生或執行期驗證使用。 */
@@ -376,9 +380,11 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'list_work_calendar': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"year":{"default":null,"description":"Calendar year (西元). Defaults to this year.","format":"int32","type":["integer","null"]}},"title":"YearInput","type":"object"},
   'set_work_calendar_day': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"kind":{"description":"`workday`, `rest_day`, `regular_leave`, `holiday` or `natural_disaster`. Empty puts the date back to what the day of the week says.","type":"string"},"name":{"default":null,"description":"What the day is called, for example 「中秋節」.","type":["string","null"]},"on_date":{"description":"The date to state (YYYY-MM-DD).","format":"date","type":"string"}},"required":["kind","on_date"],"title":"SetWorkCalendarDayInput","type":"object"},
   'refresh_work_calendar': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"year":{"default":null,"description":"Calendar year (西元) to fetch. Defaults to this year.","format":"int32","type":["integer","null"]}},"title":"RefreshInput","type":"object"},
-  'get_security_policy': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_api_tokens': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"include_revoked":{"default":false,"description":"Include revoked tokens; excluded by default.","type":"boolean"}},"title":"ListApiTokensInput","type":"object"},
   'issue_api_token': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"actor":{"description":"Who this token acts as. AI connecting with it is never more privileged than that person.","type":"string"},"actor_role":{"description":"That person's role code, e.g. `acct`.","type":"string"},"expiry_note":{"default":null,"description":"Description of the expiry condition, e.g. \"expires at period close\".","type":["string","null"]},"kind":{"description":"`api` or `mcp`.","type":"string"},"name":{"description":"Name of this token, e.g. \"website orders\".","type":"string"},"rotate_days":{"default":null,"description":"Rotation period in days. Omit for no fixed cycle and explain in expiry_note.","format":"int32","type":["integer","null"]},"scope":{"description":"Scope, as one human-readable line, e.g. \"read-only plus drafts\".","type":"string"}},"required":["actor","actor_role","kind","name","scope"],"title":"IssueApiTokenInput","type":"object"},
   'revoke_api_token': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"id":{"description":"Token id, from `list_api_tokens`.","format":"int32","type":"integer"}},"required":["id"],"title":"RevokeApiTokenInput","type":"object"},
   'get_system_health': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
+  'get_backup_setting': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
+  'update_backup_setting': {"$schema":"http://json-schema.org/draft-07/schema#","properties":{"access_key":{"default":null,"type":["string","null"]},"bucket":{"default":null,"type":["string","null"]},"enabled":{"default":null,"description":"Whether backups run at all. Turning it on needs the location, the bucket and both halves of the access key.","type":["boolean","null"]},"endpoint":{"default":null,"description":"The service address, e.g. `https://s3.ap-northeast-1.amazonaws.com`.","type":["string","null"]},"keep_days":{"default":null,"description":"How many days of backups the remote keeps.","format":"int32","type":["integer","null"]},"prefix":{"default":null,"description":"Folder inside the bucket. An empty string writes at the top.","type":["string","null"]},"region":{"default":null,"type":["string","null"]},"secret_key":{"default":null,"description":"Write only. Leave the field out to keep the stored key; an empty string clears it.","type":["string","null"]}},"title":"UpdateBackupSettingInput","type":"object"},
+  'confirm_backup_key': {"$schema":"http://json-schema.org/draft-07/schema#","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
 };

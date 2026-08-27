@@ -1,20 +1,74 @@
 # Laysi One: self-hosted deployment
 #
-#   cp .env.example .env   # change the passwords and tokens first
 #   docker compose up -d --build
+#   docker compose logs secrets      # the initialisation code, printed once
 #   open http://localhost:8088
+#
+# No .env is needed and nothing here asks for a value. Compose interpolates
+# before any container runs, so a secret it interpolates can only come from a
+# file somebody wrote; the `secrets` service below writes them into a volume
+# instead, and every consumer reads the file. postgres has POSTGRES_PASSWORD_FILE
+# of its own, and the server binaries take any setting as `NAME_FILE`.
 #
 # api verifies brand integrity at startup and exits with code 78 rather than
 # serving when it fails. That is deliberate; see
 # backend/crates/laysi-brand/src/integrity.rs.
 
 services:
+  # Generates what must differ between installations, once, into a volume.
+  #
+  # Never regenerates: a new database password against an existing pgdata
+  # volume would leave a database nobody can open, which is the same reason
+  # a generated .env must not be rewritten.
+  secrets:
+    image: alpine:3.21
+    volumes:
+      - secrets:/secrets
+      # The initialisation code has to reach a person, and the person is at a
+      # browser rather than a terminal. `:Z` relabels for SELinux, and only
+      # this one-shot container writes here.
+      - ./setup:/out:Z
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        umask 022
+        gen() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48; }
+        # Alphanumeric only: the password is interpolated into a connection
+        # string, where a punctuation character breaks the string rather than
+        # becoming part of the password.
+        [ -s /secrets/pg_password ] || gen > /secrets/pg_password
+        [ -s /secrets/setup_token ] || gen > /secrets/setup_token
+        [ -s /secrets/database_url ] || printf 'postgres://%s:%s@postgres:5432/%s' \
+            "$${POSTGRES_USER:-laysi}" "$$(cat /secrets/pg_password)" "$${POSTGRES_DB:-laysi}" \
+            > /secrets/database_url
+        chmod 0444 /secrets/*
+        # Written once, next to docker-compose.yml. Deleting it is final: a
+        # rerun leaves it deleted, and the line below is then the only copy.
+        # A read-only mount must not take the whole stack down with it.
+        if [ ! -e /out/初始化代碼.txt ] && [ ! -e /out/.written ]; then
+            {
+                printf '初始化代碼：%s\n\n' "$$(cat /secrets/setup_token)"
+                printf '建立第一個帳號時輸入。建立後本檔案沒有用途，可以刪除。\n'
+            } > /out/初始化代碼.txt && touch /out/.written || \
+                echo "無法寫入 setup/，代碼只在下一行。"
+        fi
+        echo "初始化代碼：$$(cat /secrets/setup_token)"
+        echo "也寫在 setup/初始化代碼.txt。建立第一個帳號時輸入。"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laysi}
+      POSTGRES_DB: ${POSTGRES_DB:-laysi}
+
   postgres:
     image: postgres:17
     restart: unless-stopped
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-laysi}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?請在 .env 設定資料庫密碼}
+      POSTGRES_PASSWORD_FILE: /secrets/pg_password
       POSTGRES_DB: ${POSTGRES_DB:-laysi}
       # Collation uses ICU rather than an OS locale: the postgres image does not
       # generate zh_TW.utf8, and setting LANG makes initdb fail outright. ICU is
@@ -22,6 +76,7 @@ services:
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=zh-TW --locale=C.UTF-8"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - secrets:/secrets:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laysi} -d ${POSTGRES_DB:-laysi}"]
       interval: 5s
@@ -36,7 +91,13 @@ services:
     environment:
       RUSTFS_VOLUMES: /data
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
-      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?請在 .env 設定物件儲存金鑰}
+      # The one credential that cannot come from a file: RustFS reads it from
+      # the environment at startup and has no file form, and overriding another
+      # image's entrypoint to inject one breaks on its next release. What
+      # actually keeps this bucket closed is that neither 9000 nor 9001 is
+      # published — anything that can reach them is already inside this
+      # network. Set RUSTFS_SECRET_KEY in the environment to override.
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
     volumes:
       - rustfsdata:/data
     healthcheck:
@@ -65,24 +126,26 @@ services:
     restart: unless-stopped
     environment:
       LAYSI_SERVE: app
-      DATABASE_URL: postgres://${POSTGRES_USER:-laysi}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-laysi}
+      DATABASE_URL_FILE: /secrets/database_url
       BIND_ADDR: 0.0.0.0:8080
       # The document module stores files in RustFS, so api needs the credentials
       # too. Without them /healthz reports rustfs as unconfigured and the
       # document screen is disabled.
       RUSTFS_ENDPOINT: http://rustfs:9000
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
-      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?請在 .env 設定物件儲存金鑰}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
       RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
-      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
-      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-60}
-      SESSION_ABSOLUTE_HOURS: ${SESSION_ABSOLUTE_HOURS:-168}
+      # Session timeouts are settings on 「基礎設定」; the Secure flag on the
+      # cookie follows X-Forwarded-Proto. Only the dev server needs CORS: in
+      # this deployment the frontend is same-origin behind the web container.
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:5173}
       # Whether the first account may be created from the browser. Only the api
       # service needs these: mcp mounts no /v1 routes at all.
       SETUP_ALLOW_WEB: ${SETUP_ALLOW_WEB:-true}
-      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      SETUP_TOKEN_FILE: /secrets/setup_token
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - secrets:/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -111,7 +174,7 @@ services:
     restart: unless-stopped
     environment:
       LAYSI_SERVE: mcp
-      DATABASE_URL: postgres://${POSTGRES_USER:-laysi}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-laysi}
+      DATABASE_URL_FILE: /secrets/database_url
       BIND_ADDR: 0.0.0.0:8080
       # The RustFS credentials are given here as well, deliberately.
       # upload_document and get_document are registry operations and therefore
@@ -125,14 +188,17 @@ services:
       # permitted call work.
       RUSTFS_ENDPOINT: http://rustfs:9000
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
-      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?請在 .env 設定物件儲存金鑰}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
       RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
-      # Maximum calls per token per minute; 0 means unlimited.
-      MCP_RATE_LIMIT_PER_MINUTE: ${MCP_RATE_LIMIT_PER_MINUTE:-60}
-      # Comma-separated Origin allow list, guarding against DNS rebinding. Empty
-      # accepts only callers that send no Origin (normal AI connectors do not).
+      # The per-token call limit is a setting on 「基礎設定」. This one stays
+      # here: a comma-separated Origin allow list guarding against DNS
+      # rebinding on a port whoever deploys chose to publish, which is the same
+      # layer as the port number. Empty accepts only callers that send no
+      # Origin, which normal AI connectors do not.
       MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - secrets:/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -149,6 +215,35 @@ services:
       # runs a reverse proxy in front of it.
       - "${MCP_PORT:-8089}:8080"
 
+  # Off-site backup. Where the copy goes is a setting on 「安全與營運」, read
+  # out of backup_setting on every pass, so this service takes no destination
+  # of its own and needs no restart when the destination changes.
+  #
+  # It holds the database credentials because it dumps the database, and the
+  # object store credentials because it mirrors the bucket. Both copies leave
+  # encrypted to a public key whose private half the system does not keep.
+  backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL_FILE: /secrets/database_url
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
+      RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
+      # How often a pass runs. A pass with backups switched off costs one
+      # query, so this is not a setting anybody needs on a screen.
+      BACKUP_INTERVAL_SECONDS: 86400
+    volumes:
+      - secrets:/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+
   web:
     build:
       context: ./web
@@ -163,3 +258,4 @@ services:
 volumes:
   pgdata:
   rustfsdata:
+  secrets:

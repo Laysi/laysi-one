@@ -789,7 +789,7 @@ pub async fn callback(
         Err(response) => return response,
     };
     let mut response = redirect("/");
-    auth::attach_session_cookie(&mut response, &secret, &state);
+    auth::attach_session_cookie(&mut response, &secret, &headers);
     response
 }
 

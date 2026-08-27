@@ -76,10 +76,7 @@ pub struct SetupConfig {
 impl SetupConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let allow_web = env_bool("SETUP_ALLOW_WEB", true)?;
-        let token_hash = std::env::var("SETUP_TOKEN")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+        let token_hash = laysi_store::env_or_file("SETUP_TOKEN")
             .map(|value| Arc::from(laysi_store::token_hash(&value)));
         Ok(Self { allow_web, token_hash })
     }
@@ -290,7 +287,7 @@ pub async fn bootstrap(
         "user": user_json_with_role(&state, &user).await,
     }))
     .into_response();
-    attach_session_cookie(&mut response, &secret, &state);
+    attach_session_cookie(&mut response, &secret, &headers);
     response
 }
 

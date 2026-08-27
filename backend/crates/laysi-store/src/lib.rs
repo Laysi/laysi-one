@@ -390,15 +390,14 @@ impl Store {
             "DO UPDATE SET effective_from = EXCLUDED.effective_from,
                            effective_to   = EXCLUDED.effective_to,
                            source_note    = EXCLUDED.source_note,
-                           payload        = EXCLUDED.payload,
-                           checksum       = EXCLUDED.checksum"
+                           payload        = EXCLUDED.payload"
         } else {
             "DO NOTHING"
         };
         let r = sqlx::query(&format!(
             "INSERT INTO reg_ruleset (domain, version, effective_from, effective_to,
-                                      source_note, payload, checksum)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)
+                                      source_note, payload)
+             VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT (domain, version) {conflict}"
         ))
         .bind(&rs.domain)
@@ -407,7 +406,6 @@ impl Store {
         .bind(rs.effective_to)
         .bind(&rs.source_note)
         .bind(&rs.payload)
-        .bind(format!("{:016x}", fnv1a(&rs.payload.to_string())))
         .execute(&self.pool)
         .await?;
         Ok(r.rows_affected())
@@ -443,10 +441,54 @@ impl Store {
         .collect())
     }
 
+    /// Regulation versions shipped after the installation was created.
+    ///
+    /// A new file here is a rate the legislature changed, not a schema
+    /// change, so it does not go in `migrations/`: those get squashed, and a
+    /// squash cannot preserve which amendments an installation already saw.
+    /// A file listed here is applied at most once per database, so a version
+    /// the administrator deleted on 「法規版本」 stays deleted.
+    ///
+    /// Each file writes `ON CONFLICT (domain, version) DO NOTHING`, so an
+    /// installation that entered the amendment by hand first keeps its own.
+    /// Generate them from the factory TOML with `scripts/regulation-sql.ts`
+    /// rather than writing the payload twice.
+    const REGULATION_UPDATES: &[(&str, &str)] = &[];
+
+    /// Apply every regulation update this build ships and has not applied.
+    ///
+    /// The bookkeeping row goes in before the file runs and both share one
+    /// transaction, so two servers starting together cannot both apply it:
+    /// the second blocks on the key and then sees zero rows inserted.
+    async fn apply_regulation_updates(&self, files: &[(&'static str, &'static str)]) -> Result<u64> {
+        let mut applied = 0;
+        for &(file_name, sql) in files {
+            let mut tx = self.pool.begin().await?;
+            let claimed = sqlx::query(
+                "INSERT INTO reg_update (file_name) VALUES ($1) ON CONFLICT DO NOTHING",
+            )
+            .bind(file_name)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if claimed == 1 {
+                // One statement per file. `raw_sql` would take several, but
+                // it makes this future fail to prove itself `Send` at the
+                // async-trait boundary in laysi-ops, and two amendments are
+                // two files anyway.
+                sqlx::query(sql).execute(&mut *tx).await?;
+                applied += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok(applied)
+    }
+
     /// Seed, read back and install. The table is the authority, so every
     /// path that changes it ends here.
     pub async fn reload_regulations(&self) -> Result<usize> {
         self.seed_regulations().await?;
+        self.apply_regulation_updates(Self::REGULATION_UPDATES).await?;
         let rulesets = self.regulations().await?;
         let n = rulesets.len();
         laysi_regulation::install(rulesets);
@@ -3207,6 +3249,84 @@ impl Store {
     }
     /// The external sign-in settings. Carries the client secret, so like
     /// [`UserAccount`] it deliberately does not implement `Serialize`.
+    pub async fn backup_setting(&self) -> Result<BackupSetting> {
+        let row = sqlx::query(
+            "SELECT enabled, endpoint, region, bucket, prefix, access_key, secret_key,
+                    age_recipient, age_identity_pending, keep_days,
+                    updated_at, updated_by, last_run_at, last_error, last_bytes
+               FROM backup_setting
+              WHERE id = 1",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(BackupSetting {
+            enabled: row.get("enabled"),
+            endpoint: row.get("endpoint"),
+            region: row.get("region"),
+            bucket: row.get("bucket"),
+            prefix: row.get("prefix"),
+            access_key: row.get("access_key"),
+            secret_key: row.get("secret_key"),
+            age_recipient: row.get("age_recipient"),
+            age_identity_pending: row.get("age_identity_pending"),
+            keep_days: row.get("keep_days"),
+            updated_at: row.get("updated_at"),
+            updated_by: row.get("updated_by"),
+            last_run_at: row.get("last_run_at"),
+            last_error: row.get("last_error"),
+            last_bytes: row.get("last_bytes"),
+        })
+    }
+
+    /// Edit the backup destination. Every field is three-state: absent keeps
+    /// the stored value, an empty string clears it — including the secret key,
+    /// which no screen can display and therefore cannot send back unchanged.
+    pub async fn update_backup_setting(&self, req: WriteBackupSetting<'_>) -> Result<BackupSetting> {
+        sqlx::query(
+            "UPDATE backup_setting
+                SET enabled    = COALESCE($1, enabled),
+                    endpoint   = COALESCE($2, endpoint),
+                    region     = COALESCE($3, region),
+                    bucket     = COALESCE($4, bucket),
+                    prefix     = COALESCE($5, prefix),
+                    access_key = COALESCE($6, access_key),
+                    secret_key = COALESCE($7, secret_key),
+                    keep_days  = COALESCE($8, keep_days),
+                    updated_at = now(),
+                    updated_by = $9
+              WHERE id = 1",
+        )
+        .bind(req.enabled)
+        .bind(req.endpoint)
+        .bind(req.region)
+        .bind(req.bucket)
+        .bind(req.prefix)
+        .bind(req.access_key)
+        .bind(req.secret_key)
+        .bind(req.keep_days)
+        .bind(req.updated_by)
+        .execute(&self.pool)
+        .await?;
+        self.backup_setting().await
+    }
+
+    /// Forget the private key once the administrator has written it down.
+    ///
+    /// This is what lets backups start: the backup job refuses to run while
+    /// the column holds anything, so the first archive is taken only after
+    /// somebody can still open it.
+    pub async fn clear_backup_identity(&self, by: &str) -> Result<BackupSetting> {
+        sqlx::query(
+            "UPDATE backup_setting
+                SET age_identity_pending = '', updated_at = now(), updated_by = $1
+              WHERE id = 1",
+        )
+        .bind(by)
+        .execute(&self.pool)
+        .await?;
+        self.backup_setting().await
+    }
+
     pub async fn oidc_setting(&self) -> Result<OidcSetting> {
         let row = sqlx::query(
             "SELECT enabled, issuer, client_id, client_secret, redirect_url,
@@ -7048,6 +7168,43 @@ pub struct CreateUser<'a> {
 /// External sign-in settings, including the client secret. Never serialized:
 /// the secret has to be stored to call the token endpoint, and nothing may
 /// hand it back out.
+/// Off-site backup destination. Any S3-compatible bucket.
+#[derive(Debug, Clone)]
+pub struct BackupSetting {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub region: String,
+    pub bucket: String,
+    pub prefix: String,
+    pub access_key: String,
+    pub secret_key: String,
+    /// Public half of the age key pair; all the backup job needs.
+    pub age_recipient: String,
+    /// Private half, held only until the administrator says it is written
+    /// down. While it is non-empty no backup runs, so no archive contains it.
+    pub age_identity_pending: String,
+    pub keep_days: i32,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub last_error: String,
+    pub last_bytes: Option<i64>,
+}
+
+/// Edit to the backup destination. `None` keeps the stored value.
+#[derive(Debug, Clone, Default)]
+pub struct WriteBackupSetting<'a> {
+    pub enabled: Option<bool>,
+    pub endpoint: Option<&'a str>,
+    pub region: Option<&'a str>,
+    pub bucket: Option<&'a str>,
+    pub prefix: Option<&'a str>,
+    pub access_key: Option<&'a str>,
+    pub secret_key: Option<&'a str>,
+    pub keep_days: Option<i32>,
+    pub updated_by: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub struct OidcSetting {
     pub enabled: bool,
@@ -9044,6 +9201,28 @@ fn row_to_api_token(r: &PgRow) -> ApiToken {
     }
 }
 
+/// A setting's value, from `KEY` or from the file `KEY_FILE` names.
+///
+/// The file form is what lets compose generate its own secrets: nothing can
+/// interpolate a value into the environment before the containers start, but a
+/// one-shot service can write it into a volume that the others read. Same
+/// convention as the official database images, and it applies to `laysi-admin`
+/// run with `exec` as well, which an entrypoint wrapper would not.
+///
+/// Trailing whitespace goes: a file written by a shell usually ends in a
+/// newline, and a newline inside a connection string is not a connection.
+pub fn env_or_file(key: &str) -> Option<String> {
+    if let Ok(path) = std::env::var(format!("{key}_FILE")) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let value = text.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    std::env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
 /// Token hash: BLAKE3 as hex.
 ///
 /// The same hash function as the brand integrity check (see `laysi-brand`).
@@ -9068,20 +9247,6 @@ fn row_to_bank_txn(r: &PgRow) -> BankTxn {
         matched_at: r.get("matched_at"),
         matched_by: r.get("matched_by"),
     }
-}
-
-/// Short digest of a ruleset's payload for `reg_ruleset.checksum`.
-///
-/// Cryptographic strength is not needed here: brand integrity uses BLAKE3
-/// plus a signature (see `laysi-brand`), and this column only makes it
-/// obvious at a glance whether a ruleset changed.
-fn fnv1a(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
 }
 
 #[cfg(test)]
@@ -9169,6 +9334,49 @@ mod tests {
         assert!(!fresh.is_expired(Utc::now()), "建立後 1 天、輪替 30 天的 token 不該過期");
     }
 
+
+    /// A shipped amendment applies once and never again, so a version the
+    /// administrator deleted on 「法規版本」 does not come back on the next
+    /// start. This is the whole reason the channel has its own table instead
+    /// of running the files every boot.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// a_shipped_amendment_applies_once -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn a_shipped_amendment_applies_once() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2).await.expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+        store.reload_regulations().await.expect("應載入法規");
+
+        let file = [(
+            "0000-00-00_test_only.sql",
+            "INSERT INTO reg_ruleset (domain, version, effective_from, source_note, payload)
+             VALUES ('vat', '測試版', '2099-01-01', '測試', '{\"rate\":\"0.05\"}'::jsonb)
+             ON CONFLICT (domain, version) DO NOTHING",
+        )];
+
+        assert_eq!(store.apply_regulation_updates(&file).await.expect("應套用"), 1);
+        store.delete_regulation("vat", "測試版").await.expect("應刪得掉");
+        assert_eq!(
+            store.apply_regulation_updates(&file).await.expect("應可重跑"),
+            0,
+            "已套用過的更新不得再寫一次，否則刪掉的版本會回來"
+        );
+        assert!(
+            !store.regulations().await.expect("應讀得到").iter().any(|r| r.version == "測試版"),
+            "刪掉的版本不應復活"
+        );
+
+        sqlx::query("DELETE FROM reg_update WHERE file_name = $1")
+            .bind(file[0].0)
+            .execute(&store.pool)
+            .await
+            .expect("應清得掉測試紀錄");
+    }
 
     /// An installation that corrects a rate keeps the correction: the factory
     /// seed fills gaps and never writes over a row. Without that, every

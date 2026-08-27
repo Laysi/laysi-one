@@ -6,6 +6,16 @@
 	# puts in front of compose. This container only ever speaks plain HTTP on
 	# the port compose publishes.
 	auto_https off
+
+	# Preserve X-Forwarded-Proto from a proxy in front of compose instead of
+	# overwriting it with this container's own plain HTTP. The server marks the
+	# session cookie Secure exactly when that header says https, so without
+	# this a site behind TLS would look like plain HTTP and the cookie would go
+	# out without the flag. Private ranges only: a header from the open
+	# internet decides nothing.
+	servers {
+		trusted_proxies static private_ranges
+	}
 }
 
 :80 {

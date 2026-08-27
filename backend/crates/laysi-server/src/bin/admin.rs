@@ -41,8 +41,8 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/laysi".into());
+    let database_url = laysi_store::env_or_file("DATABASE_URL")
+        .unwrap_or_else(|| "postgres://postgres:postgres@localhost:5432/laysi".into());
     let store = Store::connect(&database_url, 2)
         .await
         .context("無法連上資料庫")?;
