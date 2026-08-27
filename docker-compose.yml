@@ -21,7 +21,7 @@ services:
   # volume would leave a database nobody can open, which is the same reason
   # a generated .env must not be rewritten.
   secrets:
-    image: alpine:3.21
+    image: alpine:3.24
     volumes:
       - secrets:/secrets
       # The initialisation code has to reach a person, and the person is at a
@@ -61,7 +61,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-laysi}
 
   postgres:
-    image: postgres:17
+    image: postgres:18
     restart: unless-stopped
     depends_on:
       secrets:
@@ -75,7 +75,9 @@ services:
       # built in and needs no locale package.
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=zh-TW --locale=C.UTF-8"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # 18 moved PGDATA to /var/lib/postgresql/18/docker and declares the volume
+      # one level up, so the mount is the parent directory rather than data/.
+      - pgdata:/var/lib/postgresql
       - secrets:/secrets:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laysi} -d ${POSTGRES_DB:-laysi}"]
@@ -86,7 +88,7 @@ services:
   # RustFS: an S3-compatible object store written in Rust, holding scanned
   # documents and attachments. 9000 is the S3 API, 9001 the admin console.
   rustfs:
-    image: rustfs/rustfs:1.0.0-beta.11
+    image: rustfs/rustfs:1.0.0-rc.3
     restart: unless-stopped
     environment:
       RUSTFS_VOLUMES: /data

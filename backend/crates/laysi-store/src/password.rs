@@ -4,12 +4,12 @@
 //! change and the admin tool all call this module, so no entry point can end
 //! up with its own cost or format.
 
-use argon2::password_hash::{
-    rand_core::OsRng as PasswordOsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-};
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
-use rand::rngs::OsRng as TokenOsRng;
-use rand::RngCore;
+
+/// Salt length in bytes, the Argon2 reference value and what
+/// `SaltString::generate` produced.
+const SALT_BYTES: usize = 16;
 
 /// Argon2id memory cost, in KiB.
 const ARGON2_MEMORY_KIB: u32 = 19 * 1024;
@@ -31,7 +31,12 @@ fn engine() -> Argon2<'static> {
 
 /// Produce a PHC string ready to store in `user_account.password_hash`.
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut PasswordOsRng);
+    // The salt comes from the OS rather than from `SaltString::generate`, whose
+    // RNG argument is `rand_core::OsRng` and only exists when some other crate
+    // in the build happens to turn on that feature.
+    let mut raw = [0_u8; SALT_BYTES];
+    getrandom::fill(&mut raw).expect("OS entropy is unavailable");
+    let salt = SaltString::encode_b64(&raw)?;
     engine()
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
@@ -67,7 +72,7 @@ pub fn temporary_password() -> String {
     let mut out = String::with_capacity(TEMPORARY_LENGTH);
     let mut buffer = [0_u8; 32];
     while out.len() < TEMPORARY_LENGTH {
-        TokenOsRng.fill_bytes(&mut buffer);
+        getrandom::fill(&mut buffer).expect("OS entropy is unavailable");
         for byte in buffer {
             if byte < limit {
                 out.push(TEMPORARY_ALPHABET[byte as usize % TEMPORARY_ALPHABET.len()] as char);

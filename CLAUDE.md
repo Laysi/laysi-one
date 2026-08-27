@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Laysi One 是台灣中小企業的財務＋人資正式產品。
 評估用的示範資料只能由 `laysi-admin seed-demo` 手動種入（見 `docs/architecture.md`）。
-Rust（axum + sqlx）＋ React（Vite + TS）＋ PostgreSQL 17 ＋ RustFS ＋ Docker Compose。
+Rust（axum + sqlx）＋ React（Vite + TS）＋ PostgreSQL 18 ＋ RustFS ＋ Docker Compose。
 授權為 **BSL 1.1**（見 `LICENSE-BSL.txt`），不是開源授權。
 
 產品規格的權威來源是 Claude Design 專案「台灣中小企業財務系統原型」的
@@ -63,16 +63,15 @@ scripts/dev stop       # 停掉兩個容器
 `laysi-store/build.rs` 會 `rerun-if-changed=../../migrations`——**沒有它，新增一個
 migration 檔不會觸發重編**，伺服器會帶著舊的 migration 集合啟動且不報錯。
 
-**上線前的 63 份 migration 已經合併進 `migrations/0001_initial.sql`**，單一決定的
-來龍去脈在 git 歷史裡（`git log --diff-filter=D -- backend/migrations`）。**0001
-從此不再更動**——已經套用過的 migration 改一個位元組，現有的資料庫就會拒絕啟動；
+**上線前的 migration 已經全部合併進 `migrations/0001_initial.sql`**（先是 63 份，
+後來是 0002 到 0014 那 13 份），單一決定的來龍去脈在 git 歷史裡
+（`git log --diff-filter=D -- backend/migrations`）。合併只有在還沒有安裝要沿用時
+做得了；**0001 一旦被套用過就不再更動**——改一個位元組，現有的資料庫就會拒絕啟動；
 schema 要變就新增下一個編號。
 
-**四位數編號有兩套，而且會撞**。合併重設了編號，所以文件裡的數字可能指現存的檔案，
-也可能指合併前的那段歷史，同一個數字兩邊都有：`0009_regulation_in_db.sql` 是現存檔案，
-而 `docs/architecture.md` 的「員工自助模組（0009、…）」指的是合併前的另一件事。
-**引用編號之前先 `ls backend/migrations/` 對一下**；對不上就翻
-`git log --diff-filter=D -- backend/migrations`。新寫的文字一律引用現存檔案。
+**四位數編號指的是 git 歷史，不是檔案**：`migrations/` 底下現在只有 0001，所以文件
+裡的 0009、0044、0057 一律要用 `git log --diff-filter=D -- backend/migrations` 去
+找，不要當成檔名。
 
 ## 架構：四個關鍵設計
 
@@ -168,18 +167,26 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
 橫線＝減號／選單、完整的環＝零、兩個位移方塊＝複製、翻角紙＝檔案、圓加斜線＝禁止。
 實心的四葉飾與六瓣花在 16px 會塌成一團黑，要有對比色透出來的縫才讀得出結構。
 
-## 資料層的三個不變量（由 SQL 強制）
+## 資料層的四個不變量（由 SQL 強制）
 
 `migrations/0001_initial.sql`：
 
 1. `voucher_line`：金額非負、一行不可同時有借有貸（CHECK）
 2. 每張傳票借貸相等且至少兩行（**deferred** constraint trigger，交易結束才檢查）
 3. 已過帳傳票不可 UPDATE／DELETE，分錄也不可異動；只允許 `posted → void`
+4. 同一人的休假單彼此不得在時間上重疊，加班申請亦然（`EXCLUDE USING gist`）
 
 因為 MCP 與未來的匯入程式都可能繞過應用層，資料庫必須是最後一道防線。
 
 **後果**：建立傳票時要先寫 `pending`、分錄齊備後再更新為 `posted`。
 `post_voucher` 走這條路徑；直接插入 `status='posted'` 的傳票會被 trigger 擋下。
+
+**第四條的三個細節**：時段是半開區間，所以前一張到 18:00、後一張從 18:00 開始不算
+重疊；**被駁回的單不在約束範圍內**（`WHERE status <> 'rejected'`），同一段日期被駁回
+之後可以重送；相等欄位與範圍要放進同一個 GiST 索引，所以 0001 開頭啟用 `btree_gist`。
+PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那會讓駁回過的單也
+擋住重送，所以這裡用排除約束。`create_leave_request`／`create_overtime_request` 在寫入
+前先查一次，那一步只決定錯誤訊息說什麼，保證來自約束本身。
 
 ## 慣例
 

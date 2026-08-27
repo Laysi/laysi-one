@@ -8,6 +8,11 @@
 -- Applied by sqlx::migrate!() at start-up. Queries are run through the
 -- run-time sqlx::query rather than the macro, so compiling needs no database.
 
+-- btree_gist lets one GiST index hold both an equality column and a range, so
+-- "this employee, these two periods" can be a single exclusion constraint.
+-- Used by leave_request and overtime_request below.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
 -- Functions used by the triggers below --------------------------------------
 
 CREATE OR REPLACE FUNCTION public.check_voucher_balanced()
@@ -321,11 +326,20 @@ CREATE TABLE reg_ruleset (
     effective_to date,
     source_note text NOT NULL,
     payload jsonb NOT NULL,
-    checksum text NOT NULL,
     CONSTRAINT reg_ruleset_pkey PRIMARY KEY (id),
     CONSTRAINT reg_ruleset_domain_version_key UNIQUE (domain, version)
 );
 CREATE INDEX reg_ruleset_lookup_idx ON public.reg_ruleset USING btree (domain, effective_from DESC);
+
+-- Shipped regulation versions arrive through regulation-updates/, not through
+-- this directory: amended rates are data, and a squash cannot preserve "this
+-- installation already had that version and deleted it". Keyed by file name
+-- because the files are dated and independent of each other.
+CREATE TABLE reg_update (
+    file_name text NOT NULL,
+    applied_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT reg_update_pkey PRIMARY KEY (file_name)
+);
 
 -- 應收、應付與銀行 ------------------------------------------------------------------
 --
@@ -643,6 +657,7 @@ CREATE TABLE punch_correction (
     decision_note text DEFAULT ''::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by text NOT NULL,
+    replaced_at timestamp with time zone,
     CONSTRAINT punch_correction_pkey PRIMARY KEY (id),
     CONSTRAINT punch_correction_employee_id_fkey FOREIGN KEY (employee_id) REFERENCES employee(id) ON DELETE CASCADE,
     CONSTRAINT punch_correction_day_matches_time CHECK ((punched_on = ((punched_at AT TIME ZONE '08:00:00'::interval))::date)),
@@ -653,7 +668,34 @@ CREATE TABLE punch_correction (
 CREATE UNIQUE INDEX punch_correction_one_open_per_slot ON public.punch_correction USING btree (employee_id, punched_on, kind) WHERE (status = 'submitted'::text);
 CREATE INDEX punch_correction_open ON public.punch_correction USING btree (status, punched_on);
 COMMENT ON TABLE punch_correction IS
-    '員工送出的打卡補登申請。核准後才寫進 attendance_punch，來源記為補登。';
+    '打卡補登紀錄：員工送出的申請，以及人資直接補登（寫入時即為已核准）。核准才寫進 attendance_punch，被覆蓋的原時刻留在 replaced_at。';
+COMMENT ON COLUMN punch_correction.replaced_at IS
+    '這次補登覆蓋掉的原打卡時刻。NULL 表示該時段原本沒有紀錄。';
+
+-- Only the days that differ from the default week (Mon-Fri work, Saturday a
+-- rest day, Sunday a regular leave day), which is exactly what the government
+-- calendar publishes: 國定假日, 調整放假 and 補行上班. About twenty rows a year,
+-- so `WorkSchedule` reads the whole of it.
+--
+-- `source` keeps the two apart. Fetching the published file writes and rewrites
+-- 'government' rows and leaves 'company' rows alone: a day the company set by
+-- hand is a decision, and re-reading the official file must not undo it.
+--
+-- 'natural_disaster' is 天災停班, which the published calendar never carries: it
+-- is announced the evening before, per county. It is not a public holiday
+-- either -- the Labor Standards Act grants it none of the same things -- so it
+-- is its own kind rather than a holiday with a different name.
+CREATE TABLE work_calendar (
+    on_date date NOT NULL,
+    kind text NOT NULL,
+    name text DEFAULT ''::text NOT NULL,
+    source text DEFAULT 'company'::text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text DEFAULT ''::text NOT NULL,
+    CONSTRAINT work_calendar_pkey PRIMARY KEY (on_date),
+    CONSTRAINT work_calendar_kind_check CHECK ((kind = ANY (ARRAY['workday'::text, 'rest_day'::text, 'regular_leave'::text, 'holiday'::text, 'natural_disaster'::text]))),
+    CONSTRAINT work_calendar_source_check CHECK ((source = ANY (ARRAY['government'::text, 'company'::text])))
+);
 
 CREATE TABLE leave_request (
     id serial,
@@ -682,7 +724,15 @@ CREATE TABLE leave_request (
     CONSTRAINT leave_request_hours CHECK ((hours > (0)::numeric)),
     CONSTRAINT leave_request_kind_check CHECK ((kind = ANY (ARRAY['annual'::text, 'sick'::text, 'personal'::text, 'official'::text, 'marriage'::text, 'bereavement'::text, 'maternity'::text, 'menstrual'::text]))),
     CONSTRAINT leave_request_span CHECK ((to_at > from_at)),
-    CONSTRAINT leave_request_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text])))
+    CONSTRAINT leave_request_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text]))),
+    -- One person cannot be on leave twice over the same hours: two overlapping
+    -- requests both count against the entitlement and both reach payroll.
+    -- Rejected requests are outside the constraint, so the same days can be
+    -- filed again after a refusal.
+    CONSTRAINT leave_request_no_overlap EXCLUDE USING gist (
+        employee_id WITH =,
+        tsrange(from_at, to_at, '[)'::text) WITH &&
+    ) WHERE ((status <> 'rejected'::text))
 );
 CREATE INDEX leave_request_emp_idx ON public.leave_request USING btree (employee_id, from_on DESC);
 COMMENT ON COLUMN leave_request.from_at IS
@@ -713,7 +763,14 @@ CREATE TABLE overtime_request (
     CONSTRAINT overtime_request_decided_iff_not_pending CHECK (((status = 'pending'::text) = (decided_at IS NULL))),
     CONSTRAINT overtime_request_hours_check CHECK ((hours > (0)::numeric)),
     CONSTRAINT overtime_request_span CHECK ((to_at > from_at)),
-    CONSTRAINT overtime_request_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text])))
+    CONSTRAINT overtime_request_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text]))),
+    -- The same hours cannot be claimed twice: run_payroll pays every approved
+    -- request, so two overlapping ones are paid twice over. Rejected requests
+    -- are outside the constraint, as with leave.
+    CONSTRAINT overtime_request_no_overlap EXCLUDE USING gist (
+        employee_id WITH =,
+        tsrange(from_at, to_at, '[)'::text) WITH &&
+    ) WHERE ((status <> 'rejected'::text))
 );
 CREATE INDEX overtime_request_emp_idx ON public.overtime_request USING btree (employee_id, worked_on DESC);
 COMMENT ON TABLE overtime_request IS
@@ -800,6 +857,69 @@ CREATE TABLE payslip (
 );
 COMMENT ON TABLE payslip IS
     '逐人薪資明細。三條 CHECK 讓「應發＝各項加總」「代扣＝三項加總」「實發＝應發－代扣」在資料庫層面就不可能被寫壞。';
+
+-- 公告與規章 --------------------------------------------------------------------
+--
+-- One table holds both. An announcement and a company rule differ in what they
+-- ask of the reader, not in what they store.
+--
+-- The text lives in notice_version and is append-only: who read which wording on
+-- which day is the only thing either side can produce afterwards, so editing a
+-- rule publishes another version rather than overwriting the last one. notice
+-- keeps the identity (kind), the repeal date and a pointer to the current
+-- version, held by a deferred foreign key -- the row has to exist before its
+-- first version can, so the check cannot be immediate.
+--
+-- notice_read is one row per employee holding a single instant: how far that
+-- person has read. It is not an acknowledgement -- no version, and HR cannot see
+-- it -- it only answers "what has this person not seen yet".
+
+CREATE TABLE notice (
+    id serial,
+    kind text NOT NULL,
+    expires_on date,
+    version_no integer DEFAULT 1 NOT NULL,
+    CONSTRAINT notice_pkey PRIMARY KEY (id),
+    CONSTRAINT notice_kind_check CHECK ((kind = ANY (ARRAY['announcement'::text, 'policy'::text])))
+);
+COMMENT ON TABLE notice IS
+    '公告與規章的一則內容。announcement 是公告，policy 是規章。';
+COMMENT ON COLUMN notice.expires_on IS
+    '公告的下架日、規章的廢止日。空值表示持續有效。';
+COMMENT ON COLUMN notice.version_no IS
+    '現行版本。誰在何時發布這一版由 notice_version 回答，這裡不另存一份。';
+
+CREATE TABLE notice_version (
+    notice_id integer NOT NULL,
+    version_no integer NOT NULL,
+    title text NOT NULL,
+    body text NOT NULL,
+    effective_on date NOT NULL,
+    published_at timestamp with time zone DEFAULT now() NOT NULL,
+    published_by text NOT NULL,
+    CONSTRAINT notice_version_pkey PRIMARY KEY (notice_id, version_no),
+    CONSTRAINT notice_version_notice_id_fkey FOREIGN KEY (notice_id) REFERENCES notice(id) ON DELETE CASCADE,
+    CONSTRAINT notice_version_version_no_check CHECK ((version_no > 0)),
+    CONSTRAINT notice_version_title_present CHECK ((btrim(title) <> ''::text)),
+    CONSTRAINT notice_version_body_present CHECK ((btrim(body) <> ''::text))
+);
+COMMENT ON TABLE notice_version IS
+    '一則公告或規章的每一個版本，只增不改。改動標題、內文或生效日就是新的一版。';
+COMMENT ON COLUMN notice_version.effective_on IS
+    '本版的發布日或施行日。每一版各有各的日期，前一版到下一版施行為止。';
+
+ALTER TABLE notice ADD CONSTRAINT notice_current_version_fkey
+    FOREIGN KEY (id, version_no) REFERENCES notice_version(notice_id, version_no)
+    DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE notice_read (
+    employee_id integer NOT NULL,
+    read_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT notice_read_pkey PRIMARY KEY (employee_id),
+    CONSTRAINT notice_read_employee_id_fkey FOREIGN KEY (employee_id) REFERENCES employee(id) ON DELETE CASCADE
+);
+COMMENT ON TABLE notice_read IS
+    '一位員工把公告與規章看到哪一刻為止。一人一列，用來算未讀數，不是閱讀確認。';
 
 -- 設定、角色與權限 ------------------------------------------------------------------
 --
@@ -905,6 +1025,50 @@ COMMENT ON COLUMN oidc_setting.provision_role IS
     '網域內首次登入自動建立帳號時使用的角色代碼；空字串代表不自動建立。';
 COMMENT ON COLUMN oidc_setting.password_login_disabled IS
     '啟用時非系統管理員帳號只能用外部登入；系統管理員例外，避免外部登入設定壞掉時整個系統進不去。';
+
+-- Off-site backup, same shape as oidc_setting: the destination is a setting a
+-- system administrator changes, not deployment wiring.
+--
+-- The key pair is asymmetric on purpose. A dump carries complete national ID
+-- numbers, so the copy sitting in someone else's bucket has to be encrypted; but
+-- a symmetric key would have to stay readable to whatever encrypts, which means
+-- storing it in the database that is itself inside the encrypted file. Restoring
+-- would then need the key that is only inside what it unlocks. `age_recipient`
+-- is the public half and is all the backup job needs.
+--
+-- The private half is generated by the backup container, which owns age, and
+-- lands in `age_identity_pending` for exactly as long as it takes the
+-- administrator to write it down. A backup refuses to run while that column is
+-- non-empty, so no archive ever contains the key that opens it.
+CREATE TABLE backup_setting (
+    id integer NOT NULL,
+    enabled boolean DEFAULT false NOT NULL,
+    endpoint text DEFAULT ''::text NOT NULL,
+    region text DEFAULT 'us-east-1'::text NOT NULL,
+    bucket text DEFAULT ''::text NOT NULL,
+    prefix text DEFAULT ''::text NOT NULL,
+    access_key text DEFAULT ''::text NOT NULL,
+    secret_key text DEFAULT ''::text NOT NULL,
+    age_recipient text DEFAULT ''::text NOT NULL,
+    age_identity_pending text DEFAULT ''::text NOT NULL,
+    keep_days integer DEFAULT 30 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text DEFAULT ''::text NOT NULL,
+    last_run_at timestamp with time zone,
+    last_error text DEFAULT ''::text NOT NULL,
+    last_bytes bigint,
+    CONSTRAINT backup_setting_pkey PRIMARY KEY (id),
+    CONSTRAINT backup_setting_id_check CHECK ((id = 1)),
+    CONSTRAINT backup_setting_keep_days_check CHECK ((keep_days >= 1))
+);
+COMMENT ON TABLE backup_setting IS
+    '異地備份設定；單列表。存取密鑰不經任何操作回傳，稽核紀錄依欄位名遮蔽。';
+COMMENT ON COLUMN backup_setting.age_recipient IS
+    '加密用的公鑰；備份工作只需要這一半。';
+COMMENT ON COLUMN backup_setting.age_identity_pending IS
+    '還原用的私鑰，等待管理員保存；非空時備份不執行，所以沒有任何一份備份含有開啟它的鑰匙。';
+COMMENT ON COLUMN backup_setting.keep_days IS
+    '遠端保留天數；更早的備份由備份工作刪除。';
 
 CREATE TABLE install_bootstrap (
     id integer DEFAULT 1 NOT NULL,
@@ -1061,7 +1225,6 @@ CREATE TABLE document_version (
     byte_size bigint NOT NULL,
     content_type text NOT NULL,
     checksum text NOT NULL,
-    ocr_status text DEFAULT 'pending'::text NOT NULL,
     uploaded_at timestamp with time zone DEFAULT now() NOT NULL,
     uploaded_by text NOT NULL,
     CONSTRAINT document_version_pkey PRIMARY KEY (id),
@@ -1070,13 +1233,10 @@ CREATE TABLE document_version (
     CONSTRAINT document_version_document_id_fkey FOREIGN KEY (document_id) REFERENCES document(id) ON DELETE CASCADE,
     CONSTRAINT document_version_byte_size_check CHECK ((byte_size > 0)),
     CONSTRAINT document_version_checksum_check CHECK ((checksum ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT document_version_ocr_status_check CHECK ((ocr_status = ANY (ARRAY['pending'::text, 'not_applicable'::text]))),
     CONSTRAINT document_version_version_no_check CHECK ((version_no > 0))
 );
 COMMENT ON COLUMN document_version.checksum IS
     '上傳當時計算的 BLAKE3。取回時重算比對，這是「拿得出當初那一份」的唯一依據。';
-COMMENT ON COLUMN document_version.ocr_status IS
-    'pending＝還沒辨識（系統沒有 OCR 引擎）；not_applicable＝這種檔不需要辨識。刻意沒有「已辨識」。';
 
 -- 費用報支、預算與匯入 ----------------------------------------------------------------
 --
@@ -1256,13 +1416,14 @@ INSERT INTO role (code, name, note, sort_order) VALUES
 INSERT INTO permission (code, label, note, op_names, sort_order) VALUES
     ('view_reports', '看報表與現金', '總覽、試算表與三張財務報表；收款與銀行核銷另立一組權限', '{get_dashboard,get_trial_balance,get_balance_sheet,get_income_statement,get_cash_flow,list_chart_of_accounts}', 10),
     ('view_masters', '看基礎主檔', '會計科目、分類與公司設定的唯讀入口；科目餘額屬於報表權限', '{list_accounts,get_company_settings,list_dimensions}', 15),
-    ('manage_masters', '維護基礎主檔', '新增、修改或停用科目，建立銀行帳戶與分類項目，並設定費用簽核流程', '{create_account,update_account,create_bank_account,create_dimension_value,set_approval_rule}', 16),
+    ('manage_masters', '維護基礎主檔', '新增、修改或停用科目，建立銀行帳戶與分類項目，並設定費用簽核流程', '{create_account,update_account,create_bank_account,create_dimension_value,update_dimension_value,set_approval_rule}', 16),
     ('create_voucher', '開立傳票', '草擬待確認傳票；直接開立分錄是調整分錄權限', '{draft_voucher}', 20),
     ('post_voucher', '過帳／結帳', '過帳後不可修改；不應存在的傳票可作廢，確實發生但記錯的交易以反向傳票更正', '{post_voucher,void_voucher,reverse_voucher}', 30),
     ('adjust_entry', '調整分錄（會計師）', '查閱既有傳票、直接開立待過帳分錄，並刪除開錯而尚未過帳的傳票', '{search_vouchers,create_voucher,discard_voucher}', 40),
     ('view_subledgers', '看應收應付明細', '查看應收帳齡、應收明細與待付帳單', '{get_ar_aging,list_receivables,list_payables}', 45),
     ('issue_invoice', '開立應收單', '建立應收單據並產生待過帳傳票；營業稅申報是稅務權限', '{create_ar_invoice}', 50),
-    ('manage_tax', '稅務與法規試算', '查看適用法規、營業稅申報與各類所得扣繳明細及試算', '{list_regulations,get_vat_return,list_withholding,compute_withholding}', 55),
+    ('manage_tax', '稅務試算', '營業稅申報與各類所得扣繳明細及試算', '{get_vat_return,list_withholding,compute_withholding}', 55),
+    ('manage_regulations', '法規版本', '查看每個領域現行與歷來的費率、級距與上限；修改限系統管理員', '{list_regulations,save_regulation,delete_regulation}', 56),
     ('request_payment', '送出付款申請', '送出費用報支或建立待過帳應付帳單', '{submit_expense_claim,create_ap_bill}', 60),
     ('manage_assets', '固定資產與折舊', '登記資產、查看資產、預覽折舊並產生一期待過帳折舊傳票', '{list_fixed_assets,create_fixed_asset,preview_depreciation,run_depreciation}', 65),
     ('execute_payment', '實際匯款', '將應付帳單組成付款批次；這是職責分離中的實際付款權限', '{create_payment_batch}', 70),
@@ -1273,14 +1434,14 @@ INSERT INTO permission (code, label, note, op_names, sort_order) VALUES
     ('manage_documents', '管理文件', '查看、上傳與驗證文件版本與內容雜湊', '{list_documents,upload_document,get_document}', 85),
     ('run_imports', '執行匯入', '查看匯入來源、預覽、確認匯入與復原尚未過帳的批次', '{list_imports,preview_import,commit_import,rollback_import}', 86),
     ('view_payroll', '看薪資彙總', '全公司薪資總額與總帳對帳，不含任何個人金額', '{get_payroll_summary}', 90),
-    ('view_hr', '看人資資料', '人資總覽、名冊、出勤休假、打卡、投保摘要、保費試算與法遵檢核', '{get_hr_dashboard,list_employees,list_leave_requests,get_insurance_summary,compute_insurance,get_hr_compliance,list_attendance_punches,list_punch_corrections,list_overtime_requests}', 91),
+    ('view_hr', '看人資資料', '人資總覽、名冊、出勤休假、打卡、投保摘要、保費試算與法遵檢核', '{get_hr_dashboard,list_employees,list_leave_requests,get_insurance_summary,compute_insurance,get_hr_compliance,list_attendance_punches,list_punch_corrections,list_overtime_requests,list_notices,list_work_calendar}', 91),
     ('view_payroll_details', '看個人薪資明細', '個人薪資明細與年度扣繳憑單限負責人；全公司彙總會計亦可查看', '{list_payslips,list_withholding_statements}', 92),
     ('manage_payroll', '執行薪資作業', '計算一期薪資並產生待過帳薪資傳票，不含正式過帳', '{run_payroll}', 93),
-    ('manage_hr', '人事異動與請假', '建立與維護員工主檔，處理到離職與人事異動流程，對待簽休假單與補登申請作成決定，並補登打卡', '{decide_leave_request,create_employee,update_employee,correct_punch,decide_punch_correction,decide_overtime_request}', 95),
-    ('staff_self_service', '使用員工自助', '只回傳目前登入帳號所連結員工本人的首頁、薪資、休假、打卡、補登申請、報支進度與 MCP Token', '{get_my_home,list_my_payslips,list_my_leave_requests,request_leave,list_my_expense_claims,submit_my_expense_claim,attach_my_expense_receipt,punch_clock,list_my_punches,issue_my_api_token,list_my_api_tokens,revoke_my_api_token,submit_my_punch_correction,list_my_punch_corrections,submit_my_overtime_request,list_my_overtime_requests}', 96),
+    ('manage_hr', '人事異動與請假', '建立與維護員工主檔，維護工作日曆，對待簽休假單與補登申請作成決定，並補登打卡', '{decide_leave_request,create_employee,update_employee,correct_punch,decide_punch_correction,decide_overtime_request,create_notice,update_notice,set_work_calendar_day,refresh_work_calendar}', 95),
+    ('staff_self_service', '使用員工自助', '只回傳目前登入帳號所連結員工本人的首頁、薪資、休假、打卡、補登申請、報支進度與 MCP Token', '{get_my_home,list_my_payslips,list_my_leave_requests,request_leave,list_my_expense_claims,submit_my_expense_claim,attach_my_expense_receipt,punch_clock,list_my_punches,issue_my_api_token,list_my_api_tokens,revoke_my_api_token,submit_my_punch_correction,list_my_punch_corrections,submit_my_overtime_request,list_my_overtime_requests,list_my_notices,mark_my_notices_read}', 96),
     ('view_audit', '看稽核紀錄', '查看每次操作的呼叫者、參數摘要、結果與被拒絕紀錄', '{list_ai_audit}', 97),
-    ('view_system', '看安全與系統狀態', '查看權限對照表、安全政策、Token 後設資料與系統健康狀態', '{list_roles,get_security_policy,list_api_tokens,get_system_health}', 98),
-    ('manage_access', '改權限與 MCP', '建立與檢視登入帳號、修改公司設定與角色權限，並簽發或撤銷 API／MCP Token', '{update_company_setting,set_company_timezone,set_role_permission,issue_api_token,revoke_api_token,create_user_account,update_user_account,change_user_role,reset_user_password,unlink_user_identity,delete_user_account,list_user_accounts,get_oidc_setting,update_oidc_setting}', 100);
+    ('view_system', '看安全與系統狀態', '查看權限對照表、Token 後設資料與系統健康狀態', '{list_roles,list_api_tokens,get_system_health}', 98),
+    ('manage_access', '改權限與 MCP', '建立與檢視登入帳號、修改公司設定與角色權限，並簽發或撤銷 API／MCP Token', '{update_company_setting,set_company_timezone,set_role_permission,issue_api_token,revoke_api_token,create_user_account,update_user_account,change_user_role,reset_user_password,unlink_user_identity,delete_user_account,list_user_accounts,get_oidc_setting,update_oidc_setting,get_backup_setting,update_backup_setting,confirm_backup_key}', 100);
 
 INSERT INTO role_permission (role_code, permission_code, level, note, updated_at, updated_by) VALUES
     ('acct', 'view_reports', 'full', '會計要用總覽、試算表與三張報表完成日常帳務。', '2026-08-24 16:26:05.694728+00', 'migration 0011'),
@@ -1355,14 +1516,17 @@ INSERT INTO role_permission (role_code, permission_code, level, note, updated_at
     ('accountant', 'view_audit', 'full', '查核需要追溯操作與被拒絕的完整稽核紀錄。', '2026-08-24 16:26:05.694728+00', 'migration 0011'),
     ('admin', 'view_audit', 'full', '開啟 MCP 與 AI 的稽核紀錄。', '2026-08-24 16:26:05.817852+00', 'migration 0023'),
     ('acct', 'run_imports', 'full', '會計可以預覽、確認匯入，必要時復原帳務匯入。', '2026-08-24 16:26:05.694728+00', 'migration 0011'),
-    ('accountant', 'view_masters', 'full', '會計師需要科目與分類定義判讀報表。', '2026-08-24 16:26:05.694728+00', 'migration 0011');
+    ('accountant', 'view_masters', 'full', '會計師需要科目與分類定義判讀報表。', '2026-08-24 16:26:05.694728+00', 'migration 0011'),
+    ('admin', 'manage_regulations', 'full', '修法後由系統管理員新增版本。', '2026-08-24 16:26:06.151977+00', 'migration 0009'),
+    ('boss', 'manage_regulations', 'full', '負責人保留這組操作的完整權限。', '2026-08-24 16:26:06.151977+00', 'migration 0009'),
+    ('acct', 'manage_regulations', 'full', '會計申報前要查得到適用的費率。', '2026-08-24 16:26:06.151977+00', 'migration 0009');
 
 INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
     ('get_dashboard', true, 'read_only', '讀總覽數字', '2026-08-24 16:26:05.327083+00'),
     ('get_trial_balance', true, 'read_only', '讀試算表、科目餘額', '2026-08-24 16:26:05.327083+00'),
     ('get_cash_position', true, 'read_only', '讀各銀行餘額與現金水位', '2026-08-24 16:26:05.327083+00'),
     ('search_vouchers', true, 'read_only', '查傳票、憑證明細', '2026-08-24 16:26:05.327083+00'),
-    ('list_regulations', true, 'read_only', '讀目前適用的法規版本', '2026-08-24 16:26:05.327083+00'),
+    ('list_regulations', true, 'read_only', '讀法規版本與每一版的內容', '2026-08-24 16:26:05.327083+00'),
     ('draft_voucher', true, 'needs_confirm', '草擬分錄，存成待確認傳票', '2026-08-24 16:26:05.327083+00'),
     ('list_accounts', true, 'read_only', '讀會計科目表', '2026-08-24 16:26:05.336026+00'),
     ('get_ar_aging', true, 'read_only', '讀應收帳齡，並與 1131 總帳餘額對帳', '2026-08-24 16:26:05.345112+00'),
@@ -1381,7 +1545,7 @@ INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
     ('get_system_health', true, 'read_only', '讀 migration 版本、法規版本、稽核與 Token 現況', '2026-08-24 16:26:05.457454+00'),
     ('approve_expense_claim', false, 'high_risk', '簽核報支單，最後一關會產生傳票。對 AI 關閉：送單者自行簽核等同沒有簽核流程。', '2026-08-24 16:26:05.516218+00'),
     ('reject_expense_claim', true, 'needs_confirm', '退回報支單給申請人補資料', '2026-08-24 16:26:05.516218+00'),
-    ('list_documents', true, 'read_only', '讀文件清單、RustFS 用量與 OCR 現況', '2026-08-24 16:26:05.516218+00'),
+    ('list_documents', true, 'read_only', '讀文件清單與 RustFS 用量', '2026-08-24 16:26:05.516218+00'),
     ('upload_document', true, 'needs_confirm', '上傳一份檔案到 RustFS，存下 BLAKE3 雜湊', '2026-08-24 16:26:05.516218+00'),
     ('list_imports', true, 'read_only', '讀匯入來源、批次紀錄與對外整合現況', '2026-08-24 16:26:05.516218+00'),
     ('preview_import', true, 'needs_confirm', '匯入預覽：解析、驗證、逐列回報問題。不寫入任何資料。', '2026-08-24 16:26:05.516218+00'),
@@ -1399,7 +1563,6 @@ INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
     ('get_department_pl', true, 'read_only', '讀部門損益。未指定部門的分錄列為「未指定」，不分攤。', '2026-08-24 16:26:05.516218+00'),
     ('get_budget_status', true, 'read_only', '讀預算執行率。實際數一律現查總帳。', '2026-08-24 16:26:05.516218+00'),
     ('get_document', true, 'read_only', '取回檔案內容並比對雜湊；雜湊不符就不回傳內容。', '2026-08-24 16:26:05.516218+00'),
-    ('get_security_policy', true, 'read_only', '讀控制規則；AI 禁止事項依目前的工具開關現算', '2026-08-24 16:26:05.457454+00'),
     ('list_expense_claims', true, 'read_only', '讀費用報支單與目前關卡', '2026-08-24 16:26:05.516218+00'),
     ('decide_leave_request', false, 'needs_confirm', '准假或駁回。對 AI 關閉：核准請假屬主管職責。', '2026-08-24 16:26:05.608173+00'),
     ('run_payroll', false, 'high_risk', '計算並產生某一期的薪資傳票。對 AI 關閉。', '2026-08-24 16:26:05.608173+00'),
@@ -1467,7 +1630,21 @@ INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
     ('list_my_overtime_requests', true, 'read_only', '讀本人送出的加班申請與目前狀態。', '2026-08-24 16:26:06.21788+00'),
     ('submit_my_overtime_request', false, 'needs_confirm', '送出加班申請。對 AI 關閉：要不要加班由本人決定。', '2026-08-24 16:26:06.21788+00'),
     ('list_overtime_requests', true, 'read_only', '讀加班申請與本月已核准時數。', '2026-08-24 16:26:06.21788+00'),
-    ('decide_overtime_request', false, 'needs_confirm', '核准或駁回加班申請。對 AI 關閉：核准加班屬主管職責。', '2026-08-24 16:26:06.21788+00');
+    ('decide_overtime_request', false, 'needs_confirm', '核准或駁回加班申請。對 AI 關閉：核准加班屬主管職責。', '2026-08-24 16:26:06.21788+00'),
+    ('update_dimension_value', false, 'needs_confirm', '改名或停用分類項目，對 AI 預設關閉。', '2026-08-24 16:26:06.21788+00'),
+    ('list_notices', true, 'read_only', '讀公告與規章，含修訂紀錄', '2026-08-24 16:26:06.21788+00'),
+    ('create_notice', false, 'needs_confirm', '發布公告或規章，對 AI 預設關閉。', '2026-08-24 16:26:06.21788+00'),
+    ('update_notice', false, 'needs_confirm', '修改公告或規章，改動內容會發布新的一版。對 AI 預設關閉。', '2026-08-24 16:26:06.21788+00'),
+    ('list_my_notices', true, 'read_only', '讀本人看得到的公告與規章，含修訂紀錄', '2026-08-24 16:26:06.21788+00'),
+    ('mark_my_notices_read', false, 'needs_confirm', '把本人的公告與規章標為已讀。這一下要由本人按，對 AI 一律關閉。', '2026-08-24 16:26:06.21788+00'),
+    ('save_regulation', false, 'admin_only', '改法規費率與級距。對 AI 關閉：修法是人的判斷。', '2026-08-24 16:26:06.21788+00'),
+    ('delete_regulation', false, 'admin_only', '刪除法規版本。對 AI 關閉。', '2026-08-24 16:26:06.21788+00'),
+    ('list_work_calendar', true, 'read_only', '讀一年的工作日、休息日、例假與國定假日', '2026-08-24 16:26:06.21788+00'),
+    ('set_work_calendar_day', false, 'needs_confirm', '改一天的日別。對 AI 關閉：這一天算不算工作日由人決定。', '2026-08-24 16:26:06.21788+00'),
+    ('refresh_work_calendar', false, 'needs_confirm', '向政府資料開放平臺取行事曆。對 AI 關閉。', '2026-08-24 16:26:06.21788+00'),
+    ('get_backup_setting', false, 'admin_only', '讀異地備份設定，對 AI 關閉：這是系統本身的設定。', '2026-08-24 16:26:06.21788+00'),
+    ('update_backup_setting', false, 'admin_only', '改異地備份的目的地與保留天數，對 AI 關閉。', '2026-08-24 16:26:06.21788+00'),
+    ('confirm_backup_key', false, 'admin_only', '確認已保存還原金鑰，對 AI 關閉：保存與否只有人回答得了。', '2026-08-24 16:26:06.21788+00');
 
 INSERT INTO account (code, name, kind, normal_side, is_postable, parent_code, sort_order, report_group, cash_flow_section, is_active) VALUES
     ('1101', '現金', 'asset', 'debit', true, NULL, 10, 'current_asset', 'cash', true),
@@ -1507,11 +1684,16 @@ INSERT INTO company_setting (code, label, value, note, editable, sort_order, upd
     ('fiscal_year', '會計年度起始月份', '1', '會計年度起始月份，填 1 到 12。財務報表的預設期間依此設定。', true, 30, '2026-08-24 16:26:05.457454+00', ''),
     ('currency', '記帳本位幣', 'TWD', '記帳本位幣固定為新臺幣。', false, 50, '2026-08-24 16:26:05.457454+00', ''),
     ('budget_alert_percent', '預算提醒門檻', '', '執行率超過設定的百分比就示警；留空不示警。', true, 80, '2026-08-24 16:26:05.516218+00', ''),
-    ('work_start', '上班時間', '', '打卡遲到的判定基準，格式 HH:MM。留空不判定遲到。', true, 80, '2026-08-24 16:26:05.730849+00', ''),
-    ('work_end', '下班時間', '', '加班時數的判定基準，格式 HH:MM。留空不計加班時數。', true, 90, '2026-08-24 16:26:05.730849+00', ''),
+    ('work_start', '上班時間', '', '判定遲到與計算正常工時的基準，格式 HH:MM。留空不判定遲到，也不計加班時數。', true, 80, '2026-08-24 16:26:05.730849+00', ''),
+    ('work_end', '下班時間', '', '一天正常工時的結束時間，格式 HH:MM。留空不計加班時數。', true, 90, '2026-08-24 16:26:05.730849+00', ''),
+    ('break_start', '休息開始時間', '', '不計入工作時數的休息區間，格式 HH:MM。留空不扣除休息時間。', true, 92, '2026-08-24 16:26:06.21788+00', ''),
+    ('break_end', '休息結束時間', '', '休息區間的結束時間，格式 HH:MM。兩端都填了才扣除。', true, 94, '2026-08-24 16:26:06.21788+00', ''),
     ('flex_window_minutes', '彈性上班區間（分鐘）', '', '上班時間之後這幾分鐘內到班都算準時，下班時間順延相同分鐘數，工作總時數不變。留空表示不採彈性工時。', true, 95, '2026-08-24 16:26:05.772462+00', ''),
     ('late_grace_minutes', '遲到寬限分鐘', '', '上班時間之後幾分鐘內不計遲到。留空視為 0。', true, 100, '2026-08-24 16:26:05.730849+00', ''),
-    ('punch_correction_policy', '補登申請', '人資審核', '員工送出補登申請後的處理方式：人資審核，或自動通過。', true, 110, '2026-08-24 16:26:06.052964+00', '');
+    ('punch_correction_policy', '補登申請', '人資審核', '員工送出補登申請後的處理方式：人資審核，或自動通過。', true, 110, '2026-08-24 16:26:06.052964+00', ''),
+    ('session_idle_minutes', '閒置多久要重新登入（分鐘）', '60', '超過這段時間沒有操作就要重新登入。每一次操作都重新計時。', true, 200, '2026-08-24 16:26:06.21788+00', 'migration 0014'),
+    ('session_max_hours', '一次登入最長時數', '168', '從登入那一刻起算的上限，期間有沒有操作都一樣。', true, 210, '2026-08-24 16:26:06.21788+00', 'migration 0014'),
+    ('mcp_rate_limit_per_minute', 'MCP 每分鐘呼叫上限', '60', '單一 Token 每分鐘可呼叫的次數，填 0 表示不限。', true, 220, '2026-08-24 16:26:06.21788+00', 'migration 0014');
 
 INSERT INTO approval_rule (step_no, role_code, label, condition_note, min_amount) VALUES
     (1, NULL, '申請人上傳', '上傳收據', NULL),
@@ -1524,3 +1706,5 @@ INSERT INTO import_source (code, label, format, cadence, supported, note, sort_o
 
 INSERT INTO oidc_setting (id, enabled, issuer, client_id, client_secret, redirect_url, allowed_domain, provision_role, updated_at, updated_by, verified_at, verify_error, password_login_disabled) VALUES
     (1, false, '', '', '', '', '', '', '2026-08-24 16:26:06.080235+00', '', NULL, '', false);
+
+INSERT INTO backup_setting (id) VALUES (1);
