@@ -78,12 +78,18 @@ impl SetupConfig {
         let allow_web = env_bool("SETUP_ALLOW_WEB", true)?;
         let token_hash = laysi_store::env_or_file("SETUP_TOKEN")
             .map(|value| Arc::from(laysi_store::token_hash(&value)));
-        Ok(Self { allow_web, token_hash })
+        Ok(Self {
+            allow_web,
+            token_hash,
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn for_tests() -> Self {
-        Self { allow_web: true, token_hash: None }
+        Self {
+            allow_web: true,
+            token_hash: None,
+        }
     }
 
     pub fn allow_web(&self) -> bool {
@@ -123,7 +129,9 @@ fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
         return Err("密碼至少需要 8 個字元");
     }
 
-    Ok(FirstAccount { password: input.password })
+    Ok(FirstAccount {
+        password: input.password,
+    })
 }
 
 fn user_agent(headers: &HeaderMap) -> String {
@@ -193,27 +201,26 @@ pub async fn bootstrap(
         );
     }
 
-    let password_hash = match tokio::task::spawn_blocking(move || password::hash_password(&password))
-        .await
-    {
-        Ok(Ok(hash)) => hash,
-        Ok(Err(error)) => {
-            tracing::error!(%error, "初始化時產生密碼雜湊失敗");
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "password_hash_error",
-                "目前無法初始化，請稍後再試",
-            );
-        }
-        Err(error) => {
-            tracing::error!(%error, "密碼雜湊工作無法完成");
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "password_worker_error",
-                "目前無法初始化，請稍後再試",
-            );
-        }
-    };
+    let password_hash =
+        match tokio::task::spawn_blocking(move || password::hash_password(&password)).await {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(error)) => {
+                tracing::error!(%error, "初始化時產生密碼雜湊失敗");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "password_hash_error",
+                    "目前無法初始化，請稍後再試",
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "密碼雜湊工作無法完成");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "password_worker_error",
+                    "目前無法初始化，請稍後再試",
+                );
+            }
+        };
 
     let created = state
         .store
@@ -318,7 +325,10 @@ mod tests {
     }
 
     fn input(password: &str) -> BootstrapInput {
-        BootstrapInput { password: password.into(), setup_token: String::new() }
+        BootstrapInput {
+            password: password.into(),
+            setup_token: String::new(),
+        }
     }
 
     const GOOD_PASSWORD: &str = "一組夠長的系統初始化測試密碼";
@@ -355,7 +365,10 @@ mod tests {
 
     #[test]
     fn an_unset_token_accepts_anything_and_a_set_one_accepts_only_itself() {
-        let open = SetupConfig { allow_web: true, token_hash: None };
+        let open = SetupConfig {
+            allow_web: true,
+            token_hash: None,
+        };
         assert!(!open.token_required());
         assert!(open.token_accepted(""));
 
@@ -389,8 +402,8 @@ mod tests {
         store.migrate().await.expect("測試資料庫 migrations 應成功");
 
         let username = format!("bootstrap-test-{}", uuid::Uuid::new_v4());
-        let password_hash = password::hash_password("初始化整合測試用的長密碼")
-            .expect("應可產生測試密碼雜湊");
+        let password_hash =
+            password::hash_password("初始化整合測試用的長密碼").expect("應可產生測試密碼雜湊");
         let open = store.bootstrap_open().await.expect("應可查詢初始化狀態");
         let first = store
             .bootstrap_first_user(request(&username, &password_hash), "整合測試", false)
@@ -406,7 +419,10 @@ mod tests {
         // closed and the second call must write nothing.
         let second_username = format!("bootstrap-test-{}", uuid::Uuid::new_v4());
         assert!(
-            !store.bootstrap_open().await.expect("應可再次查詢初始化狀態"),
+            !store
+                .bootstrap_open()
+                .await
+                .expect("應可再次查詢初始化狀態"),
             "初始化之後視窗必須關閉"
         );
         assert!(

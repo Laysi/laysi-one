@@ -239,7 +239,9 @@ pub fn validate_entry(lines: &[LineInput]) -> Result<(), DomainError> {
 
     let (debit, credit) = totals(lines);
     if debit != credit {
-        return Err(DomainError::Unbalanced { diff: (debit - credit).abs() });
+        return Err(DomainError::Unbalanced {
+            diff: (debit - credit).abs(),
+        });
     }
 
     Ok(())
@@ -251,7 +253,9 @@ pub fn validate_entry(lines: &[LineInput]) -> Result<(), DomainError> {
 /// entry screen shows the remaining difference live, and at that moment the
 /// journal is not balanced yet.
 pub fn totals(lines: &[LineInput]) -> (Money, Money) {
-    lines.iter().fold((Money::ZERO, Money::ZERO), |(d, c), l| (d + l.debit, c + l.credit))
+    lines.iter().fold((Money::ZERO, Money::ZERO), |(d, c), l| {
+        (d + l.debit, c + l.credit)
+    })
 }
 
 /// One row of the trial balance.
@@ -296,7 +300,13 @@ impl TrialBalanceRow {
             Side::Debit => debit - credit,
             Side::Credit => credit - debit,
         };
-        Self { code: code.into(), name: name.into(), debit, credit, balance }
+        Self {
+            code: code.into(),
+            name: name.into(),
+            debit,
+            credit,
+            balance,
+        }
     }
 }
 
@@ -328,8 +338,14 @@ mod tests {
 
     #[test]
     fn rejects_both_sides_on_one_line() {
-        let lines = [line("6118", dec!(8420), dec!(8420)), line("1102", dec!(0), dec!(8420))];
-        assert_eq!(validate_entry(&lines).unwrap_err(), DomainError::BothSides { line: 1 });
+        let lines = [
+            line("6118", dec!(8420), dec!(8420)),
+            line("1102", dec!(0), dec!(8420)),
+        ];
+        assert_eq!(
+            validate_entry(&lines).unwrap_err(),
+            DomainError::BothSides { line: 1 }
+        );
     }
 
     #[test]
@@ -339,31 +355,55 @@ mod tests {
             line("1102", dec!(0), dec!(8420)),
             line("1101", dec!(0), dec!(0)),
         ];
-        assert_eq!(validate_entry(&lines).unwrap_err(), DomainError::EmptyLine { line: 3 });
+        assert_eq!(
+            validate_entry(&lines).unwrap_err(),
+            DomainError::EmptyLine { line: 3 }
+        );
     }
 
     #[test]
     fn rejects_negative_amounts() {
-        let lines = [line("6118", dec!(-8420), dec!(0)), line("1102", dec!(0), dec!(-8420))];
-        assert_eq!(validate_entry(&lines).unwrap_err(), DomainError::NegativeAmount { line: 1 });
+        let lines = [
+            line("6118", dec!(-8420), dec!(0)),
+            line("1102", dec!(0), dec!(-8420)),
+        ];
+        assert_eq!(
+            validate_entry(&lines).unwrap_err(),
+            DomainError::NegativeAmount { line: 1 }
+        );
     }
 
     /// When a negative and "both sides" both apply, report the negative: that
     /// is what the user actually mistyped.
     #[test]
     fn negative_wins_over_both_sides() {
-        let lines = [line("6118", dec!(-500), dec!(300)), line("1102", dec!(0), dec!(200))];
-        assert_eq!(validate_entry(&lines).unwrap_err(), DomainError::NegativeAmount { line: 1 });
+        let lines = [
+            line("6118", dec!(-500), dec!(300)),
+            line("1102", dec!(0), dec!(200)),
+        ];
+        assert_eq!(
+            validate_entry(&lines).unwrap_err(),
+            DomainError::NegativeAmount { line: 1 }
+        );
     }
 
     /// The difference must be correct and absolute; the error message reads
     /// that number out to the user.
     #[test]
     fn reports_the_exact_imbalance() {
-        let lines = [line("6118", dec!(8420), dec!(0)), line("1102", dec!(0), dec!(8400))];
-        assert_eq!(validate_entry(&lines).unwrap_err(), DomainError::Unbalanced { diff: dec!(20) });
+        let lines = [
+            line("6118", dec!(8420), dec!(0)),
+            line("1102", dec!(0), dec!(8400)),
+        ];
+        assert_eq!(
+            validate_entry(&lines).unwrap_err(),
+            DomainError::Unbalanced { diff: dec!(20) }
+        );
 
-        let flipped = [line("6118", dec!(8400), dec!(0)), line("1102", dec!(0), dec!(8420))];
+        let flipped = [
+            line("6118", dec!(8400), dec!(0)),
+            line("1102", dec!(0), dec!(8420)),
+        ];
         assert_eq!(
             validate_entry(&flipped).unwrap_err(),
             DomainError::Unbalanced { diff: dec!(20) },
@@ -373,8 +413,14 @@ mod tests {
 
     #[test]
     fn imbalance_message_names_the_amount() {
-        let lines = [line("6118", dec!(8420), dec!(0)), line("1102", dec!(0), dec!(8400))];
-        assert_eq!(validate_entry(&lines).unwrap_err().to_string(), "借貸不相等，差 20 元");
+        let lines = [
+            line("6118", dec!(8420), dec!(0)),
+            line("1102", dec!(0), dec!(8400)),
+        ];
+        assert_eq!(
+            validate_entry(&lines).unwrap_err().to_string(),
+            "借貸不相等，差 20 元"
+        );
     }
 
     /// One debit against several credits: the shape of a payroll voucher
@@ -393,7 +439,10 @@ mod tests {
     /// count as balanced.
     #[test]
     fn scale_does_not_affect_balance() {
-        let lines = [line("6118", dec!(8420), dec!(0)), line("1102", dec!(0), dec!(8420.00))];
+        let lines = [
+            line("6118", dec!(8420), dec!(0)),
+            line("1102", dec!(0), dec!(8420.00)),
+        ];
         assert!(validate_entry(&lines).is_ok());
     }
 
@@ -414,7 +463,8 @@ mod tests {
 
     #[test]
     fn trial_balance_row_follows_the_normal_side() {
-        let asset = TrialBalanceRow::new("1102", "銀行存款", dec!(214000), dec!(550953), Side::Debit);
+        let asset =
+            TrialBalanceRow::new("1102", "銀行存款", dec!(214000), dec!(550953), Side::Debit);
         assert_eq!(asset.balance, dec!(-336953), "資產出現貸餘時要照實回報負數");
 
         let liability =
@@ -432,8 +482,18 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(early.date_naive().to_string(), "2026-08-06");
-        assert_eq!(business_time(early, default_business_offset()).date().to_string(), "2026-08-07");
-        assert_eq!(business_time(early, default_business_offset()).time().to_string(), "07:50:00");
+        assert_eq!(
+            business_time(early, default_business_offset())
+                .date()
+                .to_string(),
+            "2026-08-07"
+        );
+        assert_eq!(
+            business_time(early, default_business_offset())
+                .time()
+                .to_string(),
+            "07:50:00"
+        );
     }
 
     /// The stored form goes into DDL, so anything the parser accepts has to be
@@ -451,7 +511,15 @@ mod tests {
     /// coerced: the value reaches `ALTER TABLE` as text.
     #[test]
     fn a_malformed_offset_is_refused_not_guessed() {
-        for text in ["8", "+8:00", "08:00", "+08:0", "Asia/Taipei", "+08:60", "'; DROP"] {
+        for text in [
+            "8",
+            "+8:00",
+            "08:00",
+            "+08:0",
+            "Asia/Taipei",
+            "+08:60",
+            "'; DROP",
+        ] {
             assert!(parse_business_offset(text).is_none(), "{text} 不該被接受");
         }
     }

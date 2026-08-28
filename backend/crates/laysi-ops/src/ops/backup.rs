@@ -27,7 +27,11 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(GetBackupSetting), Box::new(UpdateBackupSetting), Box::new(ConfirmBackupKey)]
+    vec![
+        Box::new(GetBackupSetting),
+        Box::new(UpdateBackupSetting),
+        Box::new(ConfirmBackupKey),
+    ]
 }
 
 /// What still stands between the settings and a backup actually running.
@@ -153,10 +157,18 @@ impl Operation for UpdateBackupSetting {
         let i: UpdateBackupSettingInput = parse(input)?;
         let now = ctx.store.backup_setting().await?;
 
-        let endpoint = i.endpoint.as_deref().map(str::trim).unwrap_or(&now.endpoint);
+        let endpoint = i
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or(&now.endpoint);
         let bucket = i.bucket.as_deref().map(str::trim).unwrap_or(&now.bucket);
-        if !endpoint.is_empty() && !(endpoint.starts_with("https://") || endpoint.starts_with("http://")) {
-            return Err(OpError::BadInput("儲存位置請填完整網址，開頭為 https://。".into()));
+        if !endpoint.is_empty()
+            && !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+        {
+            return Err(OpError::BadInput(
+                "儲存位置請填完整網址，開頭為 https://。".into(),
+            ));
         }
         if let Some(days) = i.keep_days {
             if days < 1 {
@@ -167,7 +179,9 @@ impl Operation for UpdateBackupSetting {
         // a job that never runs, and the screen would have to explain why.
         let turning_on = i.enabled.unwrap_or(now.enabled);
         if turning_on && (endpoint.is_empty() || bucket.is_empty()) {
-            return Err(OpError::BadInput("請先填寫儲存位置與桶子名稱，再啟用備份。".into()));
+            return Err(OpError::BadInput(
+                "請先填寫儲存位置與桶子名稱，再啟用備份。".into(),
+            ));
         }
 
         let saved = ctx

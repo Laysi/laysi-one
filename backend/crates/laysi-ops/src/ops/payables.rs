@@ -30,7 +30,11 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(ListPayables), Box::new(CreateApBill), Box::new(CreatePaymentBatch)]
+    vec![
+        Box::new(ListPayables),
+        Box::new(CreateApBill),
+        Box::new(CreatePaymentBatch),
+    ]
 }
 
 #[derive(Deserialize, JsonSchema, Default)]
@@ -70,8 +74,10 @@ impl Operation for ListPayables {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ListPayablesInput = parse(input)?;
         let limit = i.limit.unwrap_or(200).clamp(1, 500);
-        let mut rows =
-            ctx.store.ap_bills(ctx.today, i.include_settled, i.q.as_deref(), limit).await?;
+        let mut rows = ctx
+            .store
+            .ap_bills(ctx.today, i.include_settled, i.q.as_deref(), limit)
+            .await?;
         if let Some(days) = i.due_within_days {
             // days_overdue is today minus the due date, so >= -days covers bills
             // due within `days` days.
@@ -91,9 +97,20 @@ impl Operation for ListPayables {
             .map(|a| json!({ "code": a.code, "name": a.name }))
             .collect();
 
-        let listed: Money = rows.iter().filter(|r| r.recognised).map(|r| r.outstanding).sum();
-        let waiting: Money = rows.iter().filter(|r| !r.recognised).map(|r| r.outstanding).sum();
-        let overdue = rows.iter().filter(|r| r.days_overdue > 0 && r.recognised).count();
+        let listed: Money = rows
+            .iter()
+            .filter(|r| r.recognised)
+            .map(|r| r.outstanding)
+            .sum();
+        let waiting: Money = rows
+            .iter()
+            .filter(|r| !r.recognised)
+            .map(|r| r.outstanding)
+            .sum();
+        let overdue = rows
+            .iter()
+            .filter(|r| r.days_overdue > 0 && r.recognised)
+            .count();
 
         let summary = format!(
             "查詢應付 · {} 筆未付 {} · 與 2101 總帳{}",
@@ -131,8 +148,13 @@ const RECEIVABLE_CONTROL_ACCOUNT: &str = "1131";
 /// Report groups a bill may debit: what the company acquired. Expenses,
 /// inventory and prepayments, plus non-current assets, so an asset bought on
 /// credit is billed here and its voucher number written back to the register.
-const PURCHASE_REPORT_GROUPS: [&str; 5] =
-    ["cogs", "operating_expense", "other_expense", "current_asset", "non_current_asset"];
+const PURCHASE_REPORT_GROUPS: [&str; 5] = [
+    "cogs",
+    "operating_expense",
+    "other_expense",
+    "current_asset",
+    "non_current_asset",
+];
 
 const LIABILITY_REPORT_GROUPS: [&str; 2] = ["current_liability", "non_current_liability"];
 
@@ -295,8 +317,12 @@ impl Operation for CreateApBill {
             input.payable_account_code.trim(),
             input.input_tax_account_code.trim(),
         )?;
-        let split =
-            crate::ops::tax::split_vat(billed_on, input.net_amount, input.tax_amount, input.amount)?;
+        let split = crate::ops::tax::split_vat(
+            billed_on,
+            input.net_amount,
+            input.tax_amount,
+            input.amount,
+        )?;
         let bill = ctx
             .store
             .create_ap_bill(StoreCreateApBill {
@@ -377,10 +403,16 @@ impl Operation for CreatePaymentBatch {
         let i: CreatePaymentBatchInput = parse(input)?;
         let pay_on = i.pay_on.unwrap_or(ctx.today);
         let bank = i.bank_account_id.unwrap_or(1);
-        let source = if ctx.channel == Channel::Ui { "manual" } else { "ai_draft" };
+        let source = if ctx.channel == Channel::Ui {
+            "manual"
+        } else {
+            "ai_draft"
+        };
 
-        let batch =
-            ctx.store.create_payment_batch(&i.bill_nos, pay_on, bank, source, &ctx.actor).await?;
+        let batch = ctx
+            .store
+            .create_payment_batch(&i.bill_nos, pay_on, bank, source, &ctx.actor)
+            .await?;
 
         let summary = format!(
             "{} · {} 筆合計 {} · {} 待過帳",
@@ -417,7 +449,10 @@ mod tests {
             payable_account_code: "2101".into(),
             input_tax_account_code: "1284".into(),
         };
-        assert!(validate_ap_bill(&input, billed_on).unwrap_err().to_string().contains("到期日"));
+        assert!(validate_ap_bill(&input, billed_on)
+            .unwrap_err()
+            .to_string()
+            .contains("到期日"));
         assert_eq!(CreateApBill.risk(), Risk::NeedsConfirm);
         assert!(CreateApBill.summary().contains("一併產生待過帳傳票"));
     }
@@ -449,13 +484,49 @@ mod tests {
         vec![
             account("1101", "現金", "current_asset", "debit", Some("cash")),
             account("1102", "銀行存款", "current_asset", "debit", Some("cash")),
-            account("1131", "應收帳款", "current_asset", "debit", Some("operating")),
+            account(
+                "1131",
+                "應收帳款",
+                "current_asset",
+                "debit",
+                Some("operating"),
+            ),
             account("1251", "存貨", "current_asset", "debit", Some("operating")),
-            account("1284", "進項稅額", "current_asset", "debit", Some("operating")),
-            account("1451", "預付費用", "current_asset", "debit", Some("operating")),
-            account("1601", "辦公設備", "non_current_asset", "debit", Some("investing")),
-            account("1602", "累計折舊", "non_current_asset", "credit", Some("operating")),
-            account("2101", "應付帳款", "current_liability", "credit", Some("operating")),
+            account(
+                "1284",
+                "進項稅額",
+                "current_asset",
+                "debit",
+                Some("operating"),
+            ),
+            account(
+                "1451",
+                "預付費用",
+                "current_asset",
+                "debit",
+                Some("operating"),
+            ),
+            account(
+                "1601",
+                "辦公設備",
+                "non_current_asset",
+                "debit",
+                Some("investing"),
+            ),
+            account(
+                "1602",
+                "累計折舊",
+                "non_current_asset",
+                "credit",
+                Some("operating"),
+            ),
+            account(
+                "2101",
+                "應付帳款",
+                "current_liability",
+                "credit",
+                Some("operating"),
+            ),
             account("4111", "銷貨收入", "revenue", "credit", None),
             account("5111", "銷貨成本", "cogs", "debit", None),
             account("6118", "水電費", "operating_expense", "debit", None),
@@ -471,7 +542,9 @@ mod tests {
         for code in ["6118", "5111", "1251", "1451", "1601"] {
             assert!(check(code).is_ok(), "{code} should be accepted");
         }
-        for code in ["1101", "1102", "1131", "1284", "1602", "2101", "4111", "9999"] {
+        for code in [
+            "1101", "1102", "1131", "1284", "1602", "2101", "4111", "9999",
+        ] {
             let message = check(code).unwrap_err().to_string();
             assert!(message.contains("不能當借方科目"), "{code}: {message}");
         }
@@ -490,9 +563,15 @@ mod tests {
     #[test]
     fn the_other_two_accounts_keep_their_side_of_the_voucher() {
         let payable = check_ap_bill_accounts(&chart(), "6118", "1251", "1284");
-        assert!(payable.unwrap_err().to_string().contains("不能當應付控制科目"));
+        assert!(payable
+            .unwrap_err()
+            .to_string()
+            .contains("不能當應付控制科目"));
         let input_tax = check_ap_bill_accounts(&chart(), "6118", "2101", "2101");
-        assert!(input_tax.unwrap_err().to_string().contains("不能當進項稅額科目"));
+        assert!(input_tax
+            .unwrap_err()
+            .to_string()
+            .contains("不能當進項稅額科目"));
         assert!(check_ap_bill_accounts(&chart(), "6118", "2101", "1602").is_err());
     }
 }

@@ -159,7 +159,10 @@ fn month_bounds(month: &str) -> Option<(NaiveDate, NaiveDate)> {
 }
 
 /// Resolved period: the period string and its last day.
-fn resolve_period(period: Option<String>, today: NaiveDate) -> Result<(String, NaiveDate), OpError> {
+fn resolve_period(
+    period: Option<String>,
+    today: NaiveDate,
+) -> Result<(String, NaiveDate), OpError> {
     let period = period.unwrap_or_else(|| today.format("%Y-%m").to_string());
     let (_, end) = month_bounds(&period)
         .ok_or_else(|| OpError::BadInput(format!("期別格式請用 YYYY-MM，收到「{period}」")))?;
@@ -383,7 +386,9 @@ fn categories(rs: &Ruleset) -> Vec<Value> {
     let mut rows: Vec<Value> = lives
         .keys()
         .map(|code| {
-            let years = rs.decimal(&format!("useful_lives.{code}")).unwrap_or_default();
+            let years = rs
+                .decimal(&format!("useful_lives.{code}"))
+                .unwrap_or_default();
             json!({
                 "code": code,
                 "label": category_label(code),
@@ -444,8 +449,16 @@ impl Operation for CreateFixedAsset {
         // Every asset has to point at a voucher, otherwise the register would
         // claim a cost the ledger has never seen and the 1601 reconciliation
         // on this screen would report a difference no one can clear.
-        let paid_from = i.paid_from_account_code.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let origin = i.origin_voucher_no.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let paid_from = i
+            .paid_from_account_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let origin = i
+            .origin_voucher_no
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         match (paid_from, origin) {
             (None, None) => {
                 return Err(OpError::BadInput(
@@ -498,7 +511,11 @@ impl Operation for CreateFixedAsset {
                 input_tax_account_code: i.input_tax_account_code.trim(),
                 paid_from_account_code: paid_from,
                 origin_voucher_no: origin,
-                dept_code: i.dept_code.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                dept_code: i
+                    .dept_code
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
                 memo: i.memo.trim(),
                 created_by: &ctx.actor,
             })
@@ -654,7 +671,11 @@ impl Operation for PreviewDepreciation {
             "試算 {period} 折舊 · {} 項合計 {} · 依耐用年數表 {version}{}",
             lines.len(),
             money(total),
-            if done.is_some() { "（本期已提列）" } else { "" }
+            if done.is_some() {
+                "（本期已提列）"
+            } else {
+                ""
+            }
         );
         Ok(OpOutcome::new(
             json!({
@@ -799,7 +820,10 @@ mod tests {
 
         // 2026 charges are unaffected: months already filed do not move.
         assert_eq!(plan_for(rs, &a).unwrap().monthly, n("1950"));
-        assert_ne!(p.version, p2.version, "版本要能分辨，否則追不出哪一筆用舊版");
+        assert_ne!(
+            p.version, p2.version,
+            "版本要能分辨，否則追不出哪一筆用舊版"
+        );
     }
 
     /// The salvage rate is a rule too: raise it to 10% and both the
@@ -808,7 +832,11 @@ mod tests {
     fn the_residual_rate_comes_from_the_ruleset_too() {
         let a = asset("computer", d(2025, 1, 20), "70200", "0");
         let rs = dep(d(2026, 7, 31));
-        assert_eq!(plan_for(rs, &a).unwrap().depreciable, n("70200"), "目前殘值率是 0");
+        assert_eq!(
+            plan_for(rs, &a).unwrap().depreciable,
+            n("70200"),
+            "目前殘值率是 0"
+        );
 
         let mut next = rs.clone();
         next.version = "2027.1".into();
@@ -882,8 +910,16 @@ mod tests {
         let rs = dep(d(2026, 7, 31));
         let a = asset("computer", d(2026, 7, 22), "68000", "0");
         let p = plan_for(rs, &a).unwrap();
-        assert_eq!(due_this_period(&a, &p, d(2026, 6, 30)), Money::ZERO, "六月時還沒買");
-        assert_eq!(due_this_period(&a, &p, d(2026, 7, 31)), n("1889"), "取得當月照提一整月");
+        assert_eq!(
+            due_this_period(&a, &p, d(2026, 6, 30)),
+            Money::ZERO,
+            "六月時還沒買"
+        );
+        assert_eq!(
+            due_this_period(&a, &p, d(2026, 7, 31)),
+            n("1889"),
+            "取得當月照提一整月"
+        );
     }
 
     /// Charges already vouchered but not yet posted also count as taken, or
@@ -910,8 +946,18 @@ mod tests {
 
     #[test]
     fn periods_parse_into_their_own_month_end() {
-        assert_eq!(resolve_period(Some("2026-07".into()), d(2026, 1, 1)).unwrap().1, d(2026, 7, 31));
-        assert_eq!(resolve_period(Some("2026-02".into()), d(2026, 1, 1)).unwrap().1, d(2026, 2, 28));
+        assert_eq!(
+            resolve_period(Some("2026-07".into()), d(2026, 1, 1))
+                .unwrap()
+                .1,
+            d(2026, 7, 31)
+        );
+        assert_eq!(
+            resolve_period(Some("2026-02".into()), d(2026, 1, 1))
+                .unwrap()
+                .1,
+            d(2026, 2, 28)
+        );
         assert_eq!(resolve_period(None, d(2026, 7, 25)).unwrap().0, "2026-07");
         assert!(resolve_period(Some("七月".into()), d(2026, 1, 1)).is_err());
     }

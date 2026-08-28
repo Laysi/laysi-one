@@ -54,19 +54,17 @@ pub struct MarkOptions {
 
 impl Default for MarkOptions {
     fn default() -> Self {
-        Self { height: 28.0, color: "currentColor".into(), build: "unknown".into() }
+        Self {
+            height: 28.0,
+            color: "currentColor".into(),
+            build: "unknown".into(),
+        }
     }
 }
 
 /// Open the SVG element and write the notice and title every deliverable
 /// carries.
-fn open_svg(
-    svg: &mut String,
-    opts: &MarkOptions,
-    vb: (f64, f64, f64, f64),
-    w: f64,
-    h: f64,
-) {
+fn open_svg(svg: &mut String, opts: &MarkOptions, vb: (f64, f64, f64, f64), w: f64, h: f64) {
     let (vb_x, vb_y, vb_w, vb_h) = vb;
     let _ = write!(
         svg,
@@ -106,7 +104,13 @@ pub fn monogram(opts: &MarkOptions) -> String {
     let s = (BOX - INSET * 2.0) / LETTER_L_HEIGHT;
 
     let mut svg = String::with_capacity(1024);
-    open_svg(&mut svg, opts, (0.0, 0.0, BOX, BOX), opts.height, opts.height);
+    open_svg(
+        &mut svg,
+        opts,
+        (0.0, 0.0, BOX, BOX),
+        opts.height,
+        opts.height,
+    );
     let _ = write!(
         svg,
         r#"<path fill="{color}" transform="translate({tx:.2} {ty:.2}) scale({s:.4}) translate({ox:.2} {oy:.2})" d="{LETTER_L_PATH}"/>"#,
@@ -121,7 +125,10 @@ pub fn monogram(opts: &MarkOptions) -> String {
 }
 
 fn escape_attr(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -147,7 +154,10 @@ mod tests {
 
     #[test]
     fn build_fingerprint_is_emitted_and_escaped() {
-        let opts = MarkOptions { build: r#"v1"><script>"#.into(), ..Default::default() };
+        let opts = MarkOptions {
+            build: r#"v1"><script>"#.into(),
+            ..Default::default()
+        };
         let svg = wordmark(&opts);
         assert!(svg.contains("data-laysi-build=\"v1&quot;&gt;&lt;script&gt;\""));
         assert!(!svg.contains("<script>"));
@@ -159,7 +169,13 @@ mod tests {
         // near x=283. Placing it without subtracting that origin puts the
         // letter outside the viewBox and the mark renders blank.
         let svg = monogram(&MarkOptions::default());
-        let t = svg.split(r#"transform=""#).nth(1).unwrap().split('"').next().unwrap();
+        let t = svg
+            .split(r#"transform=""#)
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
         let n: Vec<f64> = t
             .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
             .filter(|s| !s.is_empty())
@@ -175,7 +191,10 @@ mod tests {
 
     #[test]
     fn monogram_is_square_and_is_the_letter_alone() {
-        let svg = monogram(&MarkOptions { height: 64.0, ..Default::default() });
+        let svg = monogram(&MarkOptions {
+            height: 64.0,
+            ..Default::default()
+        });
         assert!(svg.contains(r#"width="64.00" height="64.00""#));
         assert!(svg.contains(LETTER_L_PATH));
         assert!(!svg.contains(WORDMARK_PATH));

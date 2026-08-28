@@ -30,8 +30,10 @@ fn main() -> std::io::Result<()> {
 
     // Derived from the enum, not spelled out here: a hand-written union drifts
     // the moment a tier is added.
-    let risks: Vec<String> =
-        laysi_ops::Risk::ALL.iter().map(|r| format!("'{}'", r.as_db())).collect();
+    let risks: Vec<String> = laysi_ops::Risk::ALL
+        .iter()
+        .map(|r| format!("'{}'", r.as_db()))
+        .collect();
     ts.push_str(&format!("export type Risk = {};\n\n", risks.join(" | ")));
 
     ts.push_str(

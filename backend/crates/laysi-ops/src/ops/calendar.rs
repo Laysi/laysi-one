@@ -107,7 +107,8 @@ impl Operation for ListWorkCalendar {
             months.push(json!({ "month": month, "days": days }));
         }
 
-        let summary = format!("讀取 {year} 年工作日曆 · 工作日 {workdays} 天 · 國定假日 {holidays} 天");
+        let summary =
+            format!("讀取 {year} 年工作日曆 · 工作日 {workdays} 天 · 國定假日 {holidays} 天");
         Ok(OpOutcome::new(
             json!({
                 "year": year,
@@ -171,8 +172,11 @@ impl Operation for SetWorkCalendarDay {
         }
 
         let kind = DayKind::from_code(i.kind.trim()).ok_or_else(|| {
-            let names =
-                DAY_KINDS.iter().map(|k| k.label()).collect::<Vec<_>>().join("、");
+            let names = DAY_KINDS
+                .iter()
+                .map(|k| k.label())
+                .collect::<Vec<_>>()
+                .join("、");
             OpError::BadInput(format!("日別要填{names}其中一項"))
         })?;
         let name = i.name.unwrap_or_default().trim().to_string();
@@ -206,11 +210,19 @@ struct GovRow {
 /// rather than by position, because the order has moved between years.
 fn parse_gov_calendar(text: &str) -> Result<Vec<GovRow>, OpError> {
     let cell = |line: &str| -> Vec<String> {
-        line.split(',').map(|c| c.trim().trim_matches('"').to_string()).collect()
+        line.split(',')
+            .map(|c| c.trim().trim_matches('"').to_string())
+            .collect()
     };
-    let mut lines =
-        text.trim_start_matches('\u{feff}').lines().filter(|l| !l.trim().is_empty());
-    let header = cell(lines.next().ok_or_else(|| OpError::BadInput("檔案是空的。".into()))?);
+    let mut lines = text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .filter(|l| !l.trim().is_empty());
+    let header = cell(
+        lines
+            .next()
+            .ok_or_else(|| OpError::BadInput("檔案是空的。".into()))?,
+    );
     let find = |names: &[&str]| header.iter().position(|h| names.contains(&h.as_str()));
     let date_col = find(&["西元日期", "date", "Date"]).ok_or_else(|| {
         OpError::BadInput("找不到日期欄位，請確認檔案是政府行事曆的 CSV。".into())
@@ -223,7 +235,9 @@ fn parse_gov_calendar(text: &str) -> Result<Vec<GovRow>, OpError> {
     let mut out = Vec::new();
     for line in lines {
         let cells = cell(line);
-        let Some(raw) = cells.get(date_col) else { continue };
+        let Some(raw) = cells.get(date_col) else {
+            continue;
+        };
         let date = NaiveDate::parse_from_str(raw, "%Y%m%d")
             .or_else(|_| NaiveDate::parse_from_str(raw, "%Y-%m-%d"))
             .or_else(|_| NaiveDate::parse_from_str(raw, "%Y/%m/%d"));
@@ -315,9 +329,10 @@ async fn get(url: &str) -> Result<String, OpError> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| OpError::BadInput(format!("連線設定失敗：{e}")))?;
-    let response = client.get(url).send().await.map_err(|_| {
-        OpError::BadInput("連不上政府資料開放平臺，請確認對外連線後再試。".into())
-    })?;
+    let response =
+        client.get(url).send().await.map_err(|_| {
+            OpError::BadInput("連不上政府資料開放平臺，請確認對外連線後再試。".into())
+        })?;
     if !response.status().is_success() {
         return Err(OpError::BadInput(format!(
             "政府資料開放平臺回應 {}，請稍後再試。",
@@ -349,8 +364,10 @@ impl Operation for RefreshWorkCalendar {
         let i: RefreshInput = parse(input)?;
         let year = i.year.unwrap_or_else(|| ctx.today.year());
         let fetched = fetch(year).await?;
-        let (written, kept) =
-            ctx.store.import_work_calendar(&fetched.days, &ctx.actor).await?;
+        let (written, kept) = ctx
+            .store
+            .import_work_calendar(&fetched.days, &ctx.actor)
+            .await?;
 
         let summary = format!(
             "更新工作日曆 {year} · 讀取 {} 天 · 寫入 {written} 天 · 保留自訂 {kept} 天",
@@ -500,8 +517,16 @@ mod tests {
         let files = vec![
             dist("114年中華民國政府行政機關辦公日曆表", "CSV", "UTF-8"),
             dist("115年中華民國政府行政機關辦公日曆表", "CSV", "UTF-8"),
-            dist("115年中華民國政府行政機關辦公日曆表_Google行事曆專用", "CSV", "UTF-8"),
-            dist("115年中華民國政府行政機關辦公日曆表(1150310更新)", "CSV", "UTF-8"),
+            dist(
+                "115年中華民國政府行政機關辦公日曆表_Google行事曆專用",
+                "CSV",
+                "UTF-8",
+            ),
+            dist(
+                "115年中華民國政府行政機關辦公日曆表(1150310更新)",
+                "CSV",
+                "UTF-8",
+            ),
         ];
         assert_eq!(
             choose(&files, 115).unwrap().resource_description,
@@ -525,7 +550,10 @@ mod tests {
     fn the_published_file_never_produces_a_natural_disaster_day() {
         let rows = parse_gov_calendar(SAMPLE).unwrap();
         for row in &rows {
-            assert_ne!(deviation(row).map(|(k, _)| k), Some(DayKind::NaturalDisaster));
+            assert_ne!(
+                deviation(row).map(|(k, _)| k),
+                Some(DayKind::NaturalDisaster)
+            );
         }
     }
 

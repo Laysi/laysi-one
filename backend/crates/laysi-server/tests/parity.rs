@@ -54,7 +54,11 @@ fn every_operation_is_reachable_by_name() {
 fn mcp_descriptions_carry_the_risk_label() {
     for op in Registry::new().iter() {
         let description = format!("[{}] {}", op.risk().label_zh(), op.summary());
-        assert!(description.starts_with('['), "{} 的說明沒有風險標示", op.name());
+        assert!(
+            description.starts_with('['),
+            "{} 的說明沒有風險標示",
+            op.name()
+        );
         assert!(
             description.contains(op.risk().label_zh()),
             "{} 的說明沒有標出風險等級",

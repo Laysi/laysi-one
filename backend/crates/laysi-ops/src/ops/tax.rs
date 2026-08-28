@@ -36,7 +36,11 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(GetVatReturn), Box::new(ListWithholding), Box::new(ComputeWithholding)]
+    vec![
+        Box::new(GetVatReturn),
+        Box::new(ListWithholding),
+        Box::new(ComputeWithholding),
+    ]
 }
 
 /// A document amount split into its net and tax halves.
@@ -99,9 +103,16 @@ pub(crate) fn split_vat(
         return Err(OpError::BadInput("未稅金額必須大於零".into()));
     }
     if tax < Money::ZERO {
-        return Err(OpError::BadInput("營業稅不能是負數；零稅率與免稅填 0".into()));
+        return Err(OpError::BadInput(
+            "營業稅不能是負數；零稅率與免稅填 0".into(),
+        ));
     }
-    Ok(VatSplit { net, tax, total, version: rs.version.clone() })
+    Ok(VatSplit {
+        net,
+        tax,
+        total,
+        version: rs.version.clone(),
+    })
 }
 
 /// Round to whole dollars. Tax rounds half away from zero, not banker's
@@ -154,7 +165,11 @@ fn vat_period(as_of: NaiveDate, period_months: u32) -> Option<(NaiveDate, NaiveD
     let from = NaiveDate::from_ymd_opt(as_of.year(), first, 1)?;
     // Period end is the day before the first of the following month, carrying
     // the year when it wraps.
-    let (ny, nm) = if last == 12 { (as_of.year() + 1, 1) } else { (as_of.year(), last + 1) };
+    let (ny, nm) = if last == 12 {
+        (as_of.year() + 1, 1)
+    } else {
+        (as_of.year(), last + 1)
+    };
     let to = NaiveDate::from_ymd_opt(ny, nm, 1)?.pred_opt()?;
 
     let label = if first == last {
@@ -191,8 +206,7 @@ impl Operation for GetVatReturn {
         // return from a guessed rate is worse than not computing one.
         let rs = laysi_regulation::resolve("vat", as_of)?;
         let rate = rs.decimal("rate")?;
-        let period_months: u32 =
-            rs.decimal("period_months")?.trunc().try_into().unwrap_or(1);
+        let period_months: u32 = rs.decimal("period_months")?.trunc().try_into().unwrap_or(1);
         let (from, to, label) = vat_period(as_of, period_months)
             .ok_or_else(|| OpError::BadInput(format!("{as_of} 無法推算申報期別")))?;
 
@@ -201,8 +215,11 @@ impl Operation for GetVatReturn {
         // The creditable input base is derived back from the input tax:
         // exempt purchases never reach 1284, so the derivation yields exactly
         // the creditable portion.
-        let input_base =
-            if rate.is_zero() { Money::ZERO } else { to_dollars(f.input_tax / rate) };
+        let input_base = if rate.is_zero() {
+            Money::ZERO
+        } else {
+            to_dollars(f.input_tax / rate)
+        };
 
         // What output tax should be (4111 times the rate) against what the
         // books actually carry in 2211. Computed separately, difference
@@ -298,7 +315,10 @@ pub(crate) fn code_rule(rs: &Ruleset, code: &str) -> Result<CodeRule, OpError> {
         .payload
         .get("codes")
         .and_then(|v| v.as_array())
-        .and_then(|arr| arr.iter().find(|c| c.get("code").and_then(|v| v.as_str()) == Some(code)))
+        .and_then(|arr| {
+            arr.iter()
+                .find(|c| c.get("code").and_then(|v| v.as_str()) == Some(code))
+        })
         .ok_or_else(|| {
             OpError::BadInput(format!(
                 "扣繳率標準 {} 未收錄所得格式代號「{code}」。可用代號請查詢 list_regulations。",
@@ -307,12 +327,23 @@ pub(crate) fn code_rule(rs: &Ruleset, code: &str) -> Result<CodeRule, OpError> {
         })?;
 
     Ok(CodeRule {
-        name: found.get("name").and_then(|v| v.as_str()).unwrap_or(code).to_string(),
+        name: found
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(code)
+            .to_string(),
         rate: read(found, "rate").ok_or_else(|| {
-            OpError::BadInput(format!("扣繳率標準 {} 的代號 {code} 未設定 rate", rs.version))
+            OpError::BadInput(format!(
+                "扣繳率標準 {} 的代號 {code} 未設定 rate",
+                rs.version
+            ))
         })?,
         threshold: read(found, "threshold").unwrap_or(Money::ZERO),
-        note: found.get("note").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        note: found
+            .get("note")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -380,7 +411,9 @@ impl Operation for ListWithholding {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ListWithholdingInput = parse(input)?;
-        let month = i.month.unwrap_or_else(|| ctx.today.format("%Y-%m").to_string());
+        let month = i
+            .month
+            .unwrap_or_else(|| ctx.today.format("%Y-%m").to_string());
         let (from, to) = month_bounds(&month)
             .ok_or_else(|| OpError::BadInput(format!("月份格式請用 YYYY-MM，收到「{month}」")))?;
 
@@ -397,7 +430,10 @@ impl Operation for ListWithholding {
             // basis = table: the tax was computed by the payroll module from the
             // withholding table and is carried through, not recomputed.
             let (tax, basis_label) = match r.basis.as_str() {
-                "table" => (r.withheld_amount.unwrap_or(Money::ZERO), "依薪資所得扣繳稅額表"),
+                "table" => (
+                    r.withheld_amount.unwrap_or(Money::ZERO),
+                    "依薪資所得扣繳稅額表",
+                ),
                 _ => (withhold(&rule, r.gross_amount), "依扣繳率標準"),
             };
             let supp = supplementary(rs, r.gross_amount, r.supplementary_base)?;
@@ -504,7 +540,11 @@ impl Operation for ComputeWithholding {
             rule.name,
             money(i.gross_amount),
             money(tax),
-            if supp.is_zero() { String::new() } else { format!("、補充保費 {}", money(supp)) },
+            if supp.is_zero() {
+                String::new()
+            } else {
+                format!("、補充保費 {}", money(supp))
+            },
             rs.version
         );
         Ok(OpOutcome::new(
@@ -587,7 +627,10 @@ mod tests {
         next.effective_from = d(2027, 1, 1);
         next.payload["codes"][1]["rate"] = json!("0.12");
         assert_eq!(code_rule(&next, "9A").unwrap().rate, n("0.12"));
-        assert_eq!(withhold(&code_rule(&next, "9A").unwrap(), n("60000")), n("7200"));
+        assert_eq!(
+            withhold(&code_rule(&next, "9A").unwrap(), n("60000")),
+            n("7200")
+        );
         // The old rules are unaffected.
         assert_eq!(withhold(&r9a, n("60000")), n("6000"));
     }
@@ -598,8 +641,15 @@ mod tests {
     fn the_threshold_decides_whether_to_withhold_at_all() {
         let rs = wht(d(2026, 7, 15));
         let r9b = code_rule(rs, "9B").unwrap();
-        assert_eq!(withhold(&r9b, n("18000")), Money::ZERO, "未達起扣點免予扣繳");
-        assert_eq!(withhold(&r9b, r9b.threshold), to_dollars(r9b.threshold * r9b.rate));
+        assert_eq!(
+            withhold(&r9b, n("18000")),
+            Money::ZERO,
+            "未達起扣點免予扣繳"
+        );
+        assert_eq!(
+            withhold(&r9b, r9b.threshold),
+            to_dollars(r9b.threshold * r9b.rate)
+        );
 
         // The salary threshold is 0, so any amount is subject. That also comes
         // from the rules, it is not a special case.
@@ -630,9 +680,18 @@ mod tests {
 
     #[test]
     fn months_parse_into_their_own_bounds() {
-        assert_eq!(month_bounds("2026-07").unwrap(), (d(2026, 7, 1), d(2026, 7, 31)));
-        assert_eq!(month_bounds("2026-02").unwrap(), (d(2026, 2, 1), d(2026, 2, 28)));
-        assert_eq!(month_bounds("2026-12").unwrap(), (d(2026, 12, 1), d(2026, 12, 31)));
+        assert_eq!(
+            month_bounds("2026-07").unwrap(),
+            (d(2026, 7, 1), d(2026, 7, 31))
+        );
+        assert_eq!(
+            month_bounds("2026-02").unwrap(),
+            (d(2026, 2, 1), d(2026, 2, 28))
+        );
+        assert_eq!(
+            month_bounds("2026-12").unwrap(),
+            (d(2026, 12, 1), d(2026, 12, 31))
+        );
         assert!(month_bounds("2026/07").is_none());
         assert!(month_bounds("七月").is_none());
     }

@@ -54,7 +54,11 @@ use std::collections::BTreeMap;
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(GetPayrollSummary), Box::new(ListPayslips), Box::new(RunPayroll)]
+    vec![
+        Box::new(GetPayrollSummary),
+        Box::new(ListPayslips),
+        Box::new(RunPayroll),
+    ]
 }
 
 /// Withholding income code for salary. A code, not a rate; the rate is
@@ -76,7 +80,10 @@ fn month_bounds(month: &str) -> Option<(NaiveDate, NaiveDate)> {
     Some((from, NaiveDate::from_ymd_opt(ny, nm, 1)?.pred_opt()?))
 }
 
-fn resolve_period(period: Option<String>, today: NaiveDate) -> Result<(String, NaiveDate, NaiveDate), OpError> {
+fn resolve_period(
+    period: Option<String>,
+    today: NaiveDate,
+) -> Result<(String, NaiveDate, NaiveDate), OpError> {
     let period = period.unwrap_or_else(|| today.format("%Y-%m").to_string());
     let (from, to) = month_bounds(&period)
         .ok_or_else(|| OpError::BadInput(format!("期別要寫成 YYYY-MM，收到的是「{period}」")))?;
@@ -109,12 +116,23 @@ fn salary_withholding_rate(rs: &Ruleset) -> Result<(Money, String, String), OpEr
         .and_then(|v| v.as_str())
         .and_then(|s| Decimal::from_str_exact(s).ok())
         .ok_or_else(|| {
-            OpError::BadInput(format!("扣繳率標準 {} 的代號 50 未設定可用的 rate", rs.version))
+            OpError::BadInput(format!(
+                "扣繳率標準 {} 的代號 50 未設定可用的 rate",
+                rs.version
+            ))
         })?;
     Ok((
         rate,
-        found.get("name").and_then(|v| v.as_str()).unwrap_or("薪資所得").to_string(),
-        found.get("note").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        found
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("薪資所得")
+            .to_string(),
+        found
+            .get("note")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
     ))
 }
 
@@ -187,7 +205,12 @@ async fn compute_one(
     let gross = base + overtime;
 
     // Premiums resolve on the period end: the version in force for this period.
-    let p = premiums_on(to, e.labor_insured_salary, e.health_insured_salary, e.pension_wage)?;
+    let p = premiums_on(
+        to,
+        e.labor_insured_salary,
+        e.health_insured_salary,
+        e.pension_wage,
+    )?;
 
     // Withholding resolves on the payment date: the obligation arises then.
     let wht = laysi_regulation::resolve("withholding", pay_on)?;
@@ -320,14 +343,20 @@ impl Operation for GetPayrollSummary {
         let gap = posted - gl;
 
         let detail_visible = ctx.actor_role == crate::ROLE_BOSS;
-        let period_label = picked.map(|r| r.period.clone()).unwrap_or_else(|| "—".into());
+        let period_label = picked
+            .map(|r| r.period.clone())
+            .unwrap_or_else(|| "—".into());
 
         // Same question the HR dashboard asks, asked the same way: is there a
         // run for this month? Scanning the recent-runs list would answer it
         // from a window instead of from the table.
         let this_month = ctx.today.format("%Y-%m").to_string();
-        let next_period =
-            ctx.store.payroll_run(&this_month).await?.is_none().then_some(this_month);
+        let next_period = ctx
+            .store
+            .payroll_run(&this_month)
+            .await?
+            .is_none()
+            .then_some(this_month);
 
         let summary = match picked {
             Some(r) => format!(
@@ -552,7 +581,9 @@ impl Operation for RunPayroll {
                 true => laysi_regulation::overtime_pay(rs, salary, &o.day_type, o.hours)?,
                 false => Money::ZERO,
             };
-            let entry = overtime_by_employee.entry(o.employee_id).or_insert((Money::ZERO, Money::ZERO));
+            let entry = overtime_by_employee
+                .entry(o.employee_id)
+                .or_insert((Money::ZERO, Money::ZERO));
             entry.0 += o.hours;
             entry.1 += pay;
         }
@@ -636,9 +667,7 @@ impl Operation for RunPayroll {
         );
 
         let note = i.note.clone().unwrap_or_else(|| {
-            format!(
-                "依勞保 {labor_v}、健保 {health_v}、勞退 {pension_v}、扣繳 {wht_v} 規則"
-            )
+            format!("依勞保 {labor_v}、健保 {health_v}、勞退 {pension_v}、扣繳 {wht_v} 規則")
         });
 
         let run = ctx
@@ -809,7 +838,10 @@ mod tests {
         // Joined 7/16, so 16..31 is 16 days.
         let joined = emp(d(2026, 7, 16), None);
         assert_eq!(paid_days(&joined, from, to), 16);
-        assert_eq!(to_dollars(n("31000") * Decimal::from(16) / Decimal::from(31)), n("16000"));
+        assert_eq!(
+            to_dollars(n("31000") * Decimal::from(16) / Decimal::from(31)),
+            n("16000")
+        );
 
         // Someone leaving on 8/15 still worked all of July.
         let leaving = emp(d(2025, 3, 3), Some(d(2026, 8, 15)));
@@ -837,9 +869,18 @@ mod tests {
 
     #[test]
     fn periods_parse_into_their_own_bounds() {
-        assert_eq!(month_bounds("2026-07").unwrap(), (d(2026, 7, 1), d(2026, 7, 31)));
-        assert_eq!(month_bounds("2026-02").unwrap(), (d(2026, 2, 1), d(2026, 2, 28)));
-        assert_eq!(month_bounds("2026-12").unwrap(), (d(2026, 12, 1), d(2026, 12, 31)));
+        assert_eq!(
+            month_bounds("2026-07").unwrap(),
+            (d(2026, 7, 1), d(2026, 7, 31))
+        );
+        assert_eq!(
+            month_bounds("2026-02").unwrap(),
+            (d(2026, 2, 1), d(2026, 2, 28))
+        );
+        assert_eq!(
+            month_bounds("2026-12").unwrap(),
+            (d(2026, 12, 1), d(2026, 12, 31))
+        );
         assert!(month_bounds("2026/07").is_none());
         assert!(resolve_period(Some("七月".into()), d(2026, 1, 1)).is_err());
         assert_eq!(resolve_period(None, d(2026, 7, 26)).unwrap().0, "2026-07");
@@ -853,6 +894,9 @@ mod tests {
         let mut broken = rs.clone();
         broken.payload["codes"] = json!([]);
         let err = salary_withholding_rate(&broken).unwrap_err();
-        assert!(err.to_string().contains("50"), "錯誤訊息要說是哪個代號：{err}");
+        assert!(
+            err.to_string().contains("50"),
+            "錯誤訊息要說是哪個代號：{err}"
+        );
     }
 }

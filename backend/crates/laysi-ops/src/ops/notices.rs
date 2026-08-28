@@ -29,15 +29,21 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(ListNotices), Box::new(CreateNotice), Box::new(UpdateNotice)]
+    vec![
+        Box::new(ListNotices),
+        Box::new(CreateNotice),
+        Box::new(UpdateNotice),
+    ]
 }
 
 /// The two kinds the database accepts, with their labels.
-pub(crate) const NOTICE_KINDS: [(&str, &str); 2] =
-    [("announcement", "公告"), ("policy", "規章")];
+pub(crate) const NOTICE_KINDS: [(&str, &str); 2] = [("announcement", "公告"), ("policy", "規章")];
 
 pub(crate) fn kind_label(kind: &str) -> &'static str {
-    NOTICE_KINDS.iter().find(|(code, _)| *code == kind).map_or("公告", |(_, label)| *label)
+    NOTICE_KINDS
+        .iter()
+        .find(|(code, _)| *code == kind)
+        .map_or("公告", |(_, label)| *label)
 }
 
 /// Where a notice stands today, as a code and the word for it.
@@ -130,9 +136,9 @@ fn checked_text(value: &str, field: &str) -> Result<String, OpError> {
 
 fn checked_window(effective_on: NaiveDate, expires_on: Option<NaiveDate>) -> Result<(), OpError> {
     match expires_on {
-        Some(end) if end < effective_on => {
-            Err(OpError::BadInput("結束日期早於開始日期，請改成開始日之後的日期".into()))
-        }
+        Some(end) if end < effective_on => Err(OpError::BadInput(
+            "結束日期早於開始日期，請改成開始日之後的日期".into(),
+        )),
         _ => Ok(()),
     }
 }
@@ -262,7 +268,10 @@ impl Operation for CreateNotice {
             .await?;
 
         let summary = format!("發布{} · {}", kind_label(kind), notice.title);
-        Ok(OpOutcome::new(json!({ "notice": notice_json(&notice, ctx.today) }), summary))
+        Ok(OpOutcome::new(
+            json!({ "notice": notice_json(&notice, ctx.today) }),
+            summary,
+        ))
     }
 }
 
@@ -310,14 +319,23 @@ impl Operation for UpdateNotice {
         let i: UpdateNoticeInput = parse(input)?;
         let current = ctx.store.notice(i.id).await?.ok_or_else(missing_notice)?;
 
-        let title = i.title.as_deref().map(|t| checked_text(t, "標題")).transpose()?;
-        let body = i.body.as_deref().map(|b| checked_text(b, "內容")).transpose()?;
+        let title = i
+            .title
+            .as_deref()
+            .map(|t| checked_text(t, "標題"))
+            .transpose()?;
+        let body = i
+            .body
+            .as_deref()
+            .map(|b| checked_text(b, "內容"))
+            .transpose()?;
         let expires_on = match i.expires_on.as_deref().map(str::trim) {
             None => None,
             Some("") => Some(None),
-            Some(text) => Some(Some(NaiveDate::parse_from_str(text, "%Y-%m-%d").map_err(
-                |_| OpError::BadInput("結束日期請填 YYYY-MM-DD".into()),
-            )?)),
+            Some(text) => Some(Some(
+                NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                    .map_err(|_| OpError::BadInput("結束日期請填 YYYY-MM-DD".into()))?,
+            )),
         };
         checked_window(
             i.effective_on.unwrap_or(current.effective_on),
@@ -390,7 +408,11 @@ mod tests {
     #[test]
     fn each_kind_gets_its_own_words() {
         assert_eq!(
-            notice_status(&notice("policy", "2026-09-01", None, "2026-08-25"), on("2026-08-25")).1,
+            notice_status(
+                &notice("policy", "2026-09-01", None, "2026-08-25"),
+                on("2026-08-25")
+            )
+            .1,
             "未生效"
         );
         assert_eq!(
@@ -402,7 +424,11 @@ mod tests {
             "未發布"
         );
         assert_eq!(
-            notice_status(&notice("policy", "2026-01-01", None, "2026-01-01"), on("2026-08-25")).1,
+            notice_status(
+                &notice("policy", "2026-01-01", None, "2026-01-01"),
+                on("2026-08-25")
+            )
+            .1,
             "施行中"
         );
         assert_eq!(
@@ -419,7 +445,12 @@ mod tests {
     /// today.
     #[test]
     fn the_end_date_is_the_last_day_it_stands() {
-        let n = notice("announcement", "2026-08-01", Some("2026-08-25"), "2026-08-01");
+        let n = notice(
+            "announcement",
+            "2026-08-01",
+            Some("2026-08-25"),
+            "2026-08-01",
+        );
         assert_eq!(notice_status(&n, on("2026-08-25")).0, "active");
     }
 

@@ -101,7 +101,11 @@ impl Operation for GetArAging {
 
         // Invoices whose source voucher is unposted: the screen has to explain
         // why they are not in the total.
-        let waiting: Money = invoices.iter().filter(|i| !i.recognised).map(|i| i.outstanding).sum();
+        let waiting: Money = invoices
+            .iter()
+            .filter(|i| !i.recognised)
+            .map(|i| i.outstanding)
+            .sum();
 
         let buckets: Vec<Value> = BUCKETS
             .iter()
@@ -169,16 +173,24 @@ impl Operation for ListReceivables {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ListReceivablesInput = parse(input)?;
         let limit = i.limit.unwrap_or(200).clamp(1, 500);
-        let mut rows =
-            ctx.store.ar_invoices(ctx.today, i.include_settled, i.q.as_deref(), limit).await?;
+        let mut rows = ctx
+            .store
+            .ar_invoices(ctx.today, i.include_settled, i.q.as_deref(), limit)
+            .await?;
         if i.only_overdue {
             rows.retain(|r| r.days_overdue > 0);
         }
 
         let total: Money = recognised(&rows).map(|r| r.outstanding).sum();
-        let overdue = rows.iter().filter(|r| r.days_overdue > 0 && r.recognised).count();
-        let summary =
-            format!("查詢應收 · {} 筆未收 {} · 逾期 {overdue} 筆", rows.len(), money(total));
+        let overdue = rows
+            .iter()
+            .filter(|r| r.days_overdue > 0 && r.recognised)
+            .count();
+        let summary = format!(
+            "查詢應收 · {} 筆未收 {} · 逾期 {overdue} 筆",
+            rows.len(),
+            money(total)
+        );
         Ok(OpOutcome::new(
             json!({
                 "invoices": rows,
@@ -279,8 +291,12 @@ impl Operation for CreateArInvoice {
         let input: CreateArInvoiceInput = parse(input)?;
         let issued_on = input.issued_on.unwrap_or(ctx.today);
         validate_ar_invoice(&input, issued_on)?;
-        let split =
-            crate::ops::tax::split_vat(issued_on, input.net_amount, input.tax_amount, input.amount)?;
+        let split = crate::ops::tax::split_vat(
+            issued_on,
+            input.net_amount,
+            input.tax_amount,
+            input.amount,
+        )?;
         let invoice = ctx
             .store
             .create_ar_invoice(StoreCreateArInvoice {
@@ -368,11 +384,22 @@ impl Operation for RecordReceipt {
         let bank = i.bank_account_id.unwrap_or(1);
         // UI means a person recorded it on screen, MCP means AI drafted it.
         // The audit trail has to tell them apart.
-        let source = if ctx.channel == Channel::Ui { "manual" } else { "ai_draft" };
+        let source = if ctx.channel == Channel::Ui {
+            "manual"
+        } else {
+            "ai_draft"
+        };
 
         let r = ctx
             .store
-            .record_receipt(&i.invoice_no, i.amount, received_on, bank, source, &ctx.actor)
+            .record_receipt(
+                &i.invoice_no,
+                i.amount,
+                received_on,
+                bank,
+                source,
+                &ctx.actor,
+            )
             .await?;
 
         let summary = format!(
@@ -424,12 +451,10 @@ mod tests {
             receivable_account_code: "1131".into(),
             output_tax_account_code: "2211".into(),
         };
-        assert!(
-            validate_ar_invoice(&input, issued_on)
-                .unwrap_err()
-                .to_string()
-                .contains("到期日")
-        );
+        assert!(validate_ar_invoice(&input, issued_on)
+            .unwrap_err()
+            .to_string()
+            .contains("到期日"));
         assert_eq!(CreateArInvoice.risk(), Risk::NeedsConfirm);
         assert!(CreateArInvoice.summary().contains("代收營業稅"));
     }
@@ -440,13 +465,9 @@ mod tests {
     #[test]
     fn a_receivable_splits_its_output_tax_out_of_the_quoted_total() {
         let on = NaiveDate::from_ymd_opt(2026, 7, 2).unwrap();
-        let split = crate::ops::tax::split_vat(
-            on,
-            None,
-            None,
-            Some(Decimal::from_str("47250").unwrap()),
-        )
-        .unwrap();
+        let split =
+            crate::ops::tax::split_vat(on, None, None, Some(Decimal::from_str("47250").unwrap()))
+                .unwrap();
         assert_eq!(split.net, Decimal::from_str("45000").unwrap());
         assert_eq!(split.tax, Decimal::from_str("2250").unwrap());
         assert_eq!(split.net + split.tax, split.total);

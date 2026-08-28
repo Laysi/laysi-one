@@ -61,11 +61,20 @@ fn init_keys() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
     }
     let pub_path = brand_path("vendor.pub");
-    std::fs::write(&pub_path, format!("{}\n", hex::encode(sk.verifying_key().to_bytes())))?;
+    std::fs::write(
+        &pub_path,
+        format!("{}\n", hex::encode(sk.verifying_key().to_bytes())),
+    )?;
 
     println!("Vendor signing key pair generated:");
-    println!("  private key {} (gitignored; back it up offline, losing it makes re-signing impossible)", key_path.display());
-    println!("  public key {} (commit it; it is compiled into the binary)", pub_path.display());
+    println!(
+        "  private key {} (gitignored; back it up offline, losing it makes re-signing impossible)",
+        key_path.display()
+    );
+    println!(
+        "  public key {} (commit it; it is compiled into the binary)",
+        pub_path.display()
+    );
     println!("\nNow run `--update` to produce the signed manifest.");
     Ok(())
 }
@@ -73,7 +82,10 @@ fn init_keys() -> Result<(), Box<dyn std::error::Error>> {
 fn update() -> Result<(), Box<dyn std::error::Error>> {
     let key_path = brand_path("vendor.key");
     let key_hex = std::fs::read_to_string(&key_path).map_err(|e| {
-        format!("讀不到廠商私鑰 {}：{e}\n請先執行 `--init-keys`。", key_path.display())
+        format!(
+            "讀不到廠商私鑰 {}：{e}\n請先執行 `--init-keys`。",
+            key_path.display()
+        )
     })?;
     let seed: [u8; 32] = hex::decode(key_hex.trim())?
         .try_into()
@@ -113,17 +125,25 @@ fn update() -> Result<(), Box<dyn std::error::Error>> {
     let mut sorted = entries.clone();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
     for e in &sorted {
-        out.push_str(&format!("\n[[entry]]\npath = \"{}\"\nblake3 = \"{}\"\n", e.path, e.blake3));
+        out.push_str(&format!(
+            "\n[[entry]]\npath = \"{}\"\nblake3 = \"{}\"\n",
+            e.path, e.blake3
+        ));
     }
 
     let manifest_path = brand_path("integrity.toml");
     std::fs::write(&manifest_path, out)?;
 
-    println!("Brand integrity manifest re-signed: {}", manifest_path.display());
+    println!(
+        "Brand integrity manifest re-signed: {}",
+        manifest_path.display()
+    );
     for e in &sorted {
         println!("  {} {}", &e.blake3[..12], e.path);
     }
-    println!("\nNote: the manifest is embedded at compile time; rebuild before starting the server.");
+    println!(
+        "\nNote: the manifest is embedded at compile time; rebuild before starting the server."
+    );
     Ok(())
 }
 
@@ -131,7 +151,11 @@ fn verify() -> Result<(), Box<dyn std::error::Error>> {
     match integrity::verify() {
         Ok(r) => {
             println!("Brand integrity: passed");
-            println!("  {} files covered, signature {}", r.files, if r.signed { "valid" } else { "absent" });
+            println!(
+                "  {} files covered, signature {}",
+                r.files,
+                if r.signed { "valid" } else { "absent" }
+            );
             println!("  build fingerprint {}", r.fingerprint);
             Ok(())
         }

@@ -65,7 +65,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Cli> {
         bail!("缺少子指令\n\n{USAGE}");
     };
     if matches!(command.as_str(), "-h" | "--help" | "help") {
-        return Ok(Cli { command: "help".into(), options: HashMap::new() });
+        return Ok(Cli {
+            command: "help".into(),
+            options: HashMap::new(),
+        });
     }
     let allowed = allowed_options(&command)
         .ok_or_else(|| anyhow!("不支援的子指令「{command}」\n\n{USAGE}"))?;
@@ -229,7 +232,10 @@ async fn link_employee(store: &Store, cli: &Cli) -> anyhow::Result<()> {
         .set_employee_link(user.id, Some(employee.id))
         .await
         .context("連結員工資料失敗")?;
-    eprintln!("已把帳號 {username} 連到員工 {employee_no}（{}）。", employee.name);
+    eprintln!(
+        "已把帳號 {username} 連到員工 {employee_no}（{}）。",
+        employee.name
+    );
     Ok(())
 }
 
@@ -328,7 +334,10 @@ async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
             .await
             .context("建立示範員工帳號失敗")?;
         println!("{temporary}");
-        eprintln!("已建立員工自助示範帳號 {username}（{}）；首次登入必須更換密碼。", employee.name);
+        eprintln!(
+            "已建立員工自助示範帳號 {username}（{}）；首次登入必須更換密碼。",
+            employee.name
+        );
     } else {
         eprintln!("帳號 {username} 已存在，未重新建立；需要新密碼請用 reset-password。");
     }
@@ -351,8 +360,14 @@ async fn list_users(store: &Store) -> anyhow::Result<()> {
             cell(&user.username),
             cell(&user.role_code),
             cell(&user.status),
-            if user.must_change_password { "是" } else { "否" },
-            user.employee_id.map(|id| id.to_string()).unwrap_or_default(),
+            if user.must_change_password {
+                "是"
+            } else {
+                "否"
+            },
+            user.employee_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
             cell(&user.display_name),
             cell(&user.email),
         );
@@ -383,7 +398,10 @@ mod tests {
         ]))
         .expect("文件中的 create-user 形狀應可解析");
         assert_eq!(cli.command, "create-user");
-        assert_eq!(required(&cli, "--username").expect("應有 username"), "owner");
+        assert_eq!(
+            required(&cli, "--username").expect("應有 username"),
+            "owner"
+        );
         assert_eq!(required(&cli, "--role").expect("應有 role"), "boss");
     }
 
@@ -404,7 +422,8 @@ mod tests {
     /// and must still be rejected on subcommands that do not take it.
     #[test]
     fn force_is_a_valueless_flag() {
-        let cli = parse_args(strings(&["seed-demo", "--force"])).expect("seed-demo --force 應可解析");
+        let cli =
+            parse_args(strings(&["seed-demo", "--force"])).expect("seed-demo --force 應可解析");
         assert!(cli.options.contains_key("--force"));
         assert!(parse_args(strings(&["list-users", "--force"])).is_err());
     }

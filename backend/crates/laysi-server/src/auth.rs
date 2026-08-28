@@ -43,7 +43,11 @@ fn cookie_secure(headers: &HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').next().is_some_and(|p| p.trim().eq_ignore_ascii_case("https")))
+        .is_some_and(|v| {
+            v.split(',')
+                .next()
+                .is_some_and(|p| p.trim().eq_ignore_ascii_case("https"))
+        })
 }
 
 /// Authentication settings. The dummy password hash makes a non-existent
@@ -61,7 +65,9 @@ impl AuthConfig {
     fn new() -> anyhow::Result<Self> {
         let dummy_password_hash = password::hash_password("這不是任何使用者的登入密碼")
             .map_err(|e| anyhow!("無法建立登入時間差防護用的 Argon2id 雜湊：{e}"))?;
-        Ok(Self { dummy_password_hash: dummy_password_hash.into() })
+        Ok(Self {
+            dummy_password_hash: dummy_password_hash.into(),
+        })
     }
 
     #[cfg(test)]
@@ -71,7 +77,10 @@ impl AuthConfig {
 }
 
 pub(crate) fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
-    let Some(raw) = std::env::var(name).ok().filter(|value| !value.trim().is_empty()) else {
+    let Some(raw) = std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
         return Ok(default);
     };
     match raw.to_ascii_lowercase().as_str() {
@@ -129,11 +138,9 @@ impl From<StoreError> for AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         match self {
-            Self::Unauthorized => error_response(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "請先登入再繼續",
-            ),
+            Self::Unauthorized => {
+                error_response(StatusCode::UNAUTHORIZED, "unauthorized", "請先登入再繼續")
+            }
             Self::Store(error) => {
                 tracing::error!(%error, "驗證 session 時查詢資料庫失敗");
                 error_response(
@@ -516,27 +523,26 @@ pub async fn change_password(
     }
 
     let new_password = input.new_password;
-    let new_hash = match tokio::task::spawn_blocking(move || password::hash_password(&new_password))
-        .await
-    {
-        Ok(Ok(hash)) => hash,
-        Ok(Err(error)) => {
-            tracing::error!(%error, "產生新密碼雜湊失敗");
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "password_hash_error",
-                "目前無法更新密碼，請稍後再試",
-            );
-        }
-        Err(error) => {
-            tracing::error!(%error, "密碼雜湊工作無法完成");
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "password_worker_error",
-                "目前無法更新密碼，請稍後再試",
-            );
-        }
-    };
+    let new_hash =
+        match tokio::task::spawn_blocking(move || password::hash_password(&new_password)).await {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(error)) => {
+                tracing::error!(%error, "產生新密碼雜湊失敗");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "password_hash_error",
+                    "目前無法更新密碼，請稍後再試",
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "密碼雜湊工作無法完成");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "password_worker_error",
+                    "目前無法更新密碼，請稍後再試",
+                );
+            }
+        };
 
     match state
         .store
@@ -576,7 +582,9 @@ fn user_json(user: &UserAccount) -> Value {
 /// and the registry are kept equal by a test, so a mismatch is a bug to see
 /// rather than a row to hide.
 fn callable_by(registry: &laysi_ops::Registry, name: &str, role: &str) -> bool {
-    registry.get(name).is_none_or(|op| op.risk().allows_role(role))
+    registry
+        .get(name)
+        .is_none_or(|op| op.risk().allows_role(role))
 }
 
 /// `user_json` plus the role's display name.
@@ -718,7 +726,9 @@ mod tests {
     #[test]
     fn session_tokens_have_32_bytes_of_random_material_and_only_hashes_are_stored() {
         let secret = session_token();
-        let encoded = secret.strip_prefix("lys_s_").expect("session token 應有固定前綴");
+        let encoded = secret
+            .strip_prefix("lys_s_")
+            .expect("session token 應有固定前綴");
         assert_eq!(encoded.len(), 64);
         assert_ne!(laysi_store::token_hash(&secret), secret);
     }
@@ -735,11 +745,9 @@ mod tests {
             .await
             .expect("應可讀取登入失敗回應");
         assert_eq!(unknown_body, wrong_body);
-        assert!(
-            std::str::from_utf8(&unknown_body)
-                .expect("JSON 必須是 UTF-8")
-                .contains(LOGIN_FAILED_MESSAGE)
-        );
+        assert!(std::str::from_utf8(&unknown_body)
+            .expect("JSON 必須是 UTF-8")
+            .contains(LOGIN_FAILED_MESSAGE));
     }
 
     #[test]
@@ -762,7 +770,10 @@ mod tests {
             headers.insert("x-forwarded-proto", HeaderValue::from_str(value).unwrap());
             cookie_secure(&headers)
         };
-        assert!(!cookie_secure(&HeaderMap::new()), "沒有標頭就是明文，不加 Secure");
+        assert!(
+            !cookie_secure(&HeaderMap::new()),
+            "沒有標頭就是明文，不加 Secure"
+        );
         assert!(!with("http"));
         assert!(with("https"));
         assert!(with("HTTPS"), "協定名稱不分大小寫");
@@ -815,13 +826,12 @@ mod tests {
             })
             .await
             .expect("應可建立測試 session");
-        let stored_hash: String =
-            sqlx::query("SELECT token_hash FROM user_session WHERE id = $1")
-                .bind(live.id)
-                .fetch_one(store.pool())
-                .await
-                .expect("應可讀回測試 session")
-                .get("token_hash");
+        let stored_hash: String = sqlx::query("SELECT token_hash FROM user_session WHERE id = $1")
+            .bind(live.id)
+            .fetch_one(store.pool())
+            .await
+            .expect("應可讀回測試 session")
+            .get("token_hash");
         assert_eq!(stored_hash, token_hash);
         assert_ne!(stored_hash, secret);
         assert!(store
