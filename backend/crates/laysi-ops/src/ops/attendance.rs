@@ -32,6 +32,13 @@ use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+/// How many leave requests a query returns when it does not say.
+///
+/// Not everything: a company that has been running for years accumulates
+/// thousands, and the screen shows the recent ones. The caller asks for more
+/// by passing `limit`.
+const DEFAULT_LEAVE_LIMIT: i64 = 500;
 use std::collections::BTreeMap;
 
 /// Operations provided by this module.
@@ -201,9 +208,8 @@ impl WorkSchedule {
                 .map(|s| s.value.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        let time = |code: &str| {
-            value(code).and_then(|v| NaiveTime::parse_from_str(&v, "%H:%M").ok())
-        };
+        let time =
+            |code: &str| value(code).and_then(|v| NaiveTime::parse_from_str(&v, "%H:%M").ok());
         let minutes = |code: &str| value(code).and_then(|v| v.parse::<i64>().ok());
         let grace = minutes("late_grace_minutes");
         Ok(Self {
@@ -219,21 +225,24 @@ impl WorkSchedule {
                 .work_calendar()
                 .await?
                 .into_iter()
-                .filter_map(|d| {
-                    DayKind::from_code(&d.kind).map(|k| (d.on_date, (k, d.name)))
-                })
+                .filter_map(|d| DayKind::from_code(&d.kind).map(|k| (d.on_date, (k, d.name))))
                 .collect(),
         })
     }
 
     /// What this date is. The calendar states only the exceptions.
     pub fn day_kind(&self, day: NaiveDate) -> DayKind {
-        self.calendar.get(&day).map_or_else(|| default_day_kind(day), |(k, _)| *k)
+        self.calendar
+            .get(&day)
+            .map_or_else(|| default_day_kind(day), |(k, _)| *k)
     }
 
     /// The name the calendar gives this date, for a screen to print.
     pub fn day_name(&self, day: NaiveDate) -> Option<&str> {
-        self.calendar.get(&day).map(|(_, name)| name.as_str()).filter(|n| !n.is_empty())
+        self.calendar
+            .get(&day)
+            .map(|(_, name)| name.as_str())
+            .filter(|n| !n.is_empty())
     }
 
     /// The `overtime.toml` day type a date is priced under.
@@ -299,10 +308,7 @@ impl WorkSchedule {
         date: NaiveDate,
         arrived: Option<NaiveDateTime>,
     ) -> Option<NaiveDateTime> {
-        Some(
-            date.and_time(self.ends_at?)
-                + chrono::Duration::minutes(self.shift_minutes(arrived)),
-        )
+        Some(date.and_time(self.ends_at?) + chrono::Duration::minutes(self.shift_minutes(arrived)))
     }
 
     /// The moment after which an arrival counts as late: the start, plus the
@@ -322,7 +328,11 @@ impl WorkSchedule {
     /// How far past the deadline an arrival was, or `None` when no start time
     /// is stated. Zero when on time.
     pub fn late_by_seconds(&self, arrived: NaiveDateTime) -> Option<i64> {
-        Some((arrived - self.arrival_deadline(arrived.date())?).num_seconds().max(0))
+        Some(
+            (arrived - self.arrival_deadline(arrived.date())?)
+                .num_seconds()
+                .max(0),
+        )
     }
 
     /// Attendance beyond the normal working day, or `None` without both work
@@ -349,8 +359,11 @@ impl WorkSchedule {
         let arrived = arrived?;
         // Nothing is owed on a day nobody was asked to work, so the whole of
         // the attendance is beyond the normal day.
-        let normal =
-            if self.day_kind(arrived.date()).works() { self.daily_seconds()? } else { 0 };
+        let normal = if self.day_kind(arrived.date()).works() {
+            self.daily_seconds()?
+        } else {
+            0
+        };
         let attended = (left - arrived).num_seconds().max(0);
         Some((attended - self.break_seconds(arrived, left) - normal).max(0))
     }
@@ -366,7 +379,9 @@ impl WorkSchedule {
     pub fn daily_seconds(&self) -> Option<i64> {
         let (starts_at, ends_at) = (self.starts_at?, self.ends_at?);
         let paused = self.break_window().map_or(0, |(start, end)| {
-            (end.min(ends_at) - start.max(starts_at)).num_seconds().max(0)
+            (end.min(ends_at) - start.max(starts_at))
+                .num_seconds()
+                .max(0)
         });
         Some((ends_at - starts_at).num_seconds() - paused)
     }
@@ -492,7 +507,9 @@ impl PunchDay {
     pub fn json(&self, schedule: &WorkSchedule, limits: &OvertimeLimits) -> Value {
         let clock = |t: Option<NaiveDateTime>| t.map(|t| t.format(PUNCH_TIME).to_string());
         let late = self.arrived.and_then(|a| schedule.late(a));
-        let overtime = self.left.and_then(|l| schedule.overtime_seconds(self.arrived, l));
+        let overtime = self
+            .left
+            .and_then(|l| schedule.overtime_seconds(self.arrived, l));
         let day_type = limits.day_type(schedule, self.date);
         json!({
             "date": self.date,
@@ -637,10 +654,15 @@ pub(crate) fn summarise(
     limits: &OvertimeLimits,
 ) -> PunchSummary {
     let overtime = |d: &PunchDay| d.left.and_then(|l| schedule.overtime_seconds(d.arrived, l));
-    let overtime_seconds = schedule.daily_seconds().map(|_| days.iter().filter_map(overtime).sum());
+    let overtime_seconds = schedule
+        .daily_seconds()
+        .map(|_| days.iter().filter_map(overtime).sum());
     PunchSummary {
         days_with_arrival: days.iter().filter(|d| d.arrived.is_some()).count() as i64,
-        complete_days: days.iter().filter_map(|d| d.worked_seconds(schedule)).count() as i64,
+        complete_days: days
+            .iter()
+            .filter_map(|d| d.worked_seconds(schedule))
+            .count() as i64,
         open_days: days.iter().filter(|d| d.open()).count() as i64,
         worked_seconds: days.iter().filter_map(|d| d.worked_seconds(schedule)).sum(),
         late_days: schedule.starts_at.map(|_| {
@@ -750,7 +772,9 @@ fn annual_entitlement_for_service(
     rs: &Ruleset,
     months: u32,
 ) -> Result<Money, laysi_regulation::RegulationError> {
-    Ok(Money::from(laysi_regulation::annual_leave_days(rs, months)?))
+    Ok(Money::from(laysi_regulation::annual_leave_days(
+        rs, months,
+    )?))
 }
 
 fn leave_json(request: &LeaveRequest, balance: Option<AnnualBalance>) -> Value {
@@ -843,7 +867,10 @@ impl Operation for ListAttendancePunches {
         // display names collide.
         let mut by_employee: BTreeMap<i32, Vec<AttendancePunch>> = BTreeMap::new();
         for punch in punches {
-            by_employee.entry(punch.employee_id).or_default().push(punch);
+            by_employee
+                .entry(punch.employee_id)
+                .or_default()
+                .push(punch);
         }
 
         let mut rows = Vec::new();
@@ -859,8 +886,10 @@ impl Operation for ListAttendancePunches {
                 "summary": summary.json(),
             }));
             if only.as_ref().is_some_and(|e| e.id == *employee_id) {
-                detail =
-                    json!(days.iter().map(|d| d.json(&schedule, &limits)).collect::<Vec<_>>());
+                detail = json!(days
+                    .iter()
+                    .map(|d| d.json(&schedule, &limits))
+                    .collect::<Vec<_>>());
             }
         }
 
@@ -940,7 +969,10 @@ impl Operation for CorrectPunch {
         let at = NaiveTime::parse_from_str(text, "%H:%M:%S")
             .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M"))
             .map_err(|_| {
-                OpError::BadInput(format!("時間要寫成 HH:MM:SS 或 HH:MM，收到的是「{}」", i.at))
+                OpError::BadInput(format!(
+                    "時間要寫成 HH:MM:SS 或 HH:MM，收到的是「{}」",
+                    i.at
+                ))
             })?;
         if i.punched_on > ctx.today {
             return Err(OpError::BadInput("不能為未來的日期補登打卡".into()));
@@ -966,7 +998,10 @@ impl Operation for CorrectPunch {
 
         let schedule = WorkSchedule::load(ctx).await?;
         let month = i.punched_on.format("%Y-%m").to_string();
-        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
+        let days = punch_days(
+            &ctx.store.punches(&month, Some(employee.id)).await?,
+            ctx.offset,
+        );
         let day = days.iter().find(|d| d.date == i.punched_on);
         let limits = OvertimeLimits::resolve(ctx.today)?;
 
@@ -1032,7 +1067,7 @@ impl Operation for ListLeaveRequests {
 
         let requests = ctx
             .store
-            .leave_requests(i.include_done, i.limit.unwrap_or(i64::MAX))
+            .leave_requests(i.include_done, i.limit.unwrap_or(DEFAULT_LEAVE_LIMIT))
             .await?;
         let staff = ctx.store.employees(true, None).await?;
         let rs = laysi_regulation::resolve("annual_leave", ctx.today)?;
@@ -1179,7 +1214,6 @@ impl Operation for DecideLeaveRequest {
     }
 }
 
-
 // Punch corrections
 //
 // The employee proposes, and either the company reviews it or the company
@@ -1309,7 +1343,9 @@ pub(crate) fn overtime_month_totals(
             })
             .transpose()?
             .unwrap_or(Money::ZERO);
-        let entry = totals.entry(&o.emp_no).or_insert((o, Money::ZERO, Money::ZERO));
+        let entry = totals
+            .entry(&o.emp_no)
+            .or_insert((o, Money::ZERO, Money::ZERO));
         entry.1 += o.hours;
         entry.2 += pay;
     }
@@ -1360,12 +1396,19 @@ impl Operation for ListOvertimeRequests {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ListOvertimeRequestsInput = parse(input)?;
-        let month = i.month.unwrap_or_else(|| ctx.today.format("%Y-%m").to_string());
+        let month = i
+            .month
+            .unwrap_or_else(|| ctx.today.format("%Y-%m").to_string());
         if !valid_month(&month) {
-            return Err(OpError::BadInput(format!("月份格式為 YYYY-MM，收到「{month}」")));
+            return Err(OpError::BadInput(format!(
+                "月份格式為 YYYY-MM，收到「{month}」"
+            )));
         }
 
-        let all = ctx.store.overtime_requests(true, None, Some(&month)).await?;
+        let all = ctx
+            .store
+            .overtime_requests(true, None, Some(&month))
+            .await?;
         let rs = laysi_regulation::resolve("overtime", ctx.today)?;
         let ceiling = laysi_regulation::overtime_monthly_max_hours(rs)?;
         let include_done = i.include_done.unwrap_or(false);
@@ -1536,12 +1579,19 @@ impl Operation for ListPunchCorrections {
                 row
             })
             .collect::<Vec<_>>();
-        let waiting = corrections.iter().filter(|c| c.status == "submitted").count();
+        let waiting = corrections
+            .iter()
+            .filter(|c| c.status == "submitted")
+            .count();
 
         let summary = format!(
             "讀補登紀錄 · {} 筆（{waiting} 張待審核）· {}",
             rows.len(),
-            if auto { CORRECTION_AUTO } else { CORRECTION_REVIEW }
+            if auto {
+                CORRECTION_AUTO
+            } else {
+                CORRECTION_REVIEW
+            }
         );
         Ok(OpOutcome::new(
             json!({
@@ -1812,7 +1862,10 @@ mod tests {
             Some(day.and_hms_opt(18, 45, 0).unwrap()),
             "彈性把整天往後移，時數不變"
         );
-        assert_eq!(flex.latest_start().map(|t| t.to_string()), Some("10:00:00".into()));
+        assert_eq!(
+            flex.latest_start().map(|t| t.to_string()),
+            Some("10:00:00".into())
+        );
     }
 
     fn limits() -> OvertimeLimits {
@@ -1826,19 +1879,25 @@ mod tests {
     fn a_day_past_the_statutory_maximum_is_counted_on_the_summary() {
         let sched = schedule(Some("09:00"), Some("18:00"), 0);
         // 2026-08-06 is a Thursday, so four hours of extended time are allowed.
-        let over = punch_days(&[
-            punch("2026-08-06", "in", "09:00", "self"),
-            punch("2026-08-06", "out", "23:00", "self"),
-        ], tz());
+        let over = punch_days(
+            &[
+                punch("2026-08-06", "in", "09:00", "self"),
+                punch("2026-08-06", "out", "23:00", "self"),
+            ],
+            tz(),
+        );
         let stats = summarise(&over, &sched, &limits());
         assert_eq!(stats.overtime_seconds, Some(5 * 3600));
         assert_eq!(stats.over_limit_days, 1, "平日加班五小時超過單日上限");
         assert!(!stats.over_monthly_limit, "五小時還不到月上限");
 
-        let exact = punch_days(&[
-            punch("2026-08-06", "in", "09:00", "self"),
-            punch("2026-08-06", "out", "22:00", "self"),
-        ], tz());
+        let exact = punch_days(
+            &[
+                punch("2026-08-06", "in", "09:00", "self"),
+                punch("2026-08-06", "out", "22:00", "self"),
+            ],
+            tz(),
+        );
         assert_eq!(
             summarise(&exact, &sched, &limits()).over_limit_days,
             0,
@@ -1917,11 +1976,18 @@ mod tests {
             "早到的一小時算，中午那一小時不算"
         );
 
-        let days = punch_days(&[
-            punch("2026-08-06", "in", "09:00:00", "self"),
-            punch("2026-08-06", "out", "18:00:00", "self"),
-        ], tz());
-        assert_eq!(days[0].worked_seconds(&sched), Some(8 * 3600), "工作時數不含休息");
+        let days = punch_days(
+            &[
+                punch("2026-08-06", "in", "09:00:00", "self"),
+                punch("2026-08-06", "out", "18:00:00", "self"),
+            ],
+            tz(),
+        );
+        assert_eq!(
+            days[0].worked_seconds(&sched),
+            Some(8 * 3600),
+            "工作時數不含休息"
+        );
         assert_eq!(
             sched.leave_seconds(at("09:00:00"), at("18:00:00")),
             Some(8 * 3600),
@@ -1936,10 +2002,16 @@ mod tests {
     fn a_punch_reads_back_at_the_time_it_was_made() {
         let day = punch("2026-08-06", "in", "08:55:37", "self");
         assert_eq!(
-            business_time(day.punched_at, tz()).format(PUNCH_TIME).to_string(),
+            business_time(day.punched_at, tz())
+                .format(PUNCH_TIME)
+                .to_string(),
             "08:55:37"
         );
-        assert_eq!(day.punched_at.format(PUNCH_TIME).to_string(), "00:55:37", "存的是 UTC 瞬間");
+        assert_eq!(
+            day.punched_at.format(PUNCH_TIME).to_string(),
+            "00:55:37",
+            "存的是 UTC 瞬間"
+        );
     }
 
     /// The record keeps seconds, so the second decides a borderline arrival
@@ -1948,17 +2020,27 @@ mod tests {
     fn the_second_decides_a_borderline_arrival() {
         let sched = schedule(Some("09:00"), Some("18:00"), 5);
         let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at, tz());
-        assert_eq!(sched.late(at("09:05:00")), Some(false), "剛好等於寬限不算遲到");
+        assert_eq!(
+            sched.late(at("09:05:00")),
+            Some(false),
+            "剛好等於寬限不算遲到"
+        );
         assert_eq!(sched.late(at("09:05:01")), Some(true), "多一秒就是遲到");
         assert_eq!(sched.late_by_seconds(at("09:05:01")), Some(1));
         assert_eq!(sched.late_by_seconds(at("09:00:00")), Some(0));
 
-        let days = punch_days(&[
-            punch("2026-08-06", "in", "09:00:00", "self"),
-            punch("2026-08-06", "out", "18:00:30", "self"),
-        ], tz());
+        let days = punch_days(
+            &[
+                punch("2026-08-06", "in", "09:00:00", "self"),
+                punch("2026-08-06", "out", "18:00:30", "self"),
+            ],
+            tz(),
+        );
         assert_eq!(days[0].worked_seconds(&sched), Some(9 * 3600 + 30));
-        assert_eq!(sched.overtime_seconds(days[0].arrived, days[0].left.unwrap()), Some(30));
+        assert_eq!(
+            sched.overtime_seconds(days[0].arrived, days[0].left.unwrap()),
+            Some(30)
+        );
     }
 
     /// Lateness is a question the system refuses to answer until the company
@@ -1976,7 +2058,11 @@ mod tests {
     fn the_grace_period_decides_a_borderline_arrival() {
         let arrived = business_time(punch("2026-08-06", "in", "09:05", "self").punched_at, tz());
         assert_eq!(schedule(Some("09:00"), None, 0).late(arrived), Some(true));
-        assert_eq!(schedule(Some("09:00"), None, 5).late(arrived), Some(false), "剛好等於寬限不算遲到");
+        assert_eq!(
+            schedule(Some("09:00"), None, 5).late(arrived),
+            Some(false),
+            "剛好等於寬限不算遲到"
+        );
         assert_eq!(schedule(Some("09:00"), None, 10).late(arrived), Some(false));
     }
 
@@ -1985,11 +2071,14 @@ mod tests {
     #[test]
     fn an_unfinished_day_is_open_not_a_worked_day() {
         let sched = schedule(Some("09:00"), Some("18:00"), 5);
-        let days = punch_days(&[
-            punch("2026-08-05", "in", "08:58", "self"),
-            punch("2026-08-05", "out", "19:30", "self"),
-            punch("2026-08-06", "in", "09:20", "self"),
-        ], tz());
+        let days = punch_days(
+            &[
+                punch("2026-08-05", "in", "08:58", "self"),
+                punch("2026-08-05", "out", "19:30", "self"),
+                punch("2026-08-06", "in", "09:20", "self"),
+            ],
+            tz(),
+        );
         assert_eq!(days.len(), 2);
         assert_eq!(days[0].worked_seconds(&sched), Some(632 * 60));
         assert!(!days[0].open());
@@ -2014,11 +2103,14 @@ mod tests {
     #[test]
     fn a_month_lists_every_day_not_only_the_days_with_punches() {
         let day = |text: &str| NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap();
-        let punched = punch_days(&[
-            punch("2026-08-01", "in", "09:00", "self"),
-            punch("2026-08-05", "in", "09:00", "self"),
-            punch("2026-08-05", "out", "18:00", "self"),
-        ], tz());
+        let punched = punch_days(
+            &[
+                punch("2026-08-01", "in", "09:00", "self"),
+                punch("2026-08-05", "in", "09:00", "self"),
+                punch("2026-08-05", "out", "18:00", "self"),
+            ],
+            tz(),
+        );
         let days = month_days(punched, "2026-08", day("2026-08-03"), day("2026-08-07"));
 
         let dates: Vec<String> = days.iter().map(|d| d.date.to_string()).collect();
@@ -2035,7 +2127,10 @@ mod tests {
             "到職前的打卡留著，到職日到今天之間每天都有一列，今天之後沒有"
         );
         let fifth = days.iter().find(|d| d.date == day("2026-08-05")).unwrap();
-        assert_eq!(fifth.worked_seconds(&schedule(Some("09:00"), Some("18:00"), 0)), Some(9 * 3600));
+        assert_eq!(
+            fifth.worked_seconds(&schedule(Some("09:00"), Some("18:00"), 0)),
+            Some(9 * 3600)
+        );
         let sixth = days.iter().find(|d| d.date == day("2026-08-06")).unwrap();
         assert!(sixth.arrived.is_none() && sixth.left.is_none());
         assert!(!sixth.open(), "沒有上班卡的一天不是未打下班");
@@ -2057,8 +2152,7 @@ mod tests {
             .split_once("])))")
             .expect("leave_request.kind CHECK 沒有結尾")
             .0;
-        let migration_kinds: BTreeSet<&str> =
-            check.split('\'').skip(1).step_by(2).collect();
+        let migration_kinds: BTreeSet<&str> = check.split('\'').skip(1).step_by(2).collect();
         let labelled_kinds: BTreeSet<&str> = LEAVE_KINDS.iter().copied().collect();
 
         assert_eq!(

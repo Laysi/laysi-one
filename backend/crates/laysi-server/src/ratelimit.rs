@@ -28,6 +28,17 @@ enum Allowance {
     Live(fn() -> u32),
 }
 
+/// How many buckets may be held before the stale ones are swept.
+///
+/// The key is the caller's choice and login's is the submitted login name, so
+/// without a sweep an attacker naming a different account on every attempt
+/// leaves one entry per attempt in memory for the life of the process. A
+/// bucket from an earlier minute holds a count that its next use would reset,
+/// so dropping it changes no decision. Only keys seen within the current
+/// minute survive a sweep, which means the map is bounded by real traffic per
+/// minute rather than by this number.
+const MAX_BUCKETS: usize = 10_000;
+
 /// Fixed-window (per minute) counter. The bucket key is the caller's choice:
 /// `/mcp` counts per token id, login counts per login name.
 pub struct RateLimiter {
@@ -39,12 +50,18 @@ impl RateLimiter {
     /// `limit_per_minute = 0` means unlimited, which turns the whole layer off
     /// for local development or testing.
     pub fn new(limit_per_minute: u32) -> Self {
-        Self { allowance: Allowance::Fixed(limit_per_minute), buckets: Mutex::new(HashMap::new()) }
+        Self {
+            allowance: Allowance::Fixed(limit_per_minute),
+            buckets: Mutex::new(HashMap::new()),
+        }
     }
 
     /// A limiter whose allowance is whatever the setting currently says.
     pub fn from_setting(read: fn() -> u32) -> Self {
-        Self { allowance: Allowance::Live(read), buckets: Mutex::new(HashMap::new()) }
+        Self {
+            allowance: Allowance::Live(read),
+            buckets: Mutex::new(HashMap::new()),
+        }
     }
 
     fn limit_per_minute(&self) -> u32 {
@@ -66,8 +83,12 @@ impl RateLimiter {
         // break the rate limiter: a possibly incomplete count is better than
         // taking down /mcp entirely.
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        let bucket =
-            buckets.entry(key.to_string()).or_insert(Bucket { window, count: 0 });
+        if buckets.len() >= MAX_BUCKETS {
+            buckets.retain(|_, b| b.window == window);
+        }
+        let bucket = buckets
+            .entry(key.to_string())
+            .or_insert(Bucket { window, count: 0 });
         if bucket.window != window {
             bucket.window = window;
             bucket.count = 0;
@@ -78,7 +99,11 @@ impl RateLimiter {
 }
 
 fn current_window() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64 / 60
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+        / 60
 }
 
 /// Read the per-minute limit from the environment. Unset uses the default;
@@ -95,7 +120,10 @@ mod tests {
         assert!(limiter.allow("1"));
         assert!(limiter.allow("1"));
         assert!(!limiter.allow("1"), "第四次呼叫應被擋下");
-        assert!(!limiter.allow("1"), "被擋下之後仍應持續拒絕，不能因為又呼叫一次就放行");
+        assert!(
+            !limiter.allow("1"),
+            "被擋下之後仍應持續拒絕，不能因為又呼叫一次就放行"
+        );
     }
 
     #[test]
@@ -105,6 +133,29 @@ mod tests {
         assert!(!limiter.allow("1"));
         // Token 2's allowance must not be consumed by token 1.
         assert!(limiter.allow("2"));
+    }
+
+    /// One entry per attempted login name would otherwise accumulate for the
+    /// life of the process.
+    #[test]
+    fn buckets_from_an_earlier_minute_are_swept() {
+        let limiter = RateLimiter::new(1);
+        {
+            let mut buckets = limiter.buckets.lock().expect("測試中的鎖不會被毒化");
+            for i in 0..MAX_BUCKETS {
+                buckets.insert(
+                    format!("舊 {i}"),
+                    Bucket {
+                        window: 0,
+                        count: 1,
+                    },
+                );
+            }
+        }
+
+        assert!(limiter.allow("新"));
+        let buckets = limiter.buckets.lock().expect("測試中的鎖不會被毒化");
+        assert_eq!(buckets.len(), 1, "上一分鐘的桶應被清掉，只留這一次的");
     }
 
     #[test]

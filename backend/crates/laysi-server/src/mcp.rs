@@ -38,6 +38,8 @@ mod code {
     /// -32000 to -32099 is the range the spec reserves for implementation
     /// defined server errors.
     pub const RATE_LIMITED: i32 = -32029;
+    /// The server could not answer, as opposed to answering "nothing".
+    pub const INTERNAL: i32 = -32603;
 }
 
 fn ok(id: Value, result: Value) -> Response {
@@ -119,13 +121,19 @@ fn denial_reason(token: &laysi_store::ApiToken, at: DateTime<Utc>) -> Option<Den
 /// Rejections whose reason is worth recording in the audit (revoked,
 /// expired). A missing or mismatched hash is a random probe with no
 /// trustworthy identity to attribute, and is not recorded.
-async fn audit_denied_token(store: &laysi_store::Store, token: &laysi_store::ApiToken, denial: Denial) {
+async fn audit_denied_token(
+    store: &laysi_store::Store,
+    token: &laysi_store::ApiToken,
+    denial: Denial,
+) {
     let reason = match denial {
         Denial::Revoked => "已撤銷",
         Denial::Expired => "已過期",
     };
-    let summary =
-        format!("MCP 認證被拒絕 · Token「{}」（{}…）{reason}", token.name, token.prefix);
+    let summary = format!(
+        "MCP 認證被拒絕 · Token「{}」（{}…）{reason}",
+        token.name, token.prefix
+    );
     if let Err(error) = store
         .write_audit(
             &token.actor,
@@ -172,7 +180,10 @@ async fn authenticate_mcp(
     {
         return Err(McpAuthError::Unauthorized);
     }
-    Ok(AuthenticatedMcp { identity: token_identity(&token), token_id: token.id })
+    Ok(AuthenticatedMcp {
+        identity: token_identity(&token),
+        token_id: token.id,
+    })
 }
 
 fn auth_error(error: McpAuthError) -> Response {
@@ -311,16 +322,25 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
             // with the permission system — and a staff token would otherwise
             // see sixty tools it cannot use.
             //
-            // A failed lookup lists nothing rather than everything: the tool
-            // list is not the enforcement point, but it must not widen when
-            // the database is unreachable.
-            let grants = s.store.tool_grants().await.unwrap_or_default();
-            let permitted = s.store.permitted_ops(&identity.actor_role).await.unwrap_or_default();
+            // A database failure is reported as one. Answering with an empty
+            // list would say "you are granted nothing", which is a valid
+            // answer to a different question, and the operator looking for the
+            // missing tools has nothing to go on.
+            let (Ok(grants), Ok(permitted)) = (
+                s.store.tool_grants().await,
+                s.store.permitted_ops(&identity.actor_role).await,
+            ) else {
+                return err(id, code::INTERNAL, "讀不到工具授權，請稍後再試");
+            };
             let tools: Vec<Value> = s
                 .registry
                 .iter()
                 .filter(|op| {
-                    grants.iter().find(|(n, _)| n == op.name()).map(|(_, e)| *e).unwrap_or(false)
+                    grants
+                        .iter()
+                        .find(|(n, _)| n == op.name())
+                        .map(|(_, e)| *e)
+                        .unwrap_or(false)
                 })
                 .filter(|op| {
                     op.risk().allows_role(&identity.actor_role) && permitted.contains(op.name())
@@ -375,7 +395,11 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
             }
         }
 
-        other => err(id, code::METHOD_NOT_FOUND, format!("不支援的 method：{other}")),
+        other => err(
+            id,
+            code::METHOD_NOT_FOUND,
+            format!("不支援的 method：{other}"),
+        ),
     }
 }
 
@@ -559,7 +583,11 @@ mod tests {
             .expect("應可清除測試 token");
     }
 
-    fn sample_token(revoked: bool, rotate_days: Option<i32>, created_days_ago: i64) -> laysi_store::ApiToken {
+    fn sample_token(
+        revoked: bool,
+        rotate_days: Option<i32>,
+        created_days_ago: i64,
+    ) -> laysi_store::ApiToken {
         laysi_store::ApiToken {
             id: 1,
             name: "測試 Token".into(),
@@ -586,16 +614,25 @@ mod tests {
         assert!(denial_reason(&live, Utc::now()).is_none());
 
         let revoked = sample_token(true, None, 0);
-        assert!(matches!(denial_reason(&revoked, Utc::now()), Some(Denial::Revoked)));
+        assert!(matches!(
+            denial_reason(&revoked, Utc::now()),
+            Some(Denial::Revoked)
+        ));
 
         let expired = sample_token(false, Some(1), 3);
-        assert!(matches!(denial_reason(&expired, Utc::now()), Some(Denial::Expired)));
+        assert!(matches!(
+            denial_reason(&expired, Utc::now()),
+            Some(Denial::Expired)
+        ));
 
         // Revocation is checked before expiry: when both apply the audit
         // summary should say revoked, because revocation is an explicit human
         // decision while expiry is only a rotation deadline passing.
         let both = sample_token(true, Some(1), 3);
-        assert!(matches!(denial_reason(&both, Utc::now()), Some(Denial::Revoked)));
+        assert!(matches!(
+            denial_reason(&both, Utc::now()),
+            Some(Denial::Revoked)
+        ));
     }
 
     #[test]

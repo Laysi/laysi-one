@@ -62,10 +62,18 @@ pub enum StorageError {
         "檔案內容與登記的雜湊不符（{key}）：登記 {expected}，實際 {actual}。\
          這份檔案在上傳之後被動過，系統不會把它交出去。"
     )]
-    ChecksumMismatch { key: String, expected: String, actual: String },
+    ChecksumMismatch {
+        key: String,
+        expected: String,
+        actual: String,
+    },
 
     #[error("檔案 {name} 有 {size} 位元組，超過單檔上限 {limit}")]
-    TooLarge { name: String, size: usize, limit: usize },
+    TooLarge {
+        name: String,
+        size: usize,
+        limit: usize,
+    },
 
     #[error("檔案是空的：{name}")]
     Empty { name: String },
@@ -73,7 +81,10 @@ pub enum StorageError {
 
 impl StorageError {
     fn s3<E: std::fmt::Display, R>(op: &'static str) -> impl FnOnce(SdkError<E, R>) -> Self {
-        move |e| StorageError::S3 { op, message: format!("{e}") }
+        move |e| StorageError::S3 {
+            op,
+            message: format!("{e}"),
+        }
     }
 }
 
@@ -120,7 +131,7 @@ pub struct ObjectStore {
 }
 
 impl ObjectStore {
-/// Build from the environment.
+    /// Build from the environment.
     ///
     /// A missing `RUSTFS_ENDPOINT`, `RUSTFS_ACCESS_KEY` or
     /// `RUSTFS_SECRET_KEY` is an error rather than a start that only fails
@@ -134,7 +145,13 @@ impl ObjectStore {
             .ok_or_else(|| StorageError::NotConfigured("RUSTFS_SECRET_KEY".into()))?;
         let bucket = std::env::var("RUSTFS_BUCKET").unwrap_or_else(|_| DEFAULT_BUCKET.into());
         let region = std::env::var("RUSTFS_REGION").unwrap_or_else(|_| DEFAULT_REGION.into());
-        Ok(Self::new(&endpoint, &access_key, &secret_key, &bucket, &region))
+        Ok(Self::new(
+            &endpoint,
+            &access_key,
+            &secret_key,
+            &bucket,
+            &region,
+        ))
     }
 
     pub fn new(
@@ -198,7 +215,13 @@ impl ObjectStore {
         match self.client.head_bucket().bucket(&self.bucket).send().await {
             Ok(_) => Ok(false),
             Err(_) => {
-                match self.client.create_bucket().bucket(&self.bucket).send().await {
+                match self
+                    .client
+                    .create_bucket()
+                    .bucket(&self.bucket)
+                    .send()
+                    .await
+                {
                     Ok(_) => Ok(true),
                     // Two processes starting together will race; treat "someone
                     // else already created it" as success.
@@ -209,7 +232,10 @@ impl ObjectStore {
                         {
                             Ok(false)
                         } else {
-                            Err(StorageError::S3 { op: "create_bucket", message: msg })
+                            Err(StorageError::S3 {
+                                op: "create_bucket",
+                                message: msg,
+                            })
                         }
                     }
                 }
@@ -226,8 +252,11 @@ impl ObjectStore {
     pub async fn health(&self) -> BucketHealth {
         match self.client.list_buckets().send().await {
             Ok(out) => {
-                let names: Vec<String> =
-                    out.buckets().iter().filter_map(|b| b.name().map(str::to_string)).collect();
+                let names: Vec<String> = out
+                    .buckets()
+                    .iter()
+                    .filter_map(|b| b.name().map(str::to_string))
+                    .collect();
                 BucketHealth {
                     endpoint: self.endpoint.clone(),
                     bucket: self.bucket.clone(),
@@ -261,7 +290,9 @@ impl ObjectStore {
         display_name: &str,
     ) -> Result<StoredObject> {
         if body.is_empty() {
-            return Err(StorageError::Empty { name: display_name.to_string() });
+            return Err(StorageError::Empty {
+                name: display_name.to_string(),
+            });
         }
         if body.len() > MAX_OBJECT_BYTES {
             return Err(StorageError::TooLarge {
@@ -293,6 +324,26 @@ impl ObjectStore {
         })
     }
 
+    /// Remove one object, reporting nothing.
+    ///
+    /// Only for undoing an upload whose database row could not be written: an
+    /// orphan in the bucket is invisible and counts against storage forever,
+    /// while a failed removal leaves exactly the orphan there would have been
+    /// anyway. Documents themselves are never deleted -- the archive is
+    /// immutable -- so this has no caller on any success path.
+    pub async fn discard(&self, key: &str) {
+        let outcome = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await;
+        if let Err(e) = outcome {
+            tracing::warn!(key, error = %e, "上傳失敗後清不掉物件，桶子裡留下一個孤兒");
+        }
+    }
+
     /// Retrieve a file and verify its hash.
     ///
     /// `expected` is the hash registered in the database. A mismatch returns
@@ -309,9 +360,14 @@ impl ObjectStore {
             .map_err(|e| {
                 let msg = format!("{e}");
                 if msg.contains("NoSuchKey") || msg.contains("NotFound") {
-                    StorageError::NotFound { key: key.to_string() }
+                    StorageError::NotFound {
+                        key: key.to_string(),
+                    }
                 } else {
-                    StorageError::S3 { op: "get_object", message: msg }
+                    StorageError::S3 {
+                        op: "get_object",
+                        message: msg,
+                    }
                 }
             })?;
 
@@ -319,7 +375,10 @@ impl ObjectStore {
             .body
             .collect()
             .await
-            .map_err(|e| StorageError::S3 { op: "get_object.body", message: format!("{e}") })?
+            .map_err(|e| StorageError::S3 {
+                op: "get_object.body",
+                message: format!("{e}"),
+            })?
             .into_bytes();
 
         let actual = blake3::hash(&body).to_hex().to_string();
@@ -380,7 +439,13 @@ pub fn object_key(period: &str, doc_no: &str, version_no: i32, file_name: &str) 
 fn sanitise(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let trimmed = cleaned.trim_matches('_');
     if trimmed.is_empty() {
@@ -397,7 +462,11 @@ fn sanitise(name: &str) -> String {
 /// inline. There is no reason to refuse to guess here, because no amount or
 /// legal effect depends on it.
 pub fn guess_content_type(file_name: &str) -> &'static str {
-    let ext = file_name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     match ext.as_str() {
         "pdf" => "application/pdf",
         "png" => "image/png",
@@ -438,11 +507,17 @@ mod tests {
     #[test]
     fn keys_are_ascii_and_never_empty() {
         let key = object_key("2607", "D2607-002", 1, "供應商請款單.pdf");
-        assert!(key.is_ascii(), "物件鍵要能安全地出現在網址與命令列裡：{key}");
+        assert!(
+            key.is_ascii(),
+            "物件鍵要能安全地出現在網址與命令列裡：{key}"
+        );
         assert!(key.ends_with("_.pdf") || key.ends_with(".pdf"));
 
         let only_chinese = object_key("2607", "D2607-003", 1, "合約");
-        assert!(only_chinese.ends_with("file"), "全中文檔名也要有個位置：{only_chinese}");
+        assert!(
+            only_chinese.ends_with("file"),
+            "全中文檔名也要有個位置：{only_chinese}"
+        );
     }
 
     #[test]
@@ -459,6 +534,10 @@ mod tests {
         let b = checksum(b"V2607-018 8421");
         assert_ne!(a, b);
         assert_eq!(a.len(), 64, "BLAKE3 十六進位是 64 個字");
-        assert_eq!(a, checksum(b"V2607-018 8420"), "同樣的內容一定得到同樣的雜湊");
+        assert_eq!(
+            a,
+            checksum(b"V2607-018 8420"),
+            "同樣的內容一定得到同樣的雜湊"
+        );
     }
 }

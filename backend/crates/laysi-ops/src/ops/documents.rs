@@ -26,7 +26,11 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(ListDocuments), Box::new(UploadDocument), Box::new(GetDocument)]
+    vec![
+        Box::new(ListDocuments),
+        Box::new(UploadDocument),
+        Box::new(GetDocument),
+    ]
 }
 
 /// Bytes in a gigabyte. A unit conversion, not a setting.
@@ -126,7 +130,10 @@ impl Operation for ListDocuments {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ListDocumentsInput = parse(input)?;
-        let docs = ctx.store.documents(i.q.as_deref(), i.limit.unwrap_or(50)).await?;
+        let docs = ctx
+            .store
+            .documents(i.q.as_deref(), i.limit.unwrap_or(50))
+            .await?;
         let stats = ctx.store.document_stats().await?;
 
         // The bucket side is measured independently. If the database says 3 MB
@@ -215,8 +222,15 @@ pub struct UploadDocumentInput {
 }
 
 /// Permitted document kinds. Kept in step with the CHECK in migrations/0007.
-const KINDS: [&str; 7] =
-    ["receipt", "vendor_bill", "expense_receipt", "bank", "contract", "closing", "other"];
+const KINDS: [&str; 7] = [
+    "receipt",
+    "vendor_bill",
+    "expense_receipt",
+    "bank",
+    "contract",
+    "closing",
+    "other",
+];
 const LINK_TYPES: [&str; 9] = [
     "",
     "voucher",
@@ -273,7 +287,9 @@ impl Operation for UploadDocument {
         }
         let link_type = i.link_type.as_deref().unwrap_or("");
         if !LINK_TYPES.contains(&link_type) {
-            return Err(OpError::BadInput(format!("未支援「{link_type}」關聯單據種類")));
+            return Err(OpError::BadInput(format!(
+                "未支援「{link_type}」關聯單據種類"
+            )));
         }
         let link_ref = i.link_ref.as_deref().unwrap_or("");
         if link_type.is_empty() != link_ref.is_empty() {
@@ -313,11 +329,20 @@ impl Operation for UploadDocument {
         let content_type = storage::guess_content_type(&i.file_name);
         let stored = objects.put(&key, &body, content_type, &i.file_name).await?;
 
-        // 3. Register it.
-        let doc = ctx
+        // 3. Register it. If that fails the object has to go: the number is
+        //    spent either way, but a file nothing points at is invisible and
+        //    counts against storage forever.
+        let doc = match ctx
             .store
             .record_document_version(&slot, &stored, &i.file_name, &ctx.actor)
-            .await?;
+            .await
+        {
+            Ok(doc) => doc,
+            Err(e) => {
+                objects.discard(&stored.key).await;
+                return Err(e.into());
+            }
+        };
 
         let summary = format!(
             "上傳 {} · {} v{} {} · 指紋 {}{}",
@@ -326,7 +351,11 @@ impl Operation for UploadDocument {
             doc.version_no,
             human_size(doc.byte_size),
             short_checksum(&doc.checksum),
-            if link_ref.is_empty() { String::new() } else { format!(" · 掛在 {link_ref}") }
+            if link_ref.is_empty() {
+                String::new()
+            } else {
+                format!(" · 掛在 {link_ref}")
+            }
         );
         Ok(OpOutcome::new(
             json!({

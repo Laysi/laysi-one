@@ -22,7 +22,7 @@
 //! therefore listed explicitly here, and everything else still goes through
 //! the registry.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -42,6 +42,27 @@ mod setup;
 /// MCP protocol version. Tied to the shape of `tools/list`; check both when
 /// bumping it.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// Largest sign-in body accepted. A login, a password change and the bootstrap
+/// call are all a few hundred bytes; anything larger is not a client of this
+/// endpoint, and these are the only routes reachable without a session.
+const AUTH_BODY_LIMIT: usize = 64 * 1024;
+
+/// Largest operation body accepted, on both `/v1/ops/{name}` and `/mcp`.
+///
+/// axum applies its own 2 MB default to every `Json` and `Bytes` extractor,
+/// which is below what `upload_document` needs: a file is base64 inside the
+/// operation input, so a 25 MB one (`storage::MAX_OBJECT_BYTES`) arrives as
+/// roughly 33.4 MB of body. The request was rejected by the extractor before
+/// the operation's own size check could report anything, and the screen
+/// offers files up to that same 25 MB. The headroom above 4/3 covers the JSON
+/// envelope and the file name.
+const OPS_BODY_LIMIT: usize = 40 * 1024 * 1024;
+
+// base64 costs four characters per three bytes, so the ceiling has to clear
+// that much of a maximum file before the JSON envelope is even counted.
+const _: () = assert!(OPS_BODY_LIMIT > laysi_store::storage::MAX_OBJECT_BYTES / 3 * 4);
+const _: () = assert!(AUTH_BODY_LIMIT < OPS_BODY_LIMIT);
 
 /// Which routes this process mounts, decided by `LAYSI_SERVE`.
 ///
@@ -199,8 +220,8 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("RUSTFS_ENDPOINT").unwrap_or_else(|_| "http://rustfs:9000".into());
     let auth = auth::AuthConfig::from_env()?;
     let setup = setup::SetupConfig::from_env()?;
-    let cors_origin = std::env::var("CORS_ALLOWED_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:5173".into());
+    let cors_origin =
+        std::env::var("CORS_ALLOWED_ORIGIN").unwrap_or_else(|_| "http://localhost:5173".into());
     let cors_origin = HeaderValue::from_str(&cors_origin)
         .map_err(|e| anyhow::anyhow!("CORS_ALLOWED_ORIGIN 不是有效的 HTTP origin：{e}"))?;
     // MCP Origin allow list, comma separated, empty by default. That accepts
@@ -225,7 +246,6 @@ async fn main() -> anyhow::Result<()> {
     laysi_ops::load_policy_settings(&store).await;
     tracing::info!(offset = %laysi_domain::format_business_offset(offset), "記帳時區");
     tracing::info!(version = ?store.migration_version().await?, "migrations 完成");
-
 
     // 3. Rulesets
     //
@@ -271,7 +291,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let registry = Registry::new();
-    tracing::info!(operations = registry.len(), "操作註冊表就緒（REST 與 MCP 共用）");
+    tracing::info!(
+        operations = registry.len(),
+        "操作註冊表就緒（REST 與 MCP 共用）"
+    );
 
     tracing::info!(
         limit_per_minute = laysi_ops::mcp_rate_limit_per_minute(),
@@ -310,25 +333,35 @@ async fn main() -> anyhow::Result<()> {
 
     if serve_role.serves_rest() {
         app = app
-            .route("/v1/auth/login", post(auth::login))
-            .route("/v1/auth/logout", post(auth::logout))
-            .route("/v1/auth/me", get(auth::me))
-            .route("/v1/auth/change-password", post(auth::change_password))
-            .route("/v1/auth/bootstrap", post(setup::bootstrap))
-            .route("/v1/auth/oauth/start", get(oidc::start))
-            .route("/v1/auth/oauth/callback", get(oidc::callback))
+            .merge(
+                Router::new()
+                    .route("/v1/auth/login", post(auth::login))
+                    .route("/v1/auth/logout", post(auth::logout))
+                    .route("/v1/auth/me", get(auth::me))
+                    .route("/v1/auth/change-password", post(auth::change_password))
+                    .route("/v1/auth/bootstrap", post(setup::bootstrap))
+                    .route("/v1/auth/oauth/start", get(oidc::start))
+                    .route("/v1/auth/oauth/callback", get(oidc::callback))
+                    .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+            )
             .route("/v1/meta", get(meta))
             .route("/v1/brand/mark.svg", get(brand_mark))
             .route("/v1/brand/monogram.svg", get(brand_monogram))
             .route("/v1/ops", get(list_ops))
-            .route("/v1/ops/{name}", post(call_op));
+            .route(
+                "/v1/ops/{name}",
+                post(call_op).layer(DefaultBodyLimit::max(OPS_BODY_LIMIT)),
+            );
     }
 
     // In the `mcp` role nothing other than /mcp may be mounted. The reason
     // that container exists is that the externally exposed process has no
     // REST at all, rather than a reverse proxy blocking it.
     if serve_role.serves_mcp() {
-        app = app.route("/mcp", post(mcp::handle));
+        app = app.route(
+            "/mcp",
+            post(mcp::handle).layer(DefaultBodyLimit::max(OPS_BODY_LIMIT)),
+        );
     }
 
     let app = app
@@ -388,24 +421,56 @@ pub fn ctx_from(
 
 // Endpoints
 
-async fn healthz(State(s): State<Shared>) -> Response {
+/// Liveness for anyone, detail for an administrator.
+///
+/// This route is reachable without signing in, and has to be: the compose
+/// healthcheck runs before an account exists and the reverse proxy in front
+/// of the web container passes it through. So the anonymous answer is only
+/// whether each part is up. The storage endpoint and bucket, the migration
+/// version and the brand fingerprint describe the deployment's insides, and
+/// go out only to a signed-in administrator -- which is who the security
+/// screen shows them to anyway.
+async fn healthz(State(s): State<Shared>, headers: HeaderMap) -> Response {
     let migration = s.store.migration_version().await.ok().flatten();
     let db_ok = migration.is_some();
+    let rustfs = probe_rustfs(&s).await;
+    let rustfs_ok = rustfs.get("ok").cloned().unwrap_or(Value::Bool(false));
 
-    let body = json!({
+    let mut body = json!({
         "status": if db_ok { "ok" } else { "degraded" },
-        "brand": {
+        "brand": { "ok": true },
+        "db": { "ok": db_ok },
+        "rustfs": { "ok": rustfs_ok },
+    });
+
+    if admin_session(&s, &headers).await {
+        body["brand"] = json!({
             "ok": true,
             "files": s.brand.files,
             "signed": s.brand.signed,
             "fingerprint": s.brand.fingerprint,
-        },
-        "db": { "ok": db_ok, "migration": migration },
-        "rustfs": probe_rustfs(&s).await,
-        "operations": s.registry.len(),
-    });
-    let code = if db_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+        });
+        body["db"] = json!({ "ok": db_ok, "migration": migration });
+        body["rustfs"] = rustfs;
+        body["operations"] = json!(s.registry.len());
+    }
+
+    let code = if db_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     (code, Json(body)).into_response()
+}
+
+/// Whether the request carries a session cookie belonging to an administrator.
+/// Anything else -- no cookie, an expired one, another role -- is a no, and
+/// never an error: this only decides how much `/healthz` says.
+async fn admin_session(s: &Shared, headers: &HeaderMap) -> bool {
+    match auth::authenticate_session(s, headers).await {
+        Ok(verified) => verified.identity().actor_role == laysi_ops::ROLE_ADMIN,
+        Err(_) => false,
+    }
 }
 
 /// RustFS probe: actually call S3 to list buckets.
@@ -576,10 +641,18 @@ async fn call_op(
         Ok(verified) => verified,
         Err(error) => return error.into_response(),
     };
-    let Json(body) = body.unwrap_or(Json(CallBody { input: Value::Null, prompt: None }));
+    let Json(body) = body.unwrap_or(Json(CallBody {
+        input: Value::Null,
+        prompt: None,
+    }));
     // Operations from the screen use the Ui channel and are not subject to the
     // AI tool grants.
-    let ctx = ctx_from(&s, &verified.identity(), body.prompt, laysi_ops::Channel::Ui);
+    let ctx = ctx_from(
+        &s,
+        &verified.identity(),
+        body.prompt,
+        laysi_ops::Channel::Ui,
+    );
 
     match s.registry.dispatch(&ctx, &name, body.input).await {
         Ok(data) => {
@@ -597,13 +670,16 @@ async fn call_op(
                 laysi_ops::OpError::UnknownTool(_) => StatusCode::NOT_FOUND,
                 laysi_ops::OpError::ToolDisabled { .. }
                 | laysi_ops::OpError::NeedsBoss { .. }
-                | laysi_ops::OpError::NotPermitted { .. } => {
-                    StatusCode::FORBIDDEN
-                }
+                | laysi_ops::OpError::NotPermitted { .. } => StatusCode::FORBIDDEN,
                 laysi_ops::OpError::BadInput(_) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            (code, Json(json!({ "ok": false, "error": { "code": e.code(), "message": e.to_string() }})))
+            (
+                code,
+                Json(
+                    json!({ "ok": false, "error": { "code": e.code(), "message": e.to_string() }}),
+                ),
+            )
                 .into_response()
         }
     }
