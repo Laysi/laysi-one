@@ -264,6 +264,42 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { laysi_ops::ops::calendar::seed(&store, today).await });
     }
 
+    // Audit retention, once a day for as long as the server runs.
+    //
+    // The period is read on every pass rather than captured, so a change to
+    // the setting takes effect on the next pass without a restart. An empty
+    // or unparseable value keeps everything: retention has to be something a
+    // company decided, and a typo must not be the thing that deletes records.
+    // Running here rather than in the backup container keeps the two apart --
+    // an installation that never turned backups on still honours its own
+    // retention period.
+    {
+        let store = store.clone();
+        tokio::spawn(async move {
+            loop {
+                let days = store
+                    .company_settings()
+                    .await
+                    .ok()
+                    .and_then(|s| {
+                        s.iter()
+                            .find(|s| s.code == laysi_ops::AUDIT_KEEP_SETTING)
+                            .map(|s| s.value.trim().to_string())
+                    })
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .filter(|d| *d > 0);
+                if let Some(days) = days {
+                    match store.purge_audit(days).await {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!(removed = n, days, "已清除逾期稽核紀錄"),
+                        Err(error) => tracing::error!(%error, "清除逾期稽核紀錄失敗"),
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(86_400)).await;
+            }
+        });
+    }
+
     // 4. Object storage
     //
     // Create the bucket if it does not exist. RustFS being down does not
@@ -399,11 +435,15 @@ pub fn today() -> chrono::NaiveDate {
         .unwrap_or_else(|| laysi_domain::business_today(laysi_ops::business_offset()))
 }
 
+/// `client_ip` is the already-parsed address, not the header it came from:
+/// identity is resolved from a server-side credential and nothing the request
+/// carries may reach it, so no `HeaderMap` is accepted here.
 pub fn ctx_from(
     state: &Shared,
     identity: &auth::VerifiedIdentity,
     prompt: Option<String>,
     channel: laysi_ops::Channel,
+    client_ip: Option<String>,
 ) -> OpCtx {
     OpCtx {
         store: state.store.clone(),
@@ -414,6 +454,7 @@ pub fn ctx_from(
         employee_id: identity.employee_id,
         prompt,
         channel,
+        client_ip,
         today: today(),
         offset: laysi_ops::business_offset(),
     }
@@ -652,6 +693,7 @@ async fn call_op(
         &verified.identity(),
         body.prompt,
         laysi_ops::Channel::Ui,
+        auth::client_ip(&headers),
     );
 
     match s.registry.dispatch(&ctx, &name, body.input).await {

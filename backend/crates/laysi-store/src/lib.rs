@@ -2383,12 +2383,13 @@ impl Store {
         summary: &str,
         outcome: &str,
         voucher_no: Option<&str>,
+        client_ip: Option<&str>,
     ) -> Result<i64> {
         Ok(sqlx::query(
             "INSERT INTO ai_audit_log
                (actor, actor_role, tool_name, risk, prompt, channel, params,
-                result_summary, outcome, voucher_no)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
+                result_summary, outcome, voucher_no, client_ip)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id",
         )
         .bind(actor)
         .bind(actor_role)
@@ -2400,9 +2401,25 @@ impl Store {
         .bind(summary)
         .bind(outcome)
         .bind(voucher_no)
+        .bind(client_ip)
         .fetch_one(&self.pool)
         .await?
         .get("id"))
+    }
+
+    /// Remove audit rows older than `keep_days`, returning how many went.
+    ///
+    /// The retention period is a `company_setting`, so this is the only place
+    /// that deletes from `ai_audit_log`; nothing else in the codebase does,
+    /// which is what makes the setting an answer to "how long do you keep it".
+    pub async fn purge_audit(&self, keep_days: i64) -> Result<u64> {
+        Ok(
+            sqlx::query("DELETE FROM ai_audit_log WHERE at < now() - ($1 || ' days')::interval")
+                .bind(keep_days.to_string())
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
     }
     /// Full tool grant listing. `tool_grants` returns only the switches,
     /// while the security screen also needs the risk and the description.
@@ -2452,17 +2469,36 @@ impl Store {
         }))
     }
 
-    pub async fn recent_audit(&self, limit: i64) -> Result<Vec<AuditEntry>> {
+    /// Audit rows newest first, optionally bounded to an instant range.
+    ///
+    /// The bounds are instants rather than dates because `at` is a timestamp:
+    /// the caller turns the business dates a person picked into the two
+    /// instants that delimit them, using the offset that call ran under.
+    ///
+    /// `actor_role` falls back through the role name, then the raw code, then
+    /// 「未知」, which is what a failed login on a name that has no account
+    /// leaves behind.
+    pub async fn recent_audit(
+        &self,
+        limit: i64,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+    ) -> Result<Vec<AuditEntry>> {
         Ok(sqlx::query(
             "SELECT a.id, a.at, a.actor, a.actor_role,
-                    COALESCE(r.name, a.actor_role) AS actor_role_name,
+                    COALESCE(r.name, NULLIF(a.actor_role, ''), '未知') AS actor_role_name,
                     a.tool_name, a.risk, a.prompt, a.channel,
-                    a.result_summary, a.outcome, a.voucher_no, a.reverted
+                    a.result_summary, a.outcome, a.voucher_no, a.reverted,
+                    a.client_ip
                FROM ai_audit_log a
                LEFT JOIN role r ON r.code = a.actor_role
+              WHERE ($2::timestamptz IS NULL OR a.at >= $2)
+                AND ($3::timestamptz IS NULL OR a.at < $3)
               ORDER BY a.at DESC, a.id DESC LIMIT $1",
         )
         .bind(limit)
+        .bind(from)
+        .bind(to)
         .fetch_all(&self.pool)
         .await?
         .iter()
@@ -2480,6 +2516,7 @@ impl Store {
             outcome: r.get("outcome"),
             voucher_no: r.get("voucher_no"),
             reverted: r.get("reverted"),
+            client_ip: r.get("client_ip"),
         })
         .collect())
     }
@@ -7005,6 +7042,8 @@ pub struct AuditEntry {
     pub outcome: String,
     pub voucher_no: Option<String>,
     pub reverted: bool,
+    /// Source address, from the proxy header. `None` when no proxy set one.
+    pub client_ip: Option<String>,
 }
 
 /// One row of the receivables subsidiary ledger.

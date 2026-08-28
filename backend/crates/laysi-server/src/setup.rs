@@ -273,6 +273,7 @@ pub async fn bootstrap(
             "由網頁完成系統初始化，建立第一個帳號",
             "ok",
             None,
+            crate::auth::client_ip(&headers).as_deref(),
         )
         .await
     {

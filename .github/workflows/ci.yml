@@ -64,6 +64,13 @@ jobs:
       # without re-signing must not reach main.
       - run: cargo run -p laysi-brand --bin laysi-brandhash -- --verify
 
+      # Known vulnerabilities in the dependency tree, against the RustSec
+      # advisory database. The run itself is the record an audit asks for, so
+      # it must not be conditional on anything.
+      - uses: taiki-e/install-action@cargo-audit
+
+      - run: cargo audit
+
       # generated.ts is produced from the registry. A new operation without a
       # regenerated file leaves the frontend unable to name it.
       - name: web/src/api/generated.ts is up to date
@@ -86,6 +93,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
 
       - run: npm ci
+        working-directory: web
+
+      # Same reason as cargo audit above. Production dependencies only: a
+      # finding in a build tool is worth knowing but is not something the
+      # shipped bundle carries, and a wall of those hides the ones that are.
+      - run: npm audit --omit=dev --audit-level=high
         working-directory: web
 
       - run: npm run typecheck

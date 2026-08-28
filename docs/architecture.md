@@ -981,9 +981,34 @@ employee_bank_account       一人可有多筆；`is_payroll` 標出薪轉的那
 ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
              tool_name text, risk text, prompt text null,
              params jsonb, result_summary text, outcome text,
-             voucher_no text null, reverted bool default false)
+             voucher_no text null, reverted bool default false,
+             client_ip text null)
     outcome ∈ ok | blocked | error
+    client_ip  來源位址，取自前置代理的 X-Forwarded-For（第一段）或 X-Real-IP，
+               由伺服器解析成位址才寫入，不是位址就留空——那個標頭沒有代理改寫時
+               由呼叫端說了算，照收等於在稽核紀錄裡開一格任人填的欄位。
+               只記錄，不參與任何判斷。
 ```
+
+**登入本身也是稽核事件（0003）**：`/v1/auth/*` 不經 `dispatch`，所以登入成功、登入
+失敗、登出、變更密碼由 `auth::write_auth_audit` 各寫一列（`tool_name` 為 `login`／
+`logout`／`change_password`，初始化是 `bootstrap_install`）。少了這條，一次帳號遭盜用
+在系統裡只留下 stdout 的一行，而容器重啟就沒了。**成功與失敗的訊息分得比回應細**：
+回應對「查無此帳號」與「密碼不正確」一律回同一句，稽核紀錄則分開寫——分辨得出來才
+查得下去，而讀得到稽核紀錄的只有系統管理員。**被速率限制擋下的嘗試不寫**：那一段還
+沒驗任何憑證，逐次寫等於讓外面的人決定這張表長多快。
+
+**保存期限是設定，不是常數（0003）**：`audit_keep_days` 預設 1825 天（勞基法要求
+出勤紀錄保存五年，而關於出勤的稽核紀錄不該比它短命），留空表示永久保存。伺服器啟動
+時 spawn 一個每日迴圈，每一輪重讀設定再刪，所以改了不必重啟；值為空或解析不出來就
+整批留著——保存期限要是公司決定的，不能由一個打錯的字決定刪掉什麼。`Store::purge_audit`
+是全 codebase 唯一刪 `ai_audit_log` 的地方，那正是這個設定答得出「你們留多久」的原因。
+清除跑在伺服器而不是備份容器：沒開備份的安裝一樣要守自己的保存期限。
+
+**匯出走 `list_ai_audit` 本身**：輸入多了 `from`／`to`（營業日）與最高 10000 筆的
+`limit`，畫面把取回的列組成 CSV 由瀏覽器下載，不另建操作、不另開權限。日期在後端轉成
+兩個瞬間（`to` 取隔日零時，所以最後一天整天都在內），因為 `at` 是時間戳而人挑的是
+營業日。
 
 必要的不變量，以 SQL 強制（不能只靠 Rust）：
 
@@ -1126,7 +1151,8 @@ impl Registry {
 3. 即時查 `role_permission` → `permission.op_names`：操作不在角色集合裡 →
    回 `OpError::NotPermitted`，並以 `outcome = 'blocked'` 寫入稽核。
 4. 執行 `call`。
-5. 寫 `ai_audit_log`（`ReadOnly` 也要記，對應原型的唯讀稽核列）。
+5. 寫 `ai_audit_log`（`ReadOnly` 也要記，對應原型的唯讀稽核列），連同
+   `OpCtx.client_ip`。
 
 ### 核心操作
 

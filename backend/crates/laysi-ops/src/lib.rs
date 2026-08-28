@@ -76,6 +76,10 @@ pub const SESSION_IDLE_SETTING: &str = "session_idle_minutes";
 pub const SESSION_MAX_SETTING: &str = "session_max_hours";
 pub const MCP_RATE_LIMIT_SETTING: &str = "mcp_rate_limit_per_minute";
 
+/// How long `ai_audit_log` rows are kept. Read by the daily purge, which has
+/// a `Store` at hand, so it stays a row rather than joining the atomics.
+pub const AUDIT_KEEP_SETTING: &str = "audit_keep_days";
+
 pub fn session_idle_minutes() -> i64 {
     SESSION_IDLE_MINUTES.load(Ordering::Relaxed)
 }
@@ -254,6 +258,10 @@ pub struct OpCtx {
     /// records the action but not the intent.
     pub prompt: Option<String>,
     pub channel: Channel,
+    /// Source address of the request, already validated as one. Recorded on
+    /// every audit row: who and what without where answers "was this the
+    /// account holder or someone holding their credential" only halfway.
+    pub client_ip: Option<String>,
     pub today: NaiveDate,
     /// Business time zone in force for this call. Carried beside `today`
     /// because it is what `today` was derived from: an operation that turns
@@ -687,6 +695,7 @@ impl Registry {
                         &out.summary,
                         "ok",
                         out.voucher_no.as_deref(),
+                        ctx.client_ip.as_deref(),
                     )
                     .await;
             }
@@ -719,6 +728,7 @@ impl Registry {
                 summary,
                 outcome,
                 None,
+                ctx.client_ip.as_deref(),
             )
             .await
         {

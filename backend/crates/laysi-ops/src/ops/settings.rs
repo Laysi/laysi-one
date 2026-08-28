@@ -247,13 +247,16 @@ fn setting_options(code: &str) -> Vec<&'static str> {
 /// where `None` means nobody has said when work starts, which is different
 /// from nobody being late. A company that has not decided has to be able to
 /// say so, and to take it back after having set one.
-const CLEARABLE_SETTINGS: [&str; 6] = [
+const CLEARABLE_SETTINGS: [&str; 7] = [
     "work_start",
     "work_end",
     "break_start",
     "break_end",
     "late_grace_minutes",
     "flex_window_minutes",
+    // Cleared means kept forever, which a company that has to produce records
+    // years later has to be able to say.
+    crate::AUDIT_KEEP_SETTING,
 ];
 
 /// Settings whose shape is a fact about the outside world rather than a
@@ -282,6 +285,10 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
         crate::MCP_RATE_LIMIT_SETTING if value.parse::<u32>().is_err() => Err(OpError::BadInput(
             format!("「{value}」不是次數，不限就填 0"),
         )),
+        // Zero would delete the record of the call that set it to zero.
+        crate::AUDIT_KEEP_SETTING if !matches!(value.parse::<i64>(), Ok(1..)) => Err(
+            OpError::BadInput(format!("「{value}」不是大於 0 的天數，永久保存就留空")),
+        ),
         "punch_correction_policy"
             if !crate::ops::attendance::CORRECTION_POLICIES.contains(&value) =>
         {
@@ -1971,7 +1978,8 @@ mod tests {
                 "break_start",
                 "break_end",
                 "late_grace_minutes",
-                "flex_window_minutes"
+                "flex_window_minutes",
+                "audit_keep_days"
             ],
             "可清空的設定變了：每一項的空值都要在畫面上有意義"
         );

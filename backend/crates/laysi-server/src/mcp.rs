@@ -125,6 +125,7 @@ async fn audit_denied_token(
     store: &laysi_store::Store,
     token: &laysi_store::ApiToken,
     denial: Denial,
+    client_ip: Option<&str>,
 ) {
     let reason = match denial {
         Denial::Revoked => "已撤銷",
@@ -146,6 +147,7 @@ async fn audit_denied_token(
             &summary,
             "blocked",
             None,
+            client_ip,
         )
         .await
     {
@@ -167,7 +169,13 @@ async fn authenticate_mcp(
         .ok_or(McpAuthError::Unauthorized)?;
 
     if let Some(denial) = denial_reason(&token, Utc::now()) {
-        audit_denied_token(store, &token, denial).await;
+        audit_denied_token(
+            store,
+            &token,
+            denial,
+            crate::auth::client_ip(headers).as_deref(),
+        )
+        .await;
         return Err(McpAuthError::Unauthorized);
     }
 
@@ -264,6 +272,7 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
                 &summary,
                 "blocked",
                 None,
+                crate::auth::client_ip(&headers).as_deref(),
             )
             .await
         {
@@ -370,7 +379,13 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
                 .and_then(|p| p.as_str())
                 .map(str::to_string);
 
-            let ctx = crate::ctx_from(&s, &identity, prompt, laysi_ops::Channel::Mcp);
+            let ctx = crate::ctx_from(
+                &s,
+                &identity,
+                prompt,
+                laysi_ops::Channel::Mcp,
+                crate::auth::client_ip(&headers),
+            );
             match s.registry.dispatch(&ctx, name, args).await {
                 Ok(data) => ok(
                     id,
