@@ -37,33 +37,69 @@ pub const TIMEZONE_SETTING: &str = "business_utc_offset";
 /// there would ask the reader to fix something they never entered.
 const DUPLICATE_MESSAGES: &[(&str, &str)] = &[
     ("ap_bill_bill_no_key", "這個帳單號碼已經用過了，請換一個。"),
-    ("ar_invoice_invoice_no_key", "這個發票號碼已經用過了，請換一個。"),
-    ("employee_emp_no_key", "這個員工編號已經有人使用，請換一個。"),
+    (
+        "ar_invoice_invoice_no_key",
+        "這個發票號碼已經用過了，請換一個。",
+    ),
+    (
+        "employee_emp_no_key",
+        "這個員工編號已經有人使用，請換一個。",
+    ),
     ("fixed_asset_code_key", "這個資產編號已經用過了，請換一個。"),
-    ("dimension_value_dimension_code_code_key", "這個名稱已經有人使用，請換一個。"),
-    ("user_account_username_key", "這個登入信箱已經有帳號，請改用其他地址。"),
-    ("user_identity_provider_subject_key", "這個外部帳號已經連結到其他登入帳號。"),
+    (
+        "dimension_value_dimension_code_code_key",
+        "這個名稱已經有人使用，請換一個。",
+    ),
+    (
+        "user_account_username_key",
+        "這個登入信箱已經有帳號，請改用其他地址。",
+    ),
+    (
+        "user_identity_provider_subject_key",
+        "這個外部帳號已經連結到其他登入帳號。",
+    ),
     (
         "attendance_punch_employee_id_punched_on_kind_key",
         "今天的這一筆打卡已經記錄過了。要更正請送出補登申請。",
     ),
-    ("punch_correction_one_open_per_slot", "這個時段已經有一張未決的補登申請。"),
+    (
+        "punch_correction_one_open_per_slot",
+        "這個時段已經有一張未決的補登申請。",
+    ),
     (
         "employee_bank_account_employee_id_bank_name_account_no_key",
         "這個銀行帳號已經登記過了。",
     ),
-    ("employee_payroll_account_idx", "一位員工只能有一個薪轉帳戶，請先取消原本的標記。"),
-    ("budget_version_code_account_code_dept_id_key", "這個科目在本版預算已經編過了，請改用編輯。"),
-    ("attendance_employee_id_month_key", "這位員工這個月的出勤彙總已經存在。"),
+    (
+        "employee_payroll_account_idx",
+        "一位員工只能有一個薪轉帳戶，請先取消原本的標記。",
+    ),
+    (
+        "budget_version_code_account_code_dept_id_key",
+        "這個科目在本版預算已經編過了，請改用編輯。",
+    ),
+    (
+        "attendance_employee_id_month_key",
+        "這位員工這個月的出勤彙總已經存在。",
+    ),
     ("bank_txn_external_ref_key", "這筆銀行明細已經匯入過了。"),
-    ("leave_request_no_overlap", "這段時間已經有一張休假單，請改選其他時段。"),
-    ("overtime_request_no_overlap", "這段時間已經有一張加班申請，請改選其他時段。"),
+    (
+        "leave_request_no_overlap",
+        "這段時間已經有一張休假單，請改選其他時段。",
+    ),
+    (
+        "overtime_request_no_overlap",
+        "這段時間已經有一張加班申請，請改選其他時段。",
+    ),
 ];
 
 /// The message for a violated constraint, or `None` to let the caller keep the
 /// generic wording.
 fn duplicate_message(constraint: &str) -> Option<&'static str> {
-    DUPLICATE_MESSAGES.iter().find(|(name, _)| *name == constraint).map(|(_, msg)| *msg)
+    DUPLICATE_MESSAGES
+        .iter()
+        .find(|(name, _)| *name == constraint)
+        .map(|(_, msg)| *msg)
 }
 
 /// Turn the database rules a person can actually break into sentences they can
@@ -189,7 +225,11 @@ pub enum StoreError {
     NothingLeft { no: String },
 
     #[error("{no} 只剩 {left} 元未結，登記 {amount} 元會超收")]
-    AmountOutOfRange { no: String, left: Money, amount: Money },
+    AmountOutOfRange {
+        no: String,
+        left: Money,
+        amount: Money,
+    },
 
     #[error("未勾選任何帳單，無法送出付款單")]
     NothingSelected,
@@ -230,8 +270,14 @@ pub enum StoreError {
     #[error("「{code}」不能在此處變更，要重新執行期初作業")]
     SettingNotEditable { code: String },
 
-    #[error("已經有 {punches} 筆打卡與 {corrections} 筆補登申請以 UTC{current} 記錄，時區不能再變更")]
-    TimezoneHasAttendance { punches: i64, corrections: i64, current: String },
+    #[error(
+        "已經有 {punches} 筆打卡與 {corrections} 筆補登申請以 UTC{current} 記錄，時區不能再變更"
+    )]
+    TimezoneHasAttendance {
+        punches: i64,
+        corrections: i64,
+        current: String,
+    },
 
     #[error("沒有這個角色或權限：{role} / {permission}")]
     UnknownRoleOrPermission { role: String, permission: String },
@@ -279,7 +325,11 @@ pub enum StoreError {
     ImportNotCommitted { no: String, status: String },
 
     #[error("匯入批次 {no} 有 {count} 張傳票已經過帳（{vouchers}），不能復原。已過帳的更正只能開反向分錄。")]
-    ImportHasPostedVouchers { no: String, count: usize, vouchers: String },
+    ImportHasPostedVouchers {
+        no: String,
+        count: usize,
+        vouchers: String,
+    },
 
     #[error("「{name}」已撤銷")]
     TokenAlreadyRevoked { name: String },
@@ -296,19 +346,31 @@ pub enum StoreError {
     LeaveNotFound { no: String },
 
     #[error("所選時段與休假單 {no}（{from} 至 {to}）重疊，請改選其他時段")]
-    LeaveOverlaps { no: String, from: String, to: String },
+    LeaveOverlaps {
+        no: String,
+        from: String,
+        to: String,
+    },
 
     #[error("找不到加班申請 {no}")]
     OvertimeNotFound { no: String },
 
     #[error("所選時段與加班申請 {no}（{from} 至 {to}）重疊，請改選其他時段")]
-    OvertimeOverlaps { no: String, from: String, to: String },
+    OvertimeOverlaps {
+        no: String,
+        from: String,
+        to: String,
+    },
 
     #[error("加班申請 {no} 已為「{status}」，不能重複簽核")]
     OvertimeAlreadyDecided { no: String, status: String },
 
     #[error("{date} 已有{kind}卡紀錄（{at}），一天只記一次；如需更正請由人資補登")]
-    PunchAlreadyRecorded { date: String, kind: String, at: String },
+    PunchAlreadyRecorded {
+        date: String,
+        kind: String,
+        at: String,
+    },
 
     #[error("{date} 還沒有上班卡，不能單獨打下班卡")]
     PunchOutWithoutIn { date: String },
@@ -348,7 +410,10 @@ pub struct Store {
 
 impl Store {
     pub async fn connect(url: &str, max_conns: u32) -> Result<Self> {
-        let pool = PgPoolOptions::new().max_connections(max_conns).connect(url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(max_conns)
+            .connect(url)
+            .await?;
         Ok(Self { pool })
     }
 
@@ -479,7 +544,10 @@ impl Store {
     /// The bookkeeping row goes in before the file runs and both share one
     /// transaction, so two servers starting together cannot both apply it:
     /// the second blocks on the key and then sees zero rows inserted.
-    async fn apply_regulation_updates(&self, files: &[(&'static str, &'static str)]) -> Result<u64> {
+    async fn apply_regulation_updates(
+        &self,
+        files: &[(&'static str, &'static str)],
+    ) -> Result<u64> {
         let mut applied = 0;
         for &(file_name, sql) in files {
             let mut tx = self.pool.begin().await?;
@@ -507,7 +575,8 @@ impl Store {
     /// path that changes it ends here.
     pub async fn reload_regulations(&self) -> Result<usize> {
         self.seed_regulations().await?;
-        self.apply_regulation_updates(Self::REGULATION_UPDATES).await?;
+        self.apply_regulation_updates(Self::REGULATION_UPDATES)
+            .await?;
         let rulesets = self.regulations().await?;
         let n = rulesets.len();
         laysi_regulation::install(rulesets);
@@ -540,7 +609,9 @@ impl Store {
         .await?
         .as_ref()
         .map(row_to_account)
-        .ok_or_else(|| StoreError::AccountNotFound { code: code.to_string() })
+        .ok_or_else(|| StoreError::AccountNotFound {
+            code: code.to_string(),
+        })
     }
 
     /// Create an account. The caller decides the report group and cash flow
@@ -587,7 +658,9 @@ impl Store {
             .await?
             .is_some();
         if !exists {
-            return Err(StoreError::AccountNotFound { code: req.code.to_string() });
+            return Err(StoreError::AccountNotFound {
+                code: req.code.to_string(),
+            });
         }
 
         prepare_account_parent(&mut tx, req.code, req.parent_code, req.is_postable).await?;
@@ -629,7 +702,9 @@ impl Store {
         .await?
         .is_some();
         if !valid {
-            return Err(StoreError::InvalidBankGlAccount { code: req.gl_code.to_string() });
+            return Err(StoreError::InvalidBankGlAccount {
+                code: req.gl_code.to_string(),
+            });
         }
 
         let row = sqlx::query(
@@ -681,7 +756,11 @@ impl Store {
                 name: r.get("name"),
                 debit,
                 credit,
-                balance: if normal == "debit" { debit - credit } else { credit - debit },
+                balance: if normal == "debit" {
+                    debit - credit
+                } else {
+                    credit - debit
+                },
             }
         })
         .collect())
@@ -775,7 +854,11 @@ impl Store {
     }
 
     /// Month-end cash position (cumulative balance) over the last `months`.
-    pub async fn cash_history(&self, as_of: NaiveDate, months: i32) -> Result<Vec<(String, Money)>> {
+    pub async fn cash_history(
+        &self,
+        as_of: NaiveDate,
+        months: i32,
+    ) -> Result<Vec<(String, Money)>> {
         Ok(sqlx::query(
             "WITH m AS (
                 SELECT generate_series(
@@ -872,7 +955,8 @@ impl Store {
         let amount = lines.iter().map(|l| l.debit).sum::<Money>();
         // One-line summary in the form "debit account / credit account".
         let label = |l: Option<&VoucherLine>| {
-            l.map(|l| format!("{} {}", l.account_code, l.account_name)).unwrap_or_default()
+            l.map(|l| format!("{} {}", l.account_code, l.account_name))
+                .unwrap_or_default()
         };
         let accounts_label = format!(
             "{} / {}{}",
@@ -921,8 +1005,10 @@ impl Store {
         audit_id: Option<i64>,
     ) -> Result<String> {
         let mut tx = self.pool.begin().await?;
-        let no =
-            insert_voucher(&mut tx, date, memo, lines, status, source, created_by, audit_id).await?;
+        let no = insert_voucher(
+            &mut tx, date, memo, lines, status, source, created_by, audit_id,
+        )
+        .await?;
         tx.commit().await?;
         Ok(no)
     }
@@ -936,7 +1022,10 @@ impl Store {
             .get("status");
 
         if status != "draft" && status != "pending" {
-            return Err(StoreError::NotPostable { no: no.to_string(), status });
+            return Err(StoreError::NotPostable {
+                no: no.to_string(),
+                status,
+            });
         }
 
         sqlx::query("UPDATE voucher SET status = 'posted', posted_at = now() WHERE no = $1")
@@ -983,7 +1072,10 @@ impl Store {
         let status: String = row.get("status");
         let source: String = row.get("source");
         if status != "pending" {
-            return Err(StoreError::NotDiscardable { no: no.to_string(), status });
+            return Err(StoreError::NotDiscardable {
+                no: no.to_string(),
+                status,
+            });
         }
         if source != "manual" && source != "ai_draft" {
             return Err(StoreError::VoucherHasAnOwner {
@@ -991,7 +1083,10 @@ impl Store {
                 owner: voucher_owner_label(&source).to_string(),
             });
         }
-        sqlx::query("DELETE FROM voucher WHERE no = $1").bind(no).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM voucher WHERE no = $1")
+            .bind(no)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1011,12 +1106,11 @@ impl Store {
 
         // Lock the original so two concurrent reversal requests check the
         // uniqueness constraint in sequence.
-        let original =
-            sqlx::query("SELECT id, status, memo FROM voucher WHERE no = $1 FOR UPDATE")
-                .bind(no)
-                .fetch_optional(&mut *tx)
-                .await?
-                .ok_or_else(|| StoreError::VoucherNotFound { no: no.to_string() })?;
+        let original = sqlx::query("SELECT id, status, memo FROM voucher WHERE no = $1 FOR UPDATE")
+            .bind(no)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::VoucherNotFound { no: no.to_string() })?;
         let original_id: Uuid = original.get("id");
         let status: String = original.get("status");
         ensure_reversible(no, &status)?;
@@ -1064,14 +1158,7 @@ impl Store {
             format!("沖銷 {no} · {original_memo}")
         };
         let reversal_no = insert_voucher(
-            &mut tx,
-            date,
-            &memo,
-            &lines,
-            "pending",
-            "reversal",
-            created_by,
-            None,
+            &mut tx, date, &memo, &lines, "pending", "reversal", created_by, None,
         )
         .await?;
 
@@ -1295,13 +1382,17 @@ impl Store {
         .bind(invoice_no)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| StoreError::InvoiceNotFound { no: invoice_no.to_string() })?;
+        .ok_or_else(|| StoreError::InvoiceNotFound {
+            no: invoice_no.to_string(),
+        })?;
 
         let origin_status: String = row.get("origin_status");
         if origin_status != "posted" {
             return Err(StoreError::SourceNotPosted {
                 no: invoice_no.to_string(),
-                voucher: row.get::<Option<String>, _>("origin_voucher_no").unwrap_or_default(),
+                voucher: row
+                    .get::<Option<String>, _>("origin_voucher_no")
+                    .unwrap_or_default(),
             });
         }
 
@@ -1313,7 +1404,9 @@ impl Store {
         let amount = amount.unwrap_or(left);
 
         if left <= Money::ZERO {
-            return Err(StoreError::NothingLeft { no: invoice_no.to_string() });
+            return Err(StoreError::NothingLeft {
+                no: invoice_no.to_string(),
+            });
         }
         if amount <= Money::ZERO || amount > left {
             return Err(StoreError::AmountOutOfRange {
@@ -1344,9 +1437,17 @@ impl Store {
             },
         ];
 
-        let voucher_no =
-            insert_voucher(&mut tx, received_on, &memo, &lines, "pending", source, created_by, None)
-                .await?;
+        let voucher_no = insert_voucher(
+            &mut tx,
+            received_on,
+            &memo,
+            &lines,
+            "pending",
+            source,
+            created_by,
+            None,
+        )
+        .await?;
 
         sqlx::query(
             "INSERT INTO ar_receipt (invoice_id, received_on, amount, voucher_no, created_by)
@@ -1577,13 +1678,17 @@ impl Store {
             .bind(bill_no)
             .fetch_optional(&mut *tx)
             .await?
-            .ok_or_else(|| StoreError::BillNotFound { no: bill_no.clone() })?;
+            .ok_or_else(|| StoreError::BillNotFound {
+                no: bill_no.clone(),
+            })?;
 
             let origin_status: String = row.get("origin_status");
             if origin_status != "posted" {
                 return Err(StoreError::SourceNotPosted {
                     no: bill_no.clone(),
-                    voucher: row.get::<Option<String>, _>("origin_voucher_no").unwrap_or_default(),
+                    voucher: row
+                        .get::<Option<String>, _>("origin_voucher_no")
+                        .unwrap_or_default(),
                 });
             }
 
@@ -1591,7 +1696,9 @@ impl Store {
             let claimed: Money = row.get("claimed");
             let left = amount - claimed;
             if left <= Money::ZERO {
-                return Err(StoreError::NothingLeft { no: bill_no.clone() });
+                return Err(StoreError::NothingLeft {
+                    no: bill_no.clone(),
+                });
             }
 
             let vendor: String = row.get("vendor");
@@ -1620,9 +1727,10 @@ impl Store {
         });
 
         let memo = format!("付款單：{}", short_list(&vendors));
-        let voucher_no =
-            insert_voucher(&mut tx, pay_on, &memo, &lines, "pending", source, created_by, None)
-                .await?;
+        let voucher_no = insert_voucher(
+            &mut tx, pay_on, &memo, &lines, "pending", source, created_by, None,
+        )
+        .await?;
 
         let period = pay_on.format("%y%m").to_string();
         let seq = next_doc_no(&mut tx, "P", &period).await?;
@@ -1728,7 +1836,9 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
             .map(|r| r.get("gl_code"))
-            .ok_or(StoreError::BankAccountNotFound { id: txn.bank_account_id })?;
+            .ok_or(StoreError::BankAccountNotFound {
+                id: txn.bank_account_id,
+            })?;
 
         Ok(sqlx::query(
             "SELECT v.no, v.voucher_date, v.memo, v.status,
@@ -1799,11 +1909,15 @@ impl Store {
             .bind(voucher_no)
             .fetch_optional(&mut *tx)
             .await?
-            .ok_or_else(|| StoreError::VoucherNotFound { no: voucher_no.to_string() })?;
+            .ok_or_else(|| StoreError::VoucherNotFound {
+                no: voucher_no.to_string(),
+            })?;
         let voucher_id: Uuid = v.get("id");
         let status: String = v.get("status");
         if status == "void" {
-            return Err(StoreError::VoucherVoided { no: voucher_no.to_string() });
+            return Err(StoreError::VoucherVoided {
+                no: voucher_no.to_string(),
+            });
         }
 
         let taken: Option<i32> =
@@ -1813,7 +1927,10 @@ impl Store {
                 .await?
                 .map(|r| r.get("id"));
         if let Some(other) = taken {
-            return Err(StoreError::VoucherTaken { no: voucher_no.to_string(), txn_id: other });
+            return Err(StoreError::VoucherTaken {
+                no: voucher_no.to_string(),
+                txn_id: other,
+            });
         }
 
         sqlx::query(
@@ -1998,8 +2115,11 @@ impl Store {
             Some(code) => code.to_string(),
             None => next_asset_code(&mut tx).await?,
         };
-        let memo =
-            if req.memo.is_empty() { format!("購置 {}", req.name) } else { req.memo.to_string() };
+        let memo = if req.memo.is_empty() {
+            format!("購置 {}", req.name)
+        } else {
+            req.memo.to_string()
+        };
 
         let voucher_no = match (req.paid_from_account_code, req.origin_voucher_no) {
             (Some(paid_from), _) => {
@@ -2154,7 +2274,10 @@ impl Store {
             .collect();
         let mut by_accum: Vec<(String, Money, usize)> = Vec::new();
         for l in lines {
-            match by_accum.iter_mut().find(|(code, _, _)| code == &l.accum_gl_code) {
+            match by_accum
+                .iter_mut()
+                .find(|(code, _, _)| code == &l.accum_gl_code)
+            {
                 Some((_, sum, count)) => {
                     *sum += l.amount;
                     *count += 1;
@@ -2227,20 +2350,24 @@ impl Store {
     // MCP grants and audit
 
     pub async fn tool_enabled(&self, tool: &str) -> Result<Option<bool>> {
-        Ok(sqlx::query("SELECT enabled FROM mcp_tool_grant WHERE tool_name = $1")
-            .bind(tool)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|r| r.get("enabled")))
+        Ok(
+            sqlx::query("SELECT enabled FROM mcp_tool_grant WHERE tool_name = $1")
+                .bind(tool)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get("enabled")),
+        )
     }
 
     pub async fn tool_grants(&self) -> Result<Vec<(String, bool)>> {
-        Ok(sqlx::query("SELECT tool_name, enabled FROM mcp_tool_grant ORDER BY tool_name")
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(|r| (r.get("tool_name"), r.get("enabled")))
-            .collect())
+        Ok(
+            sqlx::query("SELECT tool_name, enabled FROM mcp_tool_grant ORDER BY tool_name")
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .map(|r| (r.get("tool_name"), r.get("enabled")))
+                .collect(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2295,6 +2422,34 @@ impl Store {
             updated_at: r.get("updated_at"),
         })
         .collect())
+    }
+
+    /// Turn one AI tool on or off.
+    ///
+    /// `None` means the name has no row. Every registered operation is seeded
+    /// with one, so a missing row is a misspelt name rather than a tool nobody
+    /// has decided about yet.
+    pub async fn set_tool_grant(
+        &self,
+        tool_name: &str,
+        enabled: bool,
+    ) -> Result<Option<ToolGrant>> {
+        Ok(sqlx::query(
+            "UPDATE mcp_tool_grant SET enabled = $2, updated_at = now()
+              WHERE tool_name = $1
+          RETURNING tool_name, enabled, risk, note, updated_at",
+        )
+        .bind(tool_name)
+        .bind(enabled)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| ToolGrant {
+            tool_name: r.get("tool_name"),
+            enabled: r.get("enabled"),
+            risk: r.get("risk"),
+            note: r.get("note"),
+            updated_at: r.get("updated_at"),
+        }))
     }
 
     pub async fn recent_audit(&self, limit: i64) -> Result<Vec<AuditEntry>> {
@@ -2528,11 +2683,13 @@ impl Store {
     /// Used for settings read outside a request, where the whole table would
     /// be waste: the business time zone at start-up.
     pub async fn company_setting(&self, code: &str) -> Result<Option<String>> {
-        Ok(sqlx::query("SELECT value FROM company_setting WHERE code = $1")
-            .bind(code)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|r| r.get("value")))
+        Ok(
+            sqlx::query("SELECT value FROM company_setting WHERE code = $1")
+                .bind(code)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get("value")),
+        )
     }
 
     /// Month the fiscal year starts in, from `company_setting.fiscal_year`.
@@ -2568,7 +2725,9 @@ impl Store {
     /// characters of `±HH:MM`; this re-parses it rather than trusting that.
     pub async fn set_business_timezone(&self, offset: &str, actor: &str) -> Result<String> {
         if laysi_domain::parse_business_offset(offset).is_none() {
-            return Err(StoreError::SettingNotFound { code: offset.to_string() });
+            return Err(StoreError::SettingNotFound {
+                code: offset.to_string(),
+            });
         }
         let mut tx = self.pool.begin().await?;
 
@@ -2581,14 +2740,17 @@ impl Store {
             .await?
             .get("n");
         if punches > 0 || corrections > 0 {
-            let current: String =
-                sqlx::query("SELECT value FROM company_setting WHERE code = $1")
-                    .bind(TIMEZONE_SETTING)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .map(|r| r.get("value"))
-                    .unwrap_or_else(|| "+08:00".to_string());
-            return Err(StoreError::TimezoneHasAttendance { punches, corrections, current });
+            let current: String = sqlx::query("SELECT value FROM company_setting WHERE code = $1")
+                .bind(TIMEZONE_SETTING)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|r| r.get("value"))
+                .unwrap_or_else(|| "+08:00".to_string());
+            return Err(StoreError::TimezoneHasAttendance {
+                punches,
+                corrections,
+                current,
+            });
         }
 
         for (table, constraint) in [
@@ -2633,10 +2795,14 @@ impl Store {
             .bind(code)
             .fetch_optional(&self.pool)
             .await?
-            .ok_or_else(|| StoreError::SettingNotFound { code: code.to_string() })?
+            .ok_or_else(|| StoreError::SettingNotFound {
+                code: code.to_string(),
+            })?
             .get("editable");
         if !editable {
-            return Err(StoreError::SettingNotEditable { code: code.to_string() });
+            return Err(StoreError::SettingNotEditable {
+                code: code.to_string(),
+            });
         }
 
         sqlx::query(
@@ -2654,15 +2820,16 @@ impl Store {
             .await?
             .into_iter()
             .find(|s| s.code == code)
-            .ok_or_else(|| StoreError::SettingNotFound { code: code.to_string() })
+            .ok_or_else(|| StoreError::SettingNotFound {
+                code: code.to_string(),
+            })
     }
 
     pub async fn dimensions(&self) -> Result<Vec<Dimension>> {
-        let heads = sqlx::query(
-            "SELECT code, label, note FROM dimension ORDER BY sort_order, code",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let heads =
+            sqlx::query("SELECT code, label, note FROM dimension ORDER BY sort_order, code")
+                .fetch_all(&self.pool)
+                .await?;
 
         let values = sqlx::query(
             "SELECT dimension_code, code, label, active
@@ -2765,7 +2932,9 @@ impl Store {
         .bind(req.active)
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| StoreError::DepartmentNotFound { code: req.code.to_string() })?;
+        .ok_or_else(|| StoreError::DepartmentNotFound {
+            code: req.code.to_string(),
+        })?;
 
         Ok(DimensionValueRecord {
             id: row.get("id"),
@@ -2785,12 +2954,18 @@ impl Store {
     //
 
     pub async fn roles(&self) -> Result<Vec<Role>> {
-        Ok(sqlx::query("SELECT code, name, note FROM role ORDER BY sort_order, code")
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(|r| Role { code: r.get("code"), name: r.get("name"), note: r.get("note") })
-            .collect())
+        Ok(
+            sqlx::query("SELECT code, name, note FROM role ORDER BY sort_order, code")
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .map(|r| Role {
+                    code: r.get("code"),
+                    name: r.get("name"),
+                    note: r.get("note"),
+                })
+                .collect(),
+        )
     }
 
     pub async fn permissions(&self) -> Result<Vec<Permission>> {
@@ -2931,10 +3106,12 @@ impl Store {
     // User accounts, external identities and sessions
     /// Number of accounts. `COUNT()` keeps PostgreSQL's BIGINT type explicit.
     pub async fn user_count(&self) -> Result<i64> {
-        Ok(sqlx::query("SELECT COUNT(*)::bigint AS count FROM user_account")
-            .fetch_one(&self.pool)
-            .await?
-            .get("count"))
+        Ok(
+            sqlx::query("SELECT COUNT(*)::bigint AS count FROM user_account")
+                .fetch_one(&self.pool)
+                .await?
+                .get("count"),
+        )
     }
     /// List account metadata. The return type carries the password hash, and
     /// admin tools must not print that column.
@@ -3133,7 +3310,11 @@ impl Store {
         };
 
         tx.commit().await?;
-        Ok(Some(RoleChange { user, sessions, tokens }))
+        Ok(Some(RoleChange {
+            user,
+            sessions,
+            tokens,
+        }))
     }
     /// Remove an account. Its sessions and linked external identities cascade
     /// with it, so the person is signed out everywhere at once. `ai_audit_log`
@@ -3300,7 +3481,10 @@ impl Store {
     /// Edit the backup destination. Every field is three-state: absent keeps
     /// the stored value, an empty string clears it — including the secret key,
     /// which no screen can display and therefore cannot send back unchanged.
-    pub async fn update_backup_setting(&self, req: WriteBackupSetting<'_>) -> Result<BackupSetting> {
+    pub async fn update_backup_setting(
+        &self,
+        req: WriteBackupSetting<'_>,
+    ) -> Result<BackupSetting> {
         sqlx::query(
             "UPDATE backup_setting
                 SET enabled    = COALESCE($1, enabled),
@@ -3455,11 +3639,7 @@ impl Store {
     /// sessions in the same transaction. A session opened through the IdP
     /// outlives the link otherwise, and the account would stay signed in on a
     /// credential it no longer accepts.
-    pub async fn unlink_identities(
-        &self,
-        user_id: i32,
-        actor: &str,
-    ) -> Result<UnlinkedIdentities> {
+    pub async fn unlink_identities(&self, user_id: i32, actor: &str) -> Result<UnlinkedIdentities> {
         let mut tx = self.pool.begin().await?;
         let removed = sqlx::query("DELETE FROM user_identity WHERE user_id = $1")
             .bind(user_id)
@@ -3477,7 +3657,10 @@ impl Store {
         .await?
         .rows_affected();
         tx.commit().await?;
-        Ok(UnlinkedIdentities { removed, revoked_sessions })
+        Ok(UnlinkedIdentities {
+            removed,
+            revoked_sessions,
+        })
     }
 
     /// Accounts holding an address, compared without case. The column has no
@@ -3583,7 +3766,10 @@ impl Store {
         .await?;
 
         tx.commit().await?;
-        Ok(ProvisionedUser { user, employee_no: emp_no })
+        Ok(ProvisionedUser {
+            user,
+            employee_no: emp_no,
+        })
     }
 
     /// Point a login at a roster row, or clear the link with `None`.
@@ -3782,7 +3968,9 @@ impl Store {
                 .await?
                 .is_some();
             if !role_exists {
-                return Err(StoreError::RoleNotFound { code: role_code.to_string() });
+                return Err(StoreError::RoleNotFound {
+                    code: role_code.to_string(),
+                });
             }
         }
 
@@ -3808,7 +3996,9 @@ impl Store {
             .await?
             .into_iter()
             .find(|rule| rule.step_no == req.step_no)
-            .ok_or(StoreError::ApprovalRuleNotFound { step_no: req.step_no })
+            .ok_or(StoreError::ApprovalRuleNotFound {
+                step_no: req.step_no,
+            })
     }
     /// Delete a step, keeping at least one in the flow.
     ///
@@ -3846,7 +4036,6 @@ impl Store {
     }
     // API and MCP tokens
 
-
     pub async fn api_tokens(&self, include_revoked: bool) -> Result<Vec<ApiToken>> {
         self.api_tokens_filtered(include_revoked, None).await
     }
@@ -3857,7 +4046,8 @@ impl Store {
         employee_id: i32,
         include_revoked: bool,
     ) -> Result<Vec<ApiToken>> {
-        self.api_tokens_filtered(include_revoked, Some(employee_id)).await
+        self.api_tokens_filtered(include_revoked, Some(employee_id))
+            .await
     }
 
     async fn api_tokens_filtered(
@@ -3926,11 +4116,7 @@ impl Store {
     pub async fn issue_api_token(&self, req: IssueApiToken<'_>) -> Result<IssuedApiToken> {
         // Two v4 UUIDs concatenated as hex: 256 bits of randomness from the
         // operating system CSPRNG.
-        let secret = format!(
-            "lys_{}{}",
-            Uuid::new_v4().simple(),
-            Uuid::new_v4().simple()
-        );
+        let secret = format!("lys_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let prefix: String = secret.chars().take(8).collect();
         let hash = token_hash(&secret);
 
@@ -4128,7 +4314,9 @@ impl Store {
             .await?
             .into_iter()
             .find(|v| v.code == code)
-            .ok_or_else(|| StoreError::SettingNotFound { code: code.to_string() })
+            .ok_or_else(|| StoreError::SettingNotFound {
+                code: code.to_string(),
+            })
     }
 
     pub async fn budget_versions(&self) -> Result<Vec<BudgetVersion>> {
@@ -4203,7 +4391,9 @@ impl Store {
                 .await?
                 .get("ok");
         if !known {
-            return Err(StoreError::BudgetVersionNotFound { code: version_code.to_string() });
+            return Err(StoreError::BudgetVersionNotFound {
+                code: version_code.to_string(),
+            });
         }
 
         let dept_id = match dept_code {
@@ -4232,7 +4422,9 @@ impl Store {
             .await?
             .into_iter()
             .find(|b| b.account_code == account_code && b.dept_id == dept_id)
-            .ok_or_else(|| StoreError::UnknownAccount { code: account_code.to_string() })
+            .ok_or_else(|| StoreError::UnknownAccount {
+                code: account_code.to_string(),
+            })
     }
 
     async fn department_id(&self, code: &str) -> Result<i32> {
@@ -4243,7 +4435,9 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?
         .map(|r| r.get("id"))
-        .ok_or_else(|| StoreError::DepartmentNotFound { code: code.to_string() })
+        .ok_or_else(|| StoreError::DepartmentNotFound {
+            code: code.to_string(),
+        })
     }
 
     // Expense claims
@@ -4259,7 +4453,8 @@ impl Store {
         include_done: bool,
         limit: i64,
     ) -> Result<Vec<ExpenseClaim>> {
-        self.expense_claims_filtered(include_done, limit, None).await
+        self.expense_claims_filtered(include_done, limit, None)
+            .await
     }
 
     /// Claims submitted by one claimant. Self-service operations pass only the
@@ -4270,7 +4465,8 @@ impl Store {
         claimant: &str,
         limit: i64,
     ) -> Result<Vec<ExpenseClaim>> {
-        self.expense_claims_filtered(true, limit, Some(claimant)).await
+        self.expense_claims_filtered(true, limit, Some(claimant))
+            .await
     }
 
     async fn expense_claims_filtered(
@@ -4360,7 +4556,9 @@ impl Store {
             .await?
             .into_iter()
             .find(|c| c.claim_no == claim_no)
-            .ok_or_else(|| StoreError::ClaimNotFound { no: claim_no.to_string() })
+            .ok_or_else(|| StoreError::ClaimNotFound {
+                no: claim_no.to_string(),
+            })
     }
 
     /// One claim belonging to one employee. The employee is part of the WHERE
@@ -4372,16 +4570,19 @@ impl Store {
         claim_no: &str,
         employee_id: i32,
     ) -> Result<ExpenseClaim> {
-        let owned: Option<String> =
-            sqlx::query("SELECT claim_no FROM expense_claim WHERE claim_no = $1 AND employee_id = $2")
-                .bind(claim_no)
-                .bind(employee_id)
-                .fetch_optional(&self.pool)
-                .await?
-                .map(|r| r.get("claim_no"));
+        let owned: Option<String> = sqlx::query(
+            "SELECT claim_no FROM expense_claim WHERE claim_no = $1 AND employee_id = $2",
+        )
+        .bind(claim_no)
+        .bind(employee_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| r.get("claim_no"));
         match owned {
             Some(no) => self.expense_claim(&no).await,
-            None => Err(StoreError::ClaimNotFound { no: claim_no.to_string() }),
+            None => Err(StoreError::ClaimNotFound {
+                no: claim_no.to_string(),
+            }),
         }
     }
 
@@ -4488,10 +4689,7 @@ impl Store {
     /// month end also gets its payables entry there, since the voucher credits
     /// 2101 and the payables screen reconciles its detail against that
     /// account.
-    pub async fn approve_expense_step(
-        &self,
-        req: ApproveExpenseStep<'_>,
-    ) -> Result<ExpenseClaim> {
+    pub async fn approve_expense_step(&self, req: ApproveExpenseStep<'_>) -> Result<ExpenseClaim> {
         let mut tx = self.pool.begin().await?;
 
         // FOR UPDATE: two simultaneous approvals would otherwise create two
@@ -4504,12 +4702,17 @@ impl Store {
         .bind(req.claim_no)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| StoreError::ClaimNotFound { no: req.claim_no.to_string() })?;
+        .ok_or_else(|| StoreError::ClaimNotFound {
+            no: req.claim_no.to_string(),
+        })?;
 
         let claim_id: i32 = row.get("id");
         let status: String = row.get("status");
         if status != "submitted" && status != "approving" {
-            return Err(StoreError::ClaimNotPending { no: req.claim_no.to_string(), status });
+            return Err(StoreError::ClaimNotPending {
+                no: req.claim_no.to_string(),
+                status,
+            });
         }
 
         let done: bool = sqlx::query(
@@ -4557,11 +4760,13 @@ impl Store {
             let dept_id: Option<i32> = row.get("dept_id");
             let spent_on: NaiveDate = row.get("spent_on");
             let stored: Option<String> = row.get("account_code");
-            let expense_code = req
-                .account_code
-                .map(str::to_string)
-                .or(stored)
-                .ok_or_else(|| StoreError::UnknownAccount { code: "（未指定費用科目）".into() })?;
+            let expense_code =
+                req.account_code
+                    .map(str::to_string)
+                    .or(stored)
+                    .ok_or_else(|| StoreError::UnknownAccount {
+                        code: "（未指定費用科目）".into(),
+                    })?;
 
             // Credit side: month-end reimbursement goes to payables, immediate
             // payment moves petty cash.
@@ -4598,14 +4803,7 @@ impl Store {
 
             let billed_on = req.posted_on.unwrap_or(spent_on);
             let no = insert_voucher(
-                &mut tx,
-                billed_on,
-                &memo,
-                &lines,
-                "pending",
-                "expense",
-                req.actor,
-                None,
+                &mut tx, billed_on, &memo, &lines, "pending", "expense", req.actor, None,
             )
             .await?;
 
@@ -4674,16 +4872,22 @@ impl Store {
         note: &str,
     ) -> Result<ExpenseClaim> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query("SELECT id, status FROM expense_claim WHERE claim_no = $1 FOR UPDATE")
-            .bind(claim_no)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| StoreError::ClaimNotFound { no: claim_no.to_string() })?;
+        let row =
+            sqlx::query("SELECT id, status FROM expense_claim WHERE claim_no = $1 FOR UPDATE")
+                .bind(claim_no)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| StoreError::ClaimNotFound {
+                    no: claim_no.to_string(),
+                })?;
 
         let id: i32 = row.get("id");
         let status: String = row.get("status");
         if status != "submitted" && status != "approving" {
-            return Err(StoreError::ClaimNotPending { no: claim_no.to_string(), status });
+            return Err(StoreError::ClaimNotPending {
+                no: claim_no.to_string(),
+                status,
+            });
         }
 
         sqlx::query(
@@ -4751,7 +4955,9 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
             .map(|r| r.get("id"))
-            .ok_or_else(|| StoreError::DocumentNotFound { no: doc_no.to_string() })
+            .ok_or_else(|| StoreError::DocumentNotFound {
+                no: doc_no.to_string(),
+            })
     }
 
     /// One revision of a document. Omitting `version` gives the latest.
@@ -4780,10 +4986,13 @@ impl Store {
 
         match (row, version) {
             (Some(r), _) => Ok(row_to_document(&r)),
-            (None, Some(v)) => {
-                Err(StoreError::DocumentVersionNotFound { no: doc_no.to_string(), version: v })
-            }
-            (None, None) => Err(StoreError::DocumentNotFound { no: doc_no.to_string() }),
+            (None, Some(v)) => Err(StoreError::DocumentVersionNotFound {
+                no: doc_no.to_string(),
+                version: v,
+            }),
+            (None, None) => Err(StoreError::DocumentNotFound {
+                no: doc_no.to_string(),
+            }),
         }
     }
 
@@ -4794,10 +5003,7 @@ impl Store {
     /// upload succeeds. The other order leaves either an object the database
     /// does not know about, or a row pointing at a file that does not exist.
     /// The latter is worse, because it looks like evidence.
-    pub async fn reserve_document_slot(
-        &self,
-        req: ReserveDocument<'_>,
-    ) -> Result<DocumentSlot> {
+    pub async fn reserve_document_slot(&self, req: ReserveDocument<'_>) -> Result<DocumentSlot> {
         let mut tx = self.pool.begin().await?;
 
         let existing: Option<(i32, String, i32)> = match req.doc_no {
@@ -4842,7 +5048,11 @@ impl Store {
         };
 
         tx.commit().await?;
-        Ok(DocumentSlot { document_id: doc_id, doc_no, version_no })
+        Ok(DocumentSlot {
+            document_id: doc_id,
+            doc_no,
+            version_no,
+        })
     }
 
     /// The file is in the bucket; register it.
@@ -4869,7 +5079,8 @@ impl Store {
         .bind(actor)
         .execute(&self.pool)
         .await?;
-        self.document_version(&slot.doc_no, Some(slot.version_no)).await
+        self.document_version(&slot.doc_no, Some(slot.version_no))
+            .await
     }
 
     /// Document statistics: documents, revisions and bytes.
@@ -4952,7 +5163,10 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(|r| row_to_import_batch(r, &issues)).collect())
+        Ok(rows
+            .iter()
+            .map(|r| row_to_import_batch(r, &issues))
+            .collect())
     }
 
     pub async fn import_batch(&self, batch_no: &str) -> Result<ImportBatch> {
@@ -4960,7 +5174,9 @@ impl Store {
             .await?
             .into_iter()
             .find(|b| b.batch_no == batch_no)
-            .ok_or_else(|| StoreError::ImportBatchNotFound { no: batch_no.to_string() })
+            .ok_or_else(|| StoreError::ImportBatchNotFound {
+                no: batch_no.to_string(),
+            })
     }
 
     /// Store the result of one dry run. Writes no vouchers; this step only
@@ -4973,7 +5189,9 @@ impl Store {
                 .await?
                 .get("ok");
         if !known {
-            return Err(StoreError::ImportSourceNotFound { code: req.source_code.to_string() });
+            return Err(StoreError::ImportSourceNotFound {
+                code: req.source_code.to_string(),
+            });
         }
 
         let mut tx = self.pool.begin().await?;
@@ -5024,7 +5242,9 @@ impl Store {
             .bind(batch_no)
             .fetch_optional(&self.pool)
             .await?
-            .ok_or_else(|| StoreError::ImportBatchNotFound { no: batch_no.to_string() })?;
+            .ok_or_else(|| StoreError::ImportBatchNotFound {
+                no: batch_no.to_string(),
+            })?;
         Ok((r.get("status"), r.get("payload")))
     }
 
@@ -5042,11 +5262,16 @@ impl Store {
             .bind(batch_no)
             .fetch_optional(&mut *tx)
             .await?
-            .ok_or_else(|| StoreError::ImportBatchNotFound { no: batch_no.to_string() })?;
+            .ok_or_else(|| StoreError::ImportBatchNotFound {
+                no: batch_no.to_string(),
+            })?;
         let id: i32 = row.get("id");
         let status: String = row.get("status");
         if status != "preview" {
-            return Err(StoreError::ImportNotPreview { no: batch_no.to_string(), status });
+            return Err(StoreError::ImportNotPreview {
+                no: batch_no.to_string(),
+                status,
+            });
         }
 
         let mut nos: Vec<String> = Vec::with_capacity(drafts.len());
@@ -5063,9 +5288,10 @@ impl Store {
                     dept_code: None,
                 })
                 .collect();
-            let no =
-                insert_voucher(&mut tx, d.date, &d.memo, &lines, "pending", "import", actor, None)
-                    .await?;
+            let no = insert_voucher(
+                &mut tx, d.date, &d.memo, &lines, "pending", "import", actor, None,
+            )
+            .await?;
             for (i, l) in d.lines.iter().enumerate() {
                 if l.dept_id.is_some() {
                     set_line_dept(&mut tx, &no, i as i32 + 1, l.dept_id).await?;
@@ -5091,11 +5317,7 @@ impl Store {
 
     /// Roll back a batch. Only unposted vouchers can be deleted; posted ones
     /// can be corrected only by a reversing entry.
-    pub async fn rollback_import_batch(
-        &self,
-        batch_no: &str,
-        actor: &str,
-    ) -> Result<ImportBatch> {
+    pub async fn rollback_import_batch(&self, batch_no: &str, actor: &str) -> Result<ImportBatch> {
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
@@ -5104,12 +5326,17 @@ impl Store {
         .bind(batch_no)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| StoreError::ImportBatchNotFound { no: batch_no.to_string() })?;
+        .ok_or_else(|| StoreError::ImportBatchNotFound {
+            no: batch_no.to_string(),
+        })?;
 
         let id: i32 = row.get("id");
         let status: String = row.get("status");
         if status != "committed" {
-            return Err(StoreError::ImportNotCommitted { no: batch_no.to_string(), status });
+            return Err(StoreError::ImportNotCommitted {
+                no: batch_no.to_string(),
+                status,
+            });
         }
         let nos: Vec<String> = row.get("voucher_nos");
 
@@ -5222,7 +5449,9 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?
         .map(|r| r.get("id"))
-        .ok_or_else(|| StoreError::UnknownAccount { code: gl_code.to_string() })
+        .ok_or_else(|| StoreError::UnknownAccount {
+            code: gl_code.to_string(),
+        })
     }
 
     // HR: employees
@@ -5302,12 +5531,15 @@ impl Store {
     /// Nothing revisits `left_on` later, so a login left open is open for good.
     pub async fn update_employee(&self, req: WriteEmployee<'_>) -> Result<UpdatedEmployee> {
         let mut tx = self.pool.begin().await?;
-        let current = sqlx::query("SELECT id, name, status FROM employee WHERE emp_no = $1 FOR UPDATE")
-            .bind(req.emp_no)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let current =
+            sqlx::query("SELECT id, name, status FROM employee WHERE emp_no = $1 FOR UPDATE")
+                .bind(req.emp_no)
+                .fetch_optional(&mut *tx)
+                .await?;
         let Some(current) = current else {
-            return Err(StoreError::EmployeeNotFound { no: req.emp_no.to_string() });
+            return Err(StoreError::EmployeeNotFound {
+                no: req.emp_no.to_string(),
+            });
         };
         let employee_id: i32 = current.get("id");
         let was_left: String = current.get("status");
@@ -5352,7 +5584,10 @@ impl Store {
         };
 
         tx.commit().await?;
-        Ok(UpdatedEmployee { employee: self.employee(req.emp_no).await?, closed })
+        Ok(UpdatedEmployee {
+            employee: self.employee(req.emp_no).await?,
+            closed,
+        })
     }
 
     pub async fn employees(&self, include_left: bool, q: Option<&str>) -> Result<Vec<Employee>> {
@@ -5431,8 +5666,11 @@ impl Store {
         .await?
         .as_ref()
         .map(row_to_employee)
-        .ok_or_else(|| StoreError::EmployeeNotFound { no: emp_no.to_string() })?;
-        self.attach_bank_accounts(std::slice::from_mut(&mut found)).await?;
+        .ok_or_else(|| StoreError::EmployeeNotFound {
+            no: emp_no.to_string(),
+        })?;
+        self.attach_bank_accounts(std::slice::from_mut(&mut found))
+            .await?;
         Ok(found)
     }
 
@@ -5455,7 +5693,8 @@ impl Store {
         .as_ref()
         .map(row_to_employee);
         if let Some(employee) = found.as_mut() {
-            self.attach_bank_accounts(std::slice::from_mut(employee)).await?;
+            self.attach_bank_accounts(std::slice::from_mut(employee))
+                .await?;
         }
         Ok(found)
     }
@@ -5480,14 +5719,12 @@ impl Store {
         include_done: bool,
         limit: i64,
     ) -> Result<Vec<LeaveRequest>> {
-        self.leave_requests_filtered(include_done, limit, None).await
+        self.leave_requests_filtered(include_done, limit, None)
+            .await
     }
 
     /// All leave requests for one employee, including decided history.
-    pub async fn leave_requests_by_employee(
-        &self,
-        employee_id: i32,
-    ) -> Result<Vec<LeaveRequest>> {
+    pub async fn leave_requests_by_employee(&self, employee_id: i32) -> Result<Vec<LeaveRequest>> {
         self.leave_requests_filtered(true, i64::MAX, Some(employee_id))
             .await
     }
@@ -5552,10 +5789,7 @@ impl Store {
     /// fixed at `pending` and every `decided_*` column keeps the table's
     /// default null. Requester and creator both come from the single employee
     /// resolved by the operation layer.
-    pub async fn create_leave_request(
-        &self,
-        req: NewLeaveRequest<'_>,
-    ) -> Result<LeaveRequest> {
+    pub async fn create_leave_request(&self, req: NewLeaveRequest<'_>) -> Result<LeaveRequest> {
         let mut tx = self.pool.begin().await?;
 
         // `leave_request_no_overlap` refuses this anyway; asking first is what
@@ -5755,7 +5989,9 @@ impl Store {
                 .bind(request_no)
                 .fetch_optional(&self.pool)
                 .await?
-                .ok_or_else(|| StoreError::OvertimeNotFound { no: request_no.to_string() })?;
+                .ok_or_else(|| StoreError::OvertimeNotFound {
+                    no: request_no.to_string(),
+                })?;
         let status: String = row.get("status");
         if status != "pending" {
             return Err(StoreError::OvertimeAlreadyDecided {
@@ -5764,7 +6000,9 @@ impl Store {
             });
         }
         if actor_employee_id.is_some() && actor_employee_id == Some(row.get("employee_id")) {
-            return Err(StoreError::LeaveDecidedByRequester { no: request_no.to_string() });
+            return Err(StoreError::LeaveDecidedByRequester {
+                no: request_no.to_string(),
+            });
         }
 
         let updated = sqlx::query(
@@ -5791,7 +6029,9 @@ impl Store {
             .await?
             .into_iter()
             .find(|o| o.request_no == request_no)
-            .ok_or_else(|| StoreError::OvertimeNotFound { no: request_no.to_string() })
+            .ok_or_else(|| StoreError::OvertimeNotFound {
+                no: request_no.to_string(),
+            })
     }
 
     /// Every punch of one month, optionally narrowed to one employee.
@@ -5850,7 +6090,9 @@ impl Store {
             .await?
             .into_iter()
             .find(|row| row.punched_on == p.punched_on && row.kind == p.kind)
-            .ok_or(StoreError::PunchOutWithoutIn { date: p.punched_on.to_string() })
+            .ok_or(StoreError::PunchOutWithoutIn {
+                date: p.punched_on.to_string(),
+            })
     }
 
     pub async fn decide_leave_request(
@@ -5866,15 +6108,22 @@ impl Store {
             .bind(leave_no)
             .fetch_optional(&self.pool)
             .await?
-            .ok_or_else(|| StoreError::LeaveNotFound { no: leave_no.to_string() })?;
+            .ok_or_else(|| StoreError::LeaveNotFound {
+                no: leave_no.to_string(),
+            })?;
         let status: String = row.get("status");
         if status != "pending" {
-            return Err(StoreError::LeaveAlreadyDecided { no: leave_no.to_string(), status });
+            return Err(StoreError::LeaveAlreadyDecided {
+                no: leave_no.to_string(),
+                status,
+            });
         }
         // Same separation of duties the expense flow enforces. The key is the
         // employee id, not the name: two people can share a name.
         if actor_employee_id.is_some() && actor_employee_id == Some(row.get("employee_id")) {
-            return Err(StoreError::LeaveDecidedByRequester { no: leave_no.to_string() });
+            return Err(StoreError::LeaveDecidedByRequester {
+                no: leave_no.to_string(),
+            });
         }
 
         // The status is re-checked in the UPDATE itself, so two managers
@@ -5904,7 +6153,9 @@ impl Store {
             .await?
             .into_iter()
             .find(|l| l.leave_no == leave_no)
-            .ok_or_else(|| StoreError::LeaveNotFound { no: leave_no.to_string() })
+            .ok_or_else(|| StoreError::LeaveNotFound {
+                no: leave_no.to_string(),
+            })
     }
 
     /// Punch correction requests, newest working day first.
@@ -5992,7 +6243,11 @@ impl Store {
         let Some(row) = inserted else {
             return Err(StoreError::PunchCorrectionAlreadyOpen {
                 date: n.punched_on.to_string(),
-                kind: if n.kind == "in" { "上班".into() } else { "下班".into() },
+                kind: if n.kind == "in" {
+                    "上班".into()
+                } else {
+                    "下班".into()
+                },
             });
         };
         let id: i32 = row.get("id");
@@ -6016,8 +6271,15 @@ impl Store {
         &self,
         d: DecidePunchCorrection<'_>,
     ) -> Result<PunchCorrection> {
-        let DecidePunchCorrection { id, approve, actor, actor_role, actor_employee_id, note, offset } =
-            d;
+        let DecidePunchCorrection {
+            id,
+            approve,
+            actor,
+            actor_role,
+            actor_employee_id,
+            note,
+            offset,
+        } = d;
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
@@ -6121,7 +6383,11 @@ impl Store {
     }
 
     pub async fn payroll_run(&self, period: &str) -> Result<Option<PayrollRun>> {
-        Ok(self.payroll_runs(500).await?.into_iter().find(|r| r.period == period))
+        Ok(self
+            .payroll_runs(500)
+            .await?
+            .into_iter()
+            .find(|r| r.period == period))
     }
 
     pub async fn payslips(&self, period: &str) -> Result<Vec<Payslip>> {
@@ -6229,7 +6495,9 @@ impl Store {
     /// credits are two lines, withheld items and net pay.
     pub async fn record_payroll_run(&self, req: RecordPayroll<'_>) -> Result<PayrollRun> {
         if req.slips.is_empty() {
-            return Err(StoreError::NobodyToPay { period: req.period.to_string() });
+            return Err(StoreError::NobodyToPay {
+                period: req.period.to_string(),
+            });
         }
 
         let mut tx = self.pool.begin().await?;
@@ -6241,7 +6509,9 @@ impl Store {
         {
             return Err(StoreError::PeriodAlreadyPaid {
                 period: req.period.to_string(),
-                voucher: row.get::<Option<String>, _>("voucher_no").unwrap_or_default(),
+                voucher: row
+                    .get::<Option<String>, _>("voucher_no")
+                    .unwrap_or_default(),
             });
         }
 
@@ -6406,7 +6676,9 @@ impl Store {
         tx.commit().await?;
         self.payroll_run(req.period)
             .await?
-            .ok_or_else(|| StoreError::NobodyToPay { period: req.period.to_string() })
+            .ok_or_else(|| StoreError::NobodyToPay {
+                period: req.period.to_string(),
+            })
     }
 
     // Bulletin board: announcements and company rules.
@@ -6445,11 +6717,13 @@ impl Store {
 
     /// When this employee last opened the board, if ever.
     pub async fn notices_read_at(&self, employee_id: i32) -> Result<Option<DateTime<Utc>>> {
-        Ok(sqlx::query("SELECT read_at FROM notice_read WHERE employee_id = $1")
-            .bind(employee_id)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|r| r.get("read_at")))
+        Ok(
+            sqlx::query("SELECT read_at FROM notice_read WHERE employee_id = $1")
+                .bind(employee_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get("read_at")),
+        )
     }
 
     /// Move the mark to now. One row per person: this records what they have
@@ -6591,8 +6865,7 @@ impl Store {
         let next_title = u.title.unwrap_or(&title);
         let next_body = u.body.unwrap_or(&body);
         let next_effective = u.effective_on.unwrap_or(effective_on);
-        let revised =
-            next_title != title || next_body != body || next_effective != effective_on;
+        let revised = next_title != title || next_body != body || next_effective != effective_on;
 
         if revised {
             sqlx::query(
@@ -6625,9 +6898,11 @@ impl Store {
         .await?;
 
         tx.commit().await?;
-        self.notice(u.id).await?.ok_or(StoreError::NoticeNotFound).map(|n| (n, revised))
+        self.notice(u.id)
+            .await?
+            .ok_or(StoreError::NoticeNotFound)
+            .map(|n| (n, revised))
     }
-
 }
 
 // Return types
@@ -7681,7 +7956,9 @@ pub struct ExpenseClaim {
 impl ExpenseClaim {
     /// Whether this step has been approved.
     pub fn step_done(&self, step_no: i32) -> bool {
-        self.steps.iter().any(|s| s.step_no == step_no && s.decision == "approved")
+        self.steps
+            .iter()
+            .any(|s| s.step_no == step_no && s.decision == "approved")
     }
 }
 
@@ -8261,7 +8538,10 @@ fn ensure_voidable(no: &str, status: &str) -> Result<()> {
     if status == "posted" {
         Ok(())
     } else {
-        Err(StoreError::NotVoidable { no: no.to_string(), status: status.to_string() })
+        Err(StoreError::NotVoidable {
+            no: no.to_string(),
+            status: status.to_string(),
+        })
     }
 }
 
@@ -8269,7 +8549,10 @@ fn ensure_reversible(no: &str, status: &str) -> Result<()> {
     if status == "posted" {
         Ok(())
     } else {
-        Err(StoreError::NotReversible { no: no.to_string(), status: status.to_string() })
+        Err(StoreError::NotReversible {
+            no: no.to_string(),
+            status: status.to_string(),
+        })
     }
 }
 
@@ -8287,7 +8570,9 @@ async fn prepare_account_parent(
                 .await?
                 .get("found");
         if has_children {
-            return Err(StoreError::AccountHasChildren { code: code.to_string() });
+            return Err(StoreError::AccountHasChildren {
+                code: code.to_string(),
+            });
         }
     }
 
@@ -8295,7 +8580,9 @@ async fn prepare_account_parent(
         return Ok(());
     };
     if parent_code == code {
-        return Err(StoreError::AccountParentCycle { code: code.to_string() });
+        return Err(StoreError::AccountParentCycle {
+            code: code.to_string(),
+        });
     }
 
     let row = sqlx::query(
@@ -8315,10 +8602,14 @@ async fn prepare_account_parent(
     .await?;
     let total: i64 = row.get("total");
     if total == 0 {
-        return Err(StoreError::ParentAccountNotFound { code: parent_code.to_string() });
+        return Err(StoreError::ParentAccountNotFound {
+            code: parent_code.to_string(),
+        });
     }
     if row.get::<bool, _>("cycle") {
-        return Err(StoreError::AccountParentCycle { code: code.to_string() });
+        return Err(StoreError::AccountParentCycle {
+            code: code.to_string(),
+        });
     }
 
     sqlx::query("UPDATE account SET is_postable = false WHERE code = $1")
@@ -8336,10 +8627,7 @@ fn ensure_approval_rule_can_delete(total: i64) -> Result<()> {
     }
 }
 
-async fn resolve_department_id(
-    tx: &mut Tx<'_>,
-    dept_code: Option<&str>,
-) -> Result<Option<i32>> {
+async fn resolve_department_id(tx: &mut Tx<'_>, dept_code: Option<&str>) -> Result<Option<i32>> {
     let Some(dept_code) = dept_code else {
         return Ok(None);
     };
@@ -8352,7 +8640,9 @@ async fn resolve_department_id(
     .await?
     .map(|row| row.get("id"))
     .map(Some)
-    .ok_or_else(|| StoreError::DepartmentNotFound { code: dept_code.to_string() })
+    .ok_or_else(|| StoreError::DepartmentNotFound {
+        code: dept_code.to_string(),
+    })
 }
 
 /// Which page owns a voucher this system generated, named the way the screens
@@ -8456,12 +8746,7 @@ async fn insert_ar_invoice(tx: &mut Tx<'_>, req: InsertArInvoice<'_>) -> Result<
 
 /// Settlement status of a subsidiary ledger row. `pending_label` is the
 /// wording for money in transit (received versus paid).
-fn settle_state(
-    amount: Money,
-    settled: Money,
-    in_transit: Money,
-    pending_label: &str,
-) -> String {
+fn settle_state(amount: Money, settled: Money, in_transit: Money, pending_label: &str) -> String {
     if settled >= amount {
         "settled".into()
     } else if in_transit > Money::ZERO {
@@ -8489,7 +8774,9 @@ async fn bank_gl_code(tx: &mut Tx<'_>, bank_account_id: i32) -> Result<String> {
         .fetch_optional(&mut **tx)
         .await?
         .map(|r| r.get("gl_code"))
-        .ok_or(StoreError::BankAccountNotFound { id: bank_account_id })
+        .ok_or(StoreError::BankAccountNotFound {
+            id: bank_account_id,
+        })
 }
 
 /// Next free asset code in the `FA###` series.
@@ -8561,7 +8848,9 @@ async fn insert_voucher(
         .await?
         .map(|r| r.get("usable"));
         if postable != Some(true) {
-            return Err(StoreError::UnknownAccount { code: l.account_code.clone() });
+            return Err(StoreError::UnknownAccount {
+                code: l.account_code.clone(),
+            });
         }
     }
 
@@ -8683,7 +8972,10 @@ async fn close_access(
     .await?
     .map(|r| r.get("username"));
     if let Some(username) = last_of_role {
-        return Err(StoreError::LastAdministratorLeaving { name: name.to_string(), username });
+        return Err(StoreError::LastAdministratorLeaving {
+            name: name.to_string(),
+            username,
+        });
     }
 
     let suspended = sqlx::query(
@@ -8828,9 +9120,9 @@ fn row_to_overtime(r: &PgRow) -> OvertimeRequest {
 /// it belongs to. `replace` is what separates an employee pressing the
 /// button, which must refuse to overwrite, from a correction, which exists to.
 async fn punch_in_tx(
-tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-p: &NewPunch<'_>,
-replace: bool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    p: &NewPunch<'_>,
+    replace: bool,
 ) -> Result<Option<DateTime<Utc>>> {
     let existing = sqlx::query(
         "SELECT kind, punched_at FROM attendance_punch
@@ -8847,15 +9139,22 @@ replace: bool,
             .find(|row| row.get::<String, _>("kind") == kind)
             .map(|row| row.get("punched_at"))
     };
-    let local =
-        |at: DateTime<Utc>| laysi_domain::business_time(at, p.offset).format("%H:%M:%S").to_string();
+    let local = |at: DateTime<Utc>| {
+        laysi_domain::business_time(at, p.offset)
+            .format("%H:%M:%S")
+            .to_string()
+    };
 
     let replaced = at_of(p.kind);
     if !replace {
         if let Some(at) = replaced {
             return Err(StoreError::PunchAlreadyRecorded {
                 date: p.punched_on.to_string(),
-                kind: if p.kind == "in" { "上班".into() } else { "下班".into() },
+                kind: if p.kind == "in" {
+                    "上班".into()
+                } else {
+                    "下班".into()
+                },
                 at: local(at),
             });
         }
@@ -9296,7 +9595,10 @@ pub fn env_or_file(key: &str) -> Option<String> {
             }
         }
     }
-    std::env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Token hash: BLAKE3 as hex.
@@ -9362,7 +9664,10 @@ mod tests {
                 matches!(error, StoreError::NotVoidable { .. }),
                 "應回傳作廢狀態錯誤"
             );
-            assert!(error.to_string().contains(status), "錯誤訊息沒有指出目前狀態");
+            assert!(
+                error.to_string().contains(status),
+                "錯誤訊息沒有指出目前狀態"
+            );
         }
     }
 
@@ -9403,13 +9708,21 @@ mod tests {
     fn a_token_expires_rotate_days_after_creation_not_after_last_use() {
         let created_at = Utc::now() - chrono::Duration::days(31);
         let token = sample_token(created_at, Some(30));
-        assert_eq!(token.expires_at(), Some(created_at + chrono::Duration::days(30)));
-        assert!(token.is_expired(Utc::now()), "建立後 31 天、輪替 30 天的 token 應已過期");
+        assert_eq!(
+            token.expires_at(),
+            Some(created_at + chrono::Duration::days(30))
+        );
+        assert!(
+            token.is_expired(Utc::now()),
+            "建立後 31 天、輪替 30 天的 token 應已過期"
+        );
 
         let fresh = sample_token(Utc::now() - chrono::Duration::days(1), Some(30));
-        assert!(!fresh.is_expired(Utc::now()), "建立後 1 天、輪替 30 天的 token 不該過期");
+        assert!(
+            !fresh.is_expired(Utc::now()),
+            "建立後 1 天、輪替 30 天的 token 不該過期"
+        );
     }
-
 
     /// The two regulation tests below share one `reg_ruleset` and one
     /// process-wide installed ruleset, so running them at the same time has one
@@ -9430,7 +9743,9 @@ mod tests {
         let _serial = REGULATION_TESTS.lock().await;
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
-        let store = Store::connect(&database_url, 2).await.expect("應可連上測試資料庫");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
         store.migrate().await.expect("測試資料庫 migrations 應成功");
         store.reload_regulations().await.expect("應載入法規");
 
@@ -9441,15 +9756,29 @@ mod tests {
              ON CONFLICT (domain, version) DO NOTHING",
         )];
 
-        assert_eq!(store.apply_regulation_updates(&file).await.expect("應套用"), 1);
-        store.delete_regulation("vat", "測試版").await.expect("應刪得掉");
         assert_eq!(
-            store.apply_regulation_updates(&file).await.expect("應可重跑"),
+            store.apply_regulation_updates(&file).await.expect("應套用"),
+            1
+        );
+        store
+            .delete_regulation("vat", "測試版")
+            .await
+            .expect("應刪得掉");
+        assert_eq!(
+            store
+                .apply_regulation_updates(&file)
+                .await
+                .expect("應可重跑"),
             0,
             "已套用過的更新不得再寫一次，否則刪掉的版本會回來"
         );
         assert!(
-            !store.regulations().await.expect("應讀得到").iter().any(|r| r.version == "測試版"),
+            !store
+                .regulations()
+                .await
+                .expect("應讀得到")
+                .iter()
+                .any(|r| r.version == "測試版"),
             "刪掉的版本不應復活"
         );
 
@@ -9477,7 +9806,9 @@ mod tests {
 
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
-        let store = Store::connect(&database_url, 2).await.expect("應可連上測試資料庫");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
         store.migrate().await.expect("測試資料庫 migrations 應成功");
 
         let seeded = store.reload_regulations().await.expect("應載入法規");
@@ -9488,7 +9819,10 @@ mod tests {
             .find(|r| r.domain == "labor_insurance")
             .expect("出廠版本應有勞保");
         edited.payload["premium_rate"] = "0.13".into();
-        store.write_regulation(&edited, true).await.expect("應寫得進去");
+        store
+            .write_regulation(&edited, true)
+            .await
+            .expect("應寫得進去");
 
         // The seed runs on every boot; it must leave the table alone once it
         // holds anything.
@@ -9499,7 +9833,10 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 7, 25).unwrap(),
         )
         .expect("應解析得到勞保");
-        assert_eq!(in_force.decimal("premium_rate").unwrap(), "0.13".parse().unwrap());
+        assert_eq!(
+            in_force.decimal("premium_rate").unwrap(),
+            "0.13".parse().unwrap()
+        );
 
         store
             .delete_regulation("labor_insurance", &edited.version)
@@ -9523,7 +9860,10 @@ mod tests {
             .into_iter()
             .find(|r| r.domain == "labor_insurance")
             .expect("出廠版本應有勞保");
-        store.write_regulation(&factory, false).await.expect("應寫得回去");
+        store
+            .write_regulation(&factory, false)
+            .await
+            .expect("應寫得回去");
         store.reload_regulations().await.expect("應重新載入");
     }
 
@@ -9618,7 +9958,9 @@ mod tests {
     async fn requests_cannot_overlap_for_one_employee() {
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
-        let store = Store::connect(&database_url, 2).await.expect("應可連上測試資料庫");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
         store.migrate().await.expect("測試資料庫 migrations 應成功");
 
         let emp_no = format!("T{}", &Uuid::new_v4().simple().to_string()[..8]);
@@ -9662,7 +10004,10 @@ mod tests {
             actor: "測試",
         };
 
-        store.create_leave_request(leave(at(10, 9), at(10, 18))).await.expect("第一張應收下");
+        store
+            .create_leave_request(leave(at(10, 9), at(10, 18)))
+            .await
+            .expect("第一張應收下");
         let clash = store
             .create_leave_request(leave(at(10, 13), at(11, 18)))
             .await
@@ -9685,7 +10030,10 @@ mod tests {
             reason: "測試",
             actor: "測試",
         };
-        store.create_overtime_request(overtime(at(12, 19), at(12, 21))).await.expect("第一張應收下");
+        store
+            .create_overtime_request(overtime(at(12, 19), at(12, 21)))
+            .await
+            .expect("第一張應收下");
         let clash = store
             .create_overtime_request(overtime(at(12, 20), at(12, 22)))
             .await
@@ -9736,20 +10084,23 @@ mod tests {
         }
 
         let created = store
-            .create_employee(write(&emp_no, Some(&[
-                WriteEmployeeBankAccount {
-                    bank_name: "玉山銀行",
-                    account_no: "0012345",
-                    is_payroll: true,
-                    note: "薪資",
-                },
-                WriteEmployeeBankAccount {
-                    bank_name: "台北富邦",
-                    account_no: "6789012",
-                    is_payroll: false,
-                    note: "報支退款",
-                },
-            ])))
+            .create_employee(write(
+                &emp_no,
+                Some(&[
+                    WriteEmployeeBankAccount {
+                        bank_name: "玉山銀行",
+                        account_no: "0012345",
+                        is_payroll: true,
+                        note: "薪資",
+                    },
+                    WriteEmployeeBankAccount {
+                        bank_name: "台北富邦",
+                        account_no: "6789012",
+                        is_payroll: false,
+                        note: "報支退款",
+                    },
+                ]),
+            ))
             .await
             .expect("應可建立員工與帳戶");
         assert_eq!(created.bank_accounts.len(), 2);
@@ -9765,12 +10116,15 @@ mod tests {
         assert_eq!(untouched.employee.bank_accounts.len(), 2);
 
         let replaced = store
-            .update_employee(write(&emp_no, Some(&[WriteEmployeeBankAccount {
-                bank_name: "台北富邦",
-                account_no: "6789012",
-                is_payroll: true,
-                note: "",
-            }])))
+            .update_employee(write(
+                &emp_no,
+                Some(&[WriteEmployeeBankAccount {
+                    bank_name: "台北富邦",
+                    account_no: "6789012",
+                    is_payroll: true,
+                    note: "",
+                }]),
+            ))
             .await
             .expect("應可整份取代");
         assert_eq!(replaced.employee.bank_accounts.len(), 1);
@@ -9934,12 +10288,23 @@ mod tests {
         assert_eq!(before_credit.credit, Money::ZERO);
 
         let original_no = store
-            .create_voucher(date, "需要沖銷的傳票", &lines, "pending", "manual", "測試", None)
+            .create_voucher(
+                date,
+                "需要沖銷的傳票",
+                &lines,
+                "pending",
+                "manual",
+                "測試",
+                None,
+            )
             .await
             .unwrap();
         store.post_voucher(&original_no).await.unwrap();
 
-        let reversal = store.reverse_voucher(&original_no, date, "測試").await.unwrap();
+        let reversal = store
+            .reverse_voucher(&original_no, date, "測試")
+            .await
+            .unwrap();
         assert_eq!(reversal.status, "posted");
         assert_eq!(reversal.source, "reversal");
         assert_eq!(reversal.reverses.as_deref(), Some(original_no.as_str()));
@@ -9963,10 +10328,14 @@ mod tests {
         assert_eq!(original.reversed_by.as_deref(), Some(reversal.no.as_str()));
 
         let after_reversal = store.ledger_movements(Some(date), date).await.unwrap();
-        let after_reversal_debit =
-            after_reversal.iter().find(|row| row.code == debit_code).unwrap();
-        let after_reversal_credit =
-            after_reversal.iter().find(|row| row.code == credit_code).unwrap();
+        let after_reversal_debit = after_reversal
+            .iter()
+            .find(|row| row.code == debit_code)
+            .unwrap();
+        let after_reversal_credit = after_reversal
+            .iter()
+            .find(|row| row.code == credit_code)
+            .unwrap();
         assert_eq!(
             after_reversal_debit.net_debit(),
             before_debit.net_debit(),
@@ -9983,11 +10352,19 @@ mod tests {
         let total_credit: Money = trial.iter().map(|row| row.credit).sum();
         assert_eq!(total_debit, total_credit, "沖銷後試算表仍要借貸相等");
         assert_eq!(
-            trial.iter().find(|row| row.code == debit_code).unwrap().balance,
+            trial
+                .iter()
+                .find(|row| row.code == debit_code)
+                .unwrap()
+                .balance,
             Money::ZERO
         );
         assert_eq!(
-            trial.iter().find(|row| row.code == credit_code).unwrap().balance,
+            trial
+                .iter()
+                .find(|row| row.code == credit_code)
+                .unwrap()
+                .balance,
             Money::ZERO
         );
 
@@ -10037,21 +10414,33 @@ mod tests {
         store.post_voucher(&void_no).await.unwrap();
         let with_void = store.ledger_movements(Some(date), date).await.unwrap();
         let with_void_debit = with_void.iter().find(|row| row.code == debit_code).unwrap();
-        assert_eq!(with_void_debit.debit, after_reversal_debit.debit + void_amount);
+        assert_eq!(
+            with_void_debit.debit,
+            after_reversal_debit.debit + void_amount
+        );
 
         let voided = store.void_voucher(&void_no).await.unwrap();
         assert_eq!(voided.status, "void");
         assert_eq!(voided.lines.len(), void_lines.len(), "作廢不得刪除分錄");
 
         let after_void = store.ledger_movements(Some(date), date).await.unwrap();
-        let after_void_debit = after_void.iter().find(|row| row.code == debit_code).unwrap();
-        let after_void_credit = after_void.iter().find(|row| row.code == credit_code).unwrap();
+        let after_void_debit = after_void
+            .iter()
+            .find(|row| row.code == debit_code)
+            .unwrap();
+        let after_void_credit = after_void
+            .iter()
+            .find(|row| row.code == credit_code)
+            .unwrap();
         assert_eq!(after_void_debit.debit, after_reversal_debit.debit);
         assert_eq!(after_void_debit.credit, after_reversal_debit.credit);
         assert_eq!(after_void_credit.debit, after_reversal_credit.debit);
         assert_eq!(after_void_credit.credit, after_reversal_credit.credit);
 
-        let second_void = store.void_voucher(&void_no).await.expect_err("不得重複作廢");
+        let second_void = store
+            .void_voucher(&void_no)
+            .await
+            .expect_err("不得重複作廢");
         assert!(
             matches!(second_void, StoreError::NotVoidable { ref status, .. } if status == "void")
         );
