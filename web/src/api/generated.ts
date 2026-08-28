@@ -128,7 +128,8 @@ export type OpName =
   | 'confirm_backup_key'
 ;
 
-export type Risk = 'read_only' | 'needs_confirm' | 'high_risk' | 'boss_only' | 'admin_only';
+export const RISKS = ['read_only', 'needs_confirm', 'high_risk', 'boss_only', 'admin_only'] as const;
+export type Risk = (typeof RISKS)[number];
 
 export interface OpMeta {
   name: OpName;

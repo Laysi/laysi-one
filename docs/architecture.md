@@ -2005,6 +2005,20 @@ Logo 一律 `<img src="/v1/brand/mark.svg">`，**前端不得自帶任何 logo �
 `account`／`accountList`。同一條 live 檢查另外抓到 `company_setting` 的 `source`：後端送
 `setting`／`derived`／`regulation` 三種，前端只宣告了兩種。
 
+**註冊表以外的三條路由也走同一套**：`/v1/auth/me`、`/v1/meta` 與 `/v1/ops` 不是操作，
+沒有呼叫端可以讀出配對，schema 一樣住在 `client.ts`（`authEnvelope`／`meta`／`opList`），
+live 檢查以 `mismatchAgainst` 逐一核對。`/v1/auth/me` 是其中最要緊的一條：`permissions`
+決定每一個入口畫不畫，而它原本是一次 `body as Envelope<SessionUser>` 的轉型，前端對它
+一無所知。形狀不符時 `readEnvelope` 回一則 `SHAPE_MISMATCH`（與 `callOp` 同一則訊息，
+`client.ts` 匯出），走既有的 `failure()` 出去，未登入那條路不受影響——401 的 body 仍然
+解析得出 `oauth` 與 `setup`。`SessionUser`／`SetupState`／`OauthState` 因此從 `auth.ts`
+搬進 `client.ts`：`auth.ts` 留 React hooks，形狀集中在同一個檔案，測試腳本也才 import
+得到（`auth.ts` 會把 React 一起拉進來）。
+
+**風險分級的字串由產生器發**：`generated.ts` 現在出 `export const RISKS = [...] as const`
+與 `export type Risk = (typeof RISKS)[number]`，`opInfo` 用 `z.enum(RISKS)`。原本只有型別
+沒有值，zod 需要一份執行期的清單，而手抄第二份就是等著漂走的那一份。
+
 ### 示範資料：`laysi-admin seed-demo`
 
 產品出廠是空的，這條指令是唯一的例外，而且必須手動執行。已經有傳票的安裝會被

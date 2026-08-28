@@ -34,7 +34,10 @@ fn main() -> std::io::Result<()> {
         .iter()
         .map(|r| format!("'{}'", r.as_db()))
         .collect();
-    ts.push_str(&format!("export type Risk = {};\n\n", risks.join(" | ")));
+    ts.push_str(&format!(
+        "export const RISKS = [{}] as const;\nexport type Risk = (typeof RISKS)[number];\n\n",
+        risks.join(", ")
+    ));
 
     ts.push_str(
         "export interface OpMeta {\n  name: OpName;\n  risk: Risk;\n  \
