@@ -243,14 +243,23 @@ impl Operation for GetHrCompliance {
         let overtime_ceiling = laysi_regulation::overtime_monthly_max_hours(overtime_rs)?;
         let month = as_of.format("%Y-%m").to_string();
         let mut overtime_hours: BTreeMap<i32, Money> = BTreeMap::new();
-        for request in ctx.store.overtime_requests(true, None, Some(&month)).await? {
+        for request in ctx
+            .store
+            .overtime_requests(true, None, Some(&month))
+            .await?
+        {
             if request.status == "approved" {
-                *overtime_hours.entry(request.employee_id).or_insert(Money::ZERO) += request.hours;
+                *overtime_hours
+                    .entry(request.employee_id)
+                    .or_insert(Money::ZERO) += request.hours;
             }
         }
         let mut overtime_failures = Vec::new();
         for employee in &staff {
-            let hours = overtime_hours.get(&employee.id).copied().unwrap_or(Money::ZERO);
+            let hours = overtime_hours
+                .get(&employee.id)
+                .copied()
+                .unwrap_or(Money::ZERO);
             if hours > overtime_ceiling {
                 overtime_failures.push(json!({
                     "emp_no": employee.emp_no,

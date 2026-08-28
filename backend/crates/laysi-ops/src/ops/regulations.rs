@@ -26,7 +26,11 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(ListRegulations), Box::new(SaveRegulation), Box::new(DeleteRegulation)]
+    vec![
+        Box::new(ListRegulations),
+        Box::new(SaveRegulation),
+        Box::new(DeleteRegulation),
+    ]
 }
 
 /// Display name of a regulation domain.
@@ -125,30 +129,32 @@ fn fields(node: &Value, prefix: &str) -> Vec<Value> {
     };
     match node {
         Value::Object(map) => {
-            let mut keyed: Vec<(usize, &String, &Value)> =
-                map.iter().map(|(key, child)| (field_meta(key).0, key, child)).collect();
+            let mut keyed: Vec<(usize, &String, &Value)> = map
+                .iter()
+                .map(|(key, child)| (field_meta(key).0, key, child))
+                .collect();
             keyed.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
             keyed
-            .into_iter()
-            .map(|(_, key, child)| {
-                let here = path(key);
-                match child {
-                    Value::String(text) => json!({
-                        "path": here, "label": field_label(key),
-                        "value": text, "editable": true,
-                    }),
-                    Value::Array(items) if items.iter().all(Value::is_string) => json!({
-                        "path": here, "label": field_label(key), "editable": false,
-                        "value": items.iter().filter_map(Value::as_str)
-                            .collect::<Vec<_>>().join("、"),
-                    }),
-                    other => json!({
-                        "path": here, "label": field_label(key),
-                        "children": fields(other, &here),
-                    }),
-                }
-            })
-            .collect()
+                .into_iter()
+                .map(|(_, key, child)| {
+                    let here = path(key);
+                    match child {
+                        Value::String(text) => json!({
+                            "path": here, "label": field_label(key),
+                            "value": text, "editable": true,
+                        }),
+                        Value::Array(items) if items.iter().all(Value::is_string) => json!({
+                            "path": here, "label": field_label(key), "editable": false,
+                            "value": items.iter().filter_map(Value::as_str)
+                                .collect::<Vec<_>>().join("、"),
+                        }),
+                        other => json!({
+                            "path": here, "label": field_label(key),
+                            "children": fields(other, &here),
+                        }),
+                    }
+                })
+                .collect()
         }
         Value::Array(items) => items
             .iter()
@@ -218,7 +224,10 @@ impl Operation for ListRegulations {
             })
             .collect();
         let summary = format!("讀取法規版本 · {} 個領域 · 適用日 {as_of}", domains.len());
-        Ok(OpOutcome::new(json!({ "as_of": as_of, "domains": domains }), summary))
+        Ok(OpOutcome::new(
+            json!({ "as_of": as_of, "domains": domains }),
+            summary,
+        ))
     }
 }
 
@@ -338,7 +347,10 @@ impl Operation for SaveRegulation {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: SaveRegulationInput = parse(input)?;
         if !laysi_regulation::DOMAINS.contains(&i.domain.as_str()) {
-            return Err(OpError::BadInput(format!("沒有「{}」這個法規領域。", i.domain)));
+            return Err(OpError::BadInput(format!(
+                "沒有「{}」這個法規領域。",
+                i.domain
+            )));
         }
         let version = i.version.trim().to_string();
         if version.is_empty() {
@@ -354,7 +366,9 @@ impl Operation for SaveRegulation {
         }
         let source_note = i.source_note.trim().to_string();
         if source_note.is_empty() {
-            return Err(OpError::BadInput("請填法源，報表與稽核要引用得到條文。".into()));
+            return Err(OpError::BadInput(
+                "請填法源，報表與稽核要引用得到條文。".into(),
+            ));
         }
 
         let candidate = Ruleset {
@@ -370,7 +384,10 @@ impl Operation for SaveRegulation {
         ctx.store.write_regulation(&candidate, true).await?;
         let n = ctx.store.reload_regulations().await?;
         let label = domain_label(&i.domain);
-        let summary = format!("儲存法規版本 · {label} {version} · 自 {} 起適用", i.effective_from);
+        let summary = format!(
+            "儲存法規版本 · {label} {version} · 自 {} 起適用",
+            i.effective_from
+        );
         Ok(OpOutcome::new(
             json!({
                 "domain": i.domain,
@@ -412,15 +429,20 @@ impl Operation for DeleteRegulation {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: DeleteRegulationInput = parse(input)?;
         let label = domain_label(&i.domain);
-        let remaining =
-            laysi_regulation::all().iter().filter(|r| r.domain == i.domain).count();
+        let remaining = laysi_regulation::all()
+            .iter()
+            .filter(|r| r.domain == i.domain)
+            .count();
         if remaining <= 1 {
             return Err(OpError::BadInput(format!(
                 "{label}只剩這一版，刪掉之後薪資、申報與折舊都算不出來。請先新增下一版。"
             )));
         }
         if ctx.store.delete_regulation(&i.domain, &i.version).await? == 0 {
-            return Err(OpError::BadInput(format!("{label}沒有「{}」這一版。", i.version)));
+            return Err(OpError::BadInput(format!(
+                "{label}沒有「{}」這一版。",
+                i.version
+            )));
         }
         let n = ctx.store.reload_regulations().await?;
         let summary = format!("刪除法規版本 · {label} {}", i.version);
@@ -436,7 +458,10 @@ mod tests {
     use super::*;
 
     fn factory(domain: &str) -> Ruleset {
-        laysi_regulation::seed().into_iter().find(|r| r.domain == domain).unwrap()
+        laysi_regulation::seed()
+            .into_iter()
+            .find(|r| r.domain == domain)
+            .unwrap()
     }
 
     /// Every shipped ruleset passes the check a saved one has to pass.

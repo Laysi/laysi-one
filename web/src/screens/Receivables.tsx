@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  accountList,
+  arAging,
   businessToday,
   callOp,
   docNumberHint,
   isZero,
   money,
+  newArInvoice,
+  newReceipt,
   OpFailed,
+  receivableList,
+  type Account,
   type ArAging,
   type ArInvoice,
 } from '../api/client';
@@ -26,14 +32,6 @@ interface VatInfo {
   rate: string;
   rate_percent: string;
   version: string;
-}
-
-interface RevenueAccount {
-  code: string;
-  name: string;
-  kind: string;
-  is_postable: boolean;
-  is_active: boolean;
 }
 
 const FIELD_LABEL: Record<string, string> = {
@@ -62,7 +60,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   const [receiptOn, setReceiptOn] = useState('');
 
   const [drawer, setDrawer] = useState(false);
-  const [revenueAccounts, setRevenueAccounts] = useState<RevenueAccount[] | null>(null);
+  const [revenueAccounts, setRevenueAccounts] = useState<Account[] | null>(null);
   const [customer, setCustomer] = useState('');
   const [invoiceNo, setInvoiceNo] = useState('');
   const [amounts, setAmounts] = useState<TaxTriple>(EMPTY_TAX_TRIPLE);
@@ -76,10 +74,15 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<ArAging>('get_ar_aging'),
-      callOp<{ invoices: ArInvoice[]; vat: VatInfo }>('list_receivables', {
-        only_overdue: onlyOverdue,
-      }),
+      callOp('get_ar_aging', {}, undefined, arAging),
+      callOp(
+        'list_receivables',
+        {
+          only_overdue: onlyOverdue,
+        },
+        undefined,
+        receivableList,
+      ),
     ])
       .then(([a, l]) => {
         setAging(a);
@@ -93,7 +96,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(() => {
     if (!drawer || revenueAccounts) return;
-    callOp<{ accounts: RevenueAccount[] }>('list_accounts')
+    callOp('list_accounts', {}, undefined, accountList)
       .then((d) => {
         const usable = d.accounts.filter((a) => a.kind === 'revenue' && a.is_postable && a.is_active);
         setRevenueAccounts(usable);
@@ -116,22 +119,21 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
     }
     setSavingInvoice(true);
     try {
-      const d = await callOp<{
-        invoice: { invoice_no: string; customer: string; amount: string; voucher_no: string };
-      }>(
-        'create_ar_invoice',
-        {
-          customer: customer.trim(),
-          invoice_no: invoiceNo.trim(),
-          ...(amounts.total.trim() ? { amount: amounts.total.trim() } : {}),
-          ...(amounts.net.trim() ? { net_amount: amounts.net.trim() } : {}),
-          ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
-          due_on: dueOn,
-          revenue_account_code: revenueAccountCode,
-          memo: memo.trim(),
-        },
-        `新增應收單 ${customer.trim()}`,
-      );
+      const d = await callOp(
+                        'create_ar_invoice',
+                        {
+            customer: customer.trim(),
+            invoice_no: invoiceNo.trim(),
+            ...(amounts.total.trim() ? { amount: amounts.total.trim() } : {}),
+            ...(amounts.net.trim() ? { net_amount: amounts.net.trim() } : {}),
+            ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
+            due_on: dueOn,
+            revenue_account_code: revenueAccountCode,
+            memo: memo.trim(),
+          },
+                        `新增應收單 ${customer.trim()}`,
+                        newArInvoice,
+                      );
       onToast(
         `已建立應收單 ${d.invoice.invoice_no}，${money(d.invoice.amount)}；傳票 ${d.invoice.voucher_no} 待過帳，過帳後列入未收合計`,
       );
@@ -165,11 +167,12 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
     }
     setBusy(i.invoice_no);
     try {
-      const d = await callOp<{ receipt: { voucher_no: string; amount: string } }>(
-        'record_receipt',
-        { invoice_no: i.invoice_no, amount: receiptAmount.trim(), received_on: receiptOn },
-        `登記 ${i.customer} 收款 ${money(receiptAmount.trim())}`,
-      );
+      const d = await callOp(
+                        'record_receipt',
+                        { invoice_no: i.invoice_no, amount: receiptAmount.trim(), received_on: receiptOn },
+                        `登記 ${i.customer} 收款 ${money(receiptAmount.trim())}`,
+                        newReceipt,
+                      );
       onToast(
         `已產生收款傳票 ${d.receipt.voucher_no}，${money(d.receipt.amount)} 待過帳；過帳後未收金額才會減少`,
       );

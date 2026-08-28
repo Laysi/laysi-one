@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
+  insuranceQuote,
+  insuranceSummary,
   money,
   OpFailed,
   type InsuranceQuote,
@@ -21,7 +23,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<InsuranceSummary>('get_insurance_summary')
+    callOp('get_insurance_summary', {}, undefined, insuranceSummary)
       .then(setData)
       .catch((e: Error) => setError(e.message));
   }, []);
@@ -31,9 +33,14 @@ export function Insurance({ onToast, reloadKey }: Props) {
   async function compute() {
     setBusy(true);
     try {
-      const d = await callOp<InsuranceQuote>('compute_insurance', {
-        insured_salary: salary.trim(),
-      });
+      const d = await callOp(
+                        'compute_insurance',
+                        {
+          insured_salary: salary.trim(),
+        },
+                        undefined,
+                        insuranceQuote,
+                      );
       setQuote(d);
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));

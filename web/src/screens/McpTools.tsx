@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
-import { businessTime, callOp } from '../api/client';
+import {
+  aiAuditList,
+  businessTime,
+  callOp,
+  updatedMcpToolGrant,
+  type AuditEntry,
+} from '../api/client';
+import { useCurrentUser } from '../auth';
 import type { Risk } from '../api/generated';
 
 interface OpInfo {
@@ -10,29 +17,47 @@ interface OpInfo {
   enabled: boolean;
 }
 
-interface AuditEntry {
-  at: string;
-  actor: string;
-  actor_role_name: string;
-  tool_name: string;
-  risk: string;
-  prompt: string | null;
-  channel: string;
-  result_summary: string;
-  outcome: string;
+const SELF = 'set_mcp_tool_grant';
+
+interface Props {
+  onToast: (msg: string) => void;
+  reloadKey: number;
 }
 
-export function McpTools({ reloadKey }: { reloadKey: number }) {
+export function McpTools({ onToast, reloadKey }: Props) {
+  const me = useCurrentUser();
+  const canSwitch = me.permissions.includes('set_mcp_tool_grant');
   const [ops, setOps] = useState<OpInfo[] | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [tab, setTab] = useState<'tools' | 'audit'>('tools');
+  const [busy, setBusy] = useState<string | null>(null);
+
+  function toggle(op: OpInfo) {
+    setBusy(op.name);
+    callOp(
+      SELF,
+      { tool_name: op.name, enabled: !op.enabled },
+      undefined,
+      updatedMcpToolGrant,
+    )
+      .then((d) => {
+        setOps((list) =>
+          (list ?? []).map((o) =>
+            o.name === d.grant.tool_name ? { ...o, enabled: d.grant.enabled } : o,
+          ),
+        );
+        onToast(`${d.grant.enabled ? '已開啟' : '已關閉'} ${op.summary.split('：')[0]}`);
+      })
+      .catch((e: Error) => onToast(e.message))
+      .finally(() => setBusy(null));
+  }
 
   useEffect(() => {
     fetch('/v1/ops')
       .then((r) => r.json())
       .then((d: { operations: OpInfo[] }) => setOps(d.operations))
       .catch(() => setOps([]));
-    callOp<{ entries: AuditEntry[] }>('list_ai_audit', { limit: 20 })
+    callOp('list_ai_audit', { limit: 20 }, undefined, aiAuditList)
       .then((d) => setAudit(d.entries))
       .catch(() => setAudit([]));
   }, [reloadKey]);
@@ -80,7 +105,24 @@ export function McpTools({ reloadKey }: { reloadKey: number }) {
                       {o.risk_label}
                     </span>
                   </td>
-                  <td>{o.enabled ? '開啟' : <span className="cell-muted">關閉</span>}</td>
+                  <td>
+                    {canSwitch && o.name !== SELF ? (
+                      <button
+                        className={`chip${o.enabled ? ' chip--on' : ''}`}
+                        disabled={busy === o.name}
+                        onClick={() => toggle(o)}
+                      >
+                        {o.enabled ? '開啟' : '關閉'}
+                      </button>
+                    ) : (
+                      <>
+                        {o.enabled ? '開啟' : <span className="cell-muted">關閉</span>}
+                        {o.name === SELF && (
+                          <span className="cell-hint cell-hint--block">無法對 AI 開啟</span>
+                        )}
+                      </>
+                    )}
+                  </td>
                   <td className="num cell-muted">{o.name}</td>
                 </tr>
               ))}

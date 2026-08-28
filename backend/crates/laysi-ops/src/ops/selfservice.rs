@@ -34,10 +34,10 @@
 //! two numbers on the request cannot disagree with the range above them.
 
 use crate::ops::attendance::{
-    business_instant, correction_auto_approves, leave_kind_label,
-    leave_status_label, month_days, overtime_json, punch_correction_json,
-    punch_correction_status_label, punch_days, punch_kind_label, summarise,
-    valid_leave_kind, OvertimeLimits, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
+    business_instant, correction_auto_approves, leave_kind_label, leave_status_label, month_days,
+    overtime_json, punch_correction_json, punch_correction_status_label, punch_days,
+    punch_kind_label, summarise, valid_leave_kind, OvertimeLimits, WorkSchedule, LEAVE_KINDS,
+    PUNCH_KINDS, PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
@@ -52,8 +52,8 @@ use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES};
 use laysi_store::{
-    DocumentRow, Employee, LeaveRequest, NewLeaveRequest, NewOvertimeRequest,
-    NewPunchCorrection, OvertimeRequest, Payslip, ReserveDocument, SubmitExpenseClaim,
+    DocumentRow, Employee, LeaveRequest, NewLeaveRequest, NewOvertimeRequest, NewPunchCorrection,
+    OvertimeRequest, Payslip, ReserveDocument, SubmitExpenseClaim,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -99,16 +99,11 @@ fn leave_kinds_json() -> Vec<Value> {
 
 async fn actor_employee(ctx: &OpCtx) -> Result<Employee, OpError> {
     let employee_id = ctx.employee_id.ok_or_else(|| {
-        OpError::BadInput(
-            "目前登入的帳號尚未連結員工資料，自助功能需對應一筆員工主檔".into(),
-        )
+        OpError::BadInput("目前登入的帳號尚未連結員工資料，自助功能需對應一筆員工主檔".into())
     })?;
-    ctx.store
-        .employee_by_id(employee_id)
-        .await?
-        .ok_or_else(|| {
-            OpError::BadInput("登入帳號連結的員工主檔不存在，請管理員檢查帳號設定".into())
-        })
+    ctx.store.employee_by_id(employee_id).await?.ok_or_else(|| {
+        OpError::BadInput("登入帳號連結的員工主檔不存在，請管理員檢查帳號設定".into())
+    })
 }
 
 fn service_through(employee: &Employee, today: NaiveDate) -> NaiveDate {
@@ -582,7 +577,11 @@ impl Operation for RequestLeave {
 /// counting only the approved ones would offer hours the next submission
 /// refuses.
 fn committed_overtime_hours(requests: &[OvertimeRequest]) -> Money {
-    requests.iter().filter(|o| o.status != "rejected").map(|o| o.hours).sum()
+    requests
+        .iter()
+        .filter(|o| o.status != "rejected")
+        .map(|o| o.hours)
+        .sum()
 }
 
 struct ListMyOvertimeRequests;
@@ -608,7 +607,10 @@ impl Operation for ListMyOvertimeRequests {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let _: crate::Empty = parse(input)?;
         let employee = actor_employee(ctx).await?;
-        let requests = ctx.store.overtime_requests(true, Some(employee.id), None).await?;
+        let requests = ctx
+            .store
+            .overtime_requests(true, Some(employee.id), None)
+            .await?;
         let rs = laysi_regulation::resolve("overtime", ctx.today)?;
         let ceiling = laysi_regulation::overtime_monthly_max_hours(rs)?;
         let month = ctx.today.format("%Y-%m").to_string();
@@ -704,8 +706,8 @@ impl Operation for SubmitMyOvertimeRequest {
             return Err(OpError::BadInput("加班結束時刻要晚於開始時刻".into()));
         }
         let worked_on = i.from_at.date();
-        let hours = (Money::from((i.to_at - i.from_at).num_seconds()) / Money::from(3600))
-            .round_dp(2);
+        let hours =
+            (Money::from((i.to_at - i.from_at).num_seconds()) / Money::from(3600)).round_dp(2);
 
         let rs = laysi_regulation::resolve("overtime", worked_on)?;
         let day_types = laysi_regulation::overtime_day_types(rs)?;
@@ -736,11 +738,21 @@ impl Operation for SubmitMyOvertimeRequest {
         // Normal working hours are already paid by the salary, so a weekday
         // request that overlaps them would be paid twice. Without a stated
         // working window there is nothing to overlap and nothing to check.
-        if code == "weekday" && schedule.leave_seconds(i.from_at, i.to_at).is_some_and(|s| s > 0) {
+        if code == "weekday"
+            && schedule
+                .leave_seconds(i.from_at, i.to_at)
+                .is_some_and(|s| s > 0)
+        {
             return Err(OpError::BadInput(format!(
                 "所選時段與上班時間（{} 至 {}）重疊，加班要填上班時間以外的時段",
-                schedule.starts_at.map(|t| t.format("%H:%M").to_string()).unwrap_or_default(),
-                schedule.ends_at.map(|t| t.format("%H:%M").to_string()).unwrap_or_default(),
+                schedule
+                    .starts_at
+                    .map(|t| t.format("%H:%M").to_string())
+                    .unwrap_or_default(),
+                schedule
+                    .ends_at
+                    .map(|t| t.format("%H:%M").to_string())
+                    .unwrap_or_default(),
             )));
         }
 
@@ -748,7 +760,9 @@ impl Operation for SubmitMyOvertimeRequest {
         let month = worked_on.format("%Y-%m").to_string();
         let ceiling = laysi_regulation::overtime_monthly_max_hours(rs)?;
         let so_far = committed_overtime_hours(
-            &ctx.store.overtime_requests(true, Some(employee.id), Some(&month)).await?,
+            &ctx.store
+                .overtime_requests(true, Some(employee.id), Some(&month))
+                .await?,
         );
         if so_far + hours > ceiling {
             return Err(OpError::BadInput(format!(
@@ -833,8 +847,7 @@ impl Operation for ListMyExpenseClaims {
                 .store
                 .documents_linked_to("expense_claim", &claim.claim_no)
                 .await?;
-            receipts_by_claim
-                .insert(&claim.claim_no, receipts.iter().map(receipt_json).collect());
+            receipts_by_claim.insert(&claim.claim_no, receipts.iter().map(receipt_json).collect());
         }
         let waiting: Money = claims
             .iter()
@@ -1201,7 +1214,10 @@ impl Operation for PunchClock {
         let schedule = WorkSchedule::load(ctx).await?;
         let limits = OvertimeLimits::resolve(ctx.today)?;
         let month = local.date().format("%Y-%m").to_string();
-        let days = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
+        let days = punch_days(
+            &ctx.store.punches(&month, Some(employee.id)).await?,
+            ctx.offset,
+        );
         let today = days.iter().find(|d| d.date == local.date());
         let late = today
             .and_then(|d| d.arrived)
@@ -1281,7 +1297,10 @@ impl Operation for ListMyPunches {
 
         let employee = actor_employee(ctx).await?;
         let schedule = WorkSchedule::load(ctx).await?;
-        let punched = punch_days(&ctx.store.punches(&month, Some(employee.id)).await?, ctx.offset);
+        let punched = punch_days(
+            &ctx.store.punches(&month, Some(employee.id)).await?,
+            ctx.offset,
+        );
         let limits = OvertimeLimits::resolve(ctx.today)?;
         let stats = summarise(&punched, &schedule, &limits);
 
@@ -1300,9 +1319,12 @@ impl Operation for ListMyPunches {
         let this_month = local_today.format("%Y-%m").to_string();
         let elsewhere = match this_month == month {
             true => None,
-            false => punch_days(&ctx.store.punches(&this_month, Some(employee.id)).await?, ctx.offset)
-                .into_iter()
-                .find(|d| d.date == local_today),
+            false => punch_days(
+                &ctx.store.punches(&this_month, Some(employee.id)).await?,
+                ctx.offset,
+            )
+            .into_iter()
+            .find(|d| d.date == local_today),
         };
 
         // What the button on screen should offer next. Derived here so the
@@ -1432,7 +1454,9 @@ impl Operation for IssueMyApiToken {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: IssueMyApiTokenInput = parse(input)?;
         if i.label.trim().is_empty() {
-            return Err(OpError::BadInput("Token 要有名稱，否則清單上分不出是哪一組".into()));
+            return Err(OpError::BadInput(
+                "Token 要有名稱，否則清單上分不出是哪一組".into(),
+            ));
         }
         if i.rotate_days.is_some_and(|d| d <= 0) {
             return Err(OpError::BadInput("輪替天數要大於零".into()));
@@ -1610,7 +1634,6 @@ impl Operation for RevokeMyApiToken {
     }
 }
 
-
 // My punch corrections
 //
 // The person who knows a punch is missing is the person who cannot record
@@ -1665,7 +1688,10 @@ impl Operation for SubmitMyPunchCorrection {
         let at = NaiveTime::parse_from_str(text, "%H:%M:%S")
             .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M"))
             .map_err(|_| {
-                OpError::BadInput(format!("時間要寫成 HH:MM:SS 或 HH:MM，收到的是「{}」", i.at))
+                OpError::BadInput(format!(
+                    "時間要寫成 HH:MM:SS 或 HH:MM，收到的是「{}」",
+                    i.at
+                ))
             })?;
         if i.punched_on > ctx.today {
             return Err(OpError::BadInput("不能為未來的日期送出補登申請".into()));
@@ -1735,7 +1761,10 @@ impl Operation for ListMyPunchCorrections {
     async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
         let employee = actor_employee(ctx).await?;
         let corrections = ctx.store.punch_corrections(true, Some(employee.id)).await?;
-        let waiting = corrections.iter().filter(|c| c.status == "submitted").count();
+        let waiting = corrections
+            .iter()
+            .filter(|c| c.status == "submitted")
+            .count();
         let auto = correction_auto_approves(ctx).await?;
 
         let summary = format!(
@@ -1806,7 +1835,10 @@ impl Operation for ListMyNotices {
         let unread = |n: &laysi_store::Notice| read_at.is_none_or(|at| n.published_at > at);
         let unread_count = rows.iter().filter(|n| unread(n)).count();
 
-        let summary = format!("讀本人公告與規章 · {} 則（未讀 {unread_count} 則）", rows.len());
+        let summary = format!(
+            "讀本人公告與規章 · {} 則（未讀 {unread_count} 則）",
+            rows.len()
+        );
         Ok(OpOutcome::new(
             json!({
                 "notices": rows
@@ -1877,8 +1909,14 @@ mod tests {
             name: "王小明".into(),
             dept_label: None,
             day_type: "weekday".into(),
-            from_at: NaiveDate::from_ymd_opt(2026, 8, 25).unwrap().and_hms_opt(18, 0, 0).unwrap(),
-            to_at: NaiveDate::from_ymd_opt(2026, 8, 25).unwrap().and_hms_opt(20, 0, 0).unwrap(),
+            from_at: NaiveDate::from_ymd_opt(2026, 8, 25)
+                .unwrap()
+                .and_hms_opt(18, 0, 0)
+                .unwrap(),
+            to_at: NaiveDate::from_ymd_opt(2026, 8, 25)
+                .unwrap()
+                .and_hms_opt(20, 0, 0)
+                .unwrap(),
             worked_on: NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(),
             hours: hours.parse().unwrap(),
             base_salary: Money::ZERO,
@@ -1891,8 +1929,15 @@ mod tests {
             created_at: Utc::now(),
             created_by: "e001@example.com".into(),
         };
-        let rows = vec![one("approved", "3"), one("pending", "2"), one("rejected", "8")];
-        assert_eq!(committed_overtime_hours(&rows), "5".parse::<Money>().unwrap());
+        let rows = vec![
+            one("approved", "3"),
+            one("pending", "2"),
+            one("rejected", "8"),
+        ];
+        assert_eq!(
+            committed_overtime_hours(&rows),
+            "5".parse::<Money>().unwrap()
+        );
     }
 
     /// Leave entitlement is read only from the ruleset payload. Replace the

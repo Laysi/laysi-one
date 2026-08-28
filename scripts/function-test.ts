@@ -12,9 +12,26 @@
 // scripts/mcp-role-matrix.ts; both interfaces dispatch through the same
 // registry, so the arithmetic is tested once, here.
 
+import { mismatch } from "./response-schemas";
+
 const PG_CONTAINER = process.env.PG_CONTAINER ?? "laysi-one_postgres_1";
 const PG_USER = process.env.POSTGRES_USER ?? "laysi";
-const PG_PASSWORD = process.env.POSTGRES_PASSWORD ?? "devpassword-change-me";
+// The compose stack generates the password into the secrets volume, so the
+// running container is the source of truth and is asked first. POSTGRES_PASSWORD
+// is only the fallback: bun loads a stray .env from before that change, and a
+// stale value there fails as an authentication error fifteen seconds later,
+// reported as "the server did not start".
+const PG_PASSWORD =
+  (
+    await new Response(
+      Bun.spawn(["podman", "exec", PG_CONTAINER, "cat", "/secrets/pg_password"], {
+        stdout: "pipe",
+        stderr: "ignore",
+      }).stdout,
+    ).text()
+  ).trim() ||
+  process.env.POSTGRES_PASSWORD ||
+  "";
 const TEST_DB = process.env.TEST_DB ?? "laysi_function_test";
 const PORT = Number(process.env.TEST_PORT ?? "8091");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -57,6 +74,12 @@ async function op(name: string, input: unknown = {}): Promise<OpResult> {
 async function must(name: string, input: unknown = {}): Promise<any> {
   const r = await op(name, input);
   if (!r.ok) throw new Error(`${name}：${r.error?.message}`);
+  // The screens parse this response with a zod schema before showing it, so a
+  // shape they got wrong stops here rather than on the screen. Write
+  // operations are only reachable with real arguments, which is what this
+  // file spends its length building.
+  const wrong = mismatch(name, r.data);
+  if (wrong) throw new Error(`${name} 的回應與前端 schema 不符 — ${wrong}`);
   return r.data;
 }
 

@@ -48,11 +48,46 @@ struct Person {
 }
 
 const ROSTER: &[Person] = &[
-    Person { emp_no: "E001", name: "林敬淵", dept: "ADMIN", title: "總經理", salary: "96000", hired_months_ago: 64 },
-    Person { emp_no: "E002", name: "陳映築", dept: "SALES", title: "業務經理", salary: "62000", hired_months_ago: 39 },
-    Person { emp_no: "E003", name: "黃柏叡", dept: "SALES", title: "業務專員", salary: "45000", hired_months_ago: 14 },
-    Person { emp_no: "E004", name: "蘇宛柔", dept: "ADMIN", title: "會計", salary: "52000", hired_months_ago: 27 },
-    Person { emp_no: "E005", name: "何允中", dept: "TECH", title: "工程師", salary: "58000", hired_months_ago: 7 },
+    Person {
+        emp_no: "E001",
+        name: "林敬淵",
+        dept: "ADMIN",
+        title: "總經理",
+        salary: "96000",
+        hired_months_ago: 64,
+    },
+    Person {
+        emp_no: "E002",
+        name: "陳映築",
+        dept: "SALES",
+        title: "業務經理",
+        salary: "62000",
+        hired_months_ago: 39,
+    },
+    Person {
+        emp_no: "E003",
+        name: "黃柏叡",
+        dept: "SALES",
+        title: "業務專員",
+        salary: "45000",
+        hired_months_ago: 14,
+    },
+    Person {
+        emp_no: "E004",
+        name: "蘇宛柔",
+        dept: "ADMIN",
+        title: "會計",
+        salary: "52000",
+        hired_months_ago: 27,
+    },
+    Person {
+        emp_no: "E005",
+        name: "何允中",
+        dept: "TECH",
+        title: "工程師",
+        salary: "58000",
+        hired_months_ago: 7,
+    },
 ];
 
 /// Runs an operation and fails loudly with the operation's own message.
@@ -111,12 +146,15 @@ fn ctx_for(
 
 /// `months` before `today`, on `day`, clamped into the target month.
 fn back(today: NaiveDate, months: u32, day: u32) -> NaiveDate {
-    let base = today.checked_sub_months(Months::new(months)).unwrap_or(today);
+    let base = today
+        .checked_sub_months(Months::new(months))
+        .unwrap_or(today);
     NaiveDate::from_ymd_opt(base.year(), base.month(), day).unwrap_or(base)
 }
 
 fn plus_days(date: NaiveDate, days: i64) -> NaiveDate {
-    date.checked_add_signed(chrono::Duration::days(days)).unwrap_or(date)
+    date.checked_add_signed(chrono::Duration::days(days))
+        .unwrap_or(date)
 }
 
 /// Seeds a demo company.
@@ -131,7 +169,14 @@ pub async fn seed(store: &Store, today: NaiveDate, force: bool) -> anyhow::Resul
     let admin = ctx_for(store, "laysi-admin", laysi_ops::ROLE_ADMIN, None, today);
     let mut calls = 0usize;
 
-    let existing = call(&registry, &boss, "search_vouchers", json!({ "limit": 1 }), &mut calls).await?;
+    let existing = call(
+        &registry,
+        &boss,
+        "search_vouchers",
+        json!({ "limit": 1 }),
+        &mut calls,
+    )
+    .await?;
     let occupied = existing
         .get("vouchers")
         .and_then(Value::as_array)
@@ -160,11 +205,7 @@ pub async fn seed(store: &Store, today: NaiveDate, force: bool) -> anyhow::Resul
 /// Skipped rather than fatal when object storage is not configured: a demo
 /// without RustFS is still worth having, and the document operations already
 /// say plainly that storage is not connected.
-async fn seed_documents(
-    registry: &Registry,
-    ctx: &OpCtx,
-    calls: &mut usize,
-) -> anyhow::Result<()> {
+async fn seed_documents(registry: &Registry, ctx: &OpCtx, calls: &mut usize) -> anyhow::Result<()> {
     if ctx.objects.is_none() {
         return Ok(());
     }
@@ -172,9 +213,27 @@ async fn seed_documents(
     // link and the BLAKE3 digest; a real receipt image would add nothing to
     // that and would imply the demo shipped someone's paperwork.
     let files = [
-        ("AP-2601 聯欣物流請款單.txt", "vendor_bill", "ap_bill", "AP-2601", "供應商請款單"),
-        ("AP-2604 同茂貿易對帳單.txt", "vendor_bill", "ap_bill", "AP-2604", "月結對帳單"),
-        ("AR-2605 宥昇國際訂購單.txt", "contract", "ar_invoice", "AR-2605", "客戶訂購單"),
+        (
+            "AP-2601 聯欣物流請款單.txt",
+            "vendor_bill",
+            "ap_bill",
+            "AP-2601",
+            "供應商請款單",
+        ),
+        (
+            "AP-2604 同茂貿易對帳單.txt",
+            "vendor_bill",
+            "ap_bill",
+            "AP-2604",
+            "月結對帳單",
+        ),
+        (
+            "AR-2605 宥昇國際訂購單.txt",
+            "contract",
+            "ar_invoice",
+            "AR-2605",
+            "客戶訂購單",
+        ),
     ];
     for (file_name, kind, link_type, link_ref, name) in files {
         let body = format!("{name}（示範檔案，非真實單據）\n");
@@ -201,11 +260,14 @@ async fn seed_documents(
 /// Standard base64. Written out rather than pulled in as a dependency: this
 /// is the only place in the workspace that needs an encoder.
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         for i in 0..4 {
             if i <= chunk.len() {
@@ -232,11 +294,19 @@ async fn seed_company(registry: &Registry, ctx: &OpCtx, calls: &mut usize) -> an
         ("work_end", "18:00"),
         ("late_grace_minutes", "5"),
     ] {
-        call(registry, ctx, "update_company_setting", json!({ "code": code, "value": value }), calls).await?;
+        call(
+            registry,
+            ctx,
+            "update_company_setting",
+            json!({ "code": code, "value": value }),
+            calls,
+        )
+        .await?;
     }
 
-    for (order, (code, label)) in
-        [("SALES", "業務部"), ("ADMIN", "管理部"), ("TECH", "技術部")].iter().enumerate()
+    for (order, (code, label)) in [("SALES", "業務部"), ("ADMIN", "管理部"), ("TECH", "技術部")]
+        .iter()
+        .enumerate()
     {
         call(
             registry,
@@ -312,9 +382,20 @@ enum Step {
     /// mistake.
     Opening,
     /// A monthly running cost paid straight from the bank.
-    Cost { account: &'static str, amount: &'static str, memo: &'static str },
-    ArIssue { no: &'static str, customer: &'static str, amount: &'static str, due: NaiveDate },
-    ArReceipt { no: &'static str },
+    Cost {
+        account: &'static str,
+        amount: &'static str,
+        memo: &'static str,
+    },
+    ArIssue {
+        no: &'static str,
+        customer: &'static str,
+        amount: &'static str,
+        due: NaiveDate,
+    },
+    ArReceipt {
+        no: &'static str,
+    },
     ApBill {
         no: &'static str,
         vendor: &'static str,
@@ -343,28 +424,81 @@ async fn seed_ledger(
         ("AR-2603", "合眾電子股份有限公司", "358000", 2, 8, 45, true),
         ("AR-2604", "大川五金行", "94200", 2, 22, 30, false),
         ("AR-2605", "宥昇國際貿易", "627400", 1, 6, 60, false),
-        ("AR-2606", "明泰科技股份有限公司", "173800", 1, 24, 30, false),
+        (
+            "AR-2606",
+            "明泰科技股份有限公司",
+            "173800",
+            1,
+            24,
+            30,
+            false,
+        ),
     ];
     for (no, customer, amount, months, day, terms, collected) in invoices {
         let issued = back(today, months, day);
         let due = plus_days(issued, terms);
-        steps.push((issued, Step::ArIssue { no, customer, amount, due }));
+        steps.push((
+            issued,
+            Step::ArIssue {
+                no,
+                customer,
+                amount,
+                due,
+            },
+        ));
         if collected {
             steps.push((plus_days(due, 2), Step::ArReceipt { no }));
         }
     }
 
     let bills = [
-        ("AP-2601", "聯欣物流有限公司", "68400", "6131", 3, 10, 30, true),
-        ("AP-2602", "永信文具事務用品", "12750", "6199", 2, 14, 30, true),
+        (
+            "AP-2601",
+            "聯欣物流有限公司",
+            "68400",
+            "6131",
+            3,
+            10,
+            30,
+            true,
+        ),
+        (
+            "AP-2602",
+            "永信文具事務用品",
+            "12750",
+            "6199",
+            2,
+            14,
+            30,
+            true,
+        ),
         ("AP-2603", "宏碁資訊服務", "145000", "6199", 2, 26, 45, true),
-        ("AP-2604", "同茂貿易股份有限公司", "392000", "5111", 1, 9, 30, true),
+        (
+            "AP-2604",
+            "同茂貿易股份有限公司",
+            "392000",
+            "5111",
+            1,
+            9,
+            30,
+            true,
+        ),
         ("AP-2605", "台灣大哥大", "8360", "6131", 1, 20, 15, false),
     ];
     for (no, vendor, amount, account, months, day, terms, post) in bills {
         let billed = back(today, months, day);
         let due = plus_days(billed, terms);
-        steps.push((billed, Step::ApBill { no, vendor, amount, account, due, post }));
+        steps.push((
+            billed,
+            Step::ApBill {
+                no,
+                vendor,
+                amount,
+                account,
+                due,
+                post,
+            },
+        ));
     }
 
     for months in 1..=3 {
@@ -373,7 +507,14 @@ async fn seed_ledger(
             ("6118", "6800", "水電費"),
             ("6142", "28000", "網路廣告"),
         ] {
-            steps.push((back(today, months, 5), Step::Cost { account, amount, memo }));
+            steps.push((
+                back(today, months, 5),
+                Step::Cost {
+                    account,
+                    amount,
+                    memo,
+                },
+            ));
         }
     }
 
@@ -397,9 +538,20 @@ async fn seed_ledger(
                     calls,
                 )
                 .await?;
-                call(registry, ctx, "post_voucher", json!({ "no": voucher_no(&out)? }), calls).await?;
+                call(
+                    registry,
+                    ctx,
+                    "post_voucher",
+                    json!({ "no": voucher_no(&out)? }),
+                    calls,
+                )
+                .await?;
             }
-            Step::Cost { account, amount, memo } => {
+            Step::Cost {
+                account,
+                amount,
+                memo,
+            } => {
                 let out = call(
                     registry,
                     ctx,
@@ -415,9 +567,21 @@ async fn seed_ledger(
                     calls,
                 )
                 .await?;
-                call(registry, ctx, "post_voucher", json!({ "no": voucher_no(&out)? }), calls).await?;
+                call(
+                    registry,
+                    ctx,
+                    "post_voucher",
+                    json!({ "no": voucher_no(&out)? }),
+                    calls,
+                )
+                .await?;
             }
-            Step::ArIssue { no, customer, amount, due } => {
+            Step::ArIssue {
+                no,
+                customer,
+                amount,
+                due,
+            } => {
                 let out = call(
                     registry,
                     ctx,
@@ -434,7 +598,14 @@ async fn seed_ledger(
                     calls,
                 )
                 .await?;
-                call(registry, ctx, "post_voucher", json!({ "no": voucher_no(&out)? }), calls).await?;
+                call(
+                    registry,
+                    ctx,
+                    "post_voucher",
+                    json!({ "no": voucher_no(&out)? }),
+                    calls,
+                )
+                .await?;
             }
             Step::ArReceipt { no } => {
                 let out = call(
@@ -445,9 +616,23 @@ async fn seed_ledger(
                     calls,
                 )
                 .await?;
-                call(registry, ctx, "post_voucher", json!({ "no": voucher_no(&out)? }), calls).await?;
+                call(
+                    registry,
+                    ctx,
+                    "post_voucher",
+                    json!({ "no": voucher_no(&out)? }),
+                    calls,
+                )
+                .await?;
             }
-            Step::ApBill { no, vendor, amount, account, due, post } => {
+            Step::ApBill {
+                no,
+                vendor,
+                amount,
+                account,
+                due,
+                post,
+            } => {
                 let out = call(
                     registry,
                     ctx,
@@ -465,8 +650,14 @@ async fn seed_ledger(
                 )
                 .await?;
                 if post {
-                    call(registry, ctx, "post_voucher", json!({ "no": voucher_no(&out)? }), calls)
-                        .await?;
+                    call(
+                        registry,
+                        ctx,
+                        "post_voucher",
+                        json!({ "no": voucher_no(&out)? }),
+                        calls,
+                    )
+                    .await?;
                 }
             }
         }
@@ -743,8 +934,8 @@ async fn seed_punches(
                 &[("in", arrive), ("out", leave)]
             };
             for (kind, at) in punches {
-                let time = NaiveTime::parse_from_str(at, "%H:%M:%S")
-                    .context("示範打卡時間格式錯誤")?;
+                let time =
+                    NaiveTime::parse_from_str(at, "%H:%M:%S").context("示範打卡時間格式錯誤")?;
                 sqlx::query(
                     "INSERT INTO attendance_punch
                        (employee_id, punched_on, punched_at, kind, source, note, created_by)
@@ -824,8 +1015,14 @@ mod tests {
     #[test]
     fn back_lands_in_the_intended_month() {
         let today = NaiveDate::from_ymd_opt(2026, 8, 20).expect("有效日期");
-        assert_eq!(back(today, 3, 5), NaiveDate::from_ymd_opt(2026, 5, 5).expect("有效日期"));
-        assert_eq!(back(today, 0, 5), NaiveDate::from_ymd_opt(2026, 8, 5).expect("有效日期"));
+        assert_eq!(
+            back(today, 3, 5),
+            NaiveDate::from_ymd_opt(2026, 5, 5).expect("有效日期")
+        );
+        assert_eq!(
+            back(today, 0, 5),
+            NaiveDate::from_ymd_opt(2026, 8, 5).expect("有效日期")
+        );
     }
 
     /// Going back from a long month into a short one must not overflow into
@@ -854,7 +1051,11 @@ mod tests {
     fn roster_numbers_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for person in ROSTER {
-            assert!(seen.insert(person.emp_no), "員工編號 {} 重複", person.emp_no);
+            assert!(
+                seen.insert(person.emp_no),
+                "員工編號 {} 重複",
+                person.emp_no
+            );
         }
     }
 }

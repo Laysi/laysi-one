@@ -50,7 +50,15 @@ const ROC_YEAR_CEILING: i32 = 200;
 
 /// Column order of the CSV. A first row that is not data is skipped as a
 /// header.
-const COLUMNS: [&str; 7] = ["傳票號", "日期", "摘要", "科目代號", "借方", "貸方", "部門代碼"];
+const COLUMNS: [&str; 7] = [
+    "傳票號",
+    "日期",
+    "摘要",
+    "科目代號",
+    "借方",
+    "貸方",
+    "部門代碼",
+];
 
 // Parsing
 
@@ -108,7 +116,10 @@ impl Parsed {
         self.issues.iter().filter(|i| i.severity == "error").count()
     }
     pub fn warnings(&self) -> usize {
-        self.issues.iter().filter(|i| i.severity == "warning").count()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == "warning")
+            .count()
     }
 }
 
@@ -244,17 +255,29 @@ pub fn parse_vouchers(csv: &str, look: &Lookups) -> Parsed {
         let (Some(debit), Some(credit)) = (parse_amount(&cells[4]), parse_amount(&cells[5])) else {
             out.error(
                 row_no,
-                format!("借方「{}」或貸方「{}」不是數字", cells[4].trim(), cells[5].trim()),
+                format!(
+                    "借方「{}」或貸方「{}」不是數字",
+                    cells[4].trim(),
+                    cells[5].trim()
+                ),
                 "金額只能有數字、小數點與千分位逗號",
             );
             continue;
         };
         if debit < Money::ZERO || credit < Money::ZERO {
-            out.error(row_no, "金額是負數", "沖銷請將金額填入相反的欄位，不要使用負號");
+            out.error(
+                row_no,
+                "金額是負數",
+                "沖銷請將金額填入相反的欄位，不要使用負號",
+            );
             continue;
         }
         if (debit > Money::ZERO) == (credit > Money::ZERO) {
-            let what = if debit.is_zero() { "借貸都是零" } else { "同一行同時有借方與貸方" };
+            let what = if debit.is_zero() {
+                "借貸都是零"
+            } else {
+                "同一行同時有借方與貸方"
+            };
             out.error(row_no, what, "一行只能記一邊");
             continue;
         }
@@ -274,7 +297,11 @@ pub fn parse_vouchers(csv: &str, look: &Lookups) -> Parsed {
                         format!("查無部門「{dept_raw}」"),
                         format!(
                             "可用的部門代碼：{}",
-                            look.departments.keys().cloned().collect::<Vec<_>>().join("、")
+                            look.departments
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join("、")
                         ),
                     );
                     continue;
@@ -330,7 +357,11 @@ pub fn parse_vouchers(csv: &str, look: &Lookups) -> Parsed {
 
         out.drafts.push(ImportVoucherDraft {
             date,
-            memo: if memo.is_empty() { format!("匯入 {voucher_ref}") } else { memo },
+            memo: if memo.is_empty() {
+                format!("匯入 {voucher_ref}")
+            } else {
+                memo
+            },
             lines: lines.into_iter().map(|(_, l)| l).collect(),
         });
     }
@@ -364,8 +395,11 @@ impl Operation for ListImports {
         let sources = ctx.store.import_sources().await?;
         let batches = ctx.store.import_batches(20).await?;
 
-        let supported: Vec<&str> =
-            sources.iter().filter(|s| s.supported).map(|s| s.code.as_str()).collect();
+        let supported: Vec<&str> = sources
+            .iter()
+            .filter(|s| s.supported)
+            .map(|s| s.code.as_str())
+            .collect();
         let summary = format!(
             "讀取匯入 · {} 種來源（{} 種可匯入）· {} 批紀錄",
             sources.len(),
@@ -541,12 +575,21 @@ impl Operation for CommitImport {
         let drafts: Vec<ImportVoucherDraft> = serde_json::from_value(payload)
             .map_err(|e| OpError::BadInput(format!("無法讀回預覽結果：{e}")))?;
         if drafts.is_empty() {
-            return Err(OpError::BadInput(format!("{} 沒有可匯入的傳票", i.batch_no)));
+            return Err(OpError::BadInput(format!(
+                "{} 沒有可匯入的傳票",
+                i.batch_no
+            )));
         }
 
-        let batch = ctx.store.commit_import_batch(&i.batch_no, &drafts, &ctx.actor).await?;
-        let total: Money =
-            drafts.iter().flat_map(|d| d.lines.iter()).map(|l| l.debit).sum();
+        let batch = ctx
+            .store
+            .commit_import_batch(&i.batch_no, &drafts, &ctx.actor)
+            .await?;
+        let total: Money = drafts
+            .iter()
+            .flat_map(|d| d.lines.iter())
+            .map(|l| l.debit)
+            .sum();
 
         let summary = format!(
             "匯入 {} · {} 張傳票 {} 已寫入（待過帳）· {}",
@@ -589,7 +632,10 @@ impl Operation for RollbackImport {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: BatchInput = parse(input)?;
         let before = ctx.store.import_batch(&i.batch_no).await?;
-        let batch = ctx.store.rollback_import_batch(&i.batch_no, &ctx.actor).await?;
+        let batch = ctx
+            .store
+            .rollback_import_batch(&i.batch_no, &ctx.actor)
+            .await?;
 
         let summary = format!(
             "復原 {} · 刪除 {} 張待過帳傳票",
@@ -613,10 +659,14 @@ mod tests {
 
     fn look() -> Lookups {
         Lookups {
-            accounts: [("6115", "租金支出"), ("1102", "銀行存款"), ("6111", "薪資支出")]
-                .into_iter()
-                .map(|(c, n)| (c.to_string(), n.to_string()))
-                .collect(),
+            accounts: [
+                ("6115", "租金支出"),
+                ("1102", "銀行存款"),
+                ("6111", "薪資支出"),
+            ]
+            .into_iter()
+            .map(|(c, n)| (c.to_string(), n.to_string()))
+            .collect(),
             departments: [("admin", 1), ("sales", 2)]
                 .into_iter()
                 .map(|(c, i)| (c.to_string(), i))
@@ -647,7 +697,11 @@ mod tests {
         assert_eq!(b.date, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
         assert!(!b.converted, "西元年沒有轉換，不該留提醒");
 
-        assert_eq!(parse_date("2025/06/30").unwrap().date, b.date, "斜線與破折號都要收");
+        assert_eq!(
+            parse_date("2025/06/30").unwrap().date,
+            b.date,
+            "斜線與破折號都要收"
+        );
         assert!(parse_date("六月三十").is_none());
         assert!(parse_date("2025-13-01").is_none(), "第 13 個月不是日期");
     }
@@ -663,7 +717,10 @@ mod tests {
         assert_eq!(p.warnings(), 2, "兩列都轉換過，兩列都要留提醒");
         assert!(issues_of(&p, "warning")[0].contains("民國年"));
         assert_eq!(p.drafts.len(), 1);
-        assert_eq!(p.drafts[0].date, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        assert_eq!(
+            p.drafts[0].date,
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap()
+        );
     }
 
     /// The unbalanced voucher is rejected while the rest still parse.
@@ -716,7 +773,10 @@ mod tests {
         let bad_dept = parse_vouchers("A,2025-01-01,x,6115,100,0,業務部", &look());
         let e = &issues_of(&bad_dept, "error")[0];
         assert!(e.contains("業務部"), "要指出是哪一個部門打錯");
-        assert!(bad_dept.issues[0].fix.contains("admin"), "要告訴他可用的代碼");
+        assert!(
+            bad_dept.issues[0].fix.contains("admin"),
+            "要告訴他可用的代碼"
+        );
     }
 
     /// A department that resolves is attached; departmental P&L reads from it.
@@ -727,7 +787,10 @@ mod tests {
         let p = parse_vouchers(csv, &look());
         assert_eq!(p.errors(), 0);
         assert_eq!(p.drafts[0].lines[0].dept_id, Some(2));
-        assert_eq!(p.drafts[0].lines[1].dept_id, None, "沒填就是沒填，不要複製上一行的");
+        assert_eq!(
+            p.drafts[0].lines[1].dept_id, None,
+            "沒填就是沒填，不要複製上一行的"
+        );
     }
 
     /// Headers are skipped, commas inside memos are kept, and thousands

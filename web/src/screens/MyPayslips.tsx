@@ -3,6 +3,7 @@ import {
   callOp,
   isZero,
   money,
+  myPayslipList,
   OpFailed,
   trimDecimal,
   type MyPayslipList,
@@ -20,7 +21,7 @@ export function MyPayslips({ reloadKey }: Props) {
   useEffect(() => {
     let live = true;
     setError(null);
-    callOp<MyPayslipList>('list_my_payslips')
+    callOp('list_my_payslips', {}, undefined, myPayslipList)
       .then((d) => live && setData(d))
       .catch((e) => {
         if (!live) return;

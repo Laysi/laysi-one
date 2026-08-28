@@ -1,0 +1,100 @@
+# The checks CLAUDE.md asks for, run on every push and pull request.
+#
+# Not here: function-test.ts, schema-live-test.ts and the MCP scripts. They
+# drive a real server against a podman container and are run by hand; what CI
+# adds over them is that nothing merges without the cheap checks passing.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      # The tests that need a database are #[ignore]d and run in their own
+      # step; the rest compile and run without one, because every query is
+      # sqlx::query rather than the macro.
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: laysi
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: laysi_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U laysi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - run: cargo test --workspace
+
+      - name: cargo test --workspace -- --ignored
+        run: cargo test --workspace -- --ignored
+        env:
+          TEST_DATABASE_URL: postgres://laysi:ci@localhost:5432/laysi_ci
+
+      # The server refuses to start when this fails, so a brand file edited
+      # without re-signing must not reach main.
+      - run: cargo run -p laysi-brand --bin laysi-brandhash -- --verify
+
+      # generated.ts is produced from the registry. A new operation without a
+      # regenerated file leaves the frontend unable to name it.
+      - name: web/src/api/generated.ts is up to date
+        run: |
+          cargo run -q -p laysi-server --bin laysi-schema -- /tmp/generated.ts
+          diff -u ../web/src/api/generated.ts /tmp/generated.ts
+
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26.8.1"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: npm ci
+        working-directory: web
+
+      - run: npm run typecheck
+        working-directory: web
+
+      - run: npm run build
+        working-directory: web
+
+      # Both read web/src, so they run after the install above.
+      - run: bun scripts/schema-test.ts
+
+      - run: bun scripts/markdown-test.ts

@@ -22,6 +22,7 @@ Rust（axum + sqlx）＋ React（Vite + TS）＋ PostgreSQL 18 ＋ RustFS ＋ Do
 ```bash
 # 後端（在 backend/ 下）
 cargo test --workspace                 # 全部測試
+cargo fmt --check                      # CI 會擋，格式漂移要先修
 cargo test -p laysi-regulation         # 單一 crate
 cargo test -p laysi-ops registry_holds # 單一測試（比對名稱前綴）
 cargo clippy --workspace --all-targets -- -D warnings
@@ -35,6 +36,10 @@ cargo run -p laysi-server --bin laysi-schema -- ../web/src/api/generated.ts
 # 品牌完整性（改過品牌檔就要跑，否則伺服器拒絕啟動）
 cargo run -p laysi-brand --bin laysi-brandhash -- --verify
 cargo run -p laysi-brand --bin laysi-brandhash -- --update
+
+# 端對端（需要容器起著；第二支沿用第一支留下的資料庫）
+bun scripts/function-test.ts     # 算出來的數字，以及每一次回應對不對得上前端 schema
+bun scripts/schema-live-test.ts  # 逐一核對唯讀操作的回應
 
 # 前端（在 web/ 下）
 npm run dev        # 5173，proxy /v1 與 /mcp 到 localhost:8080
@@ -254,6 +259,15 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
 - **數字用 `.num`，它有自己的 `--font-numeric`**（Source Serif 4，lining +
   tabular）。該規則排在所有元件規則之後，因為元件也設 `font-family`，同權重下由
   檔案順序決定勝負。
+- **回應形狀用 zod 驗在邊界**：`callOp(name, input, prompt, schema)` 的第四個參數
+  傳了就驗、沒傳就照舊。宣告寫成 `export const employeeRow = z.object({...})` 加一行
+  `export type EmployeeRow = z.infer<typeof employeeRow>`，型別名不變、畫面不用動；
+  `z.object` 丟掉不認得的欄位，所以後端新增欄位不會弄壞舊畫面。這不會讓手寫的形狀
+  自己跟上後端，它換掉的是失敗的方式：欄位改名或金額由字串變成數字，原本要等表格
+  印出 `undefined`，現在停在 `callOp`。**手寫的 schema 只有一條路證得出它與後端相符**：
+  `bun scripts/function-test.ts && bun scripts/schema-live-test.ts`，後者對著真的伺服器
+  逐一呼叫再解析，並且從呼叫端本身讀出操作與 schema 的對應，不另存一份清單。
+  純資料的邊界檢查在 `scripts/schema-test.ts`。
 - **`web/src` 底下不寫註解**（`.ts`／`.tsx`／`.css` 皆然，`api/generated.ts` 由
   產生器自帶的兩行標頭除外）。理由與設計說明寫在 `docs/architecture.md`，不要
   複製一份到元件旁邊。後端 Rust 仍照上一條寫英文註解。
@@ -783,6 +797,12 @@ CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_
 同一欄也是 `mcp::token_identity` 取得 `employee_id` 的唯一來源——不從姓名猜，
 老闆代發的 Token 沒有 owner，自助操作對它一律回「尚未連結員工資料」。0018 因此
 才把五個唯讀自助工具對 AI 打開；寫入類與薪資明細維持關閉。
+
+**AI 工具開關改得動了（0002）**：`set_mcp_tool_grant` 是 `AdminOnly`，「MCP 與 AI」那一頁
+的「AI 可用」欄對有權限的人畫成開關。它自己那一列種成關閉且**拒絕把自己打開**——開了等於
+讓管理員的 MCP Token 自行開啟其餘每一項，所以那一列不畫開關，改印「無法對 AI 開啟」。
+0002 重寫整列 `manage_access` 而不是附加一個名字，因為下面那兩個測試是把 migration 當
+文字讀的，只看得見 INSERT。
 
 **新增操作時 `mcp_tool_grant` 與 `permission` 要同步**：`laysi-ops` 有兩個測試以
 `include_str!` 讀 `0001_initial.sql` 的種子資料，比對 Registry 與 grant 的名稱集合、

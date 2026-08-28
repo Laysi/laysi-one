@@ -155,8 +155,8 @@ impl OidcState {
         let client_id = setting.client_id.trim().to_string();
         let client_secret = setting.client_secret.clone();
         let redirect_url = setting.redirect_url.trim().to_string();
-        let allowed_hd = Some(normalize_domain(&setting.allowed_domain))
-            .filter(|value| !value.is_empty());
+        let allowed_hd =
+            Some(normalize_domain(&setting.allowed_domain)).filter(|value| !value.is_empty());
         let provision =
             resolve_provisioning(store, &setting.provision_role, allowed_hd.as_deref()).await?;
 
@@ -184,9 +184,7 @@ impl OidcState {
             ClientId::new(client_id),
             Some(ClientSecret::new(client_secret)),
         )
-        .set_redirect_uri(
-            RedirectUrl::new(redirect_url).context("轉址網址不是有效的網址")?,
-        );
+        .set_redirect_uri(RedirectUrl::new(redirect_url).context("轉址網址不是有效的網址")?);
 
         Ok(Some(Self {
             client,
@@ -230,7 +228,10 @@ impl OidcState {
     }
 
     fn insert_pending(&self, state: &CsrfToken, verifier: PkceCodeVerifier, nonce: Nonce) {
-        let mut pending = self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         pending.retain(|_, flow| flow.created_at.elapsed() <= FLOW_TTL);
         pending.insert(
             state.secret().to_string(),
@@ -243,7 +244,10 @@ impl OidcState {
     }
 
     fn take_pending(&self, state: &str) -> Option<PendingFlow> {
-        let mut pending = self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let flow = pending.remove(state)?;
         (flow.created_at.elapsed() <= FLOW_TTL).then_some(flow)
     }
@@ -266,7 +270,10 @@ async fn resolve_provisioning(
             "要自動建立帳號請先填公司電子郵件網域，否則任何外部帳號都能建立登入"
         ));
     }
-    let roles = store.roles().await.context("讀取角色表以驗證自動建帳號角色失敗")?;
+    let roles = store
+        .roles()
+        .await
+        .context("讀取角色表以驗證自動建帳號角色失敗")?;
     let Some(role) = roles.iter().find(|role| role.code == role_code) else {
         let known: Vec<&str> = roles.iter().map(|role| role.code.as_str()).collect();
         return Err(anyhow!(
@@ -823,7 +830,10 @@ mod tests {
 
     #[test]
     fn an_unverified_address_never_creates_an_account() {
-        assert_eq!(usable_email("chen.mei@example.test", true), Some("chen.mei@example.test"));
+        assert_eq!(
+            usable_email("chen.mei@example.test", true),
+            Some("chen.mei@example.test")
+        );
         assert_eq!(usable_email("chen.mei@example.test", false), None);
         assert_eq!(usable_email("", true), None);
     }
@@ -843,11 +853,9 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("應可讀取未連結身分回應");
-        assert!(
-            std::str::from_utf8(&body)
-                .expect("JSON 必須是 UTF-8")
-                .contains("本帳號尚未連結至任何使用者，請先由管理員完成連結")
-        );
+        assert!(std::str::from_utf8(&body)
+            .expect("JSON 必須是 UTF-8")
+            .contains("本帳號尚未連結至任何使用者，請先由管理員完成連結"));
     }
 
     /// Run with:

@@ -6,6 +6,8 @@ import {
   businessDate,
   businessToday,
   callOp,
+  noticeList,
+  noticeRevision,
   OpFailed,
   type NoticeList,
   type NoticeRow,
@@ -54,7 +56,7 @@ export function Notices({ onToast, reloadKey, canManage }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<NoticeList>('list_notices', { include_ended: includeEnded })
+    callOp('list_notices', { include_ended: includeEnded }, undefined, noticeList)
       .then(setData)
       .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
   }, [includeEnded]);
@@ -99,11 +101,7 @@ export function Notices({ onToast, reloadKey, canManage }: Props) {
         if (form.body !== editing.body) input.body = form.body;
         if (form.effective_on !== editing.effective_on) input.effective_on = form.effective_on;
         if (form.expires_on !== (editing.expires_on ?? '')) input.expires_on = form.expires_on;
-        const d = await callOp<{ revised: boolean; notice: NoticeRow }>(
-          'update_notice',
-          input,
-          `更新${editing.kind_label} ${editing.title}`,
-        );
+        const d = await callOp('update_notice', input, `更新${editing.kind_label} ${editing.title}`, noticeRevision);
         onToast(d.revised ? `已發布第 ${d.notice.version_no} 版` : '已更新');
       } else {
         await callOp(

@@ -67,8 +67,10 @@ pub(crate) fn checked_pay_method(value: Option<&str>) -> Result<&str, OpError> {
 /// required, a value means "required above this amount". There is no amount
 /// in this function.
 pub(crate) fn required_steps(rules: &[ApprovalRule], amount: Money) -> Vec<&ApprovalRule> {
-    let mut steps: Vec<&ApprovalRule> =
-        rules.iter().filter(|r| r.min_amount.is_none_or(|min| amount >= min)).collect();
+    let mut steps: Vec<&ApprovalRule> = rules
+        .iter()
+        .filter(|r| r.min_amount.is_none_or(|min| amount >= min))
+        .collect();
     steps.sort_by_key(|r| r.step_no);
     steps
 }
@@ -250,7 +252,10 @@ impl Operation for ListExpenseClaims {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ListExpenseClaimsInput = parse(input)?;
         let rules = ctx.store.approval_rules().await?;
-        let claims = ctx.store.expense_claims(i.include_done, i.limit.unwrap_or(50)).await?;
+        let claims = ctx
+            .store
+            .expense_claims(i.include_done, i.limit.unwrap_or(50))
+            .await?;
 
         let waiting: Money = claims
             .iter()
@@ -286,7 +291,10 @@ impl Operation for ListExpenseClaims {
 
         let summary = format!(
             "讀取費用報支 · {} 張待處理合計 {} · 門檻依公司簽核規則",
-            claims.iter().filter(|c| c.status == "submitted" || c.status == "approving").count(),
+            claims
+                .iter()
+                .filter(|c| c.status == "submitted" || c.status == "approving")
+                .count(),
             money(waiting)
         );
         Ok(OpOutcome::new(
@@ -429,7 +437,10 @@ impl Operation for SubmitExpenseClaimOp {
             money(claim.amount),
             steps.len()
         );
-        Ok(OpOutcome::new(json!({ "claim": claim_json(&claim, &rules) }), summary))
+        Ok(OpOutcome::new(
+            json!({ "claim": claim_json(&claim, &rules) }),
+            summary,
+        ))
     }
 }
 
@@ -492,11 +503,20 @@ impl Operation for ApproveExpenseClaim {
         // None here is the deleted-step case described at the top of this
         // module: the claim is in flight with every applicable rule recorded.
         let step = next_step(&claim, &steps);
-        may_decide(step, &claim, &ctx.actor, &ctx.actor_role, &crate::role_name(ctx).await)?;
+        may_decide(
+            step,
+            &claim,
+            &ctx.actor,
+            &ctx.actor_role,
+            &crate::role_name(ctx).await,
+        )?;
 
         // Confirming the account is what the accounting step is for, so that
         // step cannot be approved without one.
-        let account_code = i.account_code.clone().or_else(|| claim.account_code.clone());
+        let account_code = i
+            .account_code
+            .clone()
+            .or_else(|| claim.account_code.clone());
         if let Some(step) = step.filter(|s| s.role_code.as_deref() == Some("acct")) {
             if account_code.is_none() {
                 return Err(OpError::BadInput(format!(
@@ -512,7 +532,10 @@ impl Operation for ApproveExpenseClaim {
         }
         if let Some(code) = &i.account_code {
             let accounts = ctx.store.accounts().await?;
-            if !accounts.iter().any(|a| &a.code == code && a.is_postable && a.kind == "expense") {
+            if !accounts
+                .iter()
+                .any(|a| &a.code == code && a.is_postable && a.kind == "expense")
+            {
                 return Err(OpError::BadInput(format!(
                     "「{code}」非可入帳的費用科目。費用報支的借方必須是費用科目。"
                 )));
@@ -568,7 +591,11 @@ impl Operation for ApproveExpenseClaim {
                 money(updated.amount),
                 step_note,
                 no,
-                if updated.pay_method == "petty_cash" { "" } else { "，並列入應付帳款" }
+                if updated.pay_method == "petty_cash" {
+                    ""
+                } else {
+                    "，並列入應付帳款"
+                }
             ),
             None => format!(
                 "{} {} {} {} · 下一關 {}",
@@ -576,7 +603,9 @@ impl Operation for ApproveExpenseClaim {
                 updated.title,
                 money(updated.amount),
                 step_note,
-                next_step(&updated, &steps).map(|s| s.label.clone()).unwrap_or_default()
+                next_step(&updated, &steps)
+                    .map(|s| s.label.clone())
+                    .unwrap_or_default()
             ),
         };
 
@@ -632,9 +661,18 @@ impl Operation for RejectExpenseClaim {
         let rules = ctx.store.approval_rules().await?;
         let steps = required_steps(&rules, claim.amount);
         let step = next_step(&claim, &steps).ok_or_else(|| {
-            OpError::BadInput(format!("{} 已完成全部簽核，如需更正請開立反向分錄", claim.claim_no))
+            OpError::BadInput(format!(
+                "{} 已完成全部簽核，如需更正請開立反向分錄",
+                claim.claim_no
+            ))
         })?;
-        may_decide(Some(step), &claim, &ctx.actor, &ctx.actor_role, &crate::role_name(ctx).await)?;
+        may_decide(
+            Some(step),
+            &claim,
+            &ctx.actor,
+            &ctx.actor_role,
+            &crate::role_name(ctx).await,
+        )?;
 
         let note = i.note.as_deref().unwrap_or("請補資料");
         let updated = ctx
@@ -650,7 +688,10 @@ impl Operation for RejectExpenseClaim {
             updated.claimant,
             note
         );
-        Ok(OpOutcome::new(json!({ "claim": claim_json(&updated, &rules) }), summary))
+        Ok(OpOutcome::new(
+            json!({ "claim": claim_json(&updated, &rules) }),
+            summary,
+        ))
     }
 }
 
@@ -676,12 +717,7 @@ mod tests {
         ]
     }
 
-    fn rule(
-        step_no: i32,
-        role: Option<&str>,
-        label: &str,
-        min: Option<&str>,
-    ) -> ApprovalRule {
+    fn rule(step_no: i32, role: Option<&str>, label: &str, min: Option<&str>) -> ApprovalRule {
         ApprovalRule {
             step_no,
             role_code: role.map(str::to_string),
@@ -738,10 +774,17 @@ mod tests {
     fn the_thresholds_come_from_the_table_not_from_this_file() {
         let rules = reference_rules();
         let steps = |amount: &str| -> Vec<i32> {
-            required_steps(&rules, n(amount)).iter().map(|s| s.step_no).collect()
+            required_steps(&rules, n(amount))
+                .iter()
+                .map(|s| s.step_no)
+                .collect()
         };
         assert_eq!(steps("2860"), vec![1, 2], "小額只要上傳與會計確認");
-        assert_eq!(steps("10000"), vec![1, 2, 3], "剛好一萬就要主管，門檻是「以上」");
+        assert_eq!(
+            steps("10000"),
+            vec![1, 2, 3],
+            "剛好一萬就要主管，門檻是「以上」"
+        );
         assert_eq!(steps("18600"), vec![1, 2, 3]);
         assert_eq!(steps("50000"), vec![1, 2, 3, 4], "五萬就要老闆");
         assert_eq!(steps("45000"), vec![1, 2, 3]);
@@ -769,7 +812,11 @@ mod tests {
         assert_eq!(next_step(&c, &steps).unwrap().step_no, 2, "上傳完換會計");
 
         let c = claim("45000", &[1, 2]);
-        assert_eq!(next_step(&c, &steps).unwrap().step_no, 3, "會計確認完換主管");
+        assert_eq!(
+            next_step(&c, &steps).unwrap().step_no,
+            3,
+            "會計確認完換主管"
+        );
 
         let c = claim("45000", &[1, 2, 3]);
         assert!(next_step(&c, &steps).is_none(), "四萬五不需要老闆那一關");
@@ -865,7 +912,11 @@ mod tests {
     fn a_claim_that_used_every_number_still_records_its_finalisation() {
         let c = claim("12000", &[1, 2]);
         assert_eq!(finalise_step_no(&c), 3);
-        assert_eq!(finalise_step_no(&claim("12000", &[])), 1, "一關都沒簽過就從 1 開始");
+        assert_eq!(
+            finalise_step_no(&claim("12000", &[])),
+            1,
+            "一關都沒簽過就從 1 開始"
+        );
     }
 
     /// The wording shown on screen is derived, not stored.

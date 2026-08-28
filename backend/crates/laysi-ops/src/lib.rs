@@ -99,7 +99,10 @@ pub async fn load_policy_settings(store: &Store) {
         return;
     };
     let value = |code: &str| {
-        settings.iter().find(|s| s.code == code).map(|s| s.value.trim().to_string())
+        settings
+            .iter()
+            .find(|s| s.code == code)
+            .map(|s| s.value.trim().to_string())
     };
     if let Some(v) = value(SESSION_IDLE_SETTING).and_then(|v| v.parse::<i64>().ok()) {
         if v > 0 {
@@ -262,10 +265,7 @@ impl OpCtx {
     /// Object storage, or a clear error when it is not configured.
     pub fn objects(&self) -> Result<&laysi_store::ObjectStore, OpError> {
         self.objects.as_ref().ok_or_else(|| {
-            OpError::BadInput(
-                "尚未接上物件儲存，文件功能無法使用；請洽系統管理員完成設定。"
-                    .into(),
-            )
+            OpError::BadInput("尚未接上物件儲存，文件功能無法使用；請洽系統管理員完成設定。".into())
         })
     }
 }
@@ -334,7 +334,11 @@ pub struct OpOutcome {
 
 impl OpOutcome {
     pub(crate) fn new(data: Value, summary: impl Into<String>) -> Self {
-        Self { data, summary: summary.into(), voucher_no: None }
+        Self {
+            data,
+            summary: summary.into(),
+            voucher_no: None,
+        }
     }
     pub(crate) fn with_voucher(mut self, no: impl Into<String>) -> Self {
         self.voucher_no = Some(no.into());
@@ -373,13 +377,19 @@ pub(crate) fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, OpError
 
 /// The text between `open` and the next `close`, if both are there.
 fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
-    text.split_once(open)?.1.split_once(close).map(|(inside, _)| inside)
+    text.split_once(open)?
+        .1
+        .split_once(close)
+        .map(|(inside, _)| inside)
 }
 
 /// A serde type name as the screens would say it.
 fn type_zh(raw: &str) -> &'static str {
     let raw = raw.trim();
-    let raw = raw.strip_prefix("a ").or_else(|| raw.strip_prefix("an ")).unwrap_or(raw);
+    let raw = raw
+        .strip_prefix("a ")
+        .or_else(|| raw.strip_prefix("an "))
+        .unwrap_or(raw);
     match raw.split([' ', ',']).next().unwrap_or(raw) {
         "string" | "str" | "&str" | "character" | "char" => "文字",
         "integer" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
@@ -414,13 +424,21 @@ fn describe_input_error(path: &str, message: &str) -> String {
 
     // Reads as a noun in every sentence below, so a missing path does not
     // turn 「的內容不正確」 into 「的內容的內容不正確」.
-    let subject =
-        if path.is_empty() || path == "." { "輸入".to_string() } else { format!("欄位「{path}」") };
+    let subject = if path.is_empty() || path == "." {
+        "輸入".to_string()
+    } else {
+        format!("欄位「{path}」")
+    };
 
-    if let Some((got, want)) =
-        message.strip_prefix("invalid type: ").and_then(|rest| rest.split_once(", expected "))
+    if let Some((got, want)) = message
+        .strip_prefix("invalid type: ")
+        .and_then(|rest| rest.split_once(", expected "))
     {
-        return format!("{subject}的型別不符：預期{}，收到{}", type_zh(want), type_zh(got));
+        return format!(
+            "{subject}的型別不符：預期{}，收到{}",
+            type_zh(want),
+            type_zh(got)
+        );
     }
     if message.to_ascii_lowercase().contains("decimal") {
         return format!("{subject}不是有效的金額，請填數字，例如 10500 或 10500.00");
@@ -454,7 +472,6 @@ pub(crate) fn money(v: Money) -> String {
         body
     }
 }
-
 
 // Shared input types
 // Parameter shapes used by more than one module live here so each module
@@ -556,7 +573,10 @@ pub(crate) async fn role_name(ctx: &OpCtx) -> String {
 }
 
 pub fn op_label(summary: &str) -> &str {
-    let label = summary.split(['：', '。', '，', '（']).next().unwrap_or(summary);
+    let label = summary
+        .split(['：', '。', '，', '（'])
+        .next()
+        .unwrap_or(summary);
     if label.is_empty() {
         summary
     } else {
@@ -570,7 +590,10 @@ impl Registry {
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Operation> {
-        self.ops.iter().find(|o| o.name() == name).map(|b| b.as_ref())
+        self.ops
+            .iter()
+            .find(|o| o.name() == name)
+            .map(|b| b.as_ref())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &dyn Operation> {
@@ -587,13 +610,18 @@ impl Registry {
 
     /// The single entry point for every call, REST and MCP alike.
     pub async fn dispatch(&self, ctx: &OpCtx, name: &str, input: Value) -> Result<Value, OpError> {
-        let op = self.get(name).ok_or_else(|| OpError::UnknownTool(name.to_string()))?;
+        let op = self
+            .get(name)
+            .ok_or_else(|| OpError::UnknownTool(name.to_string()))?;
 
         // 1. Tool grant: a disabled tool is invisible to AI, even for reading.
         //    MCP only; people on screen are unaffected (see [`Channel`]).
         if ctx.channel == Channel::Mcp && ctx.store.tool_enabled(name).await? != Some(true) {
-            self.audit(ctx, op, &input, "被拒絕：工具未開啟", "blocked").await;
-            return Err(OpError::ToolDisabled { tool: name.to_string() });
+            self.audit(ctx, op, &input, "被拒絕：工具未開啟", "blocked")
+                .await;
+            return Err(OpError::ToolDisabled {
+                tool: name.to_string(),
+            });
         }
 
         // 2. Risk floor: two operations are pinned to one role each, outside
@@ -604,14 +632,16 @@ impl Registry {
         //    operation changes `user_account.role_code`, so the split holds.
         match op.risk() {
             Risk::BossOnly if ctx.actor_role != ROLE_BOSS => {
-                self.audit(ctx, op, &input, "被拒絕：需負責人身分", "blocked").await;
+                self.audit(ctx, op, &input, "被拒絕：需負責人身分", "blocked")
+                    .await;
                 return Err(OpError::NeedsBoss {
                     tool: op_label(op.summary()).to_string(),
                     role: role_name(ctx).await,
                 });
             }
             Risk::AdminOnly if ctx.actor_role != ROLE_ADMIN => {
-                self.audit(ctx, op, &input, "被拒絕：需系統管理員身分", "blocked").await;
+                self.audit(ctx, op, &input, "被拒絕：需系統管理員身分", "blocked")
+                    .await;
                 return Err(OpError::NeedsAdmin {
                     tool: op_label(op.summary()).to_string(),
                     role: role_name(ctx).await,
@@ -631,7 +661,10 @@ impl Registry {
             let label = op_label(op.summary());
             let summary = format!("被拒絕：{role}未獲授權執行「{label}」");
             self.audit(ctx, op, &input, &summary, "blocked").await;
-            return Err(OpError::NotPermitted { tool: label.to_string(), role });
+            return Err(OpError::NotPermitted {
+                tool: label.to_string(),
+                role,
+            });
         }
 
         // 4. Execute.
@@ -712,26 +745,44 @@ mod tests {
             limit: Option<i64>,
         }
 
-        let missing = parse::<Sample>(serde_json::json!({})).unwrap_err().to_string();
+        let missing = parse::<Sample>(serde_json::json!({}))
+            .unwrap_err()
+            .to_string();
         assert_eq!(missing, "缺少必填欄位「name」");
 
-        let wrong_type =
-            parse::<Sample>(serde_json::json!({ "name": "甲", "limit": "很多" })).unwrap_err().to_string();
+        let wrong_type = parse::<Sample>(serde_json::json!({ "name": "甲", "limit": "很多" }))
+            .unwrap_err()
+            .to_string();
         assert_eq!(wrong_type, "欄位「limit」的型別不符：預期整數，收到文字");
 
         for message in [&missing, &wrong_type] {
             assert!(!message.is_ascii(), "訊息應為中文，收到「{message}」");
-            assert!(!message.contains("i64"), "訊息不該出現 Rust 型別：{message}");
+            assert!(
+                !message.contains("i64"),
+                "訊息不該出現 Rust 型別：{message}"
+            );
         }
     }
 
     #[test]
     fn the_field_that_is_wrong_is_named_even_when_the_reason_is_not_recognised() {
-        assert_eq!(describe_input_error("due_on", "input contains invalid characters"), "欄位「due_on」含有不接受的字元");
-        assert_eq!(describe_input_error("amount", "Invalid decimal: unknown character"), "欄位「amount」不是有效的金額，請填數字，例如 10500 或 10500.00");
-        assert_eq!(describe_input_error("lines[0].debit", "something new"), "欄位「lines[0].debit」的內容不正確");
+        assert_eq!(
+            describe_input_error("due_on", "input contains invalid characters"),
+            "欄位「due_on」含有不接受的字元"
+        );
+        assert_eq!(
+            describe_input_error("amount", "Invalid decimal: unknown character"),
+            "欄位「amount」不是有效的金額，請填數字，例如 10500 或 10500.00"
+        );
+        assert_eq!(
+            describe_input_error("lines[0].debit", "something new"),
+            "欄位「lines[0].debit」的內容不正確"
+        );
         // No path at all still has to produce a sentence, not an empty one.
-        assert_eq!(describe_input_error("", "something new"), "輸入的內容不正確");
+        assert_eq!(
+            describe_input_error("", "something new"),
+            "輸入的內容不正確"
+        );
     }
 
     /// An uploaded file must not land in the audit table a second time, and
@@ -752,7 +803,10 @@ mod tests {
         assert_eq!(redacted["file_name"], serde_json::json!("高鐵票.pdf"));
         let marker = format!("[內容 {} 位元組，未存入稽核紀錄]", content.len());
         assert_eq!(redacted["content_base64"], serde_json::json!(marker));
-        assert_eq!(redacted["nested"][0]["content_base64"], serde_json::json!(marker));
+        assert_eq!(
+            redacted["nested"][0]["content_base64"],
+            serde_json::json!(marker)
+        );
 
         // Short enough to survive the length rule, personal data for life.
         // The employee is still identified by emp_no.
@@ -802,7 +856,11 @@ mod tests {
         for module in modules {
             declared += module.len();
             for op in module {
-                assert!(r.get(op.name()).is_some(), "{} 沒有註冊進 Registry", op.name());
+                assert!(
+                    r.get(op.name()).is_some(),
+                    "{} 沒有註冊進 Registry",
+                    op.name()
+                );
             }
         }
         assert_eq!(before, declared, "註冊表裡有不屬於任何模組的操作");
@@ -811,7 +869,14 @@ mod tests {
     /// The schema, as text. The assertions below read the seed data straight
     /// out of it, so a switch or a permission that the schema does not actually
     /// seed cannot pass by being described in a test.
-    const SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
+    ///
+    /// Every migration that touches `permission` or `mcp_tool_grant` belongs
+    /// here, in order: the later rows win, the same way the later statement
+    /// wins in the database.
+    const SCHEMA: &str = concat!(
+        include_str!("../../../migrations/0001_initial.sql"),
+        include_str!("../../../migrations/0002_mcp_tool_grant_switch.sql"),
+    );
 
     /// The rows of one multi-row INSERT, one string per row, without the
     /// leading `('`.
@@ -829,7 +894,7 @@ mod tests {
             })
             .filter_map(|line| line.trim().strip_prefix("('"))
             .collect();
-        assert!(!rows.is_empty(), "0001 裡沒有 {table} 的 INSERT");
+        assert!(!rows.is_empty(), "migrations 裡沒有 {table} 的 INSERT");
         rows
     }
 
@@ -903,8 +968,10 @@ mod tests {
 
         let registry: BTreeSet<&str> = Registry::new().iter().map(|op| op.name()).collect();
         let mapped: BTreeSet<&str> = owners.keys().copied().collect();
-        let duplicated: Vec<_> =
-            owners.iter().filter(|(_, holders)| holders.len() != 1).collect();
+        let duplicated: Vec<_> = owners
+            .iter()
+            .filter(|(_, holders)| holders.len() != 1)
+            .collect();
 
         assert_eq!(
             registry.difference(&mapped).collect::<Vec<_>>(),
@@ -916,7 +983,10 @@ mod tests {
             Vec::<&&str>::new(),
             "permission 指到不存在的操作"
         );
-        assert!(duplicated.is_empty(), "操作出現在不只一條 permission：{duplicated:?}");
+        assert!(
+            duplicated.is_empty(),
+            "操作出現在不只一條 permission：{duplicated:?}"
+        );
     }
 
     /// The UI channel must not be bound by AI tool grants; otherwise
@@ -972,7 +1042,11 @@ mod tests {
         use std::collections::BTreeSet;
 
         let names = |want: Risk| -> BTreeSet<&'static str> {
-            Registry::new().iter().filter(|o| o.risk() == want).map(|o| o.name()).collect()
+            Registry::new()
+                .iter()
+                .filter(|o| o.risk() == want)
+                .map(|o| o.name())
+                .collect()
         };
         let boss = names(Risk::BossOnly);
         let admin = names(Risk::AdminOnly);
@@ -1003,6 +1077,7 @@ mod tests {
                 "reset_user_password",
                 "save_regulation",
                 "set_company_timezone",
+                "set_mcp_tool_grant",
                 "set_role_permission",
                 "unlink_user_identity",
                 "update_backup_setting",
@@ -1054,11 +1129,17 @@ mod tests {
         for op in Registry::new().iter() {
             assert!(!op.summary().is_empty(), "{} 沒有說明", op.name());
             assert!(
-                op.summary().chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                op.summary()
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
                 "{} 的說明不是中文，MCP 客戶端會看不懂",
                 op.name()
             );
-            assert!(op.input_schema().is_object(), "{} 的 input schema 不是物件", op.name());
+            assert!(
+                op.input_schema().is_object(),
+                "{} 的 input schema 不是物件",
+                op.name()
+            );
         }
     }
 

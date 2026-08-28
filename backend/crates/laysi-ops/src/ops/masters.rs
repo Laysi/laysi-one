@@ -27,10 +27,9 @@ use async_trait::async_trait;
 use chrono::NaiveDate;
 use laysi_domain::Money;
 use laysi_store::{
-    CreateBankAccount as StoreCreateBankAccount,
-    CreateDimensionValue as StoreCreateDimensionValue,
-    SetApprovalRule as StoreSetApprovalRule, UpdateDimensionValue as StoreUpdateDimensionValue, WriteAccount, WriteEmployee,
-    WriteEmployeeBankAccount,
+    CreateBankAccount as StoreCreateBankAccount, CreateDimensionValue as StoreCreateDimensionValue,
+    SetApprovalRule as StoreSetApprovalRule, UpdateDimensionValue as StoreUpdateDimensionValue,
+    WriteAccount, WriteEmployee, WriteEmployeeBankAccount,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -102,20 +101,17 @@ pub struct AccountInput {
 fn require_account_report_fields(input: &Value) -> Result<(), OpError> {
     let Some(object) = input.as_object() else {
         return Err(OpError::BadInput(
-            "科目輸入必須是物件，並填報表分組與現金流量活動別。"
-                .into(),
+            "科目輸入必須是物件，並填報表分組與現金流量活動別。".into(),
         ));
     };
     if !object.contains_key("report_group") {
         return Err(OpError::BadInput(
-            "報表分組必填，請指定科目在資產負債表或損益表的分段。"
-                .into(),
+            "報表分組必填，請指定科目在資產負債表或損益表的分段。".into(),
         ));
     }
     if !object.contains_key("cash_flow_section") {
         return Err(OpError::BadInput(
-            "現金流量活動別必填；損益科目請留空。"
-                .into(),
+            "現金流量活動別必填；損益科目請留空。".into(),
         ));
     }
     Ok(())
@@ -149,12 +145,19 @@ fn validate_account(input: &AccountInput) -> Result<String, OpError> {
     if input.code.trim().is_empty() || input.name.trim().is_empty() {
         return Err(OpError::BadInput("科目代號與名稱都要填寫".into()));
     }
-    if input.parent_code.as_deref().is_some_and(|parent| parent.trim() == input.code.trim()) {
+    if input
+        .parent_code
+        .as_deref()
+        .is_some_and(|parent| parent.trim() == input.code.trim())
+    {
         return Err(OpError::BadInput("父科目不能指向自己".into()));
     }
 
     let report_ok = match input.kind.as_str() {
-        "asset" => matches!(input.report_group.as_str(), "current_asset" | "non_current_asset"),
+        "asset" => matches!(
+            input.report_group.as_str(),
+            "current_asset" | "non_current_asset"
+        ),
         "liability" => matches!(
             input.report_group.as_str(),
             "current_liability" | "non_current_liability"
@@ -178,8 +181,8 @@ fn validate_account(input: &AccountInput) -> Result<String, OpError> {
     }
 
     let section = input.cash_flow_section.as_deref();
-    let section_value_ok =
-        section.is_none_or(|value| matches!(value, "cash" | "operating" | "investing" | "financing"));
+    let section_value_ok = section
+        .is_none_or(|value| matches!(value, "cash" | "operating" | "investing" | "financing"));
     let section_kind_ok = match input.kind.as_str() {
         "asset" => section.is_some(),
         "liability" | "equity" => section.is_some() && section != Some("cash"),
@@ -211,7 +214,11 @@ fn account_write<'a>(input: &'a AccountInput, normal_side: &'a str) -> WriteAcco
         normal_side,
         is_postable: input.is_postable,
         is_active: input.is_active,
-        parent_code: input.parent_code.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+        parent_code: input
+            .parent_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
         sort_order: input.sort_order,
         report_group: input.report_group.as_str(),
         cash_flow_section: input.cash_flow_section.as_deref(),
@@ -239,13 +246,19 @@ impl Operation for CreateAccount {
         require_account_report_fields(&input)?;
         let input: AccountInput = parse(input)?;
         let normal_side = validate_account(&input)?;
-        let account = ctx.store.create_account(account_write(&input, &normal_side)).await?;
+        let account = ctx
+            .store
+            .create_account(account_write(&input, &normal_side))
+            .await?;
         let summary = format!(
             "建立科目 {} {} · 報表分組 {} · 現金流量活動別 {}",
             account.code,
             account.name,
             account.report_group,
-            account.cash_flow_section.as_deref().unwrap_or("併入本期損益")
+            account
+                .cash_flow_section
+                .as_deref()
+                .unwrap_or("併入本期損益")
         );
         Ok(OpOutcome::new(json!({ "account": account }), summary))
     }
@@ -272,12 +285,19 @@ impl Operation for UpdateAccount {
         require_account_report_fields(&input)?;
         let input: AccountInput = parse(input)?;
         let normal_side = validate_account(&input)?;
-        let account = ctx.store.update_account(account_write(&input, &normal_side)).await?;
+        let account = ctx
+            .store
+            .update_account(account_write(&input, &normal_side))
+            .await?;
         let summary = format!(
             "更新科目 {} {} · {}",
             account.code,
             account.name,
-            if account.is_active { "啟用" } else { "已停用，歷史分錄保留" }
+            if account.is_active {
+                "啟用"
+            } else {
+                "已停用，歷史分錄保留"
+            }
         );
         Ok(OpOutcome::new(json!({ "account": account }), summary))
     }
@@ -372,7 +392,10 @@ fn id_letter_code(letter: char) -> Option<u32> {
         'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T',
         'U', 'V', 'X', 'Y', 'W', 'Z', 'I', 'O',
     ];
-    ORDER.iter().position(|c| *c == letter).map(|i| i as u32 + 10)
+    ORDER
+        .iter()
+        .position(|c| *c == letter)
+        .map(|i| i as u32 + 10)
 }
 
 /// Whether a national ID is well formed: one letter, nine digits, and a
@@ -410,37 +433,50 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
             "身分證字號要一個英文字母加九碼數字，且檢查碼相符；還沒收到可以留空".into(),
         ));
     }
-    if !matches!(input.employment_type.as_str(), "full_time" | "part_time" | "contract") {
-        return Err(OpError::BadInput(
-            "僱用型態只能是正職、兼職或約聘".into(),
-        ));
+    if !matches!(
+        input.employment_type.as_str(),
+        "full_time" | "part_time" | "contract"
+    ) {
+        return Err(OpError::BadInput("僱用型態只能是正職、兼職或約聘".into()));
     }
     if !matches!(input.status.as_str(), "active" | "leaving" | "left") {
         return Err(OpError::BadInput("狀態只能是在職、離職中或已離職".into()));
     }
     if matches!(input.status.as_str(), "leaving" | "left") && input.left_on.is_none() {
-        let label = if input.status == "leaving" { "待離職" } else { "已離職" };
-        return Err(OpError::BadInput(format!("狀態為{label}時必須填寫離職日。")));
+        let label = if input.status == "leaving" {
+            "待離職"
+        } else {
+            "已離職"
+        };
+        return Err(OpError::BadInput(format!(
+            "狀態為{label}時必須填寫離職日。"
+        )));
     }
-    if input.left_on.is_some_and(|left_on| left_on < input.hired_on) {
-        return Err(OpError::BadInput(
-            "離職日必須在到職日當天或之後".into(),
-        ));
+    if input
+        .left_on
+        .is_some_and(|left_on| left_on < input.hired_on)
+    {
+        return Err(OpError::BadInput("離職日必須在到職日當天或之後".into()));
     }
     // Zero means the amount has not been agreed yet. Payroll refuses such an
     // employee rather than paying nothing, so the roster does not have to hold
     // a number before there is one.
     if input.base_salary.is_some_and(|value| value < Money::ZERO) {
-        return Err(OpError::BadInput("底薪不能是負數；尚未談定時留空即可".into()));
+        return Err(OpError::BadInput(
+            "底薪不能是負數；尚未談定時留空即可".into(),
+        ));
     }
     validate_bank_accounts(input)?;
-    if [input.labor_insured_salary, input.health_insured_salary, input.pension_wage]
-        .iter()
-        .any(|value| value.is_some_and(|value| value < Money::ZERO))
+    if [
+        input.labor_insured_salary,
+        input.health_insured_salary,
+        input.pension_wage,
+    ]
+    .iter()
+    .any(|value| value.is_some_and(|value| value < Money::ZERO))
     {
         return Err(OpError::BadInput(
-            "三個投保申報級距不能是負數；級距照申報事實保存。"
-                .into(),
+            "三個投保申報級距不能是負數；級距照申報事實保存。".into(),
         ));
     }
     Ok(())
@@ -503,7 +539,11 @@ fn employee_write<'a>(
     WriteEmployee {
         emp_no: input.emp_no.trim(),
         name: input.name.trim(),
-        dept_code: input.dept_code.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+        dept_code: input
+            .dept_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
         title: input.title.trim(),
         employment_type: input.employment_type.as_str(),
         hired_on: input.hired_on,
@@ -552,8 +592,10 @@ impl Operation for CreateEmployee {
             .store
             .create_employee(employee_write(&input, &ctx.actor, accounts.as_deref()))
             .await?;
-        let summary =
-            format!("建立員工 {} {} · 未建立登入帳號", employee.emp_no, employee.name);
+        let summary = format!(
+            "建立員工 {} {} · 未建立登入帳號",
+            employee.emp_no, employee.name
+        );
         Ok(OpOutcome::new(
             json!({
                 "employee": employee,
@@ -604,7 +646,11 @@ impl Operation for UpdateEmployee {
             employee.emp_no,
             employee.name,
             crate::ops::employees::status_label(&employee.status),
-            if closed_note.is_empty() { " · 登入帳號未變更".to_string() } else { closed_note }
+            if closed_note.is_empty() {
+                " · 登入帳號未變更".to_string()
+            } else {
+                closed_note
+            }
         );
         Ok(OpOutcome::new(
             json!({
@@ -727,8 +773,11 @@ impl Operation for CreateDimensionValue {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let input: CreateDimensionValueInput = parse(input)?;
         validate_dimension_value(&input)?;
-        let code =
-            if input.code.trim().is_empty() { input.label.trim() } else { input.code.trim() };
+        let code = if input.code.trim().is_empty() {
+            input.label.trim()
+        } else {
+            input.code.trim()
+        };
         let value = ctx
             .store
             .create_dimension_value(StoreCreateDimensionValue {
@@ -839,10 +888,19 @@ fn validate_approval_rule(input: &SetApprovalRuleInput) -> Result<(), OpError> {
         return Err(OpError::BadInput("簽核關卡的順序要大於零".into()));
     }
     if input.min_amount.is_some_and(|amount| amount < Money::ZERO) {
-        return Err(OpError::BadInput("金額門檻不能是負數；不填代表一律要經過這一關".into()));
+        return Err(OpError::BadInput(
+            "金額門檻不能是負數；不填代表一律要經過這一關".into(),
+        ));
     }
-    if !input.delete && input.label.as_deref().is_none_or(|label| label.trim().is_empty()) {
-        return Err(OpError::BadInput("關卡要有名稱，簽核流程上才分得出是哪一關".into()));
+    if !input.delete
+        && input
+            .label
+            .as_deref()
+            .is_none_or(|label| label.trim().is_empty())
+    {
+        return Err(OpError::BadInput(
+            "關卡要有名稱，簽核流程上才分得出是哪一關".into(),
+        ));
     }
     Ok(())
 }
@@ -873,7 +931,11 @@ impl Operation for SetApprovalRule {
             let rules = ctx.store.approval_rules().await?;
             return Ok(OpOutcome::new(
                 json!({ "deleted_step_no": input.step_no, "steps": rules }),
-                format!("刪除簽核流程第 {} 關 · 尚餘 {} 關", input.step_no, rules.len()),
+                format!(
+                    "刪除簽核流程第 {} 關 · 尚餘 {} 關",
+                    input.step_no,
+                    rules.len()
+                ),
             ));
         }
 
@@ -882,7 +944,11 @@ impl Operation for SetApprovalRule {
             .store
             .set_approval_rule(StoreSetApprovalRule {
                 step_no: input.step_no,
-                role_code: input.role_code.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+                role_code: input
+                    .role_code
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty()),
                 label,
                 condition_note: input.condition_note.trim(),
                 min_amount: input.min_amount,
@@ -892,7 +958,10 @@ impl Operation for SetApprovalRule {
             .min_amount
             .map(|amount| format!("{} 以上", money(amount)))
             .unwrap_or_else(|| "一律需要".into());
-        let summary = format!("設定簽核第 {} 關 {} · {threshold}", rule.step_no, rule.label);
+        let summary = format!(
+            "設定簽核第 {} 關 {} · {threshold}",
+            rule.step_no, rule.label
+        );
         Ok(OpOutcome::new(json!({ "rule": rule }), summary))
     }
 }
@@ -984,7 +1053,9 @@ mod tests {
         // Not collected yet is not an error.
         input.id_no = String::new();
         assert!(validate_employee(&input).is_ok());
-        assert!(CreateEmployee.summary().contains("登入帳號由系統管理員另行建立"));
+        assert!(CreateEmployee
+            .summary()
+            .contains("登入帳號由系統管理員另行建立"));
     }
 
     #[test]
@@ -1094,7 +1165,10 @@ mod tests {
             gl_code: String::new(),
             sort_order: 0,
         };
-        assert!(validate_bank_account(&input).unwrap_err().to_string().contains("總帳科目"));
+        assert!(validate_bank_account(&input)
+            .unwrap_err()
+            .to_string()
+            .contains("總帳科目"));
         assert_eq!(CreateBankAccount.risk(), Risk::NeedsConfirm);
     }
 
@@ -1108,7 +1182,9 @@ mod tests {
             sort_order: 0,
         };
         assert!(validate_dimension_value(&input).is_err());
-        assert!(CreateDimensionValue.summary().contains("在既有分類下新增一個項目"));
+        assert!(CreateDimensionValue
+            .summary()
+            .contains("在既有分類下新增一個項目"));
     }
 
     #[test]
@@ -1119,7 +1195,10 @@ mod tests {
             label: None,
             active: None,
         };
-        assert!(validate_update_dimension_value(&input).unwrap_err().to_string().contains("沒有變更"));
+        assert!(validate_update_dimension_value(&input)
+            .unwrap_err()
+            .to_string()
+            .contains("沒有變更"));
 
         input.label = Some("  ".into());
         assert!(validate_update_dimension_value(&input).is_err());

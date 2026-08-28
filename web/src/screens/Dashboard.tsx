@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { callOp, type Dashboard as DashboardData } from '../api/client';
+import { callOp, dashboard, type Dashboard as DashboardData } from '../api/client';
 import type { ScreenId } from '../nav';
 
 function scaleOf(peak: number): { div: number; unit: string; digits: number } {
@@ -25,7 +25,7 @@ export function Dashboard({ onGo, reloadKey }: Props) {
 
   useEffect(() => {
     let live = true;
-    callOp<DashboardData>('get_dashboard')
+    callOp('get_dashboard', {}, undefined, dashboard)
       .then((d) => live && setData(d))
       .catch((e: Error) => live && setError(e.message));
     return () => {

@@ -3,6 +3,8 @@ import {
   businessToday,
   callOp,
   money,
+  myOvertimeList,
+  myOvertimeResult,
   OpFailed,
   trimDecimal,
   wallSpan,
@@ -52,7 +54,7 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
 
   const load = useCallback(() => {
     setError(null);
-    callOp<MyOvertimeList>('list_my_overtime_requests')
+    callOp('list_my_overtime_requests', {}, undefined, myOvertimeList)
       .then((d) => {
         setData(d);
         const today = businessToday();
@@ -92,16 +94,17 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
     setBusy(true);
     setFormError(null);
     try {
-      const d = await callOp<MyOvertimeResult>(
-        'submit_my_overtime_request',
-        {
-          from_at: `${fromDay}T${fromTime}:00`,
-          to_at: `${toDay}T${toTime}:00`,
-          day_type: dayType,
-          ...(reason.trim() ? { reason: reason.trim() } : {}),
-        },
-        `申請加班，${fromDay} ${fromTime} 至 ${toDay} ${toTime}`,
-      );
+      const d = await callOp(
+                        'submit_my_overtime_request',
+                        {
+            from_at: `${fromDay}T${fromTime}:00`,
+            to_at: `${toDay}T${toTime}:00`,
+            day_type: dayType,
+            ...(reason.trim() ? { reason: reason.trim() } : {}),
+          },
+                        `申請加班，${fromDay} ${fromTime} 至 ${toDay} ${toTime}`,
+                        myOvertimeResult,
+                      );
       setResult(d);
       onToast(
         `${d.request.request_no} 已送出：${d.request.day_type_label} ` +

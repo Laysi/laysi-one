@@ -35,10 +35,22 @@ use serde::{Deserialize, Serialize};
 /// Protected files. The key is the repo-relative path (for humans) and the
 /// value is the content embedded at compile time.
 pub const PROTECTED: &[(&str, &str)] = &[
-    ("LICENSE-BSL.txt", include_str!("../../../../LICENSE-BSL.txt")),
-    ("backend/crates/laysi-brand/src/glyphs.rs", include_str!("glyphs.rs")),
-    ("backend/crates/laysi-brand/src/mark.rs", include_str!("mark.rs")),
-    ("backend/crates/laysi-brand/src/integrity.rs", include_str!("integrity.rs")),
+    (
+        "LICENSE-BSL.txt",
+        include_str!("../../../../LICENSE-BSL.txt"),
+    ),
+    (
+        "backend/crates/laysi-brand/src/glyphs.rs",
+        include_str!("glyphs.rs"),
+    ),
+    (
+        "backend/crates/laysi-brand/src/mark.rs",
+        include_str!("mark.rs"),
+    ),
+    (
+        "backend/crates/laysi-brand/src/integrity.rs",
+        include_str!("integrity.rs"),
+    ),
 ];
 
 const MANIFEST_TOML: &str = include_str!("../../../brand/integrity.toml");
@@ -92,7 +104,11 @@ pub enum IntegrityError {
 #[derive(Debug, Clone)]
 pub enum Mismatch {
     /// Content does not match the manifest.
-    Changed { path: String, expected: String, actual: String },
+    Changed {
+        path: String,
+        expected: String,
+        actual: String,
+    },
     /// In the manifest but not embedded in this build: a protected file was
     /// taken out of scope.
     MissingFromBuild { path: String },
@@ -105,7 +121,11 @@ fn format_mismatches(items: &[Mismatch]) -> String {
     let mut s = String::new();
     for m in items {
         match m {
-            Mismatch::Changed { path, expected, actual } => s.push_str(&format!(
+            Mismatch::Changed {
+                path,
+                expected,
+                actual,
+            } => s.push_str(&format!(
                 "  ✗ {path}\n      清單：{expected}\n      實際：{actual}\n"
             )),
             Mismatch::MissingFromBuild { path } => {
@@ -210,12 +230,16 @@ pub fn verify() -> Result<Report, IntegrityError> {
                     });
                 }
             }
-            None => mismatches.push(Mismatch::MissingFromBuild { path: entry.path.clone() }),
+            None => mismatches.push(Mismatch::MissingFromBuild {
+                path: entry.path.clone(),
+            }),
         }
     }
     for (path, _) in PROTECTED {
         if !manifest.entry.iter().any(|e| e.path == *path) {
-            mismatches.push(Mismatch::MissingFromManifest { path: (*path).to_string() });
+            mismatches.push(Mismatch::MissingFromManifest {
+                path: (*path).to_string(),
+            });
         }
     }
     if !mismatches.is_empty() {
@@ -229,15 +253,19 @@ pub fn verify() -> Result<Report, IntegrityError> {
     let key_arr: [u8; 32] = key_bytes
         .try_into()
         .map_err(|_| IntegrityError::BadPublicKey("長度不是 32 位元組".into()))?;
-    let vk =
-        VerifyingKey::from_bytes(&key_arr).map_err(|e| IntegrityError::BadPublicKey(e.to_string()))?;
+    let vk = VerifyingKey::from_bytes(&key_arr)
+        .map_err(|e| IntegrityError::BadPublicKey(e.to_string()))?;
 
-    let sig_bytes = hex::decode(manifest.signature.trim()).map_err(|_| IntegrityError::BadSignature)?;
-    let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| IntegrityError::BadSignature)?;
+    let sig_bytes =
+        hex::decode(manifest.signature.trim()).map_err(|_| IntegrityError::BadSignature)?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| IntegrityError::BadSignature)?;
     let sig = Signature::from_bytes(&sig_arr);
 
     let msg = canonical_bytes(manifest.version, &manifest.entry);
-    vk.verify(&msg, &sig).map_err(|_| IntegrityError::BadSignature)?;
+    vk.verify(&msg, &sig)
+        .map_err(|_| IntegrityError::BadSignature)?;
 
     Ok(Report {
         files: manifest.entry.len(),
@@ -253,10 +281,22 @@ mod tests {
     #[test]
     fn protected_set_covers_the_brand_surface() {
         let paths: Vec<&str> = PROTECTED.iter().map(|(p, _)| *p).collect();
-        assert!(paths.contains(&"LICENSE-BSL.txt"), "授權條款必須在保護範圍內");
-        assert!(paths.iter().any(|p| p.ends_with("glyphs.rs")), "字形幾何必須在保護範圍內");
-        assert!(paths.iter().any(|p| p.ends_with("mark.rs")), "字標產生器必須在保護範圍內");
-        assert!(paths.iter().any(|p| p.ends_with("integrity.rs")), "驗證器本身必須在保護範圍內");
+        assert!(
+            paths.contains(&"LICENSE-BSL.txt"),
+            "授權條款必須在保護範圍內"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("glyphs.rs")),
+            "字形幾何必須在保護範圍內"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("mark.rs")),
+            "字標產生器必須在保護範圍內"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("integrity.rs")),
+            "驗證器本身必須在保護範圍內"
+        );
     }
 
     /// This repo must ship in a signed, verifying state.
@@ -278,12 +318,24 @@ mod tests {
     #[test]
     fn canonical_bytes_are_order_independent() {
         let a = vec![
-            Entry { path: "b".into(), blake3: "2".into() },
-            Entry { path: "a".into(), blake3: "1".into() },
+            Entry {
+                path: "b".into(),
+                blake3: "2".into(),
+            },
+            Entry {
+                path: "a".into(),
+                blake3: "1".into(),
+            },
         ];
         let b = vec![
-            Entry { path: "a".into(), blake3: "1".into() },
-            Entry { path: "b".into(), blake3: "2".into() },
+            Entry {
+                path: "a".into(),
+                blake3: "1".into(),
+            },
+            Entry {
+                path: "b".into(),
+                blake3: "2".into(),
+            },
         ];
         assert_eq!(canonical_bytes(1, &a), canonical_bytes(1, &b));
     }
@@ -295,8 +347,14 @@ mod tests {
 
     #[test]
     fn tampering_with_content_is_detected() {
-        let tampered =
-            Entry { path: "LICENSE-BSL.txt".into(), blake3: hash("這不是真正的授權條款") };
-        assert_ne!(tampered.blake3, hash(PROTECTED[0].1), "竄改後的雜湊必須與實際內容不同");
+        let tampered = Entry {
+            path: "LICENSE-BSL.txt".into(),
+            blake3: hash("這不是真正的授權條款"),
+        };
+        assert_ne!(
+            tampered.blake3,
+            hash(PROTECTED[0].1),
+            "竄改後的雜湊必須與實際內容不同"
+        );
     }
 }

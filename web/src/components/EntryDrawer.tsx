@@ -1,23 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  accountList,
   addDecimals,
   businessToday,
   callOp,
+  dimensionList,
   isZero,
   money,
   OpFailed,
   trimDecimal,
-  type DimensionList,
-  type Voucher,
+  voucherResult,
+  type Account,
 } from '../api/client';
 import { DateField } from './DateField';
-
-interface Account {
-  code: string;
-  name: string;
-  kind: string;
-  is_postable: boolean;
-}
 
 interface Row {
   account_code: string;
@@ -69,10 +64,10 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
 
   useEffect(() => {
     if (!open || accounts.length) return;
-    callOp<{ accounts: Account[] }>('list_accounts')
+    callOp('list_accounts', {}, undefined, accountList)
       .then((d) => setAccounts(d.accounts.filter((a) => a.is_postable)))
       .catch(() => onToast('無法讀取會計科目表'));
-    callOp<DimensionList>('list_dimensions')
+    callOp('list_dimensions', {}, undefined, dimensionList)
       .then((d) =>
         setDepts(
           d.dimensions
@@ -120,16 +115,21 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
   async function save() {
     setSaving(true);
     try {
-      const d = await callOp<{ voucher: Voucher }>('create_voucher', {
-        date,
-        memo: memo || '未填寫摘要',
-        lines: rows.map((r) => ({
-          account_code: r.account_code,
-          debit: clean(r.debit),
-          credit: clean(r.credit),
-          ...(r.dept_code ? { dept_code: r.dept_code } : {}),
-        })),
-      });
+      const d = await callOp(
+                        'create_voucher',
+                        {
+          date,
+          memo: memo || '未填寫摘要',
+          lines: rows.map((r) => ({
+            account_code: r.account_code,
+            debit: clean(r.debit),
+            credit: clean(r.credit),
+            ...(r.dept_code ? { dept_code: r.dept_code } : {}),
+          })),
+        },
+                        undefined,
+                        voucherResult,
+                      );
       onToast(`${d.voucher.no} 已儲存，狀態為待過帳`);
       setRows(EMPTY);
       setMemo('');

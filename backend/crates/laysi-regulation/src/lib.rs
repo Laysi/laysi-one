@@ -41,15 +41,42 @@ pub type Money = Decimal;
 /// and is the answer before the server has installed anything. Register a new
 /// domain here; a newly published year is added as a version on the screen.
 const SOURCES: &[(&str, &str)] = &[
-    ("2026/labor_insurance.toml", include_str!("../../../regulation/2026/labor_insurance.toml")),
-    ("2026/health_insurance.toml", include_str!("../../../regulation/2026/health_insurance.toml")),
-    ("2026/pension.toml", include_str!("../../../regulation/2026/pension.toml")),
-    ("2026/vat.toml", include_str!("../../../regulation/2026/vat.toml")),
-    ("2026/minimum_wage.toml", include_str!("../../../regulation/2026/minimum_wage.toml")),
-    ("2026/withholding.toml", include_str!("../../../regulation/2026/withholding.toml")),
-    ("2026/annual_leave.toml", include_str!("../../../regulation/2026/annual_leave.toml")),
-    ("2026/depreciation.toml", include_str!("../../../regulation/2026/depreciation.toml")),
-    ("2026/overtime.toml", include_str!("../../../regulation/2026/overtime.toml")),
+    (
+        "2026/labor_insurance.toml",
+        include_str!("../../../regulation/2026/labor_insurance.toml"),
+    ),
+    (
+        "2026/health_insurance.toml",
+        include_str!("../../../regulation/2026/health_insurance.toml"),
+    ),
+    (
+        "2026/pension.toml",
+        include_str!("../../../regulation/2026/pension.toml"),
+    ),
+    (
+        "2026/vat.toml",
+        include_str!("../../../regulation/2026/vat.toml"),
+    ),
+    (
+        "2026/minimum_wage.toml",
+        include_str!("../../../regulation/2026/minimum_wage.toml"),
+    ),
+    (
+        "2026/withholding.toml",
+        include_str!("../../../regulation/2026/withholding.toml"),
+    ),
+    (
+        "2026/annual_leave.toml",
+        include_str!("../../../regulation/2026/annual_leave.toml"),
+    ),
+    (
+        "2026/depreciation.toml",
+        include_str!("../../../regulation/2026/depreciation.toml"),
+    ),
+    (
+        "2026/overtime.toml",
+        include_str!("../../../regulation/2026/overtime.toml"),
+    ),
 ];
 
 /// Regulation domains the system knows. A rule file's `domain` must be one
@@ -92,23 +119,37 @@ pub struct Ruleset {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegulationError {
-    #[error(
-        "找不到「{domain}」在 {as_of} 適用的法規版本，請在法規版本新增涵蓋該日期的版本。"
-    )]
+    #[error("找不到「{domain}」在 {as_of} 適用的法規版本，請在法規版本新增涵蓋該日期的版本。")]
     NotFound { domain: String, as_of: NaiveDate },
 
     #[error("法規 {domain}/{version} 缺少必要欄位「{key}」")]
-    MissingField { domain: String, version: String, key: String },
+    MissingField {
+        domain: String,
+        version: String,
+        key: String,
+    },
 
     #[error("法規 {domain}/{version} 的欄位「{key}」不是合法數值：{value}")]
-    BadNumber { domain: String, version: String, key: String, value: String },
+    BadNumber {
+        domain: String,
+        version: String,
+        key: String,
+        value: String,
+    },
 
     #[error("這個計算子需要 {expected} 的規則，收到的卻是 {found}")]
-    WrongDomain { expected: &'static str, found: String },
+    WrongDomain {
+        expected: &'static str,
+        found: String,
+    },
 }
 
 fn sorted(mut v: Vec<Ruleset>) -> Vec<Ruleset> {
-    v.sort_by(|a, b| a.domain.cmp(&b.domain).then(a.effective_from.cmp(&b.effective_from)));
+    v.sort_by(|a, b| {
+        a.domain
+            .cmp(&b.domain)
+            .then(a.effective_from.cmp(&b.effective_from))
+    });
     v
 }
 
@@ -179,13 +220,19 @@ pub fn resolve(domain: &str, as_of: NaiveDate) -> Result<&'static Ruleset, Regul
         .filter(|r| r.effective_from <= as_of)
         .filter(|r| r.effective_to.is_none_or(|end| as_of <= end))
         .max_by_key(|r| r.effective_from)
-        .ok_or_else(|| RegulationError::NotFound { domain: domain.to_string(), as_of })
+        .ok_or_else(|| RegulationError::NotFound {
+            domain: domain.to_string(),
+            as_of,
+        })
 }
 
 impl Ruleset {
     fn expect_domain(&self, expected: &'static str) -> Result<(), RegulationError> {
         if self.domain != expected {
-            return Err(RegulationError::WrongDomain { expected, found: self.domain.clone() });
+            return Err(RegulationError::WrongDomain {
+                expected,
+                found: self.domain.clone(),
+            });
         }
         Ok(())
     }
@@ -197,11 +244,13 @@ impl Ruleset {
     pub fn decimal(&self, key: &str) -> Result<Money, RegulationError> {
         let mut node = &self.payload;
         for part in key.split('.') {
-            node = node.get(part).ok_or_else(|| RegulationError::MissingField {
-                domain: self.domain.clone(),
-                version: self.version.clone(),
-                key: key.to_string(),
-            })?;
+            node = node
+                .get(part)
+                .ok_or_else(|| RegulationError::MissingField {
+                    domain: self.domain.clone(),
+                    version: self.version.clone(),
+                    key: key.to_string(),
+                })?;
         }
         let text = node.as_str().ok_or_else(|| RegulationError::BadNumber {
             domain: self.domain.clone(),
@@ -209,12 +258,13 @@ impl Ruleset {
             key: key.to_string(),
             value: node.to_string(),
         })?;
-        text.parse::<Decimal>().map_err(|_| RegulationError::BadNumber {
-            domain: self.domain.clone(),
-            version: self.version.clone(),
-            key: key.to_string(),
-            value: text.to_string(),
-        })
+        text.parse::<Decimal>()
+            .map_err(|_| RegulationError::BadNumber {
+                domain: self.domain.clone(),
+                version: self.version.clone(),
+                key: key.to_string(),
+                value: text.to_string(),
+            })
     }
 }
 
@@ -272,7 +322,9 @@ pub fn health_insurance(
     rs.expect_domain("health_insurance")?;
     let premium = insured_salary * rs.decimal("rate")?;
     Ok(Contribution {
-        employer: to_dollars(premium * rs.decimal("employer_share")? * rs.decimal("avg_dependents")?),
+        employer: to_dollars(
+            premium * rs.decimal("employer_share")? * rs.decimal("avg_dependents")?,
+        ),
         employee: to_dollars(premium * rs.decimal("employee_share")?),
         government: to_dollars(premium * rs.decimal("government_share")?),
     })
@@ -299,7 +351,9 @@ pub fn vat(rs: &Ruleset, net_amount: Money) -> Result<Money, RegulationError> {
 pub fn vat_from_total(rs: &Ruleset, total_amount: Money) -> Result<Money, RegulationError> {
     rs.expect_domain("vat")?;
     let rate = rs.decimal("rate")?;
-    Ok(to_dollars(total_amount - total_amount / (Decimal::ONE + rate)))
+    Ok(to_dollars(
+        total_amount - total_amount / (Decimal::ONE + rate),
+    ))
 }
 
 /// Minimum wage check. `None` means compliant, `Some(floor)` means below the
@@ -316,20 +370,25 @@ pub fn minimum_wage_shortfall(
 /// Annual leave days. `service_months` is completed months since hire.
 pub fn annual_leave_days(rs: &Ruleset, service_months: u32) -> Result<u32, RegulationError> {
     rs.expect_domain("annual_leave")?;
-    let tiers = rs.payload.get("tiers").and_then(|v| v.as_array()).ok_or_else(|| {
-        RegulationError::MissingField {
+    let tiers = rs
+        .payload
+        .get("tiers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| RegulationError::MissingField {
             domain: rs.domain.clone(),
             version: rs.version.clone(),
             key: "tiers".into(),
-        }
-    })?;
+        })?;
 
-    let read = |t: &serde_json::Value, key: &str| -> Option<u32> { t.get(key)?.as_str()?.parse().ok() };
+    let read =
+        |t: &serde_json::Value, key: &str| -> Option<u32> { t.get(key)?.as_str()?.parse().ok() };
 
     let mut days = 0;
     let mut matched_months = 0;
     for t in tiers {
-        let (Some(months), Some(d)) = (read(t, "months"), read(t, "days")) else { continue };
+        let (Some(months), Some(d)) = (read(t, "months"), read(t, "days")) else {
+            continue;
+        };
         if service_months >= months && months >= matched_months {
             days = d;
             matched_months = months;
@@ -339,8 +398,16 @@ pub fn annual_leave_days(rs: &Ruleset, service_months: u32) -> Result<u32, Regul
     // After ten years, one more day per completed year up to the cap. This is
     // a rule rather than an enumeration.
     if service_months >= 120 {
-        let inc: u32 = rs.decimal("over_ten_years.increment_per_year")?.trunc().try_into().unwrap_or(1);
-        let max: u32 = rs.decimal("over_ten_years.max_days")?.trunc().try_into().unwrap_or(30);
+        let inc: u32 = rs
+            .decimal("over_ten_years.increment_per_year")?
+            .trunc()
+            .try_into()
+            .unwrap_or(1);
+        let max: u32 = rs
+            .decimal("over_ten_years.max_days")?
+            .trunc()
+            .try_into()
+            .unwrap_or(30);
         days = (days + (service_months - 120) / 12 * inc).min(max);
     }
     Ok(days)
@@ -355,14 +422,19 @@ pub struct OvertimeDayType {
     pub max_hours: Money,
 }
 
-fn payload_array<'a>(rs: &'a Ruleset, key: &str) -> Result<&'a Vec<serde_json::Value>, RegulationError> {
+fn payload_array<'a>(
+    rs: &'a Ruleset,
+    key: &str,
+) -> Result<&'a Vec<serde_json::Value>, RegulationError> {
     let mut node = &rs.payload;
     for part in key.split('.') {
-        node = node.get(part).ok_or_else(|| RegulationError::MissingField {
-            domain: rs.domain.clone(),
-            version: rs.version.clone(),
-            key: key.to_string(),
-        })?;
+        node = node
+            .get(part)
+            .ok_or_else(|| RegulationError::MissingField {
+                domain: rs.domain.clone(),
+                version: rs.version.clone(),
+                key: key.to_string(),
+            })?;
     }
     node.as_array().ok_or_else(|| RegulationError::BadNumber {
         domain: rs.domain.clone(),
@@ -373,19 +445,21 @@ fn payload_array<'a>(rs: &'a Ruleset, key: &str) -> Result<&'a Vec<serde_json::V
 }
 
 fn field(rs: &Ruleset, node: &serde_json::Value, key: &str) -> Result<Money, RegulationError> {
-    let text = node.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
-        RegulationError::MissingField {
+    let text =
+        node.get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RegulationError::MissingField {
+                domain: rs.domain.clone(),
+                version: rs.version.clone(),
+                key: key.to_string(),
+            })?;
+    text.parse::<Decimal>()
+        .map_err(|_| RegulationError::BadNumber {
             domain: rs.domain.clone(),
             version: rs.version.clone(),
             key: key.to_string(),
-        }
-    })?;
-    text.parse::<Decimal>().map_err(|_| RegulationError::BadNumber {
-        domain: rs.domain.clone(),
-        version: rs.version.clone(),
-        key: key.to_string(),
-        value: text.to_string(),
-    })
+            value: text.to_string(),
+        })
 }
 
 /// The kinds of day the overtime rules distinguish, in the order listed.
@@ -395,8 +469,16 @@ pub fn overtime_day_types(rs: &Ruleset) -> Result<Vec<OvertimeDayType>, Regulati
         .iter()
         .map(|t| {
             Ok(OvertimeDayType {
-                code: t.get("code").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                label: t.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                code: t
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                label: t
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 max_hours: field(rs, t, "max_hours")?,
             })
         })
@@ -434,13 +516,14 @@ pub fn overtime_pay(
             key: format!("day_types.{day_type}"),
         })?;
 
-    let bands = matched.get("bands").and_then(|v| v.as_array()).ok_or_else(|| {
-        RegulationError::MissingField {
+    let bands = matched
+        .get("bands")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| RegulationError::MissingField {
             domain: rs.domain.clone(),
             version: rs.version.clone(),
             key: format!("day_types.{day_type}.bands"),
-        }
-    })?;
+        })?;
 
     let mut left = hours;
     let mut pay = Money::ZERO;
@@ -488,10 +571,22 @@ mod tests {
     fn overtime_walks_the_bands_and_reads_them_from_the_payload() {
         let rs = resolve("overtime", d(2026, 7, 25)).unwrap();
         // 40000 over 240 hours is 166.6667 an hour.
-        assert_eq!(overtime_pay(rs, dec!(40000), "weekday", dec!(2)).unwrap(), dec!(447));
-        assert_eq!(overtime_pay(rs, dec!(40000), "weekday", dec!(3)).unwrap(), dec!(725));
-        assert_eq!(overtime_pay(rs, dec!(40000), "rest_day", dec!(3)).unwrap(), dec!(725));
-        assert_eq!(overtime_pay(rs, dec!(40000), "weekday", Money::ZERO).unwrap(), Money::ZERO);
+        assert_eq!(
+            overtime_pay(rs, dec!(40000), "weekday", dec!(2)).unwrap(),
+            dec!(447)
+        );
+        assert_eq!(
+            overtime_pay(rs, dec!(40000), "weekday", dec!(3)).unwrap(),
+            dec!(725)
+        );
+        assert_eq!(
+            overtime_pay(rs, dec!(40000), "rest_day", dec!(3)).unwrap(),
+            dec!(725)
+        );
+        assert_eq!(
+            overtime_pay(rs, dec!(40000), "weekday", Money::ZERO).unwrap(),
+            Money::ZERO
+        );
         assert!(overtime_pay(rs, dec!(40000), "public_holiday", dec!(1)).is_err());
 
         let mut changed = rs.clone();
@@ -502,7 +597,10 @@ mod tests {
         );
 
         let types = overtime_day_types(rs).unwrap();
-        assert_eq!(types.iter().map(|t| t.code.as_str()).collect::<Vec<_>>(), ["weekday", "rest_day"]);
+        assert_eq!(
+            types.iter().map(|t| t.code.as_str()).collect::<Vec<_>>(),
+            ["weekday", "rest_day"]
+        );
         assert_eq!(types[0].max_hours, dec!(4));
         assert_eq!(overtime_monthly_max_hours(rs).unwrap(), dec!(46));
     }
@@ -572,7 +670,10 @@ mod tests {
     fn minimum_wage_flags_only_shortfalls() {
         let rs = resolve("minimum_wage", d(2026, 7, 25)).unwrap();
         assert_eq!(minimum_wage_shortfall(rs, dec!(45000)).unwrap(), None);
-        assert_eq!(minimum_wage_shortfall(rs, dec!(28000)).unwrap(), Some(dec!(29500)));
+        assert_eq!(
+            minimum_wage_shortfall(rs, dec!(28000)).unwrap(),
+            Some(dec!(29500))
+        );
     }
 
     #[test]
@@ -589,7 +690,10 @@ mod tests {
         let vat_rs = resolve("vat", d(2026, 7, 25)).unwrap();
         assert!(matches!(
             labor_insurance(vat_rs, dec!(45800)),
-            Err(RegulationError::WrongDomain { expected: "labor_insurance", .. })
+            Err(RegulationError::WrongDomain {
+                expected: "labor_insurance",
+                ..
+            })
         ));
     }
 
@@ -612,7 +716,10 @@ mod tests {
         // Figures computed under the old rules do not move because a new rule
         // appeared.
         assert_eq!(before.employer, dec!(3527));
-        assert_eq!(labor_insurance(base, dec!(45800)).unwrap().employer, dec!(3527));
+        assert_eq!(
+            labor_insurance(base, dec!(45800)).unwrap().employer,
+            dec!(3527)
+        );
         // New rule: 45800 x 0.12 x 0.70 = 3847.2, rounded to 3847.
         assert_eq!(after.employer, dec!(3847));
     }

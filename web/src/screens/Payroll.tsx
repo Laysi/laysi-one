@@ -5,6 +5,9 @@ import {
   isZero,
   money,
   OpFailed,
+  payrollRunResult,
+  payrollSummary,
+  payslipList,
   type PayrollRunResult,
   type PayrollSummary,
   type PayslipList,
@@ -32,7 +35,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
   const load = useCallback(() => {
     setError(null);
     setSlipError(null);
-    callOp<PayrollSummary>('get_payroll_summary', period ? { period } : {})
+    callOp('get_payroll_summary', period ? { period } : {}, undefined, payrollSummary)
       .then((s) => {
         setSummary(s);
         setRunPeriod((v) => v || s.next_period || '');
@@ -42,7 +45,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
           setSlips(null);
           return;
         }
-        callOp<PayslipList>('list_payslips', period ? { period } : {})
+        callOp('list_payslips', period ? { period } : {}, undefined, payslipList)
           .then(setSlips)
           .catch((e: Error) => {
             setSlips(null);
@@ -57,7 +60,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
   async function tryDetail() {
     setSlipError(null);
     try {
-      const d = await callOp<PayslipList>('list_payslips', period ? { period } : {});
+      const d = await callOp('list_payslips', period ? { period } : {}, undefined, payslipList);
       setSlips(d);
     } catch (e) {
       const msg = e instanceof OpFailed ? e.error.message : String(e);
@@ -69,14 +72,15 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
   async function run() {
     setBusy(true);
     try {
-      const d = await callOp<PayrollRunResult>(
-        'run_payroll',
-        {
-          ...(runPeriod.trim() ? { period: runPeriod.trim() } : {}),
-          ...(payOn ? { pay_on: payOn } : {}),
-        },
-        `計算 ${runPeriod.trim() || '本期'} 薪資`,
-      );
+      const d = await callOp(
+                        'run_payroll',
+                        {
+            ...(runPeriod.trim() ? { period: runPeriod.trim() } : {}),
+            ...(payOn ? { pay_on: payOn } : {}),
+          },
+                        `計算 ${runPeriod.trim() || '本期'} 薪資`,
+                        payrollRunResult,
+                      );
       setResult(d);
       onToast(
         `${d.run.period} 已完成計算：${d.run.headcount} 人實發 ${money(d.run.net_total)}，` +

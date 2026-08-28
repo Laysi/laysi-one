@@ -59,12 +59,13 @@ import { AuthProvider, useAuth, useAuthSession } from './auth';
 import {
   callOp,
   getMeta,
+  myNoticeList,
+  myPunchList,
   OpFailed,
+  punchResult,
+  voucherList,
   type Meta,
-  type MyNoticeList,
   type MyPunchList,
-  type PunchResult,
-  type Voucher,
 } from './api/client';
 
 type Section = 'fin' | 'hr' | 'me' | 'sys';
@@ -233,7 +234,7 @@ function Workspace() {
       return;
     }
     let live = true;
-    callOp<MyNoticeList>('list_my_notices')
+    callOp('list_my_notices', {}, undefined, myNoticeList)
       .then((d) => live && setUnreadCount(d.unread_count))
       .catch(() => live && setUnreadCount(0));
     return () => {
@@ -247,7 +248,7 @@ function Workspace() {
       return;
     }
     let live = true;
-    callOp<MyPunchList>('list_my_punches')
+    callOp('list_my_punches', {}, undefined, myPunchList)
       .then((d) => live && setPunch(d))
       .catch(() => live && setPunch(null));
     return () => {
@@ -258,11 +259,7 @@ function Workspace() {
   async function punchNow(kind: 'in' | 'out') {
     setPunching(true);
     try {
-      const d = await callOp<PunchResult>(
-        'punch_clock',
-        { kind },
-        kind === 'in' ? '打上班卡' : '打下班卡',
-      );
+      const d = await callOp('punch_clock', { kind }, kind === 'in' ? '打上班卡' : '打下班卡', punchResult);
       showToast(`${d.punch.kind_label}卡 ${d.punch.at} 已記錄`);
       reload();
     } catch (e) {
@@ -278,8 +275,8 @@ function Workspace() {
       return;
     }
     Promise.all([
-      callOp<{ vouchers: Voucher[] }>('search_vouchers', { status: 'pending', limit: 500 }),
-      callOp<{ vouchers: Voucher[] }>('search_vouchers', { status: 'draft', limit: 500 }),
+      callOp('search_vouchers', { status: 'pending', limit: 500 }, undefined, voucherList),
+      callOp('search_vouchers', { status: 'draft', limit: 500 }, undefined, voucherList),
     ])
       .then(([p, d]) => setPendingCount(p.vouchers.length + d.vouchers.length))
       .catch(() => setPendingCount(0));
@@ -505,7 +502,7 @@ function Workspace() {
                 <Accounts onGo={go} onToast={showToast} reloadKey={reloadKey} />
               )}
               {screen === 'roles' && <Roles onToast={showToast} reloadKey={reloadKey} />}
-              {screen === 'mcp' && <McpTools reloadKey={reloadKey} />}
+              {screen === 'mcp' && <McpTools onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'sec' && <Security onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'reg' && <Regulations onToast={showToast} reloadKey={reloadKey} />}
 

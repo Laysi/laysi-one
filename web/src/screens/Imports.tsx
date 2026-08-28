@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   callOp,
+  importCommit,
+  importList,
+  importPreview,
+  importRollback,
   money,
   OpFailed,
   type ImportBatchRow,
@@ -30,7 +34,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<ImportList>('list_imports')
+    callOp('list_imports', {}, undefined, importList)
       .then(setData)
       .catch((e: Error) => setError(e.message));
   }, []);
@@ -41,11 +45,16 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
     setBusy(true);
     try {
       const content = await file.text();
-      const p = await callOp<ImportPreview>('preview_import', {
-        source_code: 'voucher',
-        file_name: file.name,
-        content,
-      });
+      const p = await callOp(
+                        'preview_import',
+                        {
+          source_code: 'voucher',
+          file_name: file.name,
+          content,
+        },
+                        undefined,
+                        importPreview,
+                      );
       setPreview(p);
       onToast(
         p.can_commit
@@ -64,7 +73,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
   async function commit(batchNo: string) {
     setBusy(true);
     try {
-      const r = await callOp<{ batch: ImportBatchRow }>('commit_import', { batch_no: batchNo });
+      const r = await callOp('commit_import', { batch_no: batchNo }, undefined, importCommit);
       onToast(
         `${batchNo} 已寫入 ${r.batch.voucher_nos.length} 張傳票，狀態都是待過帳；過帳前不列入報表`,
       );
@@ -81,7 +90,7 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
   async function rollback(batchNo: string) {
     setBusy(true);
     try {
-      const r = await callOp<{ removed: string[] }>('rollback_import', { batch_no: batchNo });
+      const r = await callOp('rollback_import', { batch_no: batchNo }, undefined, importRollback);
       onToast(`${batchNo} 已復原，刪除 ${r.removed.length} 張待過帳傳票`);
       onChanged();
       load();

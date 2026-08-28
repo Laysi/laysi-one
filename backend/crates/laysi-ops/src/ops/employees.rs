@@ -1,11 +1,14 @@
 //! Employee roster and HR dashboard.
 //!
-//! [`ListEmployees`] is `ReadOnly` and returns neither monthly salary nor
-//! insured salary brackets. Per-person amounts have exactly two exits:
-//! `list_payslips` (boss only) and `get_insurance_summary` (insured brackets
-//! are what was filed with the labour insurance bureau, and accounting needs
-//! them to check the statements). The roster returns an explanatory line
-//! instead of blank columns.
+//! [`ListEmployees`] is `ReadOnly`. On screen it returns the terms of
+//! employment -- base salary, the three insured grades, the bank accounts and
+//! the full id number -- because the drawer that edits them has to show what
+//! it is about to replace, and no other page says what someone is paid today.
+//! Monthly payslips stay in `list_payslips` (boss only).
+//!
+//! Over MCP the same operation answers with less: the amounts and the bank
+//! accounts are dropped and the id number is masked. The tool grant already
+//! promises as much, and a model has no filing errand that needs either.
 //!
 //! Annual leave entitlement is `annual_leave_days(ruleset, service_months)`,
 //! never stored; days taken are summed from `leave_request`.
@@ -15,13 +18,50 @@
 //! number, reconciliation result), the ones that are not state what is
 //! missing.
 
-use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
+use crate::{money, parse, schema_of, Channel, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{Datelike, NaiveDate};
 use laysi_domain::Money;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+/// An id number with everything but its first three and last two characters
+/// replaced, the same shape the roster shows before anyone presses to reveal.
+fn mask_id_no(id_no: &str) -> String {
+    let length = id_no.chars().count();
+    if length < 6 {
+        return id_no.to_string();
+    }
+    let head: String = id_no.chars().take(3).collect();
+    let tail: String = id_no.chars().skip(length - 2).collect();
+    format!("{head}{}{tail}", "*".repeat(length - 5))
+}
+
+/// Cut a roster row down to what an AI client is granted.
+///
+/// `id_no` is masked rather than removed so the roster can still answer
+/// whether a number is on file at all. The amounts and the bank accounts go
+/// entirely: they leave the building in whatever the model is talking to, and
+/// nothing an AI is asked about the roster needs them.
+fn redact_for_ai(row: &mut Value) {
+    let Some(fields) = row.as_object_mut() else {
+        return;
+    };
+    if let Some(Value::String(id_no)) = fields.get("id_no") {
+        let masked = mask_id_no(id_no);
+        fields.insert("id_no".into(), json!(masked));
+    }
+    for key in [
+        "base_salary",
+        "labor_insured_salary",
+        "health_insured_salary",
+        "pension_wage",
+        "bank_accounts",
+    ] {
+        fields.remove(key);
+    }
+}
 
 /// Voucher status as the screens name it. The stored value is an internal
 /// code and must not reach a page.
@@ -37,10 +77,7 @@ fn voucher_status_label(status: Option<&str>) -> &'static str {
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![
-        Box::new(GetHrDashboard),
-        Box::new(ListEmployees),
-    ]
+    vec![Box::new(GetHrDashboard), Box::new(ListEmployees)]
 }
 
 /// Completed months of service up to a date. Calendar arithmetic, not
@@ -49,7 +86,8 @@ pub(crate) fn service_months(hired: NaiveDate, as_of: NaiveDate) -> u32 {
     if as_of < hired {
         return 0;
     }
-    let mut months = (as_of.year() - hired.year()) * 12 + as_of.month() as i32 - hired.month() as i32;
+    let mut months =
+        (as_of.year() - hired.year()) * 12 + as_of.month() as i32 - hired.month() as i32;
     if as_of.day() < hired.day() {
         months -= 1;
     }
@@ -115,7 +153,10 @@ impl Operation for GetHrDashboard {
             .count();
         let departed = staff
             .iter()
-            .filter(|e| e.left_on.is_some_and(|d| d.format("%Y-%m").to_string() == month))
+            .filter(|e| {
+                e.left_on
+                    .is_some_and(|d| d.format("%Y-%m").to_string() == month)
+            })
             .count();
         let latest = runs.first();
         let (posted, in_transit) = ctx.store.payroll_totals().await?;
@@ -332,7 +373,17 @@ impl Operation for ListEmployees {
             }));
         }
 
-        let avg_months = if active == 0 { 0 } else { months_total / active as u32 };
+        if ctx.channel == Channel::Mcp {
+            for row in &mut rows {
+                redact_for_ai(row);
+            }
+        }
+
+        let avg_months = if active == 0 {
+            0
+        } else {
+            months_total / active as u32
+        };
         by_dept.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
         let summary = format!(
@@ -373,8 +424,16 @@ mod tests {
     /// Service length is calendar arithmetic: a month counts once complete.
     #[test]
     fn service_months_count_only_completed_months() {
-        assert_eq!(service_months(d(2026, 7, 16), d(2026, 7, 26)), 0, "還不滿一個月");
-        assert_eq!(service_months(d(2026, 7, 16), d(2026, 8, 15)), 0, "差一天不算滿");
+        assert_eq!(
+            service_months(d(2026, 7, 16), d(2026, 7, 26)),
+            0,
+            "還不滿一個月"
+        );
+        assert_eq!(
+            service_months(d(2026, 7, 16), d(2026, 8, 15)),
+            0,
+            "差一天不算滿"
+        );
         assert_eq!(service_months(d(2026, 7, 16), d(2026, 8, 16)), 1);
         assert_eq!(
             service_months(d(2026, 2, 16), d(2026, 7, 26)),
@@ -427,8 +486,11 @@ mod tests {
         next.version = "2027.1".into();
         next.payload["tiers"][1]["days"] = json!("10");
         assert_eq!(
-            laysi_regulation::annual_leave_days(&next, service_months(d(2025, 3, 3), d(2026, 7, 26)))
-                .unwrap(),
+            laysi_regulation::annual_leave_days(
+                &next,
+                service_months(d(2025, 3, 3), d(2026, 7, 26))
+            )
+            .unwrap(),
             10
         );
     }
@@ -439,5 +501,41 @@ mod tests {
         assert_eq!(service_label(5), "5 個月");
         assert_eq!(service_label(12), "1 年");
         assert_eq!(service_label(85), "7 年 1 個月");
+    }
+
+    #[test]
+    fn masking_keeps_the_first_three_and_last_two_characters() {
+        assert_eq!(mask_id_no("A123456789"), "A12*****89");
+        assert_eq!(mask_id_no("A123"), "A123");
+    }
+
+    /// The MCP grant for this tool says it carries no pay. Salary and the
+    /// insured grades were added to the roster afterwards for the edit
+    /// drawer, which made that promise false on the AI channel.
+    #[test]
+    fn the_ai_roster_carries_no_pay_and_no_account_numbers() {
+        let mut row = json!({
+            "emp_no": "E001",
+            "name": "王小明",
+            "id_no": "A123456789",
+            "base_salary": "80000",
+            "labor_insured_salary": "45800",
+            "health_insured_salary": "45800",
+            "pension_wage": "45800",
+            "bank_accounts": [{ "bank_name": "第一銀行", "account_no": "12345678901" }],
+        });
+        redact_for_ai(&mut row);
+
+        assert_eq!(row["id_no"], json!("A12*****89"));
+        for gone in [
+            "base_salary",
+            "labor_insured_salary",
+            "health_insured_salary",
+            "pension_wage",
+            "bank_accounts",
+        ] {
+            assert!(row.get(gone).is_none(), "{gone} 不該留在 AI 讀到的名冊上");
+        }
+        assert_eq!(row["name"], json!("王小明"), "姓名與編號仍然要回");
     }
 }

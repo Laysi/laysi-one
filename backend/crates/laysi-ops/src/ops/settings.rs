@@ -45,6 +45,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListDimensions),
         Box::new(ListRoles),
         Box::new(SetRolePermission),
+        Box::new(SetMcpToolGrant),
         Box::new(CreateUserAccount),
         Box::new(UpdateUserAccount),
         Box::new(ChangeUserRole),
@@ -259,15 +260,15 @@ const CLEARABLE_SETTINGS: [&str; 6] = [
 /// preference. Anything not listed here is stored as typed.
 fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
     match code {
-        "tax_id" if !is_valid_tax_id(value) => {
-            Err(OpError::BadInput("統一編號是 8 位數字，且檢查碼要相符".into()))
-        }
+        "tax_id" if !is_valid_tax_id(value) => Err(OpError::BadInput(
+            "統一編號是 8 位數字，且檢查碼要相符".into(),
+        )),
         "fiscal_year" if !matches!(value.parse::<u32>(), Ok(1..=12)) => {
             Err(OpError::BadInput("會計年度起始月份要填 1 到 12".into()))
         }
-        "work_start" | "work_end" | "break_start" | "break_end" if !is_clock_time(value) => {
-            Err(OpError::BadInput(format!("「{value}」不是時刻，格式是 HH:MM，例如 09:00")))
-        }
+        "work_start" | "work_end" | "break_start" | "break_end" if !is_clock_time(value) => Err(
+            OpError::BadInput(format!("「{value}」不是時刻，格式是 HH:MM，例如 09:00")),
+        ),
         "late_grace_minutes" | "flex_window_minutes" if value.parse::<u32>().is_err() => {
             Err(OpError::BadInput(format!("「{value}」不是分鐘數")))
         }
@@ -278,9 +279,9 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
         {
             Err(OpError::BadInput(format!("「{value}」不是大於 0 的數字")))
         }
-        crate::MCP_RATE_LIMIT_SETTING if value.parse::<u32>().is_err() => {
-            Err(OpError::BadInput(format!("「{value}」不是次數，不限就填 0")))
-        }
+        crate::MCP_RATE_LIMIT_SETTING if value.parse::<u32>().is_err() => Err(OpError::BadInput(
+            format!("「{value}」不是次數，不限就填 0"),
+        )),
         "punch_correction_policy"
             if !crate::ops::attendance::CORRECTION_POLICIES.contains(&value) =>
         {
@@ -332,12 +333,17 @@ impl Operation for UpdateCompanySetting {
         if !value.is_empty() {
             validate_setting(&i.code, value)?;
         }
-        let s = ctx.store.update_company_setting(&i.code, value, &ctx.actor).await?;
+        let s = ctx
+            .store
+            .update_company_setting(&i.code, value, &ctx.actor)
+            .await?;
         // The three policy settings are also read on paths with no Store at
         // hand, so the process copy has to follow the row.
         if matches!(
             i.code.as_str(),
-            crate::SESSION_IDLE_SETTING | crate::SESSION_MAX_SETTING | crate::MCP_RATE_LIMIT_SETTING
+            crate::SESSION_IDLE_SETTING
+                | crate::SESSION_MAX_SETTING
+                | crate::MCP_RATE_LIMIT_SETTING
         ) {
             crate::load_policy_settings(&ctx.store).await;
         }
@@ -481,10 +487,7 @@ impl Operation for ListDimensions {
         let dims = ctx.store.dimensions().await?;
         let values: usize = dims.iter().map(|d| d.values.len()).sum();
         let summary = format!("讀取部門 · {values} 個");
-        Ok(OpOutcome::new(
-            json!({ "dimensions": dims }),
-            summary,
-        ))
+        Ok(OpOutcome::new(json!({ "dimensions": dims }), summary))
     }
 }
 
@@ -520,7 +523,11 @@ impl Operation for ListRoles {
         // kept so the screen can label them separately. Granting a permission
         // does not lift either floor.
         let with_risk = |want: Risk| -> HashSet<&'static str> {
-            crate::ops::all().iter().filter(|o| o.risk() == want).map(|o| o.name()).collect()
+            crate::ops::all()
+                .iter()
+                .filter(|o| o.risk() == want)
+                .map(|o| o.name())
+                .collect()
         };
         let boss_only = with_risk(Risk::BossOnly);
         let admin_only = with_risk(Risk::AdminOnly);
@@ -528,12 +535,21 @@ impl Operation for ListRoles {
         let perms: Vec<Value> = permissions
             .iter()
             .map(|p| {
-                let missing: Vec<&String> =
-                    p.op_names.iter().filter(|n| !known.contains(n.as_str())).collect();
-                let boss_ops: Vec<&String> =
-                    p.op_names.iter().filter(|n| boss_only.contains(n.as_str())).collect();
-                let admin_ops: Vec<&String> =
-                    p.op_names.iter().filter(|n| admin_only.contains(n.as_str())).collect();
+                let missing: Vec<&String> = p
+                    .op_names
+                    .iter()
+                    .filter(|n| !known.contains(n.as_str()))
+                    .collect();
+                let boss_ops: Vec<&String> = p
+                    .op_names
+                    .iter()
+                    .filter(|n| boss_only.contains(n.as_str()))
+                    .collect();
+                let admin_ops: Vec<&String> = p
+                    .op_names
+                    .iter()
+                    .filter(|n| admin_only.contains(n.as_str()))
+                    .collect();
                 json!({
                     "code": p.code,
                     "label": p.label,
@@ -651,6 +667,60 @@ impl Operation for SetRolePermission {
         let summary =
             format!("改權限 · {role_name}的「{perm_label}」設為{what}（下一次呼叫立即生效）");
         Ok(OpOutcome::new(json!({ "cell": cell }), summary))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SetMcpToolGrantInput {
+    /// Operation name, e.g. `post_voucher`.
+    pub tool_name: String,
+    /// Whether an AI client may call it.
+    pub enabled: bool,
+}
+
+struct SetMcpToolGrant;
+
+#[async_trait]
+impl Operation for SetMcpToolGrant {
+    fn name(&self) -> &'static str {
+        "set_mcp_tool_grant"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "開啟或關閉一項 AI 工具。改動從下一次呼叫起立即生效。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<SetMcpToolGrantInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: SetMcpToolGrantInput = parse(input)?;
+
+        // This switch decides what AI may call, so opening it would let an
+        // administrator's MCP token open every other one. It is the single
+        // name that has to stay closed to reach the rest.
+        if i.enabled && i.tool_name == self.name() {
+            return Err(OpError::BadInput(
+                "這項工具無法對 AI 開啟。開啟之後 AI 就能自行開啟其餘工具。".into(),
+            ));
+        }
+
+        let grant = ctx
+            .store
+            .set_tool_grant(&i.tool_name, i.enabled)
+            .await?
+            .ok_or_else(|| {
+                OpError::BadInput(format!("沒有名為「{}」的工具，請確認名稱。", i.tool_name))
+            })?;
+
+        // The seeded note describes the tool in Chinese, so its first clause
+        // names it the same way `dispatch` names an operation from its summary.
+        let label = crate::op_label(&grant.note).to_string();
+        let what = if grant.enabled { "開啟" } else { "關閉" };
+        let summary = format!("{what} AI 工具 · {label}（下一次呼叫立即生效）");
+        Ok(OpOutcome::new(json!({ "grant": grant }), summary))
     }
 }
 
@@ -865,7 +935,11 @@ impl Operation for CreateUserAccount {
             user.display_name,
             role.name,
             employee.emp_no,
-            if temporary.is_some() { "" } else { "，外部登入" }
+            if temporary.is_some() {
+                ""
+            } else {
+                "，外部登入"
+            }
         );
         Ok(OpOutcome::new(
             json!({
@@ -963,9 +1037,7 @@ impl Operation for UpdateUserAccount {
                 // that has to stay reachable when the identity provider is
                 // not.
                 if !email.is_empty() && current.username == crate::ADMIN_USERNAME {
-                    return Err(OpError::BadInput(
-                        "系統管理員帳號不能設定電子郵件".into(),
-                    ));
+                    return Err(OpError::BadInput("系統管理員帳號不能設定電子郵件".into()));
                 }
                 Some(email)
             }
@@ -1046,7 +1118,11 @@ impl Operation for UpdateUserAccount {
             });
         }
         if let Some(status) = status {
-            changed.push(if status == "active" { "啟用".into() } else { "停用".to_string() });
+            changed.push(if status == "active" {
+                "啟用".into()
+            } else {
+                "停用".to_string()
+            });
         }
         if let Some(employee) = &employee {
             changed.push(match employee {
@@ -1058,7 +1134,12 @@ impl Operation for UpdateUserAccount {
             changed.push("沒有欄位變更".to_string());
         }
 
-        let summary = format!("改帳號 · {}（{}）{}", updated.username, role_name, changed.join("、"));
+        let summary = format!(
+            "改帳號 · {}（{}）{}",
+            updated.username,
+            role_name,
+            changed.join("、")
+        );
         Ok(OpOutcome::new(
             json!({
                 "user": {
@@ -1242,7 +1323,9 @@ impl Operation for ResetUserPassword {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ResetUserPasswordInput = parse(input)?;
         if !i.confirm {
-            return Err(OpError::BadInput("重設密碼會讓舊密碼立刻失效，請帶入 confirm".into()));
+            return Err(OpError::BadInput(
+                "重設密碼會讓舊密碼立刻失效，請帶入 confirm".into(),
+            ));
         }
 
         let username = i.username.trim();
@@ -1261,7 +1344,10 @@ impl Operation for ResetUserPassword {
         let temporary = laysi_store::password::temporary_password();
         let password_hash = laysi_store::password::hash_password(&temporary)
             .map_err(|e| OpError::BadInput(format!("無法建立密碼雜湊：{e}")))?;
-        let updated = ctx.store.set_password_hash(user.id, Some(&password_hash), true).await?;
+        let updated = ctx
+            .store
+            .set_password_hash(user.id, Some(&password_hash), true)
+            .await?;
         let revoked = ctx.store.revoke_user_sessions(user.id, &ctx.actor).await?;
 
         let roles = ctx.store.roles().await?;
@@ -1271,8 +1357,10 @@ impl Operation for ResetUserPassword {
             .map(|r| r.name.clone())
             .unwrap_or_else(|| updated.role_code.clone());
 
-        let summary =
-            format!("重設密碼 · {}（{}）舊密碼失效，登出 {revoked} 個工作階段", updated.username, role_name);
+        let summary = format!(
+            "重設密碼 · {}（{}）舊密碼失效，登出 {revoked} 個工作階段",
+            updated.username, role_name
+        );
         Ok(OpOutcome::new(
             json!({
                 "user": {
@@ -1332,9 +1420,7 @@ impl Operation for UnlinkUserIdentity {
         };
         let identities = ctx.store.user_identities(target.id).await?;
         if identities.is_empty() {
-            return Err(OpError::BadInput(format!(
-                "「{username}」沒有連結外部帳號"
-            )));
+            return Err(OpError::BadInput(format!("「{username}」沒有連結外部帳號")));
         }
         // Unlinking an account with no password hash leaves a login nobody
         // can use, and no operation on this screen can give it one back.
@@ -1492,7 +1578,10 @@ impl Operation for ListUserAccounts {
     async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
         let accounts = ctx.store.user_account_roster().await?;
         let pending = accounts.iter().filter(|a| a.must_change_password).count();
-        let summary = format!("讀取登入帳號 · {} 個，其中 {pending} 個尚未變更初始密碼", accounts.len());
+        let summary = format!(
+            "讀取登入帳號 · {} 個，其中 {pending} 個尚未變更初始密碼",
+            accounts.len()
+        );
         Ok(OpOutcome::new(json!({ "accounts": accounts }), summary))
     }
 }
@@ -1526,7 +1615,11 @@ impl Operation for GetOidcSetting {
         let summary = if setting.enabled {
             format!(
                 "讀外部登入設定 · 已啟用{}",
-                if setting.verify_error.is_empty() { "" } else { "，但設定有問題" }
+                if setting.verify_error.is_empty() {
+                    ""
+                } else {
+                    "，但設定有問題"
+                }
             )
         } else {
             "讀外部登入設定 · 未啟用".to_string()
@@ -1633,7 +1726,10 @@ impl Operation for UpdateOidcSetting {
             }
         }
 
-        let redirect_url = i.redirect_url.as_deref().map(|value| value.trim().to_string());
+        let redirect_url = i
+            .redirect_url
+            .as_deref()
+            .map(|value| value.trim().to_string());
         if let Some(redirect) = redirect_url.as_deref() {
             if !redirect.is_empty()
                 && (!is_web_url(redirect) || !redirect.ends_with(OAUTH_CALLBACK_PATH))
@@ -1647,7 +1743,10 @@ impl Operation for UpdateOidcSetting {
         let client_id = i.client_id.as_deref().map(|value| value.trim().to_string());
         let client_secret = i.client_secret.as_deref().map(str::trim);
         let allowed_domain = i.allowed_domain.as_deref().map(normalize_login_domain);
-        let provision_role = i.provision_role.as_deref().map(|value| value.trim().to_string());
+        let provision_role = i
+            .provision_role
+            .as_deref()
+            .map(|value| value.trim().to_string());
 
         let next_domain = allowed_domain.as_deref().unwrap_or(&current.allowed_domain);
         if let Some(role_code) = provision_role.as_deref() {
@@ -1669,8 +1768,9 @@ impl Operation for UpdateOidcSetting {
         }
 
         let next_enabled = i.enabled.unwrap_or(current.enabled);
-        let next_password_disabled =
-            i.password_login_disabled.unwrap_or(current.password_login_disabled);
+        let next_password_disabled = i
+            .password_login_disabled
+            .unwrap_or(current.password_login_disabled);
         if next_password_disabled && !next_enabled {
             return Err(OpError::BadInput(
                 "要停用帳號密碼登入請先啟用外部登入".into(),
@@ -1717,8 +1817,8 @@ impl Operation for UpdateOidcSetting {
         let write_client_id = client_id
             .as_deref()
             .filter(|value| changed_field("用戶端 ID", *value != current.client_id));
-        let write_secret =
-            client_secret.filter(|value| changed_field("用戶端密鑰", *value != current.client_secret));
+        let write_secret = client_secret
+            .filter(|value| changed_field("用戶端密鑰", *value != current.client_secret));
         let write_redirect = redirect_url
             .as_deref()
             .filter(|value| changed_field("轉址網址", *value != current.redirect_url));
@@ -1728,9 +1828,9 @@ impl Operation for UpdateOidcSetting {
         let write_role = provision_role
             .as_deref()
             .filter(|value| changed_field("自動建立帳號", *value != current.provision_role));
-        let write_password_disabled = i
-            .password_login_disabled
-            .filter(|value| changed_field("帳號密碼登入", *value != current.password_login_disabled));
+        let write_password_disabled = i.password_login_disabled.filter(|value| {
+            changed_field("帳號密碼登入", *value != current.password_login_disabled)
+        });
 
         if changed.is_empty() {
             return Ok(OpOutcome::new(
@@ -1756,7 +1856,11 @@ impl Operation for UpdateOidcSetting {
 
         let summary = format!(
             "設定外部登入 · {}（{}）",
-            if updated.enabled { "已啟用" } else { "未啟用" },
+            if updated.enabled {
+                "已啟用"
+            } else {
+                "未啟用"
+            },
             changed.join("、")
         );
         Ok(OpOutcome::new(
@@ -1882,7 +1986,15 @@ mod tests {
             assert!(is_clock_time(good), "{good} 應該通過");
             assert!(validate_setting("work_start", good).is_ok());
         }
-        for bad in ["9:00", "0900", "24:00", "18:60", "18:5", "上午九點", "09:00:00"] {
+        for bad in [
+            "9:00",
+            "0900",
+            "24:00",
+            "18:60",
+            "18:5",
+            "上午九點",
+            "09:00:00",
+        ] {
             assert!(!is_clock_time(bad), "{bad} 不該通過");
             assert!(validate_setting("work_end", bad).is_err());
         }
@@ -1906,7 +2018,12 @@ mod tests {
                 op.name(),
                 "set_role_permission" | "update_company_setting" | "create_user_account"
             ) {
-                assert_eq!(op.risk(), Risk::AdminOnly, "{} 不該低於限系統管理員", op.name());
+                assert_eq!(
+                    op.risk(),
+                    Risk::AdminOnly,
+                    "{} 不該低於限系統管理員",
+                    op.name()
+                );
             }
         }
     }

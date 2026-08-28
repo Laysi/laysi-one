@@ -1,5 +1,11 @@
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
-import { callOp, isZero, money, type HrDashboard as HrDashboardData } from '../api/client';
+import {
+  callOp,
+  hrDashboard,
+  isZero,
+  money,
+  type HrDashboard as HrDashboardData,
+} from '../api/client';
 import type { ScreenId } from '../nav';
 
 interface Props {
@@ -29,7 +35,7 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
   useEffect(() => {
     let live = true;
     setError(null);
-    callOp<HrDashboardData>('get_hr_dashboard')
+    callOp('get_hr_dashboard', {}, undefined, hrDashboard)
       .then((d) => live && setData(d))
       .catch((e: Error) => live && setError(e.message));
     return () => {

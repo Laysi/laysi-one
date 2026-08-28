@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   businessToday,
   callOp,
+  myLeaveList,
+  myLeaveResult,
   OpFailed,
   trimDecimal,
   wallSpan,
@@ -83,7 +85,7 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<MyLeaveList>('list_my_leave_requests')
+    callOp('list_my_leave_requests', {}, undefined, myLeaveList)
       .then((d) => {
         setData(d);
         const today = businessToday();
@@ -134,16 +136,17 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
     setBusy(true);
     setFormError(null);
     try {
-      const d = await callOp<MyLeaveResult>(
-        'request_leave',
-        {
-          kind,
-          from_at: `${fromDay}T${fromTime}:00`,
-          to_at: `${toDay}T${toTime}:00`,
-          ...(reason.trim() ? { reason: reason.trim() } : {}),
-        },
-        `申請${kindLabel}，${fromDay} ${fromTime} 至 ${toDay} ${toTime}`,
-      );
+      const d = await callOp(
+                        'request_leave',
+                        {
+            kind,
+            from_at: `${fromDay}T${fromTime}:00`,
+            to_at: `${toDay}T${toTime}:00`,
+            ...(reason.trim() ? { reason: reason.trim() } : {}),
+          },
+                        `申請${kindLabel}，${fromDay} ${fromTime} 至 ${toDay} ${toTime}`,
+                        myLeaveResult,
+                      );
       setResult(d);
       onToast(
         `${d.request.leave_no} 已送出：${d.request.kind_label} ` +

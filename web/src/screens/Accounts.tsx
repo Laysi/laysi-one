@@ -2,17 +2,20 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   businessTime,
   callOp,
+  changedUserRole,
+  deletedUserAccount,
+  newUserAccount,
+  oidcSetting,
   OpFailed,
-  type ChangedUserRole,
-  type DeletedUserAccount,
-  type NewUserAccount,
+  roleMatrix,
+  unlinkedUserIdentity,
+  updatedUserAccount,
+  userAccountList,
+  userPasswordReset,
   type OidcSetting,
   type RoleMatrix,
-  type UnlinkedUserIdentity,
-  type UpdatedUserAccount,
   type UserAccountList,
   type UserAccountRow,
-  type UserPasswordReset,
 } from '../api/client';
 import type { ScreenId } from '../nav';
 import { useAuth, useCurrentUser } from '../auth';
@@ -70,7 +73,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<UserAccountList>('list_user_accounts')
+    callOp('list_user_accounts', {}, undefined, userAccountList)
       .then(setList)
       .catch((e: Error) => setError(e.message));
   }, []);
@@ -79,14 +82,14 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
 
   useEffect(() => {
     if (!drawer || matrix) return;
-    callOp<RoleMatrix>('list_roles')
+    callOp('list_roles', {}, undefined, roleMatrix)
       .then(setMatrix)
       .catch(() => setMatrix(null));
   }, [drawer, matrix]);
 
   useEffect(() => {
     if (!drawer || oidc || !me.permissions.includes('get_oidc_setting')) return;
-    callOp<OidcSetting>('get_oidc_setting')
+    callOp('get_oidc_setting', {}, undefined, oidcSetting)
       .then(setOidc)
       .catch(() => setOidc(null));
   }, [drawer, oidc, me.permissions]);
@@ -145,17 +148,18 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     }
     setSaving(true);
     try {
-      const d = await callOp<NewUserAccount>(
-        'create_user_account',
-        {
-          email: form.email.trim(),
-          display_name: form.display_name.trim(),
-          role_code: form.role_code,
-          employee_no: form.employee_no.trim(),
-          external_login_only: externalOnly,
-        },
-        `建立帳號 ${form.email.trim()}`,
-      );
+      const d = await callOp(
+                        'create_user_account',
+                        {
+            email: form.email.trim(),
+            display_name: form.display_name.trim(),
+            role_code: form.role_code,
+            employee_no: form.employee_no.trim(),
+            external_login_only: externalOnly,
+          },
+                        `建立帳號 ${form.email.trim()}`,
+                        newUserAccount,
+                      );
       if (d.temporary_password) {
         setSecret({
           heading: '初始密碼',
@@ -200,11 +204,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
 
     setSaving(true);
     try {
-      const d = await callOp<UpdatedUserAccount>(
-        'update_user_account',
-        input,
-        `修改帳號 ${original.username}`,
-      );
+      const d = await callOp('update_user_account', input, `修改帳號 ${original.username}`, updatedUserAccount);
       onToast(`${d.user.username}：${d.changed.join('、')}`);
       close();
       load();
@@ -219,11 +219,12 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     const next = a.status === 'active' ? 'suspended' : 'active';
     setSaving(true);
     try {
-      await callOp<UpdatedUserAccount>(
-        'update_user_account',
-        { username: a.username, status: next },
-        `${next === 'active' ? '啟用' : '停用'}帳號 ${a.username}`,
-      );
+      await callOp(
+              'update_user_account',
+              { username: a.username, status: next },
+              `${next === 'active' ? '啟用' : '停用'}帳號 ${a.username}`,
+              updatedUserAccount,
+            );
       onToast(`${a.username} 已${next === 'active' ? '啟用' : '停用'}`);
       load();
     } catch (e) {
@@ -237,11 +238,12 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     if (!original) return;
     setSaving(true);
     try {
-      const d = await callOp<UserPasswordReset>(
-        'reset_user_password',
-        { username: original.username, confirm: true },
-        `重設 ${original.username} 的密碼`,
-      );
+      const d = await callOp(
+                        'reset_user_password',
+                        { username: original.username, confirm: true },
+                        `重設 ${original.username} 的密碼`,
+                        userPasswordReset,
+                      );
       setSecret({
         heading: '新的臨時密碼',
         username: d.user.username,
@@ -264,11 +266,12 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     if (!original || !nextRole) return;
     setSaving(true);
     try {
-      const d = await callOp<ChangedUserRole>(
-        'change_user_role',
-        { username: original.username, role_code: nextRole, confirm: true },
-        `將 ${original.username} 變更為 ${roleName(nextRole)}`,
-      );
+      const d = await callOp(
+                        'change_user_role',
+                        { username: original.username, role_code: nextRole, confirm: true },
+                        `將 ${original.username} 變更為 ${roleName(nextRole)}`,
+                        changedUserRole,
+                      );
       onToast(
         `${d.user.username} 由${d.user.previous_role_name}改為${d.user.role_name}，` +
           `登出 ${d.revoked_sessions} 個工作階段、撤銷 ${d.revoked_tokens} 組 Token`,
@@ -298,11 +301,12 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     if (!original) return;
     setSaving(true);
     try {
-      const d = await callOp<UnlinkedUserIdentity>(
-        'unlink_user_identity',
-        { username: original.username, confirm: true },
-        `解除 ${original.username} 的外部帳號連結`,
-      );
+      const d = await callOp(
+                        'unlink_user_identity',
+                        { username: original.username, confirm: true },
+                        `解除 ${original.username} 的外部帳號連結`,
+                        unlinkedUserIdentity,
+                      );
       onToast(`${d.user.username} 已解除連結，登出 ${d.revoked_sessions} 個工作階段`);
       close();
       load();
@@ -318,11 +322,12 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
     if (!original) return;
     setSaving(true);
     try {
-      const d = await callOp<DeletedUserAccount>(
-        'delete_user_account',
-        { username: original.username, confirm: true },
-        `刪除帳號 ${original.username}`,
-      );
+      const d = await callOp(
+                        'delete_user_account',
+                        { username: original.username, confirm: true },
+                        `刪除帳號 ${original.username}`,
+                        deletedUserAccount,
+                      );
       onToast(`已刪除 ${d.user.username}，剩下 ${d.remaining} 個帳號`);
       close();
       load();

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  attachReceiptResult,
   callOp,
   fileSizeLabel,
   MAX_UPLOAD_BYTES,
   money,
+  myExpenseClaimList,
   OpFailed,
   readFileBase64,
-  type AttachReceiptResult,
   type ExpenseClaim,
   type MyExpenseClaimList,
 } from '../api/client';
@@ -34,7 +35,7 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<MyExpenseClaimList>('list_my_expense_claims')
+    callOp('list_my_expense_claims', {}, undefined, myExpenseClaimList)
       .then(setData)
       .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
   }, []);
@@ -53,15 +54,16 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
     let done = 0;
     for (const file of files) {
       try {
-        await callOp<AttachReceiptResult>(
-          'attach_my_expense_receipt',
-          {
-            claim_no: claimNo,
-            file_name: file.name,
-            content_base64: await readFileBase64(file),
-          },
-          `為 ${claimNo} 附上收據 ${file.name}`,
-        );
+        await callOp(
+                'attach_my_expense_receipt',
+                {
+              claim_no: claimNo,
+              file_name: file.name,
+              content_base64: await readFileBase64(file),
+            },
+                `為 ${claimNo} 附上收據 ${file.name}`,
+                attachReceiptResult,
+              );
         done += 1;
       } catch (e) {
         onToast(e instanceof OpFailed ? e.error.message : String(e));

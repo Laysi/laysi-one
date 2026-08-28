@@ -103,7 +103,10 @@ impl Operation for ListApiTokens {
             })
             .collect();
 
-        let live = tokens.iter().filter(|t| t.revoked_at.is_none() && !t.is_expired(now)).count();
+        let live = tokens
+            .iter()
+            .filter(|t| t.revoked_at.is_none() && !t.is_expired(now))
+            .count();
         let summary = format!("讀取 Token 清單 · {} 組有效、共 {} 筆", live, rows.len());
         Ok(OpOutcome::new(
             json!({
@@ -166,7 +169,9 @@ impl Operation for IssueApiToken {
             )));
         }
         if i.name.trim().is_empty() {
-            return Err(OpError::BadInput("Token 要有名稱，否則清單上分不出是哪一組".into()));
+            return Err(OpError::BadInput(
+                "Token 要有名稱，否則清單上分不出是哪一組".into(),
+            ));
         }
         if let Some(d) = i.rotate_days {
             if d <= 0 {
@@ -247,7 +252,10 @@ impl Operation for RevokeApiToken {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: RevokeApiTokenInput = parse(input)?;
         let t = ctx.store.revoke_api_token(i.id, &ctx.actor).await?;
-        let summary = format!("撤銷 Token · {}（{}…）· {} 之後無法連線", t.name, t.prefix, t.actor);
+        let summary = format!(
+            "撤銷 Token · {}（{}…）· {} 之後無法連線",
+            t.name, t.prefix, t.actor
+        );
         Ok(OpOutcome::new(json!({ "token": t }), summary))
     }
 }
@@ -290,11 +298,16 @@ impl Operation for GetSystemHealth {
                 })
             })
             .collect();
-        let stale = rulesets.iter().filter(|r| r["applicable"] == json!(false)).count();
+        let stale = rulesets
+            .iter()
+            .filter(|r| r["applicable"] == json!(false))
+            .count();
 
         let summary = format!(
             "讀取系統現況 · migration {} · 已過帳 {} 張 · 稽核 {} 筆 · Token {} 組",
-            migration.map(|v| v.to_string()).unwrap_or_else(|| "未知".into()),
+            migration
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "未知".into()),
             stats.posted_vouchers,
             stats.audit_entries,
             stats.tokens_live
@@ -323,17 +336,29 @@ mod tests {
     /// that needs their approval.
     #[test]
     fn revoking_is_easier_than_issuing_on_purpose() {
-        let by = |name: &str| ops().into_iter().find(|o| o.name() == name).map(|o| o.risk());
+        let by = |name: &str| {
+            ops()
+                .into_iter()
+                .find(|o| o.name() == name)
+                .map(|o| o.risk())
+        };
         assert_eq!(by("issue_api_token"), Some(Risk::AdminOnly));
         assert_eq!(by("revoke_api_token"), Some(Risk::HighRisk));
-        assert_ne!(by("revoke_api_token"), Some(Risk::ReadOnly), "撤銷會改狀態，不是唯讀");
+        assert_ne!(
+            by("revoke_api_token"),
+            Some(Risk::ReadOnly),
+            "撤銷會改狀態，不是唯讀"
+        );
     }
 
     /// Listing tokens is read-only, but only because the list holds no
     /// plaintext. Adding the secret to the output would invalidate that tier.
     #[test]
     fn listing_tokens_is_read_only_because_it_carries_no_secret() {
-        let op = ops().into_iter().find(|o| o.name() == "list_api_tokens").unwrap();
+        let op = ops()
+            .into_iter()
+            .find(|o| o.name() == "list_api_tokens")
+            .unwrap();
         assert_eq!(op.risk(), Risk::ReadOnly);
         assert!(op.summary().contains("只保留前八碼與雜湊"));
     }
@@ -344,7 +369,11 @@ mod tests {
     #[test]
     fn the_module_never_states_a_rate_of_its_own() {
         for op in ops() {
-            assert!(!op.summary().contains('%'), "{} 的說明裡不該有費率", op.name());
+            assert!(
+                !op.summary().contains('%'),
+                "{} 的說明裡不該有費率",
+                op.name()
+            );
         }
     }
 }

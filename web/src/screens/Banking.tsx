@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  accountList,
+  bankMatchSuggestions,
+  bankTransactions,
   callOp,
+  cashPosition,
+  matchedBankTransaction,
   money,
+  newBankAccount,
   OpFailed,
   signedMoney,
+  type Account,
   type BankTxn,
   type CashAccount,
   type MatchCandidate,
@@ -13,14 +20,6 @@ interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
   onChanged: () => void;
-}
-
-interface GlAccount {
-  code: string;
-  name: string;
-  kind: string;
-  is_postable: boolean;
-  is_active: boolean;
 }
 
 export function Banking({ onToast, reloadKey, onChanged }: Props) {
@@ -34,7 +33,7 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
 
   const [drawer, setDrawer] = useState(false);
-  const [glAccounts, setGlAccounts] = useState<GlAccount[] | null>(null);
+  const [glAccounts, setGlAccounts] = useState<Account[] | null>(null);
   const [bankName, setBankName] = useState('');
   const [bankNo, setBankNo] = useState('');
   const [glCode, setGlCode] = useState('');
@@ -43,10 +42,8 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<{ accounts: CashAccount[]; total: string; unattributed: string }>(
-        'get_cash_position',
-      ),
-      callOp<{ transactions: BankTxn[] }>('list_bank_transactions'),
+      callOp('get_cash_position', {}, undefined, cashPosition),
+      callOp('list_bank_transactions', {}, undefined, bankTransactions),
     ])
       .then(([c, t]) => {
         setAccounts(c.accounts);
@@ -61,7 +58,7 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(() => {
     if (!drawer || glAccounts) return;
-    callOp<{ accounts: GlAccount[] }>('list_accounts')
+    callOp('list_accounts', {}, undefined, accountList)
       .then((d) => {
         const usable = d.accounts.filter((a) => a.kind === 'asset' && a.is_postable && a.is_active);
         setGlAccounts(usable);
@@ -77,11 +74,12 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
     }
     setSaving(true);
     try {
-      const d = await callOp<{ bank_account: { id: number; name: string; gl_code: string } }>(
-        'create_bank_account',
-        { name: bankName.trim(), account_no: bankNo.trim(), gl_code: glCode },
-        `新增銀行帳戶 ${bankName.trim()}`,
-      );
+      const d = await callOp(
+                        'create_bank_account',
+                        { name: bankName.trim(), account_no: bankNo.trim(), gl_code: glCode },
+                        `新增銀行帳戶 ${bankName.trim()}`,
+                        newBankAccount,
+                      );
       onToast(`已建立銀行帳戶「${d.bank_account.name}」，綁定總帳科目 ${d.bank_account.gl_code}`);
       setBankName('');
       setBankNo('');
@@ -102,7 +100,12 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
     }
     let live = true;
     setCandidates(null);
-    callOp<{ candidates: MatchCandidate[] }>('suggest_bank_matches', { txn_id: selected, limit: 4 })
+    callOp(
+      'suggest_bank_matches',
+      { txn_id: selected, limit: 4 },
+      undefined,
+      bankMatchSuggestions,
+    )
       .then((d) => live && setCandidates(d.candidates))
       .catch(() => live && setCandidates([]));
     return () => {
@@ -114,11 +117,12 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
     if (selected === null) return;
     setBusy(c.voucher_no);
     try {
-      const d = await callOp<{ transaction: BankTxn }>(
-        'match_bank_transaction',
-        { txn_id: selected, voucher_no: c.voucher_no },
-        `核銷至 ${c.voucher_no}`,
-      );
+      const d = await callOp(
+                        'match_bank_transaction',
+                        { txn_id: selected, voucher_no: c.voucher_no },
+                        `核銷至 ${c.voucher_no}`,
+                        matchedBankTransaction,
+                      );
       onToast(`已核銷：${d.transaction.memo} ↔ ${c.voucher_no}`);
       setSelected(null);
       onChanged();

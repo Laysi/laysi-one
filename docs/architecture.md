@@ -828,6 +828,14 @@ Token 一併撤銷，操作回報各撤了幾個。
 本來就是 UI 文案，多一個欄位就是多一份會漂走的副本；`every_operation_yields_a_refusal_label_without_its_registry_key`
 逐一檢查每個操作都推得出不含識別字的名稱。
 
+**工具開關由 `set_mcp_tool_grant` 在畫面上改（0002）**。`mcp_tool_grant` 決定 AI 叫得動
+什麼，而在此之前改一列的唯一方法是打開資料庫：新工具永遠停在種子說的那個值，而「MCP 與
+AI」那一頁只報得出現況。操作是 `AdminOnly`，它自己那一列種成關閉，並且**拒絕把自己打開**
+——否則系統管理員的一把 MCP Token 就能自行開啟其餘每一項。畫面上那一列因此不畫開關，改印
+「無法對 AI 開啟」。0002 把整列 `manage_access` 重寫一次而不是附加一個名字，因為守住
+registry、permission 與 grant 三者相等的兩個測試是把 migration 當文字讀的，只看得見
+INSERT；`SCHEMA` 常數因此改成依序串接 0001 與 0002。
+
 **`role_permission` 與 `mcp_tool_grant` 不得合併。** 前者管人、後者管 AI；
 把 `post_voucher` 對 AI 關掉，不該讓會計人員也不能過帳。
 
@@ -1329,7 +1337,7 @@ column，因此不可能與上面的區間不一致。
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦與人資／財務銜接狀態 |
-| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、特休額度、約定的底薪與三個投保級距；**不含系統角色** |
+| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、特休額度、約定的底薪與三個投保級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_leave_requests` | ReadOnly | `{ include_done?, limit? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度 |
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
@@ -1387,6 +1395,14 @@ column，因此不可能與上面的區間不一致。
 0008 的 `mcp_tool_grant` 名稱必須與上述五個人資操作模組在 Registry 裡的名稱集合
 完全相等；`laysi-ops` 以 `include_str!` 直接讀 migration 的測試守住這條契約，0058
 刪掉的三個工具在該測試裡另以一份名單扣除（`grant_names` 只讀 INSERT）。
+
+**名冊在 MCP 通道回得少**：`list_employees` 在畫面上回完整的身分證字號、底薪、
+三個投保級距與銀行帳戶，因為編輯抽屜要顯示它即將取代的值，而全系統沒有第二頁
+說得出某人現在領多少。這幾項後來才加進去，於是那個工具的 grant 備註「不含薪資」
+從此是假的，而一把 MCP Token 就把整份名冊倒進對話裡。`ctx.channel == Channel::Mcp`
+時因此把四個金額與銀行帳戶整個拿掉，身分證字號改回遮罩過的形狀——遮罩而不是刪掉，
+是為了名冊仍答得出某人有沒有登錄字號。這條分流不需要新的模型或新的操作：`Channel`
+本來就是「同一個能力，人與 AI 兩種答案」的分界。
 
 ### 公告與規章（0004、0005、0006）
 
@@ -1817,7 +1833,8 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 
 | 方法 | 路徑 | 說明 |
 |---|---|---|
-| GET | `/healthz` | `{ status, brand: {ok, fingerprint, files}, db: {migration}, rustfs: {ok} }` |
+| GET | `/healthz` | 未登入：`{ status, brand: {ok}, db: {ok}, rustfs: {ok} }` |
+| — | — | 帶系統管理員 session cookie 時另加 `brand.{fingerprint, files, signed}`、`db.migration`、完整的 `rustfs`（含 endpoint、bucket）與 `operations` |
 | — | — | 前端也讀這一條（Caddy 與 vite 都要 proxy）：品牌指紋與 RustFS 狀態只有伺服器行程知道，`get_system_health` 從資料庫查不到 |
 | POST | `/v1/auth/login` | 帳密登入並設定 session cookie；失敗訊息不區分帳號或密碼 |
 | POST | `/v1/auth/logout` | 撤銷目前 session 並清除 cookie |
@@ -1832,6 +1849,18 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | GET | `/v1/ops` | registry 清單：`[{name, risk, summary, enabled, input_schema}]` |
 | POST | `/v1/ops/{name}` | body 是 `{ input, prompt }`（兩者皆可省略）；回 `{ ok: true, data }` 或 `{ ok: false, error: {code, message} }` |
 | POST | `/mcp` | MCP streamable HTTP，Bearer token |
+
+**`/healthz` 分兩層回答**：這條路徑未登入就打得到（compose 的自檢在有帳號之前
+就要跑，Caddy 也直接放行），所以匿名的回答只有各部分起來了沒有。物件儲存的
+endpoint 與 bucket、migration 版本、品牌指紋描述的是這套安裝的內部，只在請求帶著
+系統管理員的 session cookie 時附上——那正是「安全與營運」畫面的讀者。
+
+**request body 的上限依路由分開設**（`AUTH_BODY_LIMIT`／`OPS_BODY_LIMIT`）。
+axum 對每個 `Json`／`Bytes` 擷取器有自己的 2 MB 預設，對登入太寬鬆，對
+`upload_document` 又太小：25 MB 的檔案（`storage::MAX_OBJECT_BYTES`）以 base64
+放在操作輸入裡，body 是它的 4/3。原本那個檔案在擷取器就被擋掉，操作自己的容量
+檢查與訊息永遠輪不到。所以 `/v1/auth/*` 收到 64 KB，`/v1/ops/{name}` 與 `/mcp`
+收到 40 MB，兩者的關係由 `const _: () = assert!(...)` 在編譯期釘住。
 
 `/healthz` 與 `/v1/brand/*.svg` 是公開端點。`/v1/meta`、`/v1/ops*` 必須有
 有效 session；`/mcp` 必須有自己的 Bearer 憑證。認證路由是操作註冊表唯一例外：
@@ -1941,6 +1970,40 @@ Logo 一律 `<img src="/v1/brand/mark.svg">`，**前端不得自帶任何 logo �
 帶下來，這條規則與「不得自帶 logo」同級。畫面上要即時試算稅額時，用後端
 回傳的費率，不要在 TS 裡寫 `0.05`。金額運算用 `client.ts` 的
 `multiplyToDollars` / `addDecimals`（BigInt），不經過 `number`。
+
+**回應的形狀由 zod 在邊界檢查**。後端的輸出沒有型別可以生成——操作回的是
+`serde_json::Value`——所以 `client.ts` 的形狀宣告本來就是手寫的，改成 zod schema
+並不會讓它自己跟上後端。它換掉的是失敗的方式：欄位被改名、被拿掉或型別變了
+（金額從字串變成數字是最貴的一種），原本要等到某張表格印出 `undefined` 才看得出來，
+現在停在 `callOp` 並回一則錯誤。宣告的寫法是
+`export const employeeRow = z.object({...})` 配一行
+`export type EmployeeRow = z.infer<typeof employeeRow>`，型別名不變，畫面的
+`import type` 不用動。`z.object` 預設會**丟掉**不認得的欄位而不是報錯，所以後端
+新增欄位不會弄壞還沒跟上的畫面。
+
+**schema 是 `callOp` 的第四個參數**：`callOp(name, input, prompt, schema)` 傳了就驗，
+沒傳就照舊。放在呼叫端而不是一張「操作對 schema」的表，是因為表容許型別參數與驗證
+對象指到兩個不同的東西；第四個參數同時決定回傳型別，兩者對不上編譯就過不了。
+
+**三個檢查**。`scripts/function-test.ts` 的 `must()` 在每一次成功呼叫之後照 schema 解析
+一次——**寫入型操作只有這條路驗得到**，因為它們要真的參數，而那正是那個檔案花掉的長度。`scripts/schema-test.ts` 是純資料的，不必起伺服器，守住三件事：多出來的
+欄位要放行、少一個欄位要擋下、金額變成數字要擋下。`scripts/schema-live-test.ts` 是對著
+真的伺服器問——手寫的 schema 只有這條路證得出它與後端相符——它從呼叫端本身讀出
+「哪個操作配哪個 schema」（不另存一份清單），以負責人與系統管理員兩種身分逐一呼叫再解析。
+接不上參數或該角色叫不動的操作算略過，不算通過。要先跑 `scripts/function-test.ts`，
+它留下的資料庫就是這條檢查用的那一個。兩者共用 `scripts/response-schemas.ts`：操作與 schema
+的對應從呼叫端讀出來，不另存一份清單。一個操作可以有多個宣告形狀（`list_notices` 帶 `id`
+回的是版本歷程），對上任何一個就算通過——呼叫端本身沒有這個模糊，那裡 schema 與回傳型別
+是同一個參數。
+
+**一個操作的回應只有一個名字**。`list_accounts` 與 `list_chart_of_accounts` 是兩個
+操作、兩種形狀：前者是科目本身，後者另帶顯示名稱、餘額與使用筆數。「費用報支」原本
+把 `list_accounts` 的回應宣告成 `ChartOfAccounts`，讀得到的 `kind_label` 等四個欄位
+其實從來沒有送來過；畫面只用到 `code` 與 `name`，所以那個謊安靜地成立了很久，是上面
+那條 live 檢查把它抓出來的。另外五個畫面各自宣告了 `Account`／`GlAccount`／
+`PostableAccount`／`FullAccount` 四個名字給同一份回應。現在統一成 `client.ts` 的
+`account`／`accountList`。同一條 live 檢查另外抓到 `company_setting` 的 `source`：後端送
+`setting`／`derived`／`regulation` 三種，前端只宣告了兩種。
 
 ### 示範資料：`laysi-admin seed-demo`
 

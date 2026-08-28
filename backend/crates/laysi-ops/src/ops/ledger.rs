@@ -26,7 +26,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(SearchVouchers),
         Box::new(ListAccounts),
         Box::new(ListAiAudit),
-                Box::new(DraftVoucher),
+        Box::new(DraftVoucher),
         Box::new(CreateVoucher),
         Box::new(PostVoucher),
         Box::new(VoidVoucher),
@@ -34,7 +34,6 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ReverseVoucher),
     ]
 }
-
 
 struct GetDashboard;
 
@@ -109,7 +108,10 @@ impl Operation for GetDashboard {
                 "outcome": a.outcome,
             })).collect::<Vec<_>>(),
         });
-        Ok(OpOutcome::new(data, format!("讀取總覽 · 現金 {}", money(cash))))
+        Ok(OpOutcome::new(
+            data,
+            format!("讀取總覽 · 現金 {}", money(cash)),
+        ))
     }
 }
 
@@ -179,7 +181,11 @@ impl Operation for GetCashPosition {
         let unattributed = ctx.store.unattributed_cash(None).await?;
         let total = assigned + unattributed;
         let names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
-        let summary = format!("讀取現金水位 · {} · 合計 {}", names.join("、"), money(total));
+        let summary = format!(
+            "讀取現金水位 · {} · 合計 {}",
+            names.join("、"),
+            money(total)
+        );
         Ok(OpOutcome::new(
             json!({
                 "accounts": accounts,
@@ -226,7 +232,10 @@ impl Operation for SearchVouchers {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: SearchVouchersInput = parse(input)?;
         let limit = i.limit.unwrap_or(50).clamp(1, 500);
-        let vouchers = ctx.store.search_vouchers(i.status.as_deref(), i.q.as_deref(), limit).await?;
+        let vouchers = ctx
+            .store
+            .search_vouchers(i.status.as_deref(), i.q.as_deref(), limit)
+            .await?;
         let summary = format!("查詢傳票 · 回傳 {} 筆", vouchers.len());
         Ok(OpOutcome::new(json!({ "vouchers": vouchers }), summary))
     }
@@ -275,7 +284,10 @@ impl Operation for ListAiAudit {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: LimitInput = parse(input)?;
-        let entries = ctx.store.recent_audit(i.limit.unwrap_or(50).clamp(1, 500)).await?;
+        let entries = ctx
+            .store
+            .recent_audit(i.limit.unwrap_or(50).clamp(1, 500))
+            .await?;
         let summary = format!("讀取稽核紀錄 · {} 筆", entries.len());
         Ok(OpOutcome::new(json!({ "entries": entries }), summary))
     }
@@ -312,7 +324,9 @@ impl Operation for DraftVoucher {
         let i: DraftVoucherInput = parse(input)?;
         let no = ctx
             .store
-            .create_voucher(i.date, &i.memo, &i.lines, "draft", "ai_draft", &ctx.actor, None)
+            .create_voucher(
+                i.date, &i.memo, &i.lines, "draft", "ai_draft", &ctx.actor, None,
+            )
             .await?;
         let v = ctx.store.voucher_by_no(&no).await?;
         let summary = format!("{} · {} {}", no, v.accounts_label, money(v.amount));
@@ -342,10 +356,16 @@ impl Operation for CreateVoucher {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: DraftVoucherInput = parse(input)?;
-        let source = if ctx.channel == Channel::Ui { "manual" } else { "ai_draft" };
+        let source = if ctx.channel == Channel::Ui {
+            "manual"
+        } else {
+            "ai_draft"
+        };
         let no = ctx
             .store
-            .create_voucher(i.date, &i.memo, &i.lines, "pending", source, &ctx.actor, None)
+            .create_voucher(
+                i.date, &i.memo, &i.lines, "pending", source, &ctx.actor, None,
+            )
             .await?;
         let v = ctx.store.voucher_by_no(&no).await?;
         let summary = format!("{} · {} {}", no, v.accounts_label, money(v.amount));
@@ -460,7 +480,10 @@ impl Operation for DiscardVoucher {
         let voucher = ctx.store.voucher_by_no(&i.no).await?;
         ctx.store.discard_voucher(&i.no).await?;
         let summary = format!("{} 已刪除 · {} {}", voucher.no, voucher.date, voucher.memo);
-        Ok(OpOutcome::new(json!({ "no": voucher.no, "discarded": true }), summary))
+        Ok(OpOutcome::new(
+            json!({ "no": voucher.no, "discarded": true }),
+            summary,
+        ))
     }
 }
 
@@ -501,10 +524,11 @@ impl Operation for ReverseVoucher {
             money(reversal.amount)
         );
         let no = reversal.no.clone();
-        Ok(
-            OpOutcome::new(json!({ "voucher": reversal, "original": original }), summary)
-                .with_voucher(no),
+        Ok(OpOutcome::new(
+            json!({ "voucher": reversal, "original": original }),
+            summary,
         )
+        .with_voucher(no))
     }
 }
 

@@ -3,7 +3,10 @@ import {
   callOp,
   money,
   OpFailed,
+  reversedVoucher,
   STATUS_LABEL,
+  voucherList,
+  voucherResult,
   type Voucher,
 } from '../api/client';
 import { ConfirmModal } from '../components/ConfirmModal';
@@ -49,10 +52,15 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
   useEffect(() => {
     let live = true;
     setError(null);
-    callOp<{ vouchers: Voucher[] }>('search_vouchers', {
-      status: filter === 'all' ? null : filter,
-      limit: 200,
-    })
+    callOp(
+      'search_vouchers',
+      {
+        status: filter === 'all' ? null : filter,
+        limit: 200,
+      },
+      undefined,
+      voucherList,
+    )
       .then((d) => live && setVouchers(d.vouchers))
       .catch((e: Error) => live && setError(e.message));
     return () => {
@@ -63,7 +71,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
   async function post(no: string) {
     setPostBusy(true);
     try {
-      await callOp<{ voucher: Voucher }>('post_voucher', { no }, `將 ${no} 過帳`);
+      await callOp('post_voucher', { no }, `將 ${no} 過帳`, voucherResult);
       setPosting(null);
       onToast(`${no} 已過帳`);
       onChanged();
@@ -107,11 +115,12 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
     }
     setSubmitting(true);
     try {
-      await callOp<{ voucher: Voucher }>(
-        'void_voucher',
-        { no: correction.voucher.no, reason: voidReason.trim() },
-        `${correction.voucher.no} 不應存在：${voidReason.trim()}`,
-      );
+      await callOp(
+              'void_voucher',
+              { no: correction.voucher.no, reason: voidReason.trim() },
+              `${correction.voucher.no} 不應存在：${voidReason.trim()}`,
+              voucherResult,
+            );
       onToast(`${correction.voucher.no} 已作廢，理由：${voidReason.trim()}`);
       closeCorrection();
       onChanged();
@@ -130,11 +139,12 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
     }
     setSubmitting(true);
     try {
-      const d = await callOp<{ voucher: Voucher; original: Voucher }>(
-        'reverse_voucher',
-        { no: correction.voucher.no, date: reverseDate },
-        `${correction.voucher.no} 金額或科目記載錯誤，開立反向傳票更正`,
-      );
+      const d = await callOp(
+                        'reverse_voucher',
+                        { no: correction.voucher.no, date: reverseDate },
+                        `${correction.voucher.no} 金額或科目記載錯誤，開立反向傳票更正`,
+                        reversedVoucher,
+                      );
       onToast(
         `已產生並過帳沖銷傳票 ${d.voucher.no}，${money(d.voucher.amount)}，原傳票 ${correction.voucher.no} 維持不動`,
       );

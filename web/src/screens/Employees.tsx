@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
+  dimensionList,
+  employeeList,
+  updatedEmployee,
   maskId,
   money,
   OpFailed,
   trimDecimal,
-  type ClosedAccess,
   type DimensionList,
   type EmployeeList,
   type EmployeeRow,
@@ -89,10 +91,15 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<EmployeeList>('list_employees', {
-      include_left: includeLeft,
-      ...(q.trim() ? { q: q.trim() } : {}),
-    })
+    callOp(
+      'list_employees',
+      {
+        include_left: includeLeft,
+        ...(q.trim() ? { q: q.trim() } : {}),
+      },
+      undefined,
+      employeeList,
+    )
       .then(setData)
       .catch((e: Error) => setError(e.message));
   }, [q, includeLeft]);
@@ -101,7 +108,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(() => {
     if (!drawer) return;
-    if (!dims) callOp<DimensionList>('list_dimensions').then(setDims).catch(() => setDims(null));
+    if (!dims) callOp('list_dimensions', {}, undefined, dimensionList).then(setDims).catch(() => setDims(null));
   }, [drawer, dims]);
 
   function openCreate() {
@@ -246,10 +253,12 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         note: form.note.trim(),
       };
       const op = drawer === 'edit' ? 'update_employee' : 'create_employee';
-      const d = await callOp<{
-        employee: { emp_no: string; name: string };
-        closed_access?: ClosedAccess;
-      }>(op, input, drawer === 'edit' ? `更新員工 ${form.emp_no}` : `新增員工 ${form.name}`);
+      const d = await callOp(
+        op,
+        input,
+        drawer === 'edit' ? `更新員工 ${form.emp_no}` : `新增員工 ${form.name}`,
+        updatedEmployee,
+      );
       const closed = d.closed_access;
       const shut: string[] = [];
       if (closed && closed.logins.length > 0) shut.push(`停用登入帳號 ${closed.logins.join('、')}`);

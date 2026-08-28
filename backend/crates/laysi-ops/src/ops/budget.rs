@@ -63,9 +63,10 @@ impl BudgetLine {
     /// Utilisation percentage. `None` when the budget is zero: division by
     /// zero has no answer, and "0%" is not the same as "no budget set".
     fn rate(&self) -> Option<Money> {
-        (!self.budget.is_zero())
-            .then(|| (self.actual * Decimal::from(PERCENT) / self.budget)
-                .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero))
+        (!self.budget.is_zero()).then(|| {
+            (self.actual * Decimal::from(PERCENT) / self.budget)
+                .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
+        })
     }
 }
 
@@ -79,7 +80,11 @@ fn actual_of(movements: &[DeptMovement], code: &str) -> (Money, i64) {
         .iter()
         .filter(|m| m.code == code)
         .fold((Money::ZERO, 0), |(amount, lines), m| {
-            let v = if m.kind == "revenue" { m.net_credit() } else { m.net_debit() };
+            let v = if m.kind == "revenue" {
+                m.net_credit()
+            } else {
+                m.net_debit()
+            };
             (amount + v, lines + m.line_count)
         })
 }
@@ -129,9 +134,10 @@ impl DeptPl {
     /// Margin. No revenue means no margin, so `None`; the screen shows a dash
     /// rather than a figure that looks like 0%.
     fn margin(&self) -> Option<Money> {
-        (!self.revenue.is_zero())
-            .then(|| (self.profit() * Decimal::from(PERCENT) / self.revenue)
-                .round_dp_with_strategy(1, RoundingStrategy::MidpointAwayFromZero))
+        (!self.revenue.is_zero()).then(|| {
+            (self.profit() * Decimal::from(PERCENT) / self.revenue)
+                .round_dp_with_strategy(1, RoundingStrategy::MidpointAwayFromZero)
+        })
     }
 }
 
@@ -182,9 +188,14 @@ pub struct BudgetPeriodInput {
     pub to: Option<NaiveDate>,
 }
 
-fn resolve_period(i: &BudgetPeriodInput, today: NaiveDate) -> Result<(NaiveDate, NaiveDate), OpError> {
+fn resolve_period(
+    i: &BudgetPeriodInput,
+    today: NaiveDate,
+) -> Result<(NaiveDate, NaiveDate), OpError> {
     let to = i.to.unwrap_or(today);
-    let from = i.from.unwrap_or_else(|| NaiveDate::from_ymd_opt(to.year(), 1, 1).unwrap_or(to));
+    let from = i
+        .from
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(to.year(), 1, 1).unwrap_or(to));
     if from > to {
         return Err(OpError::BadInput(format!("期間起日 {from} 晚於迄日 {to}")));
     }
@@ -224,13 +235,20 @@ impl Operation for GetBudgetStatus {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: BudgetStatusInput = parse(input)?;
-        let (from, to) = resolve_period(&BudgetPeriodInput { from: i.from, to: i.to }, ctx.today)?;
+        let (from, to) = resolve_period(
+            &BudgetPeriodInput {
+                from: i.from,
+                to: i.to,
+            },
+            ctx.today,
+        )?;
 
         let versions = ctx.store.budget_versions().await?;
         let version = match &i.version {
-            Some(code) => versions.iter().find(|v| &v.code == code).ok_or_else(|| {
-                OpError::BadInput(format!("查無預算版本「{code}」"))
-            })?,
+            Some(code) => versions
+                .iter()
+                .find(|v| &v.code == code)
+                .ok_or_else(|| OpError::BadInput(format!("查無預算版本「{code}」")))?,
             None => match versions
                 .iter()
                 .find(|v| v.is_current && v.fiscal_year == to.year())
@@ -499,9 +517,7 @@ impl Operation for SetBudget {
         let account = accounts
             .iter()
             .find(|a| a.code == i.account_code && a.is_postable)
-            .ok_or_else(|| {
-                OpError::BadInput(format!("「{}」不是可入帳的科目", i.account_code))
-            })?;
+            .ok_or_else(|| OpError::BadInput(format!("「{}」不是可入帳的科目", i.account_code)))?;
 
         let row = ctx
             .store
@@ -520,9 +536,15 @@ impl Operation for SetBudget {
             account.code,
             account.name,
             money(i.amount),
-            row.dept_label.as_ref().map(|d| format!("（{d}）")).unwrap_or_default()
+            row.dept_label
+                .as_ref()
+                .map(|d| format!("（{d}）"))
+                .unwrap_or_default()
         );
-        Ok(OpOutcome::new(json!({ "budget": row, "version": version }), summary))
+        Ok(OpOutcome::new(
+            json!({ "budget": row, "version": version }),
+            summary,
+        ))
     }
 }
 
@@ -584,8 +606,16 @@ impl Operation for CreateBudgetVersion {
             .map(str::to_string)
             .unwrap_or_else(|| format!("{fiscal_year} 年度預算"));
 
-        if ctx.store.budget_versions().await?.iter().any(|v| v.code == code) {
-            return Err(OpError::BadInput(format!("預算版本代號「{code}」已經有人用了")));
+        if ctx
+            .store
+            .budget_versions()
+            .await?
+            .iter()
+            .any(|v| v.code == code)
+        {
+            return Err(OpError::BadInput(format!(
+                "預算版本代號「{code}」已經有人用了"
+            )));
         }
 
         let version = ctx
@@ -604,7 +634,11 @@ impl Operation for CreateBudgetVersion {
             "建立預算版本 {} {}（{fiscal_year} 年度{}）",
             version.code,
             version.label,
-            if version.is_current { "，現行版" } else { "" }
+            if version.is_current {
+                "，現行版"
+            } else {
+                ""
+            }
         );
         Ok(OpOutcome::new(json!({ "version": version }), summary))
     }
@@ -635,7 +669,14 @@ mod tests {
         }
     }
 
-    fn mv(dept: Option<(&str, &str)>, code: &str, name: &str, kind: &str, dr: &str, cr: &str) -> DeptMovement {
+    fn mv(
+        dept: Option<(&str, &str)>,
+        code: &str,
+        name: &str,
+        kind: &str,
+        dr: &str,
+        cr: &str,
+    ) -> DeptMovement {
         DeptMovement {
             dept_id: dept.map(|_| 1),
             dept_code: dept.map(|d| d.0.to_string()),
@@ -643,7 +684,11 @@ mod tests {
             code: code.into(),
             name: name.into(),
             kind: kind.into(),
-            report_group: if kind == "revenue" { "revenue".into() } else { "operating_expense".into() },
+            report_group: if kind == "revenue" {
+                "revenue".into()
+            } else {
+                "operating_expense".into()
+            },
             debit: n(dr),
             credit: n(cr),
             line_count: 1,
@@ -653,9 +698,30 @@ mod tests {
     /// Reference P&L entries with both assigned and unassigned departments.
     fn reference_ledger() -> Vec<DeptMovement> {
         vec![
-            mv(Some(("admin", "管理部")), "6111", "薪資支出", "expense", "342653", "0"),
-            mv(Some(("admin", "管理部")), "6115", "租金支出", "expense", "52000", "0"),
-            mv(Some(("sales", "業務部")), "6122", "旅費", "expense", "3480", "0"),
+            mv(
+                Some(("admin", "管理部")),
+                "6111",
+                "薪資支出",
+                "expense",
+                "342653",
+                "0",
+            ),
+            mv(
+                Some(("admin", "管理部")),
+                "6115",
+                "租金支出",
+                "expense",
+                "52000",
+                "0",
+            ),
+            mv(
+                Some(("sales", "業務部")),
+                "6122",
+                "旅費",
+                "expense",
+                "3480",
+                "0",
+            ),
             // Depreciation carries no department: the four assets belong to
             // different units and any split would be a guess.
             mv(None, "6152", "折舊費用", "expense", "77700", "0"),
@@ -679,17 +745,35 @@ mod tests {
         assert_eq!(before.remaining(), n("5257347"));
 
         // Add July overtime; nobody edits the budget table.
-        ledger.push(mv(Some(("admin", "管理部")), "6111", "薪資支出", "expense", "1200000", "0"));
+        ledger.push(mv(
+            Some(("admin", "管理部")),
+            "6111",
+            "薪資支出",
+            "expense",
+            "1200000",
+            "0",
+        ));
         let after = &budget_lines(&budgets, &ledger)[0];
         assert_eq!(after.actual, n("1542653"), "分錄多了，實際數就多了");
         assert_eq!(after.rate(), Some(n("28")));
         assert_eq!(after.remaining(), n("4057347"));
 
         // Void one (reversing entries) and the actual moves back.
-        ledger.push(mv(Some(("admin", "管理部")), "6111", "薪資支出", "expense", "0", "1200000"));
+        ledger.push(mv(
+            Some(("admin", "管理部")),
+            "6111",
+            "薪資支出",
+            "expense",
+            "0",
+            "1200000",
+        ));
         let reverted = &budget_lines(&budgets, &ledger)[0];
         assert_eq!(reverted.actual, before.actual, "反向分錄之後回到原來的數字");
-        assert_eq!(budgets[0].amount, n("5600000"), "整段過程 budget 表都沒有被動過");
+        assert_eq!(
+            budgets[0].amount,
+            n("5600000"),
+            "整段過程 budget 表都沒有被動過"
+        );
     }
 
     /// An account nobody has spent against reads 0, not "not found".
@@ -719,7 +803,14 @@ mod tests {
     #[test]
     fn revenue_budgets_count_the_credit_side() {
         let budgets = vec![budget("4111", "銷貨收入", "12000000")];
-        let ledger = vec![mv(Some(("sales", "業務部")), "4111", "銷貨收入", "revenue", "0", "45000")];
+        let ledger = vec![mv(
+            Some(("sales", "業務部")),
+            "4111",
+            "銷貨收入",
+            "revenue",
+            "0",
+            "45000",
+        )];
         assert_eq!(budget_lines(&budgets, &ledger)[0].actual, n("45000"));
     }
 
@@ -747,7 +838,11 @@ mod tests {
 
         // Dropping "unassigned" loses 77,700, which proves it is not
         // decoration.
-        let named: Money = rows.iter().filter(|r| r.code.is_some()).map(DeptPl::profit).sum();
+        let named: Money = rows
+            .iter()
+            .filter(|r| r.code.is_some())
+            .map(DeptPl::profit)
+            .sum();
         assert_eq!(statement - named, n("-77700"), "丟掉未指定就對不上損益表");
     }
 
@@ -766,15 +861,42 @@ mod tests {
     #[test]
     fn a_department_with_no_revenue_has_no_margin() {
         let rows = department_pl(&[
-            mv(Some(("mkt", "行銷部")), "6142", "廣告費", "expense", "682000", "0"),
-            mv(Some(("sales", "業務部")), "4111", "銷貨收入", "revenue", "0", "8642000"),
-            mv(Some(("sales", "業務部")), "5111", "銷貨成本", "expense", "5218000", "0"),
+            mv(
+                Some(("mkt", "行銷部")),
+                "6142",
+                "廣告費",
+                "expense",
+                "682000",
+                "0",
+            ),
+            mv(
+                Some(("sales", "業務部")),
+                "4111",
+                "銷貨收入",
+                "revenue",
+                "0",
+                "8642000",
+            ),
+            mv(
+                Some(("sales", "業務部")),
+                "5111",
+                "銷貨成本",
+                "expense",
+                "5218000",
+                "0",
+            ),
         ]);
-        let mkt = rows.iter().find(|r| r.code.as_deref() == Some("mkt")).unwrap();
+        let mkt = rows
+            .iter()
+            .find(|r| r.code.as_deref() == Some("mkt"))
+            .unwrap();
         assert_eq!(mkt.profit(), n("-682000"));
         assert_eq!(mkt.margin(), None, "分母是零，不能報一個 0%");
 
-        let sales = rows.iter().find(|r| r.code.as_deref() == Some("sales")).unwrap();
+        let sales = rows
+            .iter()
+            .find(|r| r.code.as_deref() == Some("sales"))
+            .unwrap();
         assert_eq!(sales.profit(), n("3424000"));
         assert_eq!(sales.margin(), Some(n("39.6")), "與原型的 39.6% 一致");
     }

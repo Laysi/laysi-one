@@ -53,7 +53,11 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(GetBalanceSheet), Box::new(GetIncomeStatement), Box::new(GetCashFlow)]
+    vec![
+        Box::new(GetBalanceSheet),
+        Box::new(GetIncomeStatement),
+        Box::new(GetCashFlow),
+    ]
 }
 
 // Statement rows
@@ -77,7 +81,13 @@ struct Line {
 
 impl Line {
     fn head(label: impl Into<String>) -> Self {
-        Self { label: label.into(), code: None, value: None, kind: "head", hint: None }
+        Self {
+            label: label.into(),
+            code: None,
+            value: None,
+            kind: "head",
+            hint: None,
+        }
     }
     fn item(m: &AccountMovement, value: Money) -> Self {
         Self {
@@ -89,10 +99,22 @@ impl Line {
         }
     }
     fn plain(label: impl Into<String>, value: Money) -> Self {
-        Self { label: label.into(), code: None, value: Some(value), kind: "sub", hint: None }
+        Self {
+            label: label.into(),
+            code: None,
+            value: Some(value),
+            kind: "sub",
+            hint: None,
+        }
     }
     fn total(label: impl Into<String>, value: Money) -> Self {
-        Self { label: label.into(), code: None, value: Some(value), kind: "total", hint: None }
+        Self {
+            label: label.into(),
+            code: None,
+            value: Some(value),
+            kind: "total",
+            hint: None,
+        }
     }
     fn with_hint(mut self, hint: &'static str) -> Self {
         self.hint = Some(hint);
@@ -120,7 +142,8 @@ fn lines_json(lines: &[Line]) -> Vec<Value> {
 /// cancelled out, which is not the same as nothing having happened.
 fn group<'a>(rows: &'a [AccountMovement], name: &str) -> impl Iterator<Item = &'a AccountMovement> {
     let name = name.to_string();
-    rows.iter().filter(move |m| m.report_group == name && m.line_count > 0)
+    rows.iter()
+        .filter(move |m| m.report_group == name && m.line_count > 0)
 }
 
 // Balance sheet
@@ -184,21 +207,59 @@ fn balance_sheet(rows: &[AccountMovement]) -> BalanceSheet {
                 lines.push(Line::head(title));
                 opened = true;
             }
-            let v = if debit_side { m.net_debit() } else { m.net_credit() };
+            let v = if debit_side {
+                m.net_debit()
+            } else {
+                m.net_credit()
+            };
             *total += v;
             lines.push(Line::item(m, v));
         }
         opened
     }
 
-    section(&mut lines, rows, "流動資產", "current_asset", true, &mut assets);
-    section(&mut lines, rows, "非流動資產", "non_current_asset", true, &mut assets);
+    section(
+        &mut lines,
+        rows,
+        "流動資產",
+        "current_asset",
+        true,
+        &mut assets,
+    );
+    section(
+        &mut lines,
+        rows,
+        "非流動資產",
+        "non_current_asset",
+        true,
+        &mut assets,
+    );
     lines.push(Line::total("資產總計", assets));
 
-    section(&mut lines, rows, "流動負債", "current_liability", false, &mut liabilities);
-    section(&mut lines, rows, "非流動負債", "non_current_liability", false, &mut liabilities);
-    let equity_opened =
-        section(&mut lines, rows, "權益", "equity", false, &mut equity_accounts);
+    section(
+        &mut lines,
+        rows,
+        "流動負債",
+        "current_liability",
+        false,
+        &mut liabilities,
+    );
+    section(
+        &mut lines,
+        rows,
+        "非流動負債",
+        "non_current_liability",
+        false,
+        &mut liabilities,
+    );
+    let equity_opened = section(
+        &mut lines,
+        rows,
+        "權益",
+        "equity",
+        false,
+        &mut equity_accounts,
+    );
 
     // Profit for the period: the P&L accounts have not been closed to retained
     // earnings, so their balance is this period's change in equity. Without
@@ -218,8 +279,17 @@ fn balance_sheet(rows: &[AccountMovement]) -> BalanceSheet {
         );
     }
 
-    let mut sheet = BalanceSheet { assets, liabilities, equity_accounts, profit, lines };
-    sheet.lines.push(Line::total("負債及權益總計", sheet.liabilities + sheet.equity()));
+    let mut sheet = BalanceSheet {
+        assets,
+        liabilities,
+        equity_accounts,
+        profit,
+        lines,
+    };
+    sheet.lines.push(Line::total(
+        "負債及權益總計",
+        sheet.liabilities + sheet.equity(),
+    ));
     sheet
 }
 
@@ -346,7 +416,8 @@ fn income_statement(rows: &[AccountMovement]) -> IncomeStatement {
         st.operating_expense += v;
         st.lines.push(Line::item(m, -v));
     }
-    st.lines.push(Line::total("營業淨利", st.operating_profit()));
+    st.lines
+        .push(Line::total("營業淨利", st.operating_profit()));
 
     let mut head = false;
     for m in group(rows, "other_income") {
@@ -403,7 +474,11 @@ fn resolve_period(
 /// April means 2026-03-31 still belongs to the year that began 2025-04-01, so
 /// the calendar year is one case of this rather than the rule.
 fn year_start(d: NaiveDate, start_month: u32) -> NaiveDate {
-    let year = if d.month() >= start_month { d.year() } else { d.year() - 1 };
+    let year = if d.month() >= start_month {
+        d.year()
+    } else {
+        d.year() - 1
+    };
     NaiveDate::from_ymd_opt(year, start_month, 1).unwrap_or(d)
 }
 
@@ -504,7 +579,11 @@ impl CashFlow {
 /// How an account reads on the cash flow statement, e.g. "receivables up".
 fn movement_label(m: &AccountMovement) -> String {
     let d = m.balance();
-    format!("{}{}", m.name, if d > Money::ZERO { "增加" } else { "減少" })
+    format!(
+        "{}{}",
+        m.name,
+        if d > Money::ZERO { "增加" } else { "減少" }
+    )
 }
 
 /// A contra account (asset kind with a credit balance, such as accumulated
@@ -711,7 +790,10 @@ impl Operation for GetCashFlow {
 /// sheet. Reporting only the first leaves that entry unaccounted for on every
 /// screen that could answer for it.
 async fn unposted_note(ctx: &OpCtx, through: NaiveDate) -> Result<Value, OpError> {
-    let mut pending = ctx.store.search_vouchers(Some("pending"), None, 500).await?;
+    let mut pending = ctx
+        .store
+        .search_vouchers(Some("pending"), None, 500)
+        .await?;
     pending.extend(ctx.store.search_vouchers(Some("draft"), None, 500).await?);
     let total: Money = pending.iter().map(|v| v.amount).sum();
     let (later_count, later_total) = ctx.store.posted_after(through).await?;
@@ -765,25 +847,88 @@ mod tests {
     }
 
     fn cash(code: &str, name: &str, dr: &str, cr: &str) -> AccountMovement {
-        mv(code, name, "asset", "debit", "current_asset", Some("cash"), dr, cr)
+        mv(
+            code,
+            name,
+            "asset",
+            "debit",
+            "current_asset",
+            Some("cash"),
+            dr,
+            cr,
+        )
     }
     fn asset(code: &str, name: &str, dr: &str, cr: &str) -> AccountMovement {
-        mv(code, name, "asset", "debit", "current_asset", Some("operating"), dr, cr)
+        mv(
+            code,
+            name,
+            "asset",
+            "debit",
+            "current_asset",
+            Some("operating"),
+            dr,
+            cr,
+        )
     }
     fn equipment(code: &str, name: &str, dr: &str, cr: &str) -> AccountMovement {
-        mv(code, name, "asset", "debit", "non_current_asset", Some("investing"), dr, cr)
+        mv(
+            code,
+            name,
+            "asset",
+            "debit",
+            "non_current_asset",
+            Some("investing"),
+            dr,
+            cr,
+        )
     }
     fn accum_dep(dr: &str, cr: &str) -> AccountMovement {
-        mv("1602", "累計折舊", "asset", "credit", "non_current_asset", Some("operating"), dr, cr)
+        mv(
+            "1602",
+            "累計折舊",
+            "asset",
+            "credit",
+            "non_current_asset",
+            Some("operating"),
+            dr,
+            cr,
+        )
     }
     fn liability(code: &str, name: &str, dr: &str, cr: &str) -> AccountMovement {
-        mv(code, name, "liability", "credit", "current_liability", Some("operating"), dr, cr)
+        mv(
+            code,
+            name,
+            "liability",
+            "credit",
+            "current_liability",
+            Some("operating"),
+            dr,
+            cr,
+        )
     }
     fn equity(code: &str, name: &str, dr: &str, cr: &str) -> AccountMovement {
-        mv(code, name, "equity", "credit", "equity", Some("financing"), dr, cr)
+        mv(
+            code,
+            name,
+            "equity",
+            "credit",
+            "equity",
+            Some("financing"),
+            dr,
+            cr,
+        )
     }
     fn revenue(dr: &str, cr: &str) -> AccountMovement {
-        mv("4111", "銷貨收入", "revenue", "credit", "revenue", None, dr, cr)
+        mv(
+            "4111",
+            "銷貨收入",
+            "revenue",
+            "credit",
+            "revenue",
+            None,
+            dr,
+            cr,
+        )
     }
     fn expense(code: &str, name: &str, dr: &str, cr: &str) -> AccountMovement {
         mv(
@@ -821,7 +966,10 @@ mod tests {
 
     /// Only balanced entries qualify as input to the statements.
     fn is_balanced(rows: &[AccountMovement]) -> bool {
-        rows.iter().map(AccountMovement::net_debit).sum::<Money>().is_zero()
+        rows.iter()
+            .map(AccountMovement::net_debit)
+            .sum::<Money>()
+            .is_zero()
     }
 
     // Balance sheet
@@ -841,7 +989,12 @@ mod tests {
         assert_eq!(bs.equity(), n("6602450"));
 
         assert_eq!(bs.difference(), Money::ZERO);
-        assert!(bs.balanced(), "資產 {} ≠ 負債＋權益 {}", bs.assets, bs.liabilities + bs.equity());
+        assert!(
+            bs.balanced(),
+            "資產 {} ≠ 負債＋權益 {}",
+            bs.assets,
+            bs.liabilities + bs.equity()
+        );
     }
 
     /// Drop profit for the period and the identity breaks, which proves that
@@ -873,9 +1026,15 @@ mod tests {
                 liability("2101", "應付帳款", "0", "68000"),
             ],
             // Depreciation.
-            vec![expense("6152", "折舊費用", "12950", "0"), accum_dep("0", "12950")],
+            vec![
+                expense("6152", "折舊費用", "12950", "0"),
+                accum_dep("0", "12950"),
+            ],
             // Capital increase.
-            vec![cash("1102", "銀行存款", "1000000", "0"), equity("3101", "股本", "0", "1000000")],
+            vec![
+                cash("1102", "銀行存款", "1000000", "0"),
+                equity("3101", "股本", "0", "1000000"),
+            ],
             // Collection: cash moves within assets, neither side changes.
             vec![
                 cash("1102", "銀行存款", "214000", "0"),
@@ -885,7 +1044,12 @@ mod tests {
         for rows in cases {
             assert!(is_balanced(&rows));
             let bs = balance_sheet(&rows);
-            assert!(bs.balanced(), "{:?} 沒有平，差 {}", bs.lines, bs.difference());
+            assert!(
+                bs.balanced(),
+                "{:?} 沒有平，差 {}",
+                bs.lines,
+                bs.difference()
+            );
         }
     }
 
@@ -901,7 +1065,11 @@ mod tests {
         let bs = balance_sheet(&rows);
         assert_eq!(bs.assets, n("665100"), "成本 − 累計折舊");
         assert_eq!(bs.liabilities, Money::ZERO);
-        let row = bs.lines.iter().find(|l| l.code.as_deref() == Some("1602")).unwrap();
+        let row = bs
+            .lines
+            .iter()
+            .find(|l| l.code.as_deref() == Some("1602"))
+            .unwrap();
         assert_eq!(row.value, Some(n("-365100")), "在資產段裡是負數");
         assert!(bs.balanced());
     }
@@ -912,7 +1080,16 @@ mod tests {
     fn the_income_statement_is_revenue_minus_expenses() {
         let rows = vec![
             revenue("0", "12486300"),
-            mv("5111", "銷貨成本", "expense", "debit", "cogs", None, "7104200", "0"),
+            mv(
+                "5111",
+                "銷貨成本",
+                "expense",
+                "debit",
+                "cogs",
+                None,
+                "7104200",
+                "0",
+            ),
             expense("6111", "薪資支出", "3403400", "0"),
             expense("6152", "折舊費用", "184800", "0"),
         ];
@@ -1000,7 +1177,10 @@ mod tests {
             ),
             (
                 n("500000"),
-                vec![expense("6152", "折舊費用", "12950", "0"), accum_dep("0", "12950")],
+                vec![
+                    expense("6152", "折舊費用", "12950", "0"),
+                    accum_dep("0", "12950"),
+                ],
             ),
             (
                 n("42000"),
@@ -1020,10 +1200,7 @@ mod tests {
             // equals opening.
             (
                 n("777"),
-                vec![
-                    asset("1131", "應收帳款", "5000", "0"),
-                    revenue("0", "5000"),
-                ],
+                vec![asset("1131", "應收帳款", "5000", "0"), revenue("0", "5000")],
             ),
         ];
         for (opening, rows) in cases {
@@ -1044,12 +1221,19 @@ mod tests {
     /// why — it is the least intuitive row on it.
     #[test]
     fn depreciation_is_added_back_and_says_why() {
-        let rows = vec![expense("6152", "折舊費用", "12950", "0"), accum_dep("0", "12950")];
+        let rows = vec![
+            expense("6152", "折舊費用", "12950", "0"),
+            accum_dep("0", "12950"),
+        ];
         let cf = cash_flow(Money::ZERO, &rows);
         assert_eq!(cf.profit, n("-12950"));
         assert_eq!(cf.operating_total, Money::ZERO, "提折舊不影響現金");
 
-        let line = cf.operating.iter().find(|l| l.code.as_deref() == Some("1602")).unwrap();
+        let line = cf
+            .operating
+            .iter()
+            .find(|l| l.code.as_deref() == Some("1602"))
+            .unwrap();
         assert_eq!(line.value, Some(n("12950")));
         assert!(line.hint.is_some_and(|h| h.contains("未實際支付現金")));
     }
@@ -1078,7 +1262,11 @@ mod tests {
         let cf2 = cash_flow(Money::ZERO, &moved);
         assert_eq!(cf2.investing_total, Money::ZERO);
         assert_eq!(cf2.operating_total, n("-68000"));
-        assert_eq!(cf2.net_change(), cf.net_change(), "分段換了，現金變動不會換");
+        assert_eq!(
+            cf2.net_change(),
+            cf.net_change(),
+            "分段換了，現金變動不會換"
+        );
     }
 
     #[test]

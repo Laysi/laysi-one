@@ -2,15 +2,20 @@ import { useCallback, useEffect, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import { TimeField } from '../components/TimeField';
 import {
+  accountList,
   callOp,
+  chartOfAccounts,
+  companySettings,
+  dimensionList,
   money,
   OpFailed,
+  userAccountList,
+  type Account,
   type ChartAccount,
   type ChartOfAccounts,
   type CompanySettingRow,
   type DimensionList,
   type DimensionValue,
-  type UserAccountRow,
 } from '../api/client';
 import type { ScreenId } from '../nav';
 
@@ -84,19 +89,6 @@ const DEFAULT_NORMAL_SIDE: Record<string, 'debit' | 'credit'> = {
   expense: 'debit',
 };
 
-interface FullAccount {
-  code: string;
-  name: string;
-  kind: string;
-  normal_side: string;
-  is_postable: boolean;
-  is_active: boolean;
-  parent_code: string | null;
-  sort_order: number;
-  report_group: string;
-  cash_flow_section: string | null;
-}
-
 interface AccountForm {
   code: string;
   name: string;
@@ -110,7 +102,7 @@ interface AccountForm {
   sort_order: string;
 }
 
-function structureOnly(a: FullAccount): ChartAccount {
+function structureOnly(a: Account): ChartAccount {
   return {
     code: a.code,
     name: a.name,
@@ -164,8 +156,8 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<{ settings: CompanySettingRow[] }>('get_company_settings'),
-      callOp<DimensionList>('list_dimensions'),
+      callOp('get_company_settings', {}, undefined, companySettings),
+      callOp('list_dimensions', {}, undefined, dimensionList),
     ])
       .then(([s, d]) => {
         setSettings(s.settings);
@@ -173,7 +165,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
       })
       .catch((e: Error) => setError(e.message));
     if (me.permissions.includes('list_user_accounts')) {
-      callOp<{ accounts: UserAccountRow[] }>('list_user_accounts')
+      callOp('list_user_accounts', {}, undefined, userAccountList)
         .then((d) =>
           setOwnerMissing(
             !d.accounts.some((a) => a.role_code === 'boss' && a.status === 'active'),
@@ -182,12 +174,12 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
         .catch(() => setOwnerMissing(false));
     }
     if (showBalances) {
-      callOp<ChartOfAccounts>('list_chart_of_accounts')
+      callOp('list_chart_of_accounts', {}, undefined, chartOfAccounts)
         .then(setCoa)
         .catch(() => setCoa(null));
       return;
     }
-    callOp<{ accounts: FullAccount[] }>('list_accounts')
+    callOp('list_accounts', {}, undefined, accountList)
       .then((d) => {
         setFullAccounts(d.accounts);
         setCoa({
@@ -225,11 +217,11 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
   const [accountDrawer, setAccountDrawer] = useState<'create' | 'edit' | null>(null);
   const [accountForm, setAccountForm] = useState<AccountForm>(emptyAccountForm());
   const [savingAccount, setSavingAccount] = useState(false);
-  const [fullAccounts, setFullAccounts] = useState<FullAccount[] | null>(null);
+  const [fullAccounts, setFullAccounts] = useState<Account[] | null>(null);
 
-  function loadFullAccounts(): Promise<FullAccount[]> {
+  function loadFullAccounts(): Promise<Account[]> {
     if (fullAccounts) return Promise.resolve(fullAccounts);
-    return callOp<{ accounts: FullAccount[] }>('list_accounts').then((d) => {
+    return callOp('list_accounts', {}, undefined, accountList).then((d) => {
       setFullAccounts(d.accounts);
       return d.accounts;
     });

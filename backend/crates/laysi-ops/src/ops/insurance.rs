@@ -298,7 +298,11 @@ impl Operation for GetInsuranceSummary {
             Some(s) => s,
             None => {
                 let p = premiums_on(as_of, Money::ZERO, Money::ZERO, Money::ZERO)?;
-                (ruleset_json(p.labor_rs), ruleset_json(p.health_rs), ruleset_json(p.pension_rs))
+                (
+                    ruleset_json(p.labor_rs),
+                    ruleset_json(p.health_rs),
+                    ruleset_json(p.pension_rs),
+                )
             }
         };
 
@@ -521,7 +525,11 @@ mod tests {
         let p = premiums_on(d(2026, 7, 26), n("45800"), n("53000"), n("53000")).unwrap();
         assert_eq!(p.labor.employer, n("3527"), "公司負擔勞保");
         assert_eq!(p.labor.employee, n("1008"), "員工自付勞保");
-        assert_eq!(p.health.employer, n("2647"), "公司負擔健保（含平均眷口 1.61）");
+        assert_eq!(
+            p.health.employer,
+            n("2647"),
+            "公司負擔健保（含平均眷口 1.61）"
+        );
         assert_eq!(p.health.employee, n("822"), "員工自付健保");
         assert_eq!(p.pension, n("3180"), "公司提繳勞退");
 
@@ -567,7 +575,9 @@ mod tests {
 
         // The same employee under the old rules is unchanged.
         assert_eq!(
-            laysi_regulation::labor_insurance(base, n("45800")).unwrap().employer,
+            laysi_regulation::labor_insurance(base, n("45800"))
+                .unwrap()
+                .employer,
             n("3527")
         );
 
@@ -584,7 +594,10 @@ mod tests {
         let pbase = laysi_regulation::resolve("pension", d(2026, 7, 26)).unwrap();
         let mut pnext = pbase.clone();
         pnext.payload["employer_rate"] = json!("0.08");
-        assert_eq!(laysi_regulation::pension(&pnext, n("53000")).unwrap(), n("4240"));
+        assert_eq!(
+            laysi_regulation::pension(&pnext, n("53000")).unwrap(),
+            n("4240")
+        );
     }
 
     /// The percentage label is derived, not written out separately.
@@ -608,7 +621,10 @@ mod tests {
             Money::ZERO,
         ));
         assert!(m.any());
-        assert_eq!(m.labels(), vec!["勞保投保薪資", "健保投保金額", "勞退提繳工資"]);
+        assert_eq!(
+            m.labels(),
+            vec!["勞保投保薪資", "健保投保金額", "勞退提繳工資"]
+        );
     }
 
     /// One bracket can be filed and another not, so each is judged alone.

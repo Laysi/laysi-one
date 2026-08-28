@@ -21,7 +21,11 @@ use serde_json::{json, Value};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(ListBankTransactions), Box::new(SuggestBankMatches), Box::new(MatchBankTransaction)]
+    vec![
+        Box::new(ListBankTransactions),
+        Box::new(SuggestBankMatches),
+        Box::new(MatchBankTransaction),
+    ]
 }
 
 /// One sentence describing how close a candidate is. Written for a person,
@@ -80,11 +84,17 @@ impl Operation for ListBankTransactions {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ListBankTransactionsInput = parse(input)?;
         let limit = i.limit.unwrap_or(200).clamp(1, 500);
-        let rows =
-            ctx.store.bank_transactions(i.bank_account_id, i.only_unmatched, limit).await?;
+        let rows = ctx
+            .store
+            .bank_transactions(i.bank_account_id, i.only_unmatched, limit)
+            .await?;
 
         let unmatched = rows.iter().filter(|t| !t.is_matched()).count();
-        let pending: Money = rows.iter().filter(|t| !t.is_matched()).map(|t| t.amount).sum();
+        let pending: Money = rows
+            .iter()
+            .filter(|t| !t.is_matched())
+            .map(|t| t.amount)
+            .sum();
         let summary = format!("讀取銀行流水 · {} 筆 · 未核銷 {unmatched} 筆", rows.len());
         Ok(OpOutcome::new(
             json!({
@@ -153,7 +163,10 @@ impl Operation for SuggestBankMatches {
             money(txn.amount),
             listed.len()
         );
-        Ok(OpOutcome::new(json!({ "transaction": txn, "candidates": listed }), summary))
+        Ok(OpOutcome::new(
+            json!({ "transaction": txn, "candidates": listed }),
+            summary,
+        ))
     }
 }
 
@@ -187,9 +200,16 @@ impl Operation for MatchBankTransaction {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: MatchBankTransactionInput = parse(input)?;
-        let txn = ctx.store.match_bank_transaction(i.txn_id, &i.voucher_no, &ctx.actor).await?;
-        let summary =
-            format!("已核銷 · {} {} ↔ {}", txn.memo, money(txn.amount), i.voucher_no);
+        let txn = ctx
+            .store
+            .match_bank_transaction(i.txn_id, &i.voucher_no, &ctx.actor)
+            .await?;
+        let summary = format!(
+            "已核銷 · {} {} ↔ {}",
+            txn.memo,
+            money(txn.amount),
+            i.voucher_no
+        );
         Ok(OpOutcome::new(json!({ "transaction": txn }), summary).with_voucher(i.voucher_no))
     }
 }
@@ -236,7 +256,10 @@ mod tests {
     #[test]
     fn an_exact_match_says_so() {
         let t = txn("-156300");
-        assert_eq!(reason(&candidate("-156300", "0", 0, "posted"), &t), "金額與日期均相符");
+        assert_eq!(
+            reason(&candidate("-156300", "0", 0, "posted"), &t),
+            "金額與日期均相符"
+        );
     }
 
     #[test]
