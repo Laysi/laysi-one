@@ -75,6 +75,7 @@ scripts/dev stop           # 連容器一起停
 
 cd backend
 
+cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 
@@ -106,6 +107,18 @@ npm run build              # tsc --noEmit && vite build
 ```
 
 編譯不需要資料庫連線。
+
+整套端對端測試需要容器起著（`scripts/dev` 或 `podman compose ... up -d postgres`），
+它自己建一個拋棄式資料庫、自己起一個伺服器：
+
+```bash
+bun scripts/function-test.ts     # 算出來的數字對不對，順便驗前端 schema
+bun scripts/schema-live-test.ts  # 沿用上一條留下的資料庫，逐一核對唯讀操作的回應
+```
+
+`.github/workflows/ci.yml` 在每次 push 與 pull request 跑 `cargo fmt --check`、
+clippy、`cargo test`（含需要資料庫的那些）、品牌完整性、`generated.ts` 是否為最新，
+以及前端的 typecheck 與 build。上面那兩支要容器，由人手動跑。
 
 ## 接上 AI 用戶端（MCP）
 
