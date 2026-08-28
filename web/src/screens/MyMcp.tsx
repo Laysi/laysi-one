@@ -3,6 +3,8 @@ import { OPS } from '../api/generated';
 import {
   businessTime,
   callOp,
+  myApiTokenIssued,
+  myApiTokenList,
   OpFailed,
   type MyApiTokenIssued,
   type MyApiTokenList,
@@ -30,7 +32,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<MyApiTokenList>('list_my_api_tokens')
+    callOp('list_my_api_tokens', {}, undefined, myApiTokenList)
       .then(setData)
       .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
   }, []);
@@ -51,15 +53,16 @@ export function MyMcp({ onToast, reloadKey }: Props) {
     setFormError(null);
     try {
       const days = rotateDays.trim();
-      const d = await callOp<MyApiTokenIssued>(
-        'issue_my_api_token',
-        {
-          label: name.trim(),
-          ...(scope.trim() ? { scope: scope.trim() } : {}),
-          ...(days ? { rotate_days: Number(days) } : {}),
-        },
-        `核發我的 MCP Token「${name.trim()}」`,
-      );
+      const d = await callOp(
+                        'issue_my_api_token',
+                        {
+            label: name.trim(),
+            ...(scope.trim() ? { scope: scope.trim() } : {}),
+            ...(days ? { rotate_days: Number(days) } : {}),
+          },
+                        `核發我的 MCP Token「${name.trim()}」`,
+                        myApiTokenIssued,
+                      );
       setIssued(d);
       onToast(`「${d.token.name}」已核發，明文只顯示一次`);
       setName('');

@@ -2,14 +2,16 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   businessClock,
   callOp,
+  myPunchCorrectionList,
+  myPunchList,
   OpFailed,
+  punchCorrectionResult,
+  punchResult,
   serverClockGapMs,
   type MyPunchCorrectionList,
   type MyPunchList,
   type PunchCorrection,
-  type PunchCorrectionResult,
   type PunchDay,
-  type PunchResult,
   type WorkSchedule,
 } from '../api/client';
 import { PunchTrail } from '../components/PunchTrail';
@@ -94,7 +96,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<MyPunchList>('list_my_punches', month ? { month } : {})
+    callOp('list_my_punches', month ? { month } : {}, undefined, myPunchList)
       .then(setData)
       .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
   }, [month]);
@@ -107,7 +109,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
   const [trailOn, setTrailOn] = useState<string | null>(null);
 
   const loadFixes = useCallback(() => {
-    callOp<MyPunchCorrectionList>('list_my_punch_corrections')
+    callOp('list_my_punch_corrections', {}, undefined, myPunchCorrectionList)
       .then(setFixes)
       .catch(() => setFixes(null));
   }, []);
@@ -146,16 +148,17 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
     setFixBusy(true);
     setFormError(null);
     try {
-      const d = await callOp<PunchCorrectionResult>(
-        'submit_my_punch_correction',
-        {
-          punched_on: editing.date,
-          kind: editing.kind,
-          at: fixAt,
-          ...(fixReason.trim() ? { reason: fixReason.trim() } : {}),
-        },
-        '送出補登申請',
-      );
+      const d = await callOp(
+                        'submit_my_punch_correction',
+                        {
+            punched_on: editing.date,
+            kind: editing.kind,
+            at: fixAt,
+            ...(fixReason.trim() ? { reason: fixReason.trim() } : {}),
+          },
+                        '送出補登申請',
+                        punchCorrectionResult,
+                      );
       onToast(
         d.punch_written
           ? `${d.correction.punched_on} 的${d.correction.kind_label}卡已補上 ${d.correction.at}`
@@ -180,11 +183,12 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
     setBusy(true);
     setFormError(null);
     try {
-      const d = await callOp<PunchResult>(
-        'punch_clock',
-        { kind, ...(note.trim() ? { note: note.trim() } : {}) },
-        kind === 'in' ? '打上班卡' : '打下班卡',
-      );
+      const d = await callOp(
+                        'punch_clock',
+                        { kind, ...(note.trim() ? { note: note.trim() } : {}) },
+                        kind === 'in' ? '打上班卡' : '打下班卡',
+                        punchResult,
+                      );
       onToast(`${d.punch.kind_label}卡 ${d.punch.at} 已記錄`);
       setNote('');
       setNoteOpen(false);

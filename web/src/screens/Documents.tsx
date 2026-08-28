@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { callOp, OpFailed, type DocumentList, type DocumentRow } from '../api/client';
+import {
+  callOp,
+  documentList,
+  OpFailed,
+  uploadedDocument,
+  verifiedDocument,
+  type DocumentList,
+  type DocumentRow,
+} from '../api/client';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -29,7 +37,7 @@ export function Documents({ onToast, reloadKey }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<DocumentList>('list_documents', q.trim() ? { q: q.trim() } : {})
+    callOp('list_documents', q.trim() ? { q: q.trim() } : {}, undefined, documentList)
       .then(setData)
       .catch((e: Error) => setError(e.message));
   }, [q]);
@@ -40,11 +48,12 @@ export function Documents({ onToast, reloadKey }: Props) {
     setBusy(true);
     try {
       const content = await readAsBase64(file);
-      const d = await callOp<{ document: DocumentRow; new_version: boolean }>(
-        'upload_document',
-        { file_name: file.name, content_base64: content, kind: 'receipt' },
-        `上傳 ${file.name}`,
-      );
+      const d = await callOp(
+                        'upload_document',
+                        { file_name: file.name, content_base64: content, kind: 'receipt' },
+                        `上傳 ${file.name}`,
+                        uploadedDocument,
+                      );
       onToast(
         `${d.document.doc_no} ${d.document.version_label} 已上傳，檔案指紋 ${d.document.checksum_short}`,
       );
@@ -59,10 +68,7 @@ export function Documents({ onToast, reloadKey }: Props) {
 
   async function verify(d: DocumentRow) {
     try {
-      const r = await callOp<{ verified: boolean; checksum_recomputed: string; byte_size_actual: number }>(
-        'get_document',
-        { doc_no: d.doc_no },
-      );
+      const r = await callOp('get_document', { doc_no: d.doc_no }, undefined, verifiedDocument);
       setVerified((v) => ({
         ...v,
         [d.doc_no]: r.verified

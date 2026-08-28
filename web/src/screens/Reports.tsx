@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  balanceSheet,
   callOp,
+  cashFlow,
+  incomeStatement,
   isZero,
   money,
   reportAmount,
@@ -58,9 +61,9 @@ export function Reports({ reloadKey }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<BalanceSheet>('get_balance_sheet'),
-      callOp<IncomeStatement>('get_income_statement'),
-      callOp<CashFlow>('get_cash_flow'),
+      callOp('get_balance_sheet', {}, undefined, balanceSheet),
+      callOp('get_income_statement', {}, undefined, incomeStatement),
+      callOp('get_cash_flow', {}, undefined, cashFlow),
     ])
       .then(([b, p, c]) => {
         setBs(b);

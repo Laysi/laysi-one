@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { callOp, OpFailed, trimDecimal, type MyHome } from '../api/client';
+import { callOp, myHome, OpFailed, trimDecimal, type MyHome } from '../api/client';
 import type { ScreenId } from '../nav';
 
 interface Props {
@@ -14,7 +14,7 @@ export function Me({ onGo, reloadKey }: Props) {
   useEffect(() => {
     let live = true;
     setError(null);
-    callOp<MyHome>('get_my_home')
+    callOp('get_my_home', {}, undefined, myHome)
       .then((d) => live && setData(d))
       .catch((e) => {
         if (!live) return;

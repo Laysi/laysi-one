@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  accountList,
   callOp,
+  depreciationPreview,
+  depreciationRunResult,
+  dimensionList,
+  fixedAssetList,
   isZero,
   money,
+  newFixedAsset,
   OpFailed,
+  type Account,
   type DepreciationPreview,
   type DimensionList,
   type FixedAssetList,
@@ -22,18 +29,7 @@ interface Props {
   onChanged: () => void;
 }
 
-interface PostableAccount {
-  code: string;
-  name: string;
-  kind: string;
-  normal_side: string;
-  is_postable: boolean;
-  is_active: boolean;
-  report_group: string;
-  cash_flow_section: string | null;
-}
-
-function fixedAssetAccounts(accounts: PostableAccount[], side: string): PostableAccount[] {
+function fixedAssetAccounts(accounts: Account[], side: string): Account[] {
   return accounts.filter((a) => a.report_group === 'non_current_asset' && a.normal_side === side);
 }
 
@@ -46,7 +42,7 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
 
   const [drawer, setDrawer] = useState(false);
-  const [accounts, setAccounts] = useState<PostableAccount[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [depts, setDepts] = useState<DimensionList | null>(null);
   const [name, setName] = useState('');
   const [category, setCategory] = useState('');
@@ -63,8 +59,8 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<FixedAssetList>('list_fixed_assets'),
-      callOp<DepreciationPreview>('preview_depreciation'),
+      callOp('list_fixed_assets', {}, undefined, fixedAssetList),
+      callOp('preview_depreciation', {}, undefined, depreciationPreview),
     ])
       .then(([a, p]) => {
         setData(a);
@@ -78,12 +74,12 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
   useEffect(() => {
     if (!drawer || !canRegister) return;
     if (accounts.length === 0) {
-      callOp<{ accounts: PostableAccount[] }>('list_accounts')
+      callOp('list_accounts', {}, undefined, accountList)
         .then((d) => setAccounts(d.accounts.filter((a) => a.is_postable && a.is_active)))
         .catch(() => setAccounts([]));
     }
     if (!depts) {
-      callOp<DimensionList>('list_dimensions')
+      callOp('list_dimensions', {}, undefined, dimensionList)
         .then(setDepts)
         .catch(() => setDepts(null));
     }
@@ -106,27 +102,24 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
   async function register() {
     setSaving(true);
     try {
-      const d = await callOp<{
-        asset: { code: string; name: string; cost: string; origin_voucher_no: string | null };
-        life_years: number;
-        monthly: string;
-      }>(
-        'create_fixed_asset',
-        {
-          name: name.trim(),
-          category,
-          ...(acquiredOn ? { acquired_on: acquiredOn } : {}),
-          cost: amounts.net.trim(),
-          ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
-          gl_code: glCode,
-          accum_gl_code: accumGlCode,
-          ...(paidFrom ? { paid_from_account_code: paidFrom } : {}),
-          ...(paidFrom ? {} : { origin_voucher_no: voucherNo.trim() }),
-          ...(deptCode ? { dept_code: deptCode } : {}),
-          memo: assetMemo.trim(),
-        },
-        `登記固定資產 ${name.trim()}`,
-      );
+      const d = await callOp(
+                        'create_fixed_asset',
+                        {
+            name: name.trim(),
+            category,
+            ...(acquiredOn ? { acquired_on: acquiredOn } : {}),
+            cost: amounts.net.trim(),
+            ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
+            gl_code: glCode,
+            accum_gl_code: accumGlCode,
+            ...(paidFrom ? { paid_from_account_code: paidFrom } : {}),
+            ...(paidFrom ? {} : { origin_voucher_no: voucherNo.trim() }),
+            ...(deptCode ? { dept_code: deptCode } : {}),
+            memo: assetMemo.trim(),
+          },
+                        `登記固定資產 ${name.trim()}`,
+                        newFixedAsset,
+                      );
       onToast(
         d.asset.origin_voucher_no && paidFrom
           ? `已登記 ${d.asset.code} ${d.asset.name}，每月折舊 ${money(d.monthly)}；傳票 ${d.asset.origin_voucher_no} 待過帳，過帳後才計入成本並開始提列`
@@ -146,9 +139,12 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
     if (!preview) return;
     setBusy(true);
     try {
-      const d = await callOp<{
-        run: { voucher_no: string; total: string; ruleset_version: string | null };
-      }>('run_depreciation', { period: preview.period }, `提列 ${preview.period} 折舊`);
+      const d = await callOp(
+                        'run_depreciation',
+                        { period: preview.period },
+                        `提列 ${preview.period} 折舊`,
+                        depreciationRunResult,
+                      );
       onToast(
         `已產生折舊傳票 ${d.run.voucher_no}，${money(d.run.total)} 待過帳；過帳後累計折舊才會增加`,
       );

@@ -4,7 +4,10 @@ import {
   docNumberHint,
   isZero,
   money,
+  newApBill,
+  newPaymentBatch,
   OpFailed,
+  payablesResult,
   type ApBill,
   type PayablesResult,
 } from '../api/client';
@@ -50,7 +53,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<PayablesResult>('list_payables')
+    callOp('list_payables', {}, undefined, payablesResult)
       .then((d) => {
         setData(d);
 
@@ -74,20 +77,21 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
     }
     setSavingBill(true);
     try {
-      const d = await callOp<{ bill: { bill_no: string; vendor: string; amount: string; voucher_no: string } }>(
-        'create_ap_bill',
-        {
-          vendor: vendor.trim(),
-          bill_no: billNo.trim(),
-          ...(amounts.total.trim() ? { amount: amounts.total.trim() } : {}),
-          ...(amounts.net.trim() ? { net_amount: amounts.net.trim() } : {}),
-          ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
-          due_on: dueOn,
-          debit_account_code: debitAccountCode,
-          memo: memo.trim(),
-        },
-        `新增應付帳單 ${vendor.trim()}`,
-      );
+      const d = await callOp(
+                        'create_ap_bill',
+                        {
+            vendor: vendor.trim(),
+            bill_no: billNo.trim(),
+            ...(amounts.total.trim() ? { amount: amounts.total.trim() } : {}),
+            ...(amounts.net.trim() ? { net_amount: amounts.net.trim() } : {}),
+            ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
+            due_on: dueOn,
+            debit_account_code: debitAccountCode,
+            memo: memo.trim(),
+          },
+                        `新增應付帳單 ${vendor.trim()}`,
+                        newApBill,
+                      );
       onToast(
         `已建立應付帳單 ${d.bill.bill_no}，${money(d.bill.amount)}；傳票 ${d.bill.voucher_no} 待過帳，過帳後列入未付合計`,
       );
@@ -120,11 +124,12 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
     if (chosen.length === 0) return;
     setBusy(true);
     try {
-      const d = await callOp<{ batch: { batch_no: string; voucher_no: string; total: string } }>(
-        'create_payment_batch',
-        { bill_nos: picked },
-        `付款 ${chosen.length} 筆`,
-      );
+      const d = await callOp(
+                        'create_payment_batch',
+                        { bill_nos: picked },
+                        `付款 ${chosen.length} 筆`,
+                        newPaymentBatch,
+                      );
       onToast(
         `付款單 ${d.batch.batch_no} 已送出，${money(d.batch.total)}；傳票 ${d.batch.voucher_no} 待過帳，待出納執行匯款`,
       );

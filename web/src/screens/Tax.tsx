@@ -3,6 +3,8 @@ import {
   callOp,
   isZero,
   money,
+  vatReturn,
+  withholdingList,
   type VatReturn,
   type WithholdingList,
 } from '../api/client';
@@ -46,8 +48,8 @@ export function Tax({ reloadKey }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<VatReturn>('get_vat_return', asOf ? { as_of: asOf } : {}),
-      callOp<WithholdingList>('list_withholding'),
+      callOp('get_vat_return', asOf ? { as_of: asOf } : {}, undefined, vatReturn),
+      callOp('list_withholding', {}, undefined, withholdingList),
     ])
       .then(([v, w]) => {
         setVat(v);

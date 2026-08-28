@@ -1,12 +1,19 @@
 import { useEffect, useState } from 'react';
 import {
+  accountList,
   callOp,
+  companySettings,
+  dimensionList,
+  newBankAccount,
+  newUserAccount,
+  oidcSetting,
   OpFailed,
+  userAccountList,
+  type Account,
   type CompanySettingRow,
   type DimensionList,
   type NewUserAccount,
   type OidcSetting,
-  type UserAccountList,
 } from '../api/client';
 import { TimeField } from './TimeField';
 
@@ -33,15 +40,6 @@ const STEPS: { id: Step; label: string }[] = [
 const GOOGLE_ISSUER = 'https://accounts.google.com';
 const CALLBACK_PATH = '/v1/auth/oauth/callback';
 
-interface Account {
-  code: string;
-  name: string;
-  kind: string;
-  is_postable: boolean;
-  is_active: boolean;
-  cash_flow_section: string | null;
-}
-
 const BANK_GL = '1102';
 
 export function SetupWizard({ onToast, onProgress, onExit }: Props) {
@@ -54,7 +52,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   const [savingCompany, setSavingCompany] = useState(false);
 
   useEffect(() => {
-    callOp<{ settings: CompanySettingRow[] }>('get_company_settings')
+    callOp('get_company_settings', {}, undefined, companySettings)
       .then((d) => {
         setSettings(d.settings);
         setCompanyName(d.settings.find((s) => s.code === 'company_name')?.value ?? '');
@@ -118,7 +116,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
 
   useEffect(() => {
     if (step !== 'bank' || accounts) return;
-    callOp<{ accounts: Account[] }>('list_accounts')
+    callOp('list_accounts', {}, undefined, accountList)
       .then((d) => {
         const usable = d.accounts.filter(
           (a) =>
@@ -140,11 +138,12 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
     }
     setSavingBank(true);
     try {
-      await callOp<{ bank_account: { name: string; account_no: string } }>(
-        'create_bank_account',
-        { name: bankName.trim(), account_no: bankNo.trim(), gl_code: glCode },
-        '設定第一個銀行帳戶',
-      );
+      await callOp(
+              'create_bank_account',
+              { name: bankName.trim(), account_no: bankNo.trim(), gl_code: glCode },
+              '設定第一個銀行帳戶',
+              newBankAccount,
+            );
       onToast(`已建立銀行帳戶「${bankName.trim()}」`);
       onProgress();
       setStep('dept');
@@ -186,7 +185,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
 
   useEffect(() => {
     if (step !== 'sso' || oidc) return;
-    callOp<OidcSetting>('get_oidc_setting')
+    callOp('get_oidc_setting', {}, undefined, oidcSetting)
       .then((d) => {
         setOidc(d);
         setSsoClientId(d.client_id);
@@ -225,7 +224,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
       };
       if (ssoSecret.trim()) input.client_secret = ssoSecret.trim();
       await callOp<unknown>('update_oidc_setting', input, '設定外部登入');
-      const fresh = await callOp<OidcSetting>('get_oidc_setting');
+      const fresh = await callOp('get_oidc_setting', {}, undefined, oidcSetting);
       setOidc(fresh);
       setSsoSecret('');
       if (fresh.verify_error) {
@@ -248,7 +247,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
 
   useEffect(() => {
     if (step !== 'dept' || dims) return;
-    callOp<DimensionList>('list_dimensions').then(setDims).catch(() => setDims(null));
+    callOp('list_dimensions', {}, undefined, dimensionList).then(setDims).catch(() => setDims(null));
   }, [step, dims]);
 
   const deptDimension = dims?.dimensions.find((d) => d.code === 'department') ?? null;
@@ -276,7 +275,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   }
 
   useEffect(() => {
-    callOp<UserAccountList>('list_user_accounts')
+    callOp('list_user_accounts', {}, undefined, userAccountList)
       .then((d) =>
         setOwnerExists(d.accounts.some((a) => a.role_code === 'boss' && a.status === 'active')),
       )
@@ -290,17 +289,18 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
     }
     setSavingOwner(true);
     try {
-      const d = await callOp<NewUserAccount>(
-        'create_user_account',
-        {
-          email: ownerEmail.trim(),
-          display_name: ownerDisplayName.trim(),
-          role_code: 'boss',
-          employee_no: '',
-          external_login_only: ownerInDomain,
-        },
-        `建立負責人帳號 ${ownerEmail.trim()}`,
-      );
+      const d = await callOp(
+                        'create_user_account',
+                        {
+            email: ownerEmail.trim(),
+            display_name: ownerDisplayName.trim(),
+            role_code: 'boss',
+            employee_no: '',
+            external_login_only: ownerInDomain,
+          },
+                        `建立負責人帳號 ${ownerEmail.trim()}`,
+                        newUserAccount,
+                      );
       setOwnerSecret(d);
       setOwnerCopied(false);
       setOwnerExists(true);

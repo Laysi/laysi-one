@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
+  hrCompliance,
   maskId,
   money,
   OpFailed,
+  withholdingStatements,
   type ComplianceCheck,
   type HrCompliance,
   type WithholdingStatements,
@@ -38,11 +40,16 @@ export function Withholding({ onToast, reloadKey }: Props) {
   const load = useCallback(() => {
     setError(null);
     setStatementError(null);
-    callOp<HrCompliance>('get_hr_compliance')
+    callOp('get_hr_compliance', {}, undefined, hrCompliance)
       .then(setCompliance)
       .catch((e: Error) => setError(e.message));
 
-    callOp<WithholdingStatements>('list_withholding_statements', year ? { year } : {})
+    callOp(
+      'list_withholding_statements',
+      year ? { year } : {},
+      undefined,
+      withholdingStatements,
+    )
       .then((d) => {
         setStatements(d);
         setStatementError(null);
@@ -58,10 +65,12 @@ export function Withholding({ onToast, reloadKey }: Props) {
   async function tryStatements() {
     setStatementError(null);
     try {
-      const d = await callOp<WithholdingStatements>(
-        'list_withholding_statements',
-        year ? { year } : {},
-      );
+      const d = await callOp(
+                        'list_withholding_statements',
+                        year ? { year } : {},
+                        undefined,
+                        withholdingStatements,
+                      );
       setStatements(d);
     } catch (e) {
       const msg = e instanceof OpFailed ? e.error.message : String(e);

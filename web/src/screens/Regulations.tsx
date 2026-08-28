@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import { DateField } from '../components/DateField';
-import { callOp, OpFailed, businessToday, type RegulationList, type RegulationField, type RegulationVersion } from '../api/client';
+import {
+  businessToday,
+  callOp,
+  OpFailed,
+  regulationList,
+  type RegulationField,
+  type RegulationList,
+  type RegulationVersion,
+} from '../api/client';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -89,7 +97,7 @@ export function Regulations({ onToast, reloadKey }: Props) {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
-    callOp<RegulationList>('list_regulations', {})
+    callOp('list_regulations', {}, undefined, regulationList)
       .then((d) => {
         setData(d);
         setDomain((now) => now ?? d.domains[0]?.domain ?? null);

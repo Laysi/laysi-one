@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  accountList,
+  budgetStatus,
   callOp,
+  departmentPl,
   isZero,
   money,
+  newBudgetVersion,
   OpFailed,
+  type Account,
   type BudgetStatus,
   type DepartmentPl,
 } from '../api/client';
@@ -12,14 +17,6 @@ import { useCurrentUser } from '../auth';
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
-}
-
-interface BudgetableAccount {
-  code: string;
-  name: string;
-  kind: string;
-  is_postable: boolean;
-  is_active: boolean;
 }
 
 export function Budget({ onToast, reloadKey }: Props) {
@@ -32,7 +29,7 @@ export function Budget({ onToast, reloadKey }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
-  const [accounts, setAccounts] = useState<BudgetableAccount[] | null>(null);
+  const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [newCode, setNewCode] = useState('');
   const [newAmount, setNewAmount] = useState('');
@@ -41,8 +38,8 @@ export function Budget({ onToast, reloadKey }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<BudgetStatus>('get_budget_status', version ? { version } : {}),
-      callOp<DepartmentPl>('get_department_pl'),
+      callOp('get_budget_status', version ? { version } : {}, undefined, budgetStatus),
+      callOp('get_department_pl', {}, undefined, departmentPl),
     ])
       .then(([b, d]) => {
         setStatus(b);
@@ -55,7 +52,7 @@ export function Budget({ onToast, reloadKey }: Props) {
 
   useEffect(() => {
     if (!adding || accounts) return;
-    callOp<{ accounts: BudgetableAccount[] }>('list_accounts')
+    callOp('list_accounts', {}, undefined, accountList)
       .then((d) =>
         setAccounts(
           d.accounts.filter(
@@ -84,11 +81,7 @@ export function Budget({ onToast, reloadKey }: Props) {
   async function createFirstVersion() {
     setCreating(true);
     try {
-      const d = await callOp<{ version: { code: string; label: string } }>(
-        'create_budget_version',
-        { code: 'V1' },
-        '建立第一版年度預算',
-      );
+      const d = await callOp('create_budget_version', { code: 'V1' }, '建立第一版年度預算', newBudgetVersion);
       onToast(`已建立 ${d.version.label}，接著逐科目填入金額`);
       setVersion(d.version.code);
       load();

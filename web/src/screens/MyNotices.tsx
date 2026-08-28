@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Markdown } from '../components/Markdown';
 import { NoticeHistory } from '../components/NoticeHistory';
-import { businessDate, callOp, OpFailed, type MyNoticeList, type NoticeRow } from '../api/client';
+import {
+  businessDate,
+  callOp,
+  myNoticeList,
+  OpFailed,
+  type MyNoticeList,
+  type NoticeRow,
+} from '../api/client';
 
 interface Props {
   reloadKey: number;
@@ -15,7 +22,7 @@ export function MyNotices({ reloadKey, onRead }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<MyNoticeList>('list_my_notices')
+    callOp('list_my_notices', {}, undefined, myNoticeList)
       .then((d) => {
         setData(d);
         setOpen(new Set(d.notices.filter((n) => n.unread).map((n) => n.id)));

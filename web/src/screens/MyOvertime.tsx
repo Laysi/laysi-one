@@ -3,6 +3,7 @@ import {
   businessDate,
   callOp,
   money,
+  myOvertimeList,
   OpFailed,
   trimDecimal,
   wallSpan,
@@ -28,7 +29,7 @@ export function MyOvertime({ onGo, reloadKey }: Props) {
   useEffect(() => {
     let live = true;
     setError(null);
-    callOp<MyOvertimeList>('list_my_overtime_requests')
+    callOp('list_my_overtime_requests', {}, undefined, myOvertimeList)
       .then((d) => live && setData(d))
       .catch((e) => {
         if (!live) return;

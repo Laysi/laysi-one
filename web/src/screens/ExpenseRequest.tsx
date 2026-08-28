@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  attachReceiptResult,
   businessToday,
   callOp,
   fileSizeLabel,
   MAX_UPLOAD_BYTES,
   money,
+  myExpenseClaimList,
+  myExpenseClaimResult,
   OpFailed,
   readFileBase64,
-  type AttachReceiptResult,
   type ExpenseReceipt,
   type MyExpenseClaimList,
   type MyExpenseClaimResult,
@@ -41,7 +43,7 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<MyExpenseClaimList>('list_my_expense_claims')
+    callOp('list_my_expense_claims', {}, undefined, myExpenseClaimList)
       .then(setData)
       .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
   }, []);
@@ -69,15 +71,16 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
     const failed: string[] = [];
     for (const file of files) {
       try {
-        const r = await callOp<AttachReceiptResult>(
-          'attach_my_expense_receipt',
-          {
-            claim_no: claimNo,
-            file_name: file.name,
-            content_base64: await readFileBase64(file),
-          },
-          `為 ${claimNo} 附上收據 ${file.name}`,
-        );
+        const r = await callOp(
+                          'attach_my_expense_receipt',
+                          {
+              claim_no: claimNo,
+              file_name: file.name,
+              content_base64: await readFileBase64(file),
+            },
+                          `為 ${claimNo} 附上收據 ${file.name}`,
+                          attachReceiptResult,
+                        );
         attached.push(r.receipt);
       } catch {
         failed.push(file.name);
@@ -93,17 +96,18 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
     setReceipts([]);
     setUnattached([]);
     try {
-      const d = await callOp<MyExpenseClaimResult>(
-        'submit_my_expense_claim',
-        {
-          title: title.trim(),
-          amount: amount.trim(),
-          spent_on: spentOn,
-          pay_method: payMethod,
-          ...(memo.trim() ? { memo: memo.trim() } : {}),
-        },
-        `報支${title.trim()} ${amount.trim()} 元`,
-      );
+      const d = await callOp(
+                        'submit_my_expense_claim',
+                        {
+            title: title.trim(),
+            amount: amount.trim(),
+            spent_on: spentOn,
+            pay_method: payMethod,
+            ...(memo.trim() ? { memo: memo.trim() } : {}),
+          },
+                        `報支${title.trim()} ${amount.trim()} 元`,
+                        myExpenseClaimResult,
+                      );
       setResult(d);
       const failed = await attachAll(d.claim.claim_no);
       setUnattached(failed);

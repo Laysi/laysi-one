@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import {
+  businessToday,
   callOp,
   OpFailed,
-  businessToday,
-  type WorkCalendarYear,
+  workCalendarRefresh,
+  workCalendarYear,
   type WorkCalendarDay,
+  type WorkCalendarYear,
 } from '../api/client';
 
 interface Props {
@@ -37,7 +39,7 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
-    callOp<WorkCalendarYear>('list_work_calendar', { year })
+    callOp('list_work_calendar', { year }, undefined, workCalendarYear)
       .then(setData)
       .catch(() => setData(null));
   }, [year]);
@@ -71,10 +73,7 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
   const refresh = async () => {
     setBusy(true);
     try {
-      const r = await callOp<{ read: number; written: number; kept: number; source: string }>(
-        'refresh_work_calendar',
-        { year },
-      );
+      const r = await callOp('refresh_work_calendar', { year }, undefined, workCalendarRefresh);
       onToast(`${r.source}：寫入 ${r.written} 天，保留自訂 ${r.kept} 天`);
       load();
     } catch (e) {

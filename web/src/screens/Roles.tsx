@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import {
+  approvalRules,
   callOp,
   money,
   OpFailed,
+  roleMatrix,
   type ApprovalRules,
   type ApprovalStep,
   type GrantCell,
@@ -66,14 +68,14 @@ export function Roles({ onToast, reloadKey }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<RoleMatrix>('list_roles')
+    callOp('list_roles', {}, undefined, roleMatrix)
       .then(setMatrix)
       .catch((e: Error) => setError(e.message));
     if (!canReadFlow) {
       setFlow(null);
       return;
     }
-    callOp<ApprovalRules>('list_approval_rules')
+    callOp('list_approval_rules', {}, undefined, approvalRules)
       .then(setFlow)
       .catch((e: Error) => setFlowError(e.message));
   }, [canReadFlow]);

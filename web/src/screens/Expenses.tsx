@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  accountList,
   businessToday,
   callOp,
+  dimensionList,
+  expenseApproval,
+  expenseClaimList,
+  expenseClaimResult,
   money,
   OpFailed,
-  type ChartOfAccounts,
+  type AccountList,
   type DimensionList,
   type ExpenseClaim,
   type ExpenseClaimList,
@@ -31,7 +36,7 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
   const [includeDone, setIncludeDone] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [account, setAccount] = useState<Record<string, string>>({});
-  const [accounts, setAccounts] = useState<ChartOfAccounts | null>(null);
+  const [accounts, setAccounts] = useState<AccountList | null>(null);
   const [depts, setDepts] = useState<DimensionList | null>(null);
 
   const [drawer, setDrawer] = useState(false);
@@ -46,7 +51,7 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
 
   const load = useCallback(() => {
     setError(null);
-    callOp<ExpenseClaimList>('list_expense_claims', { include_done: includeDone })
+    callOp('list_expense_claims', { include_done: includeDone }, undefined, expenseClaimList)
       .then(setData)
       .catch((e: Error) => setError(e.message));
   }, [includeDone]);
@@ -54,14 +59,14 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
   useEffect(load, [load, reloadKey]);
 
   useEffect(() => {
-    callOp<ChartOfAccounts>('list_accounts')
+    callOp('list_accounts', {}, undefined, accountList)
       .then(setAccounts)
       .catch(() => setAccounts(null));
   }, []);
 
   useEffect(() => {
     if (!drawer || depts) return;
-    callOp<DimensionList>('list_dimensions')
+    callOp('list_dimensions', {}, undefined, dimensionList)
       .then(setDepts)
       .catch(() => setDepts(null));
   }, [drawer, depts]);
@@ -84,19 +89,20 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
     }
     setSaving(true);
     try {
-      const d = await callOp<{ claim: ExpenseClaim }>(
-        'submit_expense_claim',
-        {
-          title: title.trim(),
-          amount: amount.trim(),
-          spent_on: spentOn,
-          claimant: claimant.trim(),
-          pay_method: payMethod,
-          ...(deptCode ? { dept_code: deptCode } : {}),
-          ...(memo.trim() ? { memo: memo.trim() } : {}),
-        },
-        `代 ${claimant.trim()} 建立報支單 ${money(amount.trim())}`,
-      );
+      const d = await callOp(
+                        'submit_expense_claim',
+                        {
+            title: title.trim(),
+            amount: amount.trim(),
+            spent_on: spentOn,
+            claimant: claimant.trim(),
+            pay_method: payMethod,
+            ...(deptCode ? { dept_code: deptCode } : {}),
+            ...(memo.trim() ? { memo: memo.trim() } : {}),
+          },
+                        `代 ${claimant.trim()} 建立報支單 ${money(amount.trim())}`,
+                        expenseClaimResult,
+                      );
       onToast(`已建立報支單 ${d.claim.claim_no}，目前關卡：${d.claim.step_label}`);
       setDrawer(false);
       onChanged();
@@ -113,15 +119,16 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
     setBusy(c.claim_no);
     try {
       if (approve) {
-        const d = await callOp<{ claim: ExpenseClaim; voucher: { no: string } | null }>(
-          'approve_expense_claim',
-          {
-            claim_no: c.claim_no,
-
-            ...(picked ? { account_code: picked } : {}),
-          },
-          `核准 ${c.claimant} 的${c.title}`,
-        );
+        const d = await callOp(
+                          'approve_expense_claim',
+                          {
+              claim_no: c.claim_no,
+  
+              ...(picked ? { account_code: picked } : {}),
+            },
+                          `核准 ${c.claimant} 的${c.title}`,
+                          expenseApproval,
+                        );
         onToast(
           d.voucher
             ? `${c.claim_no} 已完成全部簽核，產生傳票 ${d.voucher.no}（待過帳）；過帳後才進總帳`

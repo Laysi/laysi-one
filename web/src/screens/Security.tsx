@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import {
+  apiTokenList,
+  backupSetting,
   businessTime,
   callOp,
-  getHealthz,
-  OpFailed,
   fileSizeLabel,
+  getHealthz,
+  issuedApiToken,
+  oidcSetting,
+  OpFailed,
+  systemHealth,
+  updatedBackupSetting,
+  updatedOidcSetting,
   type ApiTokenList,
   type BackupSetting,
   type Healthz,
   type OidcSetting,
   type SystemHealth,
-  type UpdatedBackupSetting,
-  type UpdatedOidcSetting,
 } from '../api/client';
 
 interface Props {
@@ -97,8 +102,8 @@ export function Security({ onToast, reloadKey }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<ApiTokenList>('list_api_tokens'),
-      callOp<SystemHealth>('get_system_health'),
+      callOp('list_api_tokens', {}, undefined, apiTokenList),
+      callOp('get_system_health', {}, undefined, systemHealth),
     ])
       .then(([t, h]) => {
         setTokens(t);
@@ -109,13 +114,13 @@ export function Security({ onToast, reloadKey }: Props) {
     getHealthz().then(setHz).catch(() => setHz(null));
 
     if (canReadOidc) {
-      callOp<OidcSetting>('get_oidc_setting')
+      callOp('get_oidc_setting', {}, undefined, oidcSetting)
         .then(setOidc)
         .catch(() => setOidc(null));
     }
 
     if (canReadBackup) {
-      callOp<BackupSetting>('get_backup_setting')
+      callOp('get_backup_setting', {}, undefined, backupSetting)
         .then(setBackup)
         .catch(() => setBackup(null));
     }
@@ -178,10 +183,10 @@ export function Security({ onToast, reloadKey }: Props) {
 
     setSavingOidc(true);
     try {
-      const d = await callOp<UpdatedOidcSetting>('update_oidc_setting', input, '設定外部登入');
+      const d = await callOp('update_oidc_setting', input, '設定外部登入', updatedOidcSetting);
       onToast(`已儲存：${d.changed.join('、')}`);
       setOidcForm(null);
-      const fresh = await callOp<OidcSetting>('get_oidc_setting');
+      const fresh = await callOp('get_oidc_setting', {}, undefined, oidcSetting);
       setOidc(fresh);
       if (fresh.verify_error) onToast(fresh.verify_error);
     } catch (e) {
@@ -214,10 +219,10 @@ export function Security({ onToast, reloadKey }: Props) {
 
     setSavingBackup(true);
     try {
-      const d = await callOp<UpdatedBackupSetting>('update_backup_setting', input, '設定異地備份');
+      const d = await callOp('update_backup_setting', input, '設定異地備份', updatedBackupSetting);
       onToast(d.blocked_reason ?? `已儲存，備份目的地 ${d.bucket}`);
       setBackupForm(null);
-      setBackup(await callOp<BackupSetting>('get_backup_setting'));
+      setBackup(await callOp('get_backup_setting', {}, undefined, backupSetting));
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -230,7 +235,7 @@ export function Security({ onToast, reloadKey }: Props) {
     try {
       await callOp('confirm_backup_key', {}, '確認還原金鑰已保存');
       onToast('系統已不再留存還原金鑰');
-      setBackup(await callOp<BackupSetting>('get_backup_setting'));
+      setBackup(await callOp('get_backup_setting', {}, undefined, backupSetting));
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -240,14 +245,19 @@ export function Security({ onToast, reloadKey }: Props) {
 
   async function issue() {
     try {
-      const d = await callOp<{ token: { name: string }; secret: string }>('issue_api_token', {
-        name: '新連線',
-        kind: 'mcp',
-        scope: '唯讀',
-        actor: me.display_name,
-        actor_role: me.role,
-        rotate_days: 90,
-      });
+      const d = await callOp(
+                        'issue_api_token',
+                        {
+          name: '新連線',
+          kind: 'mcp',
+          scope: '唯讀',
+          actor: me.display_name,
+          actor_role: me.role,
+          rotate_days: 90,
+        },
+                        undefined,
+                        issuedApiToken,
+                      );
       setIssued({ name: d.token.name, secret: d.secret });
       load();
     } catch (e) {
@@ -294,13 +304,15 @@ export function Security({ onToast, reloadKey }: Props) {
                 <span className="fact__key">檔案儲存</span>
                 <span className="fact__value">
                   {hz ? (hz.rustfs.ok ? '正常' : '無法連線') : '無法讀取'}
-                  <span className="fact__note">{hz?.rustfs.endpoint ?? '由 /healthz 回報'}</span>
+                  {hz?.rustfs.endpoint ? (
+                    <span className="fact__note">{hz.rustfs.endpoint}</span>
+                  ) : null}
                 </span>
               </div>
               <div className="fact">
                 <span className="fact__key">品牌完整性</span>
                 <span className="fact__value">
-                  {hz ? (
+                  {hz?.brand.fingerprint ? (
                     <>
                       {hz.brand.signed ? '已簽章' : '未簽章'} · {hz.brand.files} 個檔案
                       <span className="fact__note num">指紋 {hz.brand.fingerprint}</span>

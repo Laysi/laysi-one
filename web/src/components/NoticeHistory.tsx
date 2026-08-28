@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   businessDate,
   callOp,
+  noticeHistory,
   OpFailed,
   type NoticeHistory as History,
   type NoticeRow,
@@ -23,7 +24,7 @@ export function NoticeHistory({ notice, op }: Props) {
     if (!open) return;
     let live = true;
     setError(null);
-    callOp<History>(op, { id: notice.id })
+    callOp(op, { id: notice.id }, undefined, noticeHistory)
       .then((d) => live && setData(d))
       .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
     return () => {

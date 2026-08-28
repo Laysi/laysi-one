@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   businessDate,
   callOp,
+  myLeaveList,
   OpFailed,
   trimDecimal,
   wallSpan,
@@ -27,7 +28,7 @@ export function MyLeave({ onGo, reloadKey }: Props) {
   useEffect(() => {
     let live = true;
     setError(null);
-    callOp<MyLeaveList>('list_my_leave_requests')
+    callOp('list_my_leave_requests', {}, undefined, myLeaveList)
       .then((d) => live && setData(d))
       .catch((e) => {
         if (!live) return;

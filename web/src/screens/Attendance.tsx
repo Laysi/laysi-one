@@ -1,8 +1,12 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import {
+  attendancePunchList,
   callOp,
+  leaveRequestList,
   money,
   OpFailed,
+  overtimeRequestList,
+  punchCorrectionList,
   trimDecimal,
   wallSpan,
   type AttendancePunchList,
@@ -58,11 +62,16 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const load = useCallback(() => {
     setError(null);
     Promise.all([
-      callOp<LeaveRequestList>('list_leave_requests', { include_done: includeDone }),
-      callOp<AttendancePunchList>('list_attendance_punches', {
-        ...(month ? { month } : {}),
-        ...(picked ? { emp_no: picked } : {}),
-      }),
+      callOp('list_leave_requests', { include_done: includeDone }, undefined, leaveRequestList),
+      callOp(
+        'list_attendance_punches',
+        {
+          ...(month ? { month } : {}),
+          ...(picked ? { emp_no: picked } : {}),
+        },
+        undefined,
+        attendancePunchList,
+      ),
     ])
       .then(([l, p]) => {
         setLeave(l);
@@ -79,10 +88,15 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
 
   const loadOvertime = useCallback(() => {
     if (!canSeeOvertime) return;
-    callOp<OvertimeRequestList>('list_overtime_requests', {
-      ...(month ? { month } : {}),
-      include_done: otDone,
-    })
+    callOp(
+      'list_overtime_requests',
+      {
+        ...(month ? { month } : {}),
+        include_done: otDone,
+      },
+      undefined,
+      overtimeRequestList,
+    )
       .then(setOvertime)
       .catch(() => setOvertime(null));
   }, [canSeeOvertime, month, otDone]);
@@ -114,7 +128,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
 
   const loadFixes = useCallback(() => {
     if (!canSeeFixes) return;
-    callOp<PunchCorrectionList>('list_punch_corrections', { include_done: true })
+    callOp('list_punch_corrections', { include_done: true }, undefined, punchCorrectionList)
       .then(setFixes)
       .catch(() => setFixes(null));
   }, [canSeeFixes]);
