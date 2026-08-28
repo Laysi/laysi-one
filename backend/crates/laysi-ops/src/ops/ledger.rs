@@ -6,8 +6,7 @@
 //! registered in `ops/mod.rs`.
 
 use crate::{
-    money, parse, schema_of, AsOfInput, Channel, Empty, LimitInput, OpCtx, OpError, OpOutcome,
-    Operation, Risk,
+    money, parse, schema_of, AsOfInput, Channel, Empty, OpCtx, OpError, OpOutcome, Operation, Risk,
 };
 use async_trait::async_trait;
 use chrono::{Datelike, NaiveDate};
@@ -64,7 +63,7 @@ impl Operation for GetDashboard {
         let pending = s.search_vouchers(Some("pending"), None, 500).await?.len();
         let drafts = s.search_vouchers(Some("draft"), None, 500).await?.len();
         let bars = s.cash_history(ctx.today, 6).await?;
-        let audit = s.recent_audit(3).await?;
+        let audit = s.recent_audit(3, None, None).await?;
         // Every figure above is drawn from posted vouchers only, so with none of
         // them the four stats are zero for want of data rather than of money.
         let started = !s.search_vouchers(Some("posted"), None, 1).await?.is_empty();
@@ -265,6 +264,27 @@ impl Operation for ListAccounts {
     }
 }
 
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ListAiAuditInput {
+    /// Maximum rows to return, default 50, at most 10000.
+    pub limit: Option<i64>,
+    /// Earliest business date to include (YYYY-MM-DD). Omit for no lower bound.
+    pub from: Option<NaiveDate>,
+    /// Latest business date to include (YYYY-MM-DD), inclusive.
+    pub to: Option<NaiveDate>,
+}
+
+/// Midnight of a business day as the instant it happened.
+///
+/// `ai_audit_log.at` is a timestamp and the dates a person picks are business
+/// dates, so the two bounds have to be derived with the offset this call runs
+/// under. Total by construction: `NaiveTime::MIN` needs no validation.
+fn day_start(day: NaiveDate, offset: chrono::FixedOffset) -> chrono::DateTime<chrono::Utc> {
+    (day.and_time(chrono::NaiveTime::MIN)
+        - chrono::Duration::seconds(offset.local_minus_utc().into()))
+    .and_utc()
+}
+
 struct ListAiAudit;
 
 #[async_trait]
@@ -276,17 +296,29 @@ impl Operation for ListAiAudit {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀 AI 稽核紀錄：每一次工具呼叫的時間、身分、原始提問與結果"
+        "讀稽核紀錄：每一次操作與登入的時間、身分、來源位址、原始提問與結果。可指定日期區間，供匯出留存。"
     }
     fn input_schema(&self) -> Value {
-        schema_of::<LimitInput>()
+        schema_of::<ListAiAuditInput>()
     }
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let i: LimitInput = parse(input)?;
+        let i: ListAiAuditInput = parse(input)?;
+        if let (Some(from), Some(to)) = (i.from, i.to) {
+            if from > to {
+                return Err(OpError::BadInput("起始日期晚於結束日期".into()));
+            }
+        }
+        // The upper bound is the start of the day after `to`, so the last day
+        // asked for is included whole.
         let entries = ctx
             .store
-            .recent_audit(i.limit.unwrap_or(50).clamp(1, 500))
+            .recent_audit(
+                i.limit.unwrap_or(50).clamp(1, 10_000),
+                i.from.map(|d| day_start(d, ctx.offset)),
+                i.to.and_then(|d| d.succ_opt())
+                    .map(|d| day_start(d, ctx.offset)),
+            )
             .await?;
         let summary = format!("讀取稽核紀錄 · {} 筆", entries.len());
         Ok(OpOutcome::new(json!({ "entries": entries }), summary))

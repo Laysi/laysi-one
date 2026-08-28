@@ -50,6 +50,24 @@ fn cookie_secure(headers: &HeaderMap) -> bool {
         })
 }
 
+/// Source address of the request, for the audit record.
+///
+/// Read from what the reverse proxy says, taking the first hop of
+/// `X-Forwarded-For` and falling back to `X-Real-IP`. Parsed as an address and
+/// dropped when it is not one: the header is client-supplied when no proxy
+/// rewrites it, and an audit row that stores whatever arrived is a place to
+/// put text of the caller's choosing. Never used for a decision -- only
+/// recorded, so a wrong value misleads an investigation but grants nothing.
+pub(crate) fn client_ip(headers: &HeaderMap) -> Option<String> {
+    ["x-forwarded-for", "x-real-ip"]
+        .iter()
+        .filter_map(|name| headers.get(*name))
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| v.split(',').next())
+        .find_map(|v| v.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+}
+
 /// Authentication settings. The dummy password hash makes a non-existent
 /// account run Argon2id too, reducing the timing difference.
 #[derive(Clone)]
@@ -287,6 +305,49 @@ enum LoginFailure {
     WrongPassword,
 }
 
+/// Record an authentication event in `ai_audit_log`.
+///
+/// The endpoints under `/v1/auth` do not go through `Registry::dispatch`, so
+/// without this a sign-in, a sign-out and a password change left nothing
+/// behind but a line in the container's stdout, which the next restart drops.
+/// Access to an account is the event an investigation starts from.
+///
+/// `actor_role` is empty for a name that has no account. The screen reads it
+/// through a fallback rather than showing a code.
+///
+/// The summaries here separate "no such account" from "wrong password" while
+/// the response to the caller does not: the distinction is what makes the
+/// record useful, and only an administrator can read it back.
+pub(crate) async fn write_auth_audit(
+    state: &Shared,
+    headers: &HeaderMap,
+    actor: &str,
+    actor_role: &str,
+    event: &str,
+    summary: &str,
+    outcome: &str,
+) {
+    if let Err(error) = state
+        .store
+        .write_audit(
+            actor,
+            actor_role,
+            event,
+            "read_only",
+            None,
+            "ui",
+            &json!({}),
+            summary,
+            outcome,
+            None,
+            client_ip(headers).as_deref(),
+        )
+        .await
+    {
+        tracing::error!(%error, event, "認證稽核紀錄寫入失敗");
+    }
+}
+
 fn login_failure_response(_reason: LoginFailure) -> Response {
     error_response(
         StatusCode::UNAUTHORIZED,
@@ -371,10 +432,37 @@ pub async fn login(
         Err(response) => return response,
     };
 
+    // Both failure paths write exactly one audit row, so the work done before
+    // the shared response is the same either way.
     let Some(user) = user else {
+        write_auth_audit(
+            &state,
+            &headers,
+            input.username.trim(),
+            "",
+            "login",
+            "登入失敗：查無此帳號",
+            "blocked",
+        )
+        .await;
         return login_failure_response(LoginFailure::UnknownUser);
     };
     if !verified || user.password_hash.is_none() || user.status != "active" {
+        let why = match (verified, user.status.as_str()) {
+            (true, "active") => "登入失敗：本帳號只用外部登入",
+            (true, _) => "登入失敗：帳號已停用",
+            _ => "登入失敗：密碼不正確",
+        };
+        write_auth_audit(
+            &state,
+            &headers,
+            &user.display_name,
+            &user.role_code,
+            "login",
+            why,
+            "blocked",
+        )
+        .await;
         return login_failure_response(LoginFailure::WrongPassword);
     }
 
@@ -387,6 +475,16 @@ pub async fn login(
     if user.role_code != laysi_ops::ROLE_ADMIN {
         if let Some(oidc) = crate::oidc::current(&state).await {
             if oidc.password_login_disabled() {
+                write_auth_audit(
+                    &state,
+                    &headers,
+                    &user.display_name,
+                    &user.role_code,
+                    "login",
+                    "登入失敗：本站已停用帳號密碼登入",
+                    "blocked",
+                )
+                .await;
                 return error_response(
                     StatusCode::FORBIDDEN,
                     "password_login_disabled",
@@ -400,6 +498,16 @@ pub async fn login(
         Ok(secret) => secret,
         Err(response) => return response,
     };
+    write_auth_audit(
+        &state,
+        &headers,
+        &user.display_name,
+        &user.role_code,
+        "login",
+        "登入成功",
+        "ok",
+    )
+    .await;
 
     let mut response = Json(json!({
         "ok": true,
@@ -411,6 +519,23 @@ pub async fn login(
 }
 
 pub async fn logout(State(state): State<Shared>, headers: HeaderMap) -> Response {
+    // Read before the session is revoked; afterwards there is no name to
+    // record. A request with no valid session logs nothing: there is no
+    // identity to attribute it to and the caller learns nothing either way.
+    if let Ok(verified) = authenticate_session(&state, &headers).await {
+        let user = &verified.session.user;
+        write_auth_audit(
+            &state,
+            &headers,
+            &user.display_name,
+            &user.role_code,
+            "logout",
+            "登出",
+            "ok",
+        )
+        .await;
+    }
+
     if let Some(secret) = cookie_secret(&headers) {
         let token_hash = laysi_store::token_hash(secret);
         if let Err(error) = state.store.revoke_session(&token_hash, "使用者登出").await {
@@ -550,6 +675,16 @@ pub async fn change_password(
         .await
     {
         Ok(user) => {
+            write_auth_audit(
+                &state,
+                &headers,
+                &user.display_name,
+                &user.role_code,
+                "change_password",
+                "變更密碼",
+                "ok",
+            )
+            .await;
             let body = json!({ "ok": true, "user": user_json_with_role(&state, &user).await });
             Json(body).into_response()
         }
@@ -715,8 +850,9 @@ mod tests {
         );
 
         // `ctx_from`'s type signature does not accept a HeaderMap at all, so a
-        // forged header has no path into identity resolution.
-        let ctx = crate::ctx_from(&state, &identity, None, laysi_ops::Channel::Ui);
+        // forged header has no path into identity resolution. The source
+        // address is passed already parsed, and is only ever recorded.
+        let ctx = crate::ctx_from(&state, &identity, None, laysi_ops::Channel::Ui, None);
         assert_eq!(ctx.actor, "可信帳號");
         assert_eq!(ctx.actor_role, "acct");
         assert_eq!(ctx.employee_id, Some(7));

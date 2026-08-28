@@ -139,6 +139,8 @@ fn ctx_for(
         // Not Mcp: this is a person running a command, and the MCP tool
         // grants exist to limit what AI may call.
         channel: Channel::Ui,
+        // A command on the host, so there is no request to have come from.
+        client_ip: None,
         today,
         offset: laysi_ops::business_offset(),
     }

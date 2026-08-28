@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import {
   aiAuditList,
+  businessStamp,
   businessTime,
+  businessToday,
   callOp,
   getOps,
   updatedMcpToolGrant,
@@ -9,8 +11,50 @@ import {
   type OpInfo,
 } from '../api/client';
 import { useCurrentUser } from '../auth';
+import { DateField } from '../components/DateField';
 
 const SELF = 'set_mcp_tool_grant';
+const EXPORT_LIMIT = 10000;
+
+const CSV_HEADERS = [
+  '時間',
+  '來源',
+  '身分',
+  '角色',
+  '來源位址',
+  '原始提問',
+  '結果',
+  '操作名稱',
+] as const;
+
+function csvCell(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function csvOf(rows: AuditEntry[]): string {
+  const lines = rows.map((a) =>
+    [
+      businessStamp(a.at),
+      a.channel === 'mcp' ? 'AI' : '人員',
+      a.actor,
+      a.actor_role_name,
+      a.client_ip ?? '',
+      a.prompt ?? '',
+      (a.outcome === 'blocked' ? '已擋下 ' : '') + a.result_summary,
+      a.tool_name,
+    ].map(csvCell).join(','),
+  );
+  return '﻿' + [CSV_HEADERS.join(','), ...lines].join('\r\n');
+}
+
+function download(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
 interface Props {
   onToast: (msg: string) => void;
@@ -24,6 +68,44 @@ export function McpTools({ onToast, reloadKey }: Props) {
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [tab, setTab] = useState<'tools' | 'audit'>('tools');
   const [busy, setBusy] = useState<string | null>(null);
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [loadingAudit, setLoadingAudit] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  function auditRange() {
+    return { from: from || undefined, to: to || undefined };
+  }
+
+  function loadAudit() {
+    setLoadingAudit(true);
+    callOp('list_ai_audit', { limit: 100, ...auditRange() }, undefined, aiAuditList)
+      .then((d) => setAudit(d.entries))
+      .catch((e: Error) => {
+        setAudit([]);
+        onToast(e.message);
+      })
+      .finally(() => setLoadingAudit(false));
+  }
+
+  function exportAudit() {
+    setExporting(true);
+    callOp('list_ai_audit', { limit: EXPORT_LIMIT, ...auditRange() }, undefined, aiAuditList)
+      .then((d) => {
+        if (d.entries.length === 0) {
+          onToast('這段期間沒有稽核紀錄');
+          return;
+        }
+        download(`稽核紀錄-${from || '起始'}-${to || businessToday()}.csv`, csvOf(d.entries));
+        onToast(
+          d.entries.length === EXPORT_LIMIT
+            ? `已匯出 ${EXPORT_LIMIT} 筆，達單次上限；請縮短日期區間再匯出一次`
+            : `已匯出 ${d.entries.length} 筆`,
+        );
+      })
+      .catch((e: Error) => onToast(e.message))
+      .finally(() => setExporting(false));
+  }
 
   function toggle(op: OpInfo) {
     setBusy(op.name);
@@ -49,7 +131,7 @@ export function McpTools({ onToast, reloadKey }: Props) {
     getOps()
       .then(setOps)
       .catch(() => setOps([]));
-    callOp('list_ai_audit', { limit: 20 }, undefined, aiAuditList)
+    callOp('list_ai_audit', { limit: 100 }, undefined, aiAuditList)
       .then((d) => setAudit(d.entries))
       .catch(() => setAudit([]));
   }, [reloadKey]);
@@ -124,6 +206,19 @@ export function McpTools({ onToast, reloadKey }: Props) {
       )}
 
       {tab === 'audit' && (
+      <>
+      <div className="toolbar toolbar--spaced">
+        <DateField value={from} onChange={setFrom} className="input input--date" />
+        <span className="cell-muted">至</span>
+        <DateField value={to} onChange={setTo} className="input input--date" />
+        <button className="btn" disabled={loadingAudit} onClick={loadAudit}>
+          查詢
+        </button>
+        <button className="btn" disabled={exporting} onClick={exportAudit}>
+          匯出 CSV
+        </button>
+      </div>
+
       <div className="table-scroll">
         <table className="table">
           <thead>
@@ -131,9 +226,10 @@ export function McpTools({ onToast, reloadKey }: Props) {
               <th>時間</th>
               <th>來源</th>
               <th>身分</th>
+              <th>來源位址</th>
               <th>原始提問</th>
               <th>結果</th>
-              <th>工具名稱</th>
+              <th>操作名稱</th>
             </tr>
           </thead>
           <tbody>
@@ -149,6 +245,7 @@ export function McpTools({ onToast, reloadKey }: Props) {
                   {a.actor}
                   <span className="cell-hint cell-hint--block">{a.actor_role_name}</span>
                 </td>
+                <td className="num cell-muted">{a.client_ip ?? '—'}</td>
                 <td className="cell-muted">{a.prompt ?? '—'}</td>
                 <td>
                   {a.outcome === 'blocked' && <span className="tag tag--bad">已擋下</span>}{' '}
@@ -157,9 +254,17 @@ export function McpTools({ onToast, reloadKey }: Props) {
                 <td className="num cell-muted">{a.tool_name}</td>
               </tr>
             ))}
+            {audit.length === 0 && !loadingAudit && (
+              <tr>
+                <td colSpan={7} className="cell-muted">
+                  這段期間沒有稽核紀錄
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
+      </>
       )}
     </div>
   );

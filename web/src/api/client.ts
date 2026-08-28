@@ -1095,6 +1095,7 @@ export const auditEntry = z.object({
   channel: z.string(),
   result_summary: z.string(),
   outcome: z.string(),
+  client_ip: z.string().nullable(),
 });
 export type AuditEntry = z.infer<typeof auditEntry>;
 
@@ -2540,6 +2541,15 @@ export function businessDate(v: string | null | undefined, fallback = '—'): st
   return `${shifted.getUTCFullYear()}-${two(shifted.getUTCMonth() + 1)}-${two(
     shifted.getUTCDate(),
   )}`;
+}
+
+export function businessStamp(v: string | null | undefined, fallback = ''): string {
+  if (!v) return fallback;
+  const shifted = shiftToBusiness(v);
+  if (!shifted) return v;
+  return `${businessDate(v)} ${two(shifted.getUTCHours())}:${two(
+    shifted.getUTCMinutes(),
+  )}:${two(shifted.getUTCSeconds())}`;
 }
 
 export function wallSpan(from: string, to: string): string {
