@@ -13,7 +13,7 @@
 //
 //   bun scripts/function-test.ts && bun scripts/schema-live-test.ts
 
-import { mismatch, wiredOperations } from "./response-schemas";
+import { mismatch, mismatchAgainst, wiredOperations } from "./response-schemas";
 
 const PG_CONTAINER = process.env.PG_CONTAINER ?? "laysi-one_postgres_1";
 const PG_USER = process.env.POSTGRES_USER ?? "laysi";
@@ -72,6 +72,22 @@ try {
     });
     if (!res.ok) throw new Error(`登入失敗 ${username}：HTTP ${res.status}`);
     const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0]!;
+
+    // The routes outside the registry. auth.ts and the sidebar read these, and
+    // a wrong shape here stops the login itself rather than one screen.
+    const routes: [string, string][] = [
+      ["/v1/auth/me", "authEnvelope"],
+      ["/v1/meta", "meta"],
+      ["/v1/ops", "opList"],
+    ];
+    for (const [path, schema] of routes) {
+      const body = await (await fetch(`${BASE}${path}`, { headers: { cookie } })).json();
+      const wrong = mismatchAgainst(schema, body);
+      if (wrong) {
+        failed += 1;
+        console.log(`  FAIL ${path}\n       ${wrong}`);
+      }
+    }
 
     let checked = 0;
     let skipped = 0;

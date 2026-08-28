@@ -1,11 +1,48 @@
 import { z } from 'zod';
-import type { OpName } from './generated';
+import { RISKS, type OpName } from './generated';
 
 export const apiError = z.object({
   code: z.string(),
   message: z.string(),
 });
 export type ApiError = z.infer<typeof apiError>;
+
+export const sessionUser = z.object({
+  id: z.number(),
+  username: z.string(),
+  display_name: z.string(),
+  email: z.string(),
+  role: z.string(),
+  role_name: z.string(),
+  permissions: z.array(z.string()),
+  employee_id: z.number().nullable(),
+  must_change_password: z.boolean(),
+});
+export type SessionUser = z.infer<typeof sessionUser>;
+
+export const setupState = z.object({
+  bootstrap_available: z.boolean(),
+  token_required: z.boolean(),
+});
+export type SetupState = z.infer<typeof setupState>;
+
+export const oauthState = z.object({
+  enabled: z.boolean(),
+  label: z.string(),
+  domain: z.string().nullable(),
+  creates_accounts: z.boolean(),
+  password_login_disabled: z.boolean(),
+});
+export type OauthState = z.infer<typeof oauthState>;
+
+export const authEnvelope = z.object({
+  ok: z.boolean().optional(),
+  error: apiError.optional(),
+  user: sessionUser.optional(),
+  oauth: oauthState.partial().optional(),
+  setup: setupState.optional(),
+});
+export type AuthEnvelope = z.infer<typeof authEnvelope>;
 
 export class OpFailed extends Error {
   constructor(
@@ -17,15 +54,15 @@ export class OpFailed extends Error {
   }
 }
 
-const SHAPE_MISMATCH = 'shape_mismatch';
+export const SHAPE_MISMATCH: ApiError = {
+  code: 'shape_mismatch',
+  message: '伺服器回應的欄位與本畫面預期的不相符，請聯絡系統管理員。',
+};
 
 function parsed<S extends z.ZodType>(schema: S, data: unknown): z.infer<S> {
   const result = schema.safeParse(data);
   if (result.success) return result.data;
-  throw new OpFailed(
-    { code: SHAPE_MISMATCH, message: '伺服器回應的欄位與本畫面預期的不相符，請聯絡系統管理員。' },
-    result.error,
-  );
+  throw new OpFailed(SHAPE_MISMATCH, result.error);
 }
 
 type UnauthorizedHandler = () => void;
@@ -129,9 +166,9 @@ export async function getMeta(): Promise<Meta> {
   noteServerTime(res);
   if (res.status === 401) throw sessionExpired();
   if (!res.ok) throw new Error(`讀不到系統資訊（HTTP ${res.status}）`);
-  const meta = (await res.json()) as Meta;
-  setBusinessOffset(meta.utc_offset);
-  return meta;
+  const info = parsed(meta, await res.json());
+  setBusinessOffset(info.utc_offset);
+  return info;
 }
 
 export const stat = z.object({
@@ -1118,6 +1155,25 @@ export async function getHealthz(): Promise<Healthz> {
   const res = await fetch('/healthz');
   if (!res.ok && res.status !== 503) throw new Error(`讀不到系統健康（HTTP ${res.status}）`);
   return parsed(healthz, await res.json());
+}
+
+export const opInfo = z.object({
+  name: z.string(),
+  risk: z.enum(RISKS),
+  risk_label: z.string(),
+  summary: z.string(),
+  enabled: z.boolean(),
+});
+export type OpInfo = z.infer<typeof opInfo>;
+
+export const opList = z.object({ operations: z.array(opInfo) });
+
+export async function getOps(): Promise<OpInfo[]> {
+  const res = await fetch('/v1/ops', { headers: headers() });
+  noteServerTime(res);
+  if (res.status === 401) throw sessionExpired();
+  if (!res.ok) throw new Error(`讀不到操作清單（HTTP ${res.status}）`);
+  return parsed(opList, await res.json()).operations;
 }
 
 export const approvalStepState = z.object({

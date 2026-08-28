@@ -14,6 +14,7 @@ import {
   type Account,
   type ArAging,
   type ArInvoice,
+  type VatInfo,
 } from '../api/client';
 import {
   EMPTY_TAX_TRIPLE,
@@ -26,12 +27,6 @@ interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
   onChanged: () => void;
-}
-
-interface VatInfo {
-  rate: string;
-  rate_percent: string;
-  version: string;
 }
 
 const FIELD_LABEL: Record<string, string> = {

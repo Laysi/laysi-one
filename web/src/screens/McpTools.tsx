@@ -3,19 +3,12 @@ import {
   aiAuditList,
   businessTime,
   callOp,
+  getOps,
   updatedMcpToolGrant,
   type AuditEntry,
+  type OpInfo,
 } from '../api/client';
 import { useCurrentUser } from '../auth';
-import type { Risk } from '../api/generated';
-
-interface OpInfo {
-  name: string;
-  risk: Risk;
-  risk_label: string;
-  summary: string;
-  enabled: boolean;
-}
 
 const SELF = 'set_mcp_tool_grant';
 
@@ -53,9 +46,8 @@ export function McpTools({ onToast, reloadKey }: Props) {
   }
 
   useEffect(() => {
-    fetch('/v1/ops')
-      .then((r) => r.json())
-      .then((d: { operations: OpInfo[] }) => setOps(d.operations))
+    getOps()
+      .then(setOps)
       .catch(() => setOps([]));
     callOp('list_ai_audit', { limit: 20 }, undefined, aiAuditList)
       .then((d) => setAudit(d.entries))

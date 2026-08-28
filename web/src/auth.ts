@@ -1,17 +1,17 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { noteServerTime, setUnauthorizedHandler, type ApiError } from './api/client';
+import {
+  authEnvelope,
+  noteServerTime,
+  setUnauthorizedHandler,
+  SHAPE_MISMATCH,
+  type ApiError,
+  type AuthEnvelope,
+  type OauthState,
+  type SessionUser,
+  type SetupState,
+} from './api/client';
 
-export interface SessionUser {
-  id: number;
-  username: string;
-  display_name: string;
-  email: string;
-  role: string;
-  role_name: string;
-  permissions: string[];
-  employee_id: number | null;
-  must_change_password: boolean;
-}
+export type { OauthState, SessionUser, SetupState };
 
 export class AuthFailed extends Error {
   constructor(public readonly error: ApiError) {
@@ -22,25 +22,12 @@ export class AuthFailed extends Error {
 
 export const NO_USER_ACCOUNT = 'no_user_account';
 
-export interface SetupState {
-  bootstrap_available: boolean;
-  token_required: boolean;
-}
-
 export interface BootstrapInput {
   password: string;
   setup_token: string;
 }
 
 const CLOSED_SETUP: SetupState = { bootstrap_available: false, token_required: false };
-
-export interface OauthState {
-  enabled: boolean;
-  label: string;
-  domain: string | null;
-  creates_accounts: boolean;
-  password_login_disabled: boolean;
-}
 
 const OAUTH_OFF: OauthState = {
   enabled: false,
@@ -81,29 +68,22 @@ export function useCurrentUser(): SessionUser {
   return user;
 }
 
-interface Envelope<T> {
-  ok?: boolean;
-  error?: ApiError;
-  user?: T;
-  oauth?: Partial<OauthState>;
-  setup?: SetupState;
-}
-
 function landOnStart(): void {
   if (window.location.pathname !== '/') {
     window.history.replaceState({}, '', '/');
   }
 }
 
-async function readEnvelope(res: Response): Promise<Envelope<SessionUser>> {
+async function readEnvelope(res: Response): Promise<AuthEnvelope> {
   const body: unknown = await res.json().catch(() => null);
-  if (body && typeof body === 'object') return body as Envelope<SessionUser>;
-  return {};
+  if (body === null) return {};
+  const read = authEnvelope.safeParse(body);
+  return read.success ? read.data : { error: SHAPE_MISMATCH };
 }
 
-function failure(res: Response, envelope: Envelope<SessionUser>): AuthFailed {
+function failure(res: Response, read: AuthEnvelope): AuthFailed {
   return new AuthFailed(
-    envelope.error ?? { code: 'network', message: `伺服器回應異常（HTTP ${res.status}）` },
+    read.error ?? { code: 'network', message: `伺服器回應異常（HTTP ${res.status}）` },
   );
 }
 

@@ -114,3 +114,20 @@ export function mismatch(op: string, data: unknown): string | null {
   }
   return failures.join(" / ");
 }
+
+/// The same check against one named schema, for the endpoints that are not
+/// operations: /v1/auth/me, /v1/meta and /v1/ops are plain routes, so there is
+/// no call site to read the wiring from.
+export function mismatchAgainst(name: string, data: unknown): string | null {
+  const schema = client[name];
+  if (!schema?.safeParse) throw new Error(`${name} 不是 client.ts 匯出的 schema`);
+  const parsed = schema.safeParse(data);
+  if (parsed.success) return null;
+  return (
+    `${name}：` +
+    parsed.error.issues
+      .slice(0, 3)
+      .map((i: any) => `${i.path.join(".")} ${i.message}`)
+      .join("；")
+  );
+}
