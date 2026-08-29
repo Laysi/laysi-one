@@ -112,7 +112,6 @@ impl Operation for ListApiTokens {
             json!({
                 "tokens": rows,
                 "live_count": live,
-                "storage_note": "明文只在核發時顯示一次。",
                 "wiring_note": "設定輪替天數後，超過期限就不能連線。",
             }),
             summary,

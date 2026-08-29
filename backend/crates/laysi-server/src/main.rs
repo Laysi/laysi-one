@@ -292,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
                     created,
                     "RustFS 物件儲存就緒"
                 ),
-                Err(e) => tracing::warn!(error = %e, "RustFS 連得上設定但桶子備妥失敗"),
+                Err(e) => tracing::warn!(error = %e, "RustFS 連得上設定但 bucket 備妥失敗"),
             }
             Some(o)
         }

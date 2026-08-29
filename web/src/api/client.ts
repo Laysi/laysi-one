@@ -1104,7 +1104,6 @@ export type AiAuditList = z.infer<typeof aiAuditList>;
 export const apiTokenList = z.object({
   tokens: z.array(apiTokenRow),
   live_count: z.number(),
-  storage_note: z.string(),
   wiring_note: z.string(),
 });
 export type ApiTokenList = z.infer<typeof apiTokenList>;
@@ -2404,7 +2403,6 @@ export const myApiTokenList = z.object({
   live_count: z.number(),
   tools: myMcpTools,
   endpoint: z.string(),
-  storage_note: z.string(),
   scope_note: z.string(),
 });
 export type MyApiTokenList = z.infer<typeof myApiTokenList>;

@@ -247,7 +247,6 @@ export function MyMcp({ onToast, reloadKey }: Props) {
               <p className="form-note">還沒核發過 Token。</p>
             )}
           </div>
-          <p className="hint">{data.storage_note}</p>
         </section>
 
         <section>

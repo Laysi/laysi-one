@@ -1576,7 +1576,6 @@ impl Operation for ListMyApiTokens {
                 "live_count": live,
                 "tools": tools,
                 "endpoint": "/mcp",
-                "storage_note": "明文只在核發時顯示一次。",
                 "scope_note": "只列出 owner_employee_id 等於 ctx.employee_id 的 Token；負責人代發的不在此列。",
             }),
             summary,

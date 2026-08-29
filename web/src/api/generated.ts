@@ -232,9 +232,9 @@ export const OPS: readonly OpMeta[] = [
   { name: 'issue_my_api_token', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入者本人的身分核發一組 MCP Token。輸入只有名稱、用途與輪替天數，不能指定代表對象與角色，兩者都取自 session，因此這組 Token 能做的事與本人完全相同。明文僅回傳一次。" },
   { name: 'list_my_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人自助核發的 MCP Token，以及本人在 MCP 上實際能呼叫的工具清單。不含負責人代發的 Token，輸入不含可指定他人的欄位。" },
   { name: 'revoke_my_api_token', risk: 'needs_confirm', riskLabel: '需人確認', summary: "撤銷一組本人自助核發的 MCP Token。只能撤銷本人核發的 Token，別人核發的一律查無此筆。撤銷後不可復原。" },
-  { name: 'get_company_settings', risk: 'read_only', riskLabel: '唯讀', summary: "讀公司與帳務設定：公司名稱、統編、會計年度、本位幣。本期會計期間與單據編號規則為現算；營業稅依生效日由法規規則庫解析。" },
-  { name: 'update_company_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "變更一項公司設定。只有標示為可編輯的項目能改；統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班與休息時間收 HH:MM 且可以留空表示不判定遲到；法規決定的數值由規則檔提供，不在這個操作變更。" },
-  { name: 'set_company_timezone', risk: 'admin_only', riskLabel: '限系統管理員', summary: "變更記帳時區。出勤日期與單據日期以這個時區判定，格式 +08:00。已經有打卡或補登申請時拒絕變更：出勤日期是由打卡時刻依時區推導後存下來的，換一個時區會把晚間的打卡改記到另一天。" },
+  { name: 'get_company_settings', risk: 'read_only', riskLabel: '唯讀', summary: "讀公司與帳務設定：公司名稱、統一編號、會計年度、本位幣、本期會計期間、單據編號規則與營業稅率。" },
+  { name: 'update_company_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "變更一項公司設定。只有可編輯的項目改得動：統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班與休息時間收 HH:MM，留空表示不判定遲到。法規決定的數值不在這裡變更。" },
+  { name: 'set_company_timezone', risk: 'admin_only', riskLabel: '限系統管理員', summary: "變更記帳時區。出勤日期與單據日期依這個時區判定，格式 +08:00。已經有打卡或補登申請時不能變更。" },
   { name: 'list_chart_of_accounts', risk: 'read_only', riskLabel: '唯讀', summary: "讀會計科目表：代號、名稱、類別、正常餘額方向，以及所屬報表分組、現金流量活動別與目前餘額" },
   { name: 'list_dimensions', risk: 'read_only', riskLabel: '唯讀', summary: "讀部門清單。" },
   { name: 'list_roles', risk: 'read_only', riskLabel: '唯讀', summary: "讀角色權限對照表：哪個角色有哪些權限、完整還是有限。每次呼叫都會即時強制檢查。" },
@@ -260,8 +260,8 @@ export const OPS: readonly OpMeta[] = [
   { name: 'issue_api_token', risk: 'admin_only', riskLabel: '限系統管理員', summary: "核發一組新的 API 或 MCP Token。明文僅出現於本次回應。" },
   { name: 'revoke_api_token', risk: 'high_risk', riskLabel: '高風險', summary: "撤銷一組 Token。撤銷後不能復原，需要時重新核發。" },
   { name: 'get_system_health', risk: 'read_only', riskLabel: '唯讀', summary: "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。物件儲存連線由 /healthz 回答。" },
-  { name: 'get_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀異地備份設定：儲存位置、桶子、路徑、保留天數與上次備份結果。存取金鑰不在回應內，設定後也無法取回。" },
-  { name: 'update_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "設定異地備份：儲存位置、桶子、路徑、存取金鑰與保留天數。存取密鑰留空表示沿用原設定。" },
+  { name: 'get_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀異地備份設定：儲存位置、bucket、路徑、保留天數與上次備份結果。存取金鑰不在回應內，設定後也無法取回。" },
+  { name: 'update_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "設定異地備份：儲存位置、bucket、路徑、存取金鑰與保留天數。存取密鑰留空表示沿用原設定。" },
   { name: 'confirm_backup_key', risk: 'admin_only', riskLabel: '限系統管理員', summary: "確認還原金鑰已保存。確認後系統不再留存該金鑰，備份隨即開始執行。" },
 ] as const;
 

@@ -390,6 +390,7 @@ textarea {
   font-weight: var(--weight-semibold);
   font-size: var(--text-md);
   padding: var(--space-sm) var(--space-2xl);
+  white-space: nowrap;
 }
 
 .chip:hover {
@@ -951,6 +952,14 @@ textarea {
 
 .table .align-right {
   text-align: right;
+}
+
+/* Shrink a column to its content so the prose column absorbs the rest.
+   Without it the auto layout starves a two-character cell down to one
+   character per line. */
+.table .cell-fit {
+  width: 1%;
+  white-space: nowrap;
 }
 
 .table tbody tr:hover {

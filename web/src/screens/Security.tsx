@@ -584,10 +584,10 @@ export function Security({ onToast, reloadKey }: Props) {
                             setBackupForm({ ...backupForm, endpoint: e.target.value })
                           }
                         />
-                        <span className="field__hint">相容 S3 介面的儲存服務皆可。</span>
+                        <span className="field__hint">相容 S3</span>
                       </label>
                       <label className="field">
-                        桶子名稱
+                        Bucket 名稱
                         <input
                           className="input"
                           value={backupForm.bucket}
@@ -607,10 +607,8 @@ export function Security({ onToast, reloadKey }: Props) {
                         <input
                           className="input"
                           value={backupForm.prefix}
-                          placeholder="laysi"
                           onChange={(e) => setBackupForm({ ...backupForm, prefix: e.target.value })}
                         />
-                        <span className="field__hint">留空表示寫在桶子最上層。</span>
                       </label>
                       <label className="field">
                         保留天數
@@ -727,7 +725,6 @@ export function Security({ onToast, reloadKey }: Props) {
             )}
 
             <h3 className={`section-title${oidc || backup ? ' section-title--spaced' : ''}`}>Token 與連線</h3>
-            <p className="section-note">{tokens.storage_note}</p>
             <div className="card fact-card">
               {tokens.tokens.map((t) => (
                 <div className="fact fact--stacked" key={t.id}>
@@ -771,9 +768,6 @@ export function Security({ onToast, reloadKey }: Props) {
 
             <p className="recon recon--off">{tokens.wiring_note}</p>
 
-            <p className="hint">
-              新發的 Token 代表<span className="num">{me.display_name}</span>。
-            </p>
           </section>
         </div>
       )}

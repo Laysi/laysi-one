@@ -165,21 +165,21 @@ export function McpTools({ onToast, reloadKey }: Props) {
             <thead>
               <tr>
                 <th>工具</th>
-                <th>風險</th>
-                <th>AI 可用</th>
-                <th>工具名稱</th>
+                <th className="cell-fit">風險</th>
+                <th className="cell-fit">AI 可用</th>
+                <th className="cell-fit">工具名稱</th>
               </tr>
             </thead>
             <tbody>
               {ops.map((o) => (
                 <tr key={o.name}>
                   <td>{o.summary}</td>
-                  <td>
+                  <td className="cell-fit">
                     <span className={`tag${o.risk === 'read_only' ? '' : ' tag--warn'}`}>
                       {o.risk_label}
                     </span>
                   </td>
-                  <td>
+                  <td className="cell-fit">
                     {canSwitch && o.name !== SELF ? (
                       <button
                         className={`chip${o.enabled ? ' chip--on' : ''}`}
@@ -197,7 +197,7 @@ export function McpTools({ onToast, reloadKey }: Props) {
                       </>
                     )}
                   </td>
-                  <td className="num cell-muted">{o.name}</td>
+                  <td className="num cell-muted cell-fit">{o.name}</td>
                 </tr>
               ))}
             </tbody>

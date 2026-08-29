@@ -55,7 +55,7 @@ pub enum StorageError {
     #[error("物件儲存 {op} 失敗：{message}")]
     S3 { op: &'static str, message: String },
 
-    #[error("物件 {key} 不在桶子裡")]
+    #[error("物件 {key} 不在 bucket 裡")]
     NotFound { key: String },
 
     #[error(
@@ -340,7 +340,7 @@ impl ObjectStore {
             .send()
             .await;
         if let Err(e) = outcome {
-            tracing::warn!(key, error = %e, "上傳失敗後清不掉物件，桶子裡留下一個孤兒");
+            tracing::warn!(key, error = %e, "上傳失敗後清不掉物件，bucket 裡留下一個孤兒");
         }
     }
 
