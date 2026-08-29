@@ -107,7 +107,11 @@ jobs:
       - run: npm run build
         working-directory: web
 
-      # Both read web/src, so they run after the install above.
+      # All four read web/src, so they run after the install above.
       - run: bun scripts/schema-test.ts
 
       - run: bun scripts/markdown-test.ts
+
+      - run: bun scripts/format-test.ts
+
+      - run: bun scripts/nav-test.ts

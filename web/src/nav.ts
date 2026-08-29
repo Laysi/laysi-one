@@ -1,3 +1,5 @@
+import type { OpName } from './api/generated';
+
 export type ScreenId =
   | 'dash'
   | 'gl'
@@ -44,7 +46,7 @@ export interface NavItem {
   kind: 'item';
   id: ScreenId;
   label: string;
-  op: string;
+  op: OpName;
   ready?: boolean;
   badge?: 'pending' | 'draft' | 'unread';
 }

@@ -267,7 +267,8 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
   印出 `undefined`，現在停在 `callOp`。**手寫的 schema 只有一條路證得出它與後端相符**：
   `bun scripts/function-test.ts && bun scripts/schema-live-test.ts`，後者對著真的伺服器
   逐一呼叫再解析，並且從呼叫端本身讀出操作與 schema 的對應，不另存一份清單。
-  純資料的邊界檢查在 `scripts/schema-test.ts`。
+  純資料的邊界檢查在 `scripts/schema-test.ts`；螢幕上的金額與日期格式在
+  `scripts/format-test.ts`、導覽與網址在 `scripts/nav-test.ts`，四支都在 CI 裡。
   **`/v1/auth/me`／`/v1/meta`／`/v1/ops` 不是操作但同樣要驗**（`authEnvelope`／`meta`／
   `opList`，都在 `client.ts`），live 檢查以 `mismatchAgainst` 核對。`SessionUser` 這類
   形狀住 `client.ts` 不住 `auth.ts`。風險分級的執行期清單由產生器發成 `RISKS`，不手抄。
