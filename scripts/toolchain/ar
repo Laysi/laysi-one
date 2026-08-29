@@ -1,3 +1,0 @@
-#!/bin/sh
-# Static archiver backed by zig; see ./cc.
-exec "${ZIG:-zig}" ar "$@"

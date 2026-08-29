@@ -65,7 +65,7 @@ docs/architecture.md 跨層契約，動型別或端點前先讀
 工具鏈由 proto 管理，版本釘在倉庫根目錄的 `.prototools`：
 
 ```bash
-proto install              # rust、zig、node
+proto install              # rust、node
 cargo install cargo-watch  # scripts/dev 用它自動重建重啟伺服器
 
 # 資料庫與物件儲存在容器裡，伺服器與前端跑在本機
@@ -80,13 +80,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # 改過 laysi-ops 後重新產生前端型別
 cargo run -p laysi-server --bin laysi-schema -- ../web/src/api/generated.ts
-```
-
-本機沒有系統 C 編譯器時（`ring` 之類的相依要編 C 原始碼），把 `scripts/toolchain`
-放進 PATH，裡面的 `cc` 與 `ar` 會轉呼叫 proto 裝的 zig：
-
-```fish
-set -x PATH (pwd)/scripts/toolchain $PATH
 ```
 
 管理指令直接在跑著的 api 容器裡執行：
