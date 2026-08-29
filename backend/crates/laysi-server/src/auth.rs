@@ -1037,4 +1037,42 @@ mod tests {
             .await
             .expect("應可清除測試帳號");
     }
+
+    #[test]
+    fn client_ip_takes_the_first_hop_and_drops_anything_that_is_not_an_address() {
+        let ip = |name: &'static str, value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, HeaderValue::from_static(value));
+            client_ip(&headers)
+        };
+
+        assert_eq!(
+            ip("x-forwarded-for", "203.0.113.7, 10.0.0.1, 10.0.0.2"),
+            Some("203.0.113.7".to_string()),
+            "第一跳是來源，其後的是代理"
+        );
+        assert_eq!(
+            ip("x-forwarded-for", "  203.0.113.7  "),
+            Some("203.0.113.7".to_string())
+        );
+        assert_eq!(
+            ip("x-real-ip", "2001:db8::1"),
+            Some("2001:db8::1".to_string())
+        );
+
+        // No proxy rewrites the header when the server is reached directly, so
+        // the value is the caller's to choose. Anything that is not an address
+        // is stored as nothing rather than as text.
+        assert_eq!(ip("x-forwarded-for", "'; DROP TABLE ai_audit_log --"), None);
+        assert_eq!(ip("x-real-ip", "unknown"), None);
+        assert_eq!(client_ip(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn a_malformed_forwarded_for_falls_through_to_the_real_ip_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("unknown"));
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.4"));
+        assert_eq!(client_ip(&headers), Some("198.51.100.4".to_string()));
+    }
 }
