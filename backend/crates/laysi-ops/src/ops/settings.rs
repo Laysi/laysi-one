@@ -114,7 +114,7 @@ impl Operation for GetCompanySettings {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀公司與帳務設定：公司名稱、統編、會計年度、本位幣。本期會計期間與單據編號規則為現算；營業稅依生效日由法規規則庫解析。"
+        "讀公司與帳務設定：公司名稱、統一編號、會計年度、本位幣、本期會計期間、單據編號規則與營業稅率。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -156,7 +156,7 @@ impl Operation for GetCompanySettings {
             "code": "doc_number",
             "label": "單據編號規則",
             "value": format!("V{}-001 起，每月從 001 重新編號", ctx.today.format("%y%m")),
-            "note": "傳票以 V、付款批次以 P、費用報支以 EX、文件以 D 為前綴。",
+            "note": "",
             "editable": false,
             "source": "derived",
         }));
@@ -186,10 +186,7 @@ impl Operation for GetCompanySettings {
             },
         }));
 
-        let summary = format!(
-            "讀取公司設定 · {} 項（含 2 項現算、1 項來自法規規則庫）",
-            rows.len()
-        );
+        let summary = format!("讀取公司設定 · {} 項", rows.len());
         Ok(OpOutcome::new(
             json!({
                 "settings": rows,
@@ -234,9 +231,16 @@ fn is_valid_tax_id(value: &str) -> bool {
 /// The values a setting accepts, when it accepts a fixed few. The screen
 /// offers exactly these and nothing else, so a policy that has two answers
 /// cannot be stored as a third thing that reads like neither.
+/// Months a fiscal year can start in. Offering them as options makes the
+/// screen a picker, so the range no longer has to be written out beside it.
+const FISCAL_MONTHS: [&str; 12] = [
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+];
+
 fn setting_options(code: &str) -> Vec<&'static str> {
     match code {
         "punch_correction_policy" => crate::ops::attendance::CORRECTION_POLICIES.to_vec(),
+        "fiscal_year" => FISCAL_MONTHS.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -325,7 +329,7 @@ impl Operation for UpdateCompanySetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "變更一項公司設定。只有標示為可編輯的項目能改；統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班與休息時間收 HH:MM 且可以留空表示不判定遲到；法規決定的數值由規則檔提供，不在這個操作變更。"
+        "變更一項公司設定。只有可編輯的項目改得動：統一編號驗檢查碼，會計年度收 1 到 12 的起始月份，上下班與休息時間收 HH:MM，留空表示不判定遲到。法規決定的數值不在這裡變更。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateCompanySettingInput>()
@@ -381,7 +385,7 @@ impl Operation for SetCompanyTimezone {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "變更記帳時區。出勤日期與單據日期以這個時區判定，格式 +08:00。已經有打卡或補登申請時拒絕變更：出勤日期是由打卡時刻依時區推導後存下來的，換一個時區會把晚間的打卡改記到另一天。"
+        "變更記帳時區。出勤日期與單據日期依這個時區判定，格式 +08:00。已經有打卡或補登申請時不能變更。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<SetCompanyTimezoneInput>()

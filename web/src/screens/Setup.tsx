@@ -404,6 +404,12 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
   }
 
   const isPlKind = accountForm.kind === 'revenue' || accountForm.kind === 'expense';
+  const defaultSide = DEFAULT_NORMAL_SIDE[accountForm.kind] ?? 'debit';
+  const normalSide = accountForm.contra
+    ? defaultSide === 'debit'
+      ? 'credit'
+      : 'debit'
+    : defaultSide;
 
   return (
     <div>
@@ -508,11 +514,9 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                 ))}
               </div>
 
-              <p className="hint">
-                {canEditSettings
-                  ? '變更立即套用到全系統。'
-                  : '公司設定由系統管理員維護。'}
-              </p>
+              {!canEditSettings && (
+                <p className="hint">公司設定由系統管理員維護。</p>
+              )}
 
               {dims.dimensions.map((d) => (
                 <div key={d.code}>
@@ -633,9 +637,6 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
             {coa && (
               <section>
                 <h3 className="section-title">會計科目表</h3>
-                <p className="section-note">
-                  每個科目都要指定報表段落與現金流量活動別。
-                </p>
                 <div className="toolbar">
                   {showBalances && (
                     <button
@@ -721,7 +722,6 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                 <div className="drawer__title">
                   {accountDrawer === 'edit' ? `編輯科目 ${accountForm.code}` : '新增科目'}
                 </div>
-                <div className="drawer__subtitle">報表分組與現金流量活動別為必填，決定科目在報表中的段落</div>
               </div>
               <button className="btn btn--close" onClick={() => setAccountDrawer(null)} aria-label="關閉">
                 ×
@@ -739,7 +739,6 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                     placeholder="1103"
                     onChange={(e) => setAccountField('code', e.target.value)}
                   />
-                  {accountDrawer === 'edit' && <span className="field__hint">編輯時不可變更代號</span>}
                 </label>
                 <label className="field">
                   科目名稱
@@ -779,14 +778,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                   </select>
                 </label>
 
-                {isPlKind ? (
-                  <div className="field field--full">
-                    <span>現金流量活動別</span>
-                    <p className="field__hint">
-                      損益科目不需填寫本欄。
-                    </p>
-                  </div>
-                ) : (
+                {!isPlKind && (
                   <label className="field">
                     現金流量活動別
                     <select
@@ -800,9 +792,6 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                         </option>
                       ))}
                     </select>
-                    {accountForm.kind === 'asset' && (
-                      <span className="field__hint">僅資產科目可選「現金本身」</span>
-                    )}
                   </label>
                 )}
 
@@ -811,7 +800,6 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                   <input
                     className="input num"
                     value={accountForm.parent_code}
-                    placeholder="可留空"
                     onChange={(e) => setAccountField('parent_code', e.target.value)}
                   />
                 </label>
@@ -846,11 +834,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
                   備抵科目（餘額方向相反）
                 </button>
               </div>
-              <p className="field__hint">
-                正常餘額方向依類別自動帶入（
-                {DEFAULT_NORMAL_SIDE[accountForm.kind] === 'debit' ? '借方' : '貸方'}）；
-                僅「累計折舊」等備抵科目需開啟上方切換，將方向反轉。
-              </p>
+              <p className="field__hint">正常餘額　{SIDE_LABEL[normalSide]}</p>
             </div>
 
             <div className="drawer__foot">

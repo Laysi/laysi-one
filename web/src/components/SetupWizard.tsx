@@ -433,7 +433,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                     </option>
                   ))}
                 </select>
-                <span className="field__hint">財務報表的預設期間依此設定。</span>
               </label>
 
               <div className="wizard-actions">
@@ -450,9 +449,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
       {step === 'bank' && (
         <div className="card wizard-panel">
           <h3 className="section-title">第一個銀行帳戶</h3>
-          <p className="section-note">
-            收款、付款與薪資都要指定資金進出帳戶，之後可於「銀行與現金」續增。
-          </p>
           {!accounts && <p className="state-note">讀取中…</p>}
           {accounts && accounts.length === 0 && (
             <p className="form-warn">
@@ -481,7 +477,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                   />
                 </label>
                 <label className="field field--full">
-                  綁定的總帳科目（必須是啟用中的資產科目，供收付款與核銷使用）
+                  綁定的總帳科目
                   <select className="input" value={glCode} onChange={(e) => setGlCode(e.target.value)}>
                     {accounts.map((a) => (
                       <option key={a.code} value={a.code}>
@@ -511,9 +507,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
       {step === 'dept' && (
         <div className="card wizard-panel">
           <h3 className="section-title">第一個部門</h3>
-          <p className="section-note">
-            員工名冊與部門損益都要使用部門，之後可於「基礎設定」續增。
-          </p>
           {deptDimension && deptDimension.values.length > 0 && (
             <p className="section-note">
               目前已有：{deptDimension.values.map((v) => v.label).join('、')}
@@ -549,8 +542,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         <div className="card wizard-panel">
           <h3 className="section-title">上下班時間</h3>
           <p className="section-note">
-            填了上下班時間才判定遲到、才計加班時數；留空只記錄打卡時間，之後可在「基礎設定」補上。
-            上班到下班之間扣掉休息時間，就是一天的正常工時。
+            留空只記錄打卡時間，不判定遲到、不計加班時數。
           </p>
           <div className="field-grid">
             <label className="field">
@@ -567,8 +559,12 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
             </label>
             <label className="field">
               休息結束時間
-              <TimeField label="休息結束時間" value={breakEnd} onChange={setBreakEnd} />
-              <span className="field__hint">兩端都填了才從工作時數扣除。</span>
+              <TimeField
+                label="休息結束時間"
+                value={breakEnd}
+                onChange={setBreakEnd}
+                disabled={!breakStart}
+              />
             </label>
             <label className="field">
               遲到寬限（分鐘）
@@ -579,7 +575,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                 placeholder="10"
                 onChange={(e) => setGraceMinutes(e.target.value)}
               />
-              <span className="field__hint">寬限僅免除遲到判定，下班時間不順延。</span>
             </label>
           </div>
           <div className="wizard-actions">
@@ -649,9 +644,8 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                 onChange={(e) => setSsoPasswordOff(e.target.value === 'off')}
               >
                 <option value="on">開放</option>
-                <option value="off">停用</option>
+                <option value="off">停用（系統管理員除外）</option>
               </select>
-              <span className="field__hint">系統管理員仍可用密碼登入。</span>
             </label>
             <div className="field field--full">
               轉址網址
@@ -784,9 +778,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                     }
                     readOnly
                   />
-                  {ssoDomainReady && (
-                    <span className="field__hint">@{oidc!.allowed_domain} 的地址不必設密碼。</span>
-                  )}
                 </label>
               </div>
               <div className="wizard-actions">

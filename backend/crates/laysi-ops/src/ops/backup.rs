@@ -44,7 +44,7 @@ fn blocked_reason(s: &laysi_store::BackupSetting) -> Option<String> {
         return Some("備份未啟用。".into());
     }
     if s.bucket.trim().is_empty() || s.endpoint.trim().is_empty() {
-        return Some("尚未填寫儲存位置與桶子名稱。".into());
+        return Some("尚未填寫儲存位置與 bucket 名稱。".into());
     }
     if s.access_key.trim().is_empty() || s.secret_key.is_empty() {
         return Some("尚未填寫存取金鑰。".into());
@@ -69,7 +69,7 @@ impl Operation for GetBackupSetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "讀異地備份設定：儲存位置、桶子、路徑、保留天數與上次備份結果。存取金鑰不在回應內，設定後也無法取回。"
+        "讀異地備份設定：儲存位置、bucket、路徑、保留天數與上次備份結果。存取金鑰不在回應內，設定後也無法取回。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -147,7 +147,7 @@ impl Operation for UpdateBackupSetting {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "設定異地備份：儲存位置、桶子、路徑、存取金鑰與保留天數。存取密鑰留空表示沿用原設定。"
+        "設定異地備份：儲存位置、bucket、路徑、存取金鑰與保留天數。存取密鑰留空表示沿用原設定。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateBackupSettingInput>()
@@ -180,7 +180,7 @@ impl Operation for UpdateBackupSetting {
         let turning_on = i.enabled.unwrap_or(now.enabled);
         if turning_on && (endpoint.is_empty() || bucket.is_empty()) {
             return Err(OpError::BadInput(
-                "請先填寫儲存位置與桶子名稱，再啟用備份。".into(),
+                "請先填寫儲存位置與 bucket 名稱，再啟用備份。".into(),
             ));
         }
 
