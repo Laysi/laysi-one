@@ -2047,4 +2047,19 @@ mod tests {
         assert!(known.contains("set_role_permission"));
         assert!(!known.contains("approve_expense"));
     }
+
+    #[test]
+    fn audit_retention_is_a_positive_number_of_days_or_left_empty() {
+        assert!(validate_setting(crate::AUDIT_KEEP_SETTING, "365").is_ok());
+        assert!(validate_setting(crate::AUDIT_KEEP_SETTING, "1").is_ok());
+
+        // Zero would delete the record of the call that set it to zero, and
+        // the way to keep everything is to clear the setting instead.
+        for bad in ["0", "-1", "30.5", "半年", "365 天"] {
+            assert!(
+                validate_setting(crate::AUDIT_KEEP_SETTING, bad).is_err(),
+                "「{bad}」不該是有效的保存天數"
+            );
+        }
+    }
 }

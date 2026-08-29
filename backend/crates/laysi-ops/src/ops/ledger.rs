@@ -601,4 +601,23 @@ mod tests {
         assert!(error.to_string().contains("理由必填"));
         assert_eq!(require_void_reason("  重複過帳  ").unwrap(), "重複過帳");
     }
+
+    #[test]
+    fn an_audit_range_is_bounded_by_business_midnights_and_covers_the_last_day_whole() {
+        let offset = chrono::FixedOffset::east_opt(8 * 3600).expect("+08:00 是有效的偏移量");
+        let from = NaiveDate::from_ymd_opt(2026, 8, 1).expect("日期必須有效");
+        let to = NaiveDate::from_ymd_opt(2026, 8, 31).expect("日期必須有效");
+
+        // Midnight local, not midnight UTC: eight hours of a picked day would
+        // otherwise sit outside the range the person asked for.
+        assert_eq!(
+            day_start(from, offset).to_rfc3339(),
+            "2026-07-31T16:00:00+00:00"
+        );
+
+        let upper = day_start(to.succ_opt().expect("次日必然存在"), offset);
+        let last_moment = day_start(to, offset) + chrono::Duration::seconds(86_399);
+        assert!(last_moment < upper, "結束日當天的最後一秒必須落在區間內");
+        assert_eq!(upper.to_rfc3339(), "2026-08-31T16:00:00+00:00");
+    }
 }
