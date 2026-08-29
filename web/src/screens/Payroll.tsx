@@ -8,6 +8,7 @@ import {
   payrollRunResult,
   payrollSummary,
   payslipList,
+  voidedPayroll,
   type PayrollRunResult,
   type PayrollSummary,
   type PayslipList,
@@ -19,9 +20,10 @@ interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
   onChanged: () => void;
+  canVoid: boolean;
 }
 
-export function Payroll({ onToast, reloadKey, onChanged }: Props) {
+export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
   const [summary, setSummary] = useState<PayrollSummary | null>(null);
   const [slips, setSlips] = useState<PayslipList | null>(null);
   const [slipError, setSlipError] = useState<string | null>(null);
@@ -32,6 +34,8 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
 
   const [runPeriod, setRunPeriod] = useState('');
   const [payOn, setPayOn] = useState('');
+  const [voidReason, setVoidReason] = useState('');
+  const [voidOpen, setVoidOpen] = useState(false);
 
   const load = useCallback(() => {
     setError(null);
@@ -96,7 +100,38 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
     }
   }
 
+  async function voidRun(target: string) {
+    setBusy(true);
+    try {
+      const d = await callOp(
+        'void_payroll_run',
+        { period: target, reason: voidReason.trim() },
+        `作廢 ${target} 薪資作業`,
+        voidedPayroll,
+      );
+      onToast(
+        `${d.voided.period} 薪資作業已作廢：${d.voided.headcount} 人的薪資單與` +
+          `${d.voided.voucher_nos.join('、') || '傳票'}已刪除，可以重新計算。`,
+      );
+      setVoidOpen(false);
+      setVoidReason('');
+      setResult(null);
+      setPeriod(undefined);
+      setRunPeriod(target);
+      onChanged();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+
   const run0 = summary?.run ?? null;
+  const periodRuns = summary?.period_runs ?? [];
+  const allPending =
+    periodRuns.length > 0 && periodRuns.every((r) => r.voucher_status === 'pending');
   const alreadyRun =
     runPeriod.trim() !== '' && (summary?.runs ?? []).some((r) => r.period === runPeriod.trim());
 
@@ -178,32 +213,88 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
               <p className="recon recon--off">{summary.employer_note}</p>
 
               <div className="card fact-card">
-                <div className="fact">
-                  <span className="fact__key">薪資傳票</span>
-                  <span className="fact__value num">
-                    {run0.voucher_no ?? '—'}
-                    {run0.voucher_status && (
-                      <span className="tag tag--static">
-                        {run0.voucher_status === 'posted' ? '已過帳' : '待過帳'}
+                {summary.period_runs.map((r, i) => (
+                  <div key={r.voucher_no ?? i}>
+                    <div className="fact">
+                      <span className="fact__key">
+                        {run0.run_count > 1 ? `第 ${run0.run_count - i} 次計算的傳票` : '薪資傳票'}
                       </span>
-                    )}
-                  </span>
-                </div>
-                <div className="fact">
-                  <span className="fact__key">本期適用規則版本</span>
-                  <span className="fact__value num">
-                    勞保 {run0.rulesets.labor_insurance}　健保 {run0.rulesets.health_insurance}　勞退{' '}
-                    {run0.rulesets.pension}　扣繳 {run0.rulesets.withholding}
-                  </span>
-                </div>
-                <div className="fact">
-                  <span className="fact__key">計算人員與時間</span>
-                  <span className="fact__value">
-                    {run0.created_by} · <span className="num">{businessDate(run0.created_at)}</span>
-                    {run0.note && <span className="fact__note">{run0.note}</span>}
-                  </span>
-                </div>
+                      <span className="fact__value num">
+                        {r.voucher_no ?? '—'}
+                        {r.voucher_status && (
+                          <span className="tag tag--static">
+                            {r.voucher_status === 'posted' ? '已過帳' : '待過帳'}
+                          </span>
+                        )}
+                        <span className="cell-hint cell-hint--block num">
+                          {r.headcount} 人 · 應發 {money(r.gross_total)}
+                        </span>
+                      </span>
+                    </div>
+                    <div className="fact">
+                      <span className="fact__key">適用規則版本</span>
+                      <span className="fact__value num">
+                        勞保 {r.rulesets.labor_insurance}　健保 {r.rulesets.health_insurance}　勞退{' '}
+                        {r.rulesets.pension}　扣繳 {r.rulesets.withholding}
+                      </span>
+                    </div>
+                    <div className="fact">
+                      <span className="fact__key">計算人員與時間</span>
+                      <span className="fact__value">
+                        {r.created_by} · <span className="num">{businessDate(r.created_at)}</span>
+                        {r.note && <span className="fact__note">{r.note}</span>}
+                      </span>
+                    </div>
+                  </div>
+                ))}
               </div>
+
+              {canVoid && allPending && (
+                <div className="card form-card">
+                  {voidOpen ? (
+                    <>
+                      <p className="form-warn">
+                        作廢後<strong>無法復原</strong>：{run0.period} 的 {run0.headcount}{' '}
+                        人薪資單、扣繳紀錄與{' '}
+                        <span className="num">
+                          {periodRuns.map((r) => r.voucher_no ?? '—').join('、')}
+                        </span>{' '}
+                        一併刪除，之後可以重新計算。
+                      </p>
+                      <label className="field field--full">
+                        作廢理由（必填，會寫進稽核摘要）
+                        <textarea
+                          className="input"
+                          rows={2}
+                          value={voidReason}
+                          placeholder="例如：到職日更正，重新計算本期"
+                          onChange={(e) => setVoidReason(e.target.value)}
+                        />
+                      </label>
+                      <div className="toolbar">
+                        <button className="btn btn--ghost" onClick={() => setVoidOpen(false)}>
+                          取消
+                        </button>
+                        <span className="spacer" />
+                        <button
+                          className={`btn${busy ? ' btn--off' : ''}`}
+                          disabled={busy || voidReason.trim() === ''}
+                          onClick={() => void voidRun(run0.period)}
+                        >
+                          {busy ? '處理中…' : '確認作廢，無法復原'}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <button
+                      className="btn btn--secondary btn--compact"
+                      onClick={() => setVoidOpen(true)}
+                    >
+                      作廢本期薪資作業，重新計算
+                    </button>
+                  )}
+                </div>
+              )}
             </>
           ) : (
             <p className="state-note">尚無薪資計算紀錄，請由右側算出第一期。</p>

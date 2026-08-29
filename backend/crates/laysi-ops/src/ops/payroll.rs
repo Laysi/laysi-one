@@ -58,6 +58,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(GetPayrollSummary),
         Box::new(ListPayslips),
         Box::new(RunPayroll),
+        Box::new(VoidPayrollRun),
     ]
 }
 
@@ -298,6 +299,34 @@ fn run_json(r: &laysi_store::PayrollRun) -> Value {
     })
 }
 
+/// The periods of these runs, newest first, each named once. A period holds
+/// more than one run once somebody is paid late, and the screen offers periods.
+fn distinct_periods(runs: &[laysi_store::PayrollRun]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for r in runs {
+        if !seen.contains(&r.period) {
+            seen.push(r.period.clone());
+        }
+    }
+    seen
+}
+
+/// One period as the screen totals it. A person paid late is paid by a second
+/// run of the same period, so a period is a sum of runs and not one of them.
+fn period_json(runs: &[&laysi_store::PayrollRun]) -> Option<Value> {
+    let first = runs.first()?;
+    Some(json!({
+        "period": first.period,
+        "pay_on": first.pay_on,
+        "headcount": runs.iter().map(|r| r.headcount).sum::<i32>(),
+        "gross_total": runs.iter().map(|r| r.gross_total).sum::<Money>().to_string(),
+        "deduction_total": runs.iter().map(|r| r.deduction_total).sum::<Money>().to_string(),
+        "net_total": runs.iter().map(|r| r.net_total).sum::<Money>().to_string(),
+        "employer_total": runs.iter().map(|r| r.employer_total).sum::<Money>().to_string(),
+        "run_count": runs.len(),
+    }))
+}
+
 // Payroll summary
 
 struct GetPayrollSummary;
@@ -330,10 +359,14 @@ impl Operation for GetPayrollSummary {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: PayrollPeriodInput = parse(input)?;
         let runs = ctx.store.payroll_runs(24).await?;
-        let picked = match &i.period {
-            Some(p) => runs.iter().find(|r| &r.period == p),
-            None => runs.first(),
+        let selected = match &i.period {
+            Some(p) => Some(p.clone()),
+            None => runs.first().map(|r| r.period.clone()),
         };
+        let picked: Vec<&laysi_store::PayrollRun> = runs
+            .iter()
+            .filter(|r| Some(&r.period) == selected.as_ref())
+            .collect();
 
         // Two independently computed paths: HR sums gross pay per period, the
         // ledger computes the balance of 6111. Equality is a conclusion, not an
@@ -343,9 +376,7 @@ impl Operation for GetPayrollSummary {
         let gap = posted - gl;
 
         let detail_visible = ctx.actor_role == crate::ROLE_BOSS;
-        let period_label = picked
-            .map(|r| r.period.clone())
-            .unwrap_or_else(|| "—".into());
+        let period_label = selected.clone().unwrap_or_else(|| "—".into());
 
         // Same question the HR dashboard asks, asked the same way: is there a
         // run for this month? Scanning the recent-runs list would answer it
@@ -358,25 +389,29 @@ impl Operation for GetPayrollSummary {
             .is_none()
             .then_some(this_month);
 
-        let summary = match picked {
-            Some(r) => format!(
+        let summary = match picked.is_empty() {
+            false => format!(
                 "讀薪資彙總 {} · {} 人應發 {} 代扣 {} 實發 {} · 與總帳 6111 {}",
-                r.period,
-                r.headcount,
-                money(r.gross_total),
-                money(r.deduction_total),
-                money(r.net_total),
+                period_label,
+                picked.iter().map(|r| r.headcount).sum::<i32>(),
+                money(picked.iter().map(|r| r.gross_total).sum()),
+                money(picked.iter().map(|r| r.deduction_total).sum()),
+                money(picked.iter().map(|r| r.net_total).sum()),
                 if gap.is_zero() { "相符" } else { "不符" }
             ),
-            None => "讀薪資彙總 · 尚無任何期別的薪資計算紀錄".to_string(),
+            true => "讀薪資彙總 · 尚無任何期別的薪資計算紀錄".to_string(),
         };
 
         Ok(OpOutcome::new(
             json!({
                 "period": period_label,
-                "run": picked.map(run_json),
+                "run": period_json(&picked),
+                // The runs that add up to the selected period, newest first.
+                // The screen states each one: they carry a voucher and a set
+                // of rule versions of their own.
+                "period_runs": picked.iter().map(|r| run_json(r)).collect::<Vec<_>>(),
                 "runs": runs.iter().map(run_json).collect::<Vec<_>>(),
-                "periods": runs.iter().map(|r| r.period.clone()).collect::<Vec<_>>(),
+                "periods": distinct_periods(&runs),
                 // Reconciliation: HR gross total against the posted balance of 6111.
                 "hr_posted_total": posted.to_string(),
                 "gl_balance": gl.to_string(),
@@ -443,6 +478,10 @@ impl Operation for ListPayslips {
 
         let (_, _, period_end) = resolve_period(Some(run.period.clone()), ctx.today)?;
         let slips = ctx.store.payslips(&run.period).await?;
+        // Every run of the period, because payslips are listed by period and a
+        // late joiner is paid by a second run.
+        let period_runs: Vec<&laysi_store::PayrollRun> =
+            runs.iter().filter(|r| r.period == run.period).collect();
 
         let mut rows = Vec::with_capacity(slips.len());
         let mut all_match = true;
@@ -498,19 +537,19 @@ impl Operation for ListPayslips {
             "讀 {} 逐人薪資明細 · {} 人 · 應發 {} 實發 {} · 依存下來的規則版本重算{}",
             run.period,
             rows.len(),
-            money(run.gross_total),
-            money(run.net_total),
+            money(period_runs.iter().map(|r| r.gross_total).sum()),
+            money(period_runs.iter().map(|r| r.net_total).sum()),
             if all_match { "一致" } else { "有差異" }
         );
 
         Ok(OpOutcome::new(
             json!({
                 "period": run.period,
-                "run": run_json(run),
+                "run": period_json(&period_runs),
                 "rows": rows,
                 "recompute_all_match": all_match,
                 "recompute_note": "各列都以當期薪資作業保存的規則版本重算一次，並與儲存值比對。",
-                "periods": runs.iter().map(|r| r.period.clone()).collect::<Vec<_>>(),
+                "periods": distinct_periods(&runs),
             }),
             summary,
         ))
@@ -742,6 +781,52 @@ impl Operation for RunPayroll {
     }
 }
 
+// Undo a payroll run so the period can be computed again
+
+struct VoidPayrollRun;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct VoidPayrollRunInput {
+    /// Period (YYYY-MM) to undo.
+    pub period: String,
+    /// Reason for voiding. Required, and written into the audit summary.
+    pub reason: String,
+}
+
+#[async_trait]
+impl Operation for VoidPayrollRun {
+    fn name(&self) -> &'static str {
+        "void_payroll_run"
+    }
+    fn risk(&self) -> Risk {
+        // Deletes payslips and the voucher that carried them. Same tier as
+        // producing them.
+        Risk::HighRisk
+    }
+    fn summary(&self) -> &'static str {
+        "作廢一整期的薪資作業，薪資單、扣繳紀錄與待過帳傳票一併刪除，主檔改好後可以重新計算。傳票已過帳的期間不受理，差額請在下一期補發或補扣。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<VoidPayrollRunInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: VoidPayrollRunInput = parse(input)?;
+        let reason = crate::ops::ledger::require_void_reason(&i.reason)?;
+        let (period, _, _) = resolve_period(Some(i.period), ctx.today)?;
+
+        let voided = ctx.store.void_payroll_run(&period).await?;
+        let vouchers = match voided.voucher_nos.is_empty() {
+            true => "無傳票".to_string(),
+            false => voided.voucher_nos.join("、"),
+        };
+        let summary = format!(
+            "{} 薪資作業已作廢 · {} 人薪資單與傳票 {} 一併刪除 · 理由：{reason}",
+            voided.period, voided.headcount, vouchers
+        );
+        Ok(OpOutcome::new(json!({ "voided": voided }), summary))
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

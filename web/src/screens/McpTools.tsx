@@ -5,6 +5,7 @@ import {
   businessTime,
   businessToday,
   callOp,
+  downloadFile,
   getOps,
   updatedMcpToolGrant,
   type AuditEntry,
@@ -47,15 +48,6 @@ function csvOf(rows: AuditEntry[]): string {
   return '﻿' + [CSV_HEADERS.join(','), ...lines].join('\r\n');
 }
 
-function download(name: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = name;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
@@ -96,7 +88,11 @@ export function McpTools({ onToast, reloadKey }: Props) {
           onToast('這段期間沒有稽核紀錄');
           return;
         }
-        download(`稽核紀錄-${from || '起始'}-${to || businessToday()}.csv`, csvOf(d.entries));
+        downloadFile(
+          `稽核紀錄-${from || '起始'}-${to || businessToday()}.csv`,
+          csvOf(d.entries),
+          'text/csv;charset=utf-8',
+        );
         onToast(
           d.entries.length === EXPORT_LIMIT
             ? `已匯出 ${EXPORT_LIMIT} 筆，達單次上限；請縮短日期區間再匯出一次`

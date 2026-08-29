@@ -1211,6 +1211,7 @@ impl Registry {
 | `get_backup_setting` | AdminOnly | `{}` | 目的地、保留天數、上次結果、`blocked_reason`、`restore_key_to_save`（只回一次）；**無存取密鑰** |
 | `update_backup_setting` | AdminOnly | `{ enabled?, endpoint?, region?, bucket?, prefix?, access_key?, secret_key?, keep_days? }` | `{ bucket, enabled, blocked_reason }`；`secret_key` 不帶＝沿用 |
 | `confirm_backup_key` | AdminOnly | `{}` | `{ blocked_reason }`；清掉待保存的私鑰，備份隨即開始 |
+| `reset_backup_key` | AdminOnly | `{}` | `{ blocked_reason }`；清掉兩半金鑰，下一次備份重新產生一組 |
 | `list_api_tokens` | ReadOnly | `{ include_revoked? }` | `tokens[]`（**無明文**）、`storage_note`、`wiring_note` |
 | `issue_api_token` | AdminOnly | `{ name, kind, scope, actor, actor_role, rotate_days?, expiry_note? }` | `{ token, secret }`，`secret` 只顯示這一次 |
 | `revoke_api_token` | HighRisk | `{ id }` | `{ token }` |
@@ -1370,6 +1371,7 @@ column，因此不可能與上面的區間不一致。
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額 |
 | `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳 |
 | `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票 |
+| `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
 | `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額 |
 | `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, as_of? }` | 單一級距試算與三份 ruleset |
 | `get_hr_compliance` | ReadOnly | `{ as_of? }` | `checks[]`；逐項帶 `checked`、`passed`、ruleset 與差異 |
@@ -1407,6 +1409,29 @@ ruleset 的上限比較。
 這一頁的主體。`payroll_reconciliation.note`、`table_note`、`source_note` 與逐列的
 `source_note` 一併移除：對帳結論由差額欄位自己說，稅額缺值與「可能為多人合併」
 都已經是該列上的標記。
+
+**一期不只一次計算。** 0054 拿掉 `payroll_run.period` 的 UNIQUE，讓計薪之後才到職
+的人仍領得到那幾天的錢，`run_payroll` 改成跳過已經持有薪資單的人。但
+`record_payroll_run` 裡那條「這一期已經有作業了就回錯」留著沒刪，等於在 Rust 裡
+重建剛拿掉的約束：畫面上那句「這次只算後來到職或當時漏算的人」與它的按鈕，按下去
+必定失敗。同一次移除的還有 `PeriodAlreadyPaid`。**已過帳的期間補算是唯一的路**——
+作廢在那裡被擋下，所以兩個機制不是二選一。連帶的三件事：`payroll_runs` 的排序加上
+`p.id DESC`，一期之內才有定序；`record_payroll_run` 改回傳它剛寫的那一列（依 id
+取，不是依期別再查一次，否則答案是該期排在最前面的那一列）；`get_payroll_summary`
+與 `list_payslips` 的 `run` 改成**該期各次計算的合計**（`period_json`），各次的傳票、
+規則版本與計算人員另以 `period_runs` 逐次回傳，期別選單則逐期只列一次。畫面因此
+一期一張總計卡，底下一段傳票一段規則版本，而作廢的按鈕要該期**每一張**傳票都還沒
+過帳才畫。
+
+**改主檔之後重算，只到總帳為止（0006）。** 到職日改了，那一期的薪資單仍然照舊的
+天數按曆日比例計薪，而回頭的路一條也沒有：`run_payroll` 跳過已經持有薪資單的人，
+`discard_voucher` 拒絕不是手開的傳票並指向產生它的那一頁，而那一頁沒有這個動作。
+`void_payroll_run` 就是它，作廢一整期：薪資單（`payroll_run` 級聯）、扣繳紀錄與
+傳票在同一個交易裡刪掉，之後重新計算。刪除順序由外鍵決定——`withholding_record`
+與 `payroll_run` 都指向傳票，所以兩者先走。**界線在總帳**：只要該期任何一張傳票
+不是待過帳就整個拒絕，已過帳的金額報表已經算進去了，那裡的更正是下一期的差額而
+不是刪除。理由必填並寫進稽核摘要，與 `void_voucher` 同一個 `require_void_reason`。
+畫面畫不畫這顆按鈕看 `permissions` 與傳票狀態，兩個條件缺一就不畫。
 
 **`run_payroll` 在同一個交易裡寫入這些給付紀錄。** 沒有它，扣繳頁永遠寫著「對不上，
 差一整年的薪資」，而畫面上沒有任何動作可以消除——那不是對帳，是一個做不完的待辦。
@@ -2372,8 +2397,8 @@ INSERT。
 備份的目的地是設定，不是部署佈線——這個產品沒有任何一項需要人去主機上編檔案。
 `backup_setting` 是單列表，形狀與 `oidc_setting` 相同：`secret_key` 進得去、出不來，
 稽核紀錄依欄位名遮蔽（`REDACTED_FIELDS`）。畫面在「安全與營運」，操作是
-`get_backup_setting`／`update_backup_setting`／`confirm_backup_key`，三個都是
-`AdminOnly`。
+`get_backup_setting`／`update_backup_setting`／`confirm_backup_key`／
+`reset_backup_key`，四個都是 `AdminOnly`。
 
 **金鑰是非對稱的**。備份檔裡有完整身分證字號，放進別人家的桶子一定要加密；而對稱金鑰
 必須留給加密的那一方讀得到，也就是存進資料庫——但資料庫本身就在那份加密檔裡，還原時
@@ -2383,6 +2408,12 @@ INSERT。
 金鑰格式寫錯的那一方——格式錯了要到有人嘗試還原的那一天才會發現。私鑰落在
 `age_identity_pending`，畫面顯示一次；`confirm_backup_key` 是管理員說「已經抄下來了」，
 而**在那之前備份不執行**，所以沒有任何一份備份含有開啟它的鑰匙。
+
+**抄丟了要換得掉（0007）**。金鑰只在 `age_recipient` 為空的那一次產生，確認之後私鑰
+就永久不存在，所以少了這條路，抄丟的安裝會繼續每天備份到誰也打不開的檔案，而畫面上
+沒有任何動作改得了它。`reset_backup_key` 把兩半一起清空，下一次備份重新產生一組並再
+顯示一次。它停在這裡：**已經寫出去的備份檔仍然只能以原金鑰開啟**，而要不要刪掉它們不
+是這個操作決定得了的事，畫面上的確認視窗照實說這一句。
 
 伺服器因此不必引入 `age` crate：那會為了三行金鑰產生多帶進約六十個 crate（含 fluent
 i18n 與已被標記未來會被 Rust 拒絕的 `proc-macro-error2`）。

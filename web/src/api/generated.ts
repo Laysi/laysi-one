@@ -72,6 +72,7 @@ export type OpName =
   | 'get_payroll_summary'
   | 'list_payslips'
   | 'run_payroll'
+  | 'void_payroll_run'
   | 'get_hr_compliance'
   | 'list_withholding_statements'
   | 'list_notices'
@@ -126,6 +127,7 @@ export type OpName =
   | 'get_backup_setting'
   | 'update_backup_setting'
   | 'confirm_backup_key'
+  | 'reset_backup_key'
 ;
 
 export const RISKS = ['read_only', 'needs_confirm', 'high_risk', 'boss_only', 'admin_only'] as const;
@@ -168,8 +170,8 @@ export const OPS: readonly OpMeta[] = [
   { name: 'create_fixed_asset', risk: 'needs_confirm', riskLabel: '需人確認', summary: "登記固定資產並產生取得傳票（借資產科目與 1284 進項稅額／貸付款科目）。成本填未稅金額，營業稅依取得日適用的稅率拆出，免稅填 0；賒購則改在應付帳款開單、以 1601 為借方科目，再填入該傳票號。耐用年數查自耐用年數表，不逐筆設定。" },
   { name: 'preview_depreciation', risk: 'read_only', riskLabel: '唯讀', summary: "試算某一期的折舊：逐項列出提列金額、適用耐用年數與所依據的年數表版本。僅試算，不產生傳票。" },
   { name: 'run_depreciation', risk: 'needs_confirm', riskLabel: '需人確認', summary: "提列某一期的折舊，產生待過帳傳票（借 6152 折舊費用／貸各資產的累計折舊科目）。同一期僅能提列一次，各項都記錄所用耐用年數與規則版本。" },
-  { name: 'list_expense_claims', risk: 'read_only', riskLabel: '唯讀', summary: "讀費用報支單：各單目前關卡、應經關卡（門檻查自公司簽核規則）、AI 建議科目與人員確認科目" },
-  { name: 'submit_expense_claim', risk: 'needs_confirm', riskLabel: '需人確認', summary: "送出費用報支單（申請人送件關卡）。可帶入 AI 建議的科目與收據文件編號。不產生任何分錄。" },
+  { name: 'list_expense_claims', risk: 'read_only', riskLabel: '唯讀', summary: "讀費用報支單：各單目前關卡、應經關卡（門檻查自公司簽核規則）、送單時建議的科目與人員確認的科目" },
+  { name: 'submit_expense_claim', risk: 'needs_confirm', riskLabel: '需人確認', summary: "送出費用報支單（申請人送件關卡）。可帶入建議的費用科目與收據文件編號。不產生任何分錄。" },
   { name: 'approve_expense_claim', risk: 'high_risk', riskLabel: '高風險', summary: "簽核費用報支單目前所在的關卡。會計關卡要帶入費用科目；最後一關會產生待過帳的費用傳票（借費用科目／貸應付帳款或零用金）。付款方式為月底彙總匯款時，同時列入應付帳款，由付款單匯出。申請人不得核准本人送出的單據。" },
   { name: 'reject_expense_claim', risk: 'needs_confirm', riskLabel: '需人確認', summary: "退回一張報支單，由申請人補件；整張作廢重送。單據內容變更後，先前關卡的簽核就不再有效。" },
   { name: 'get_budget_status', risk: 'read_only', riskLabel: '唯讀', summary: "讀預算執行率：預算數為設定值，實際數一律由已過帳分錄現算。提醒門檻取自公司設定。" },
@@ -209,6 +211,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_payroll_summary', risk: 'read_only', riskLabel: '唯讀', summary: "讀某一期的薪資彙總：應發、代扣、實發、公司負擔，並與總帳 6111 薪資支出對帳。不含任何個人金額。" },
   { name: 'list_payslips', risk: 'boss_only', riskLabel: '限負責人', summary: "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司負擔的勞健保與勞退。限負責人。以同一份規則重算一次，再與存下來的數字比對。" },
   { name: 'run_payroll', risk: 'high_risk', riskLabel: '高風險', summary: "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。已計薪的人不會再算一次，同一期可以為後來到職或漏算的人補算，各自產生一張傳票。" },
+  { name: 'void_payroll_run', risk: 'high_risk', riskLabel: '高風險', summary: "作廢一整期的薪資作業，薪資單、扣繳紀錄與待過帳傳票一併刪除，主檔改好後可以重新計算。傳票已過帳的期間不受理，差額請在下一期補發或補扣。" },
   { name: 'get_hr_compliance', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、延長工時上限（已核准的加班申請與打卡推算各一項）與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。" },
   { name: 'list_withholding_statements', risk: 'boss_only', riskLabel: '限負責人', summary: "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限負責人；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。" },
   { name: 'list_notices', risk: 'read_only', riskLabel: '唯讀', summary: "讀公告與規章，含生效期間與版次；帶 id 則回該則的每一個版本" },
@@ -263,6 +266,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀異地備份設定：儲存位置、bucket、路徑、保留天數與上次備份結果。存取金鑰不在回應內，設定後也無法取回。" },
   { name: 'update_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "設定異地備份：儲存位置、bucket、路徑、存取金鑰與保留天數。存取密鑰留空表示沿用原設定。" },
   { name: 'confirm_backup_key', risk: 'admin_only', riskLabel: '限系統管理員', summary: "確認還原金鑰已保存。確認後系統不再留存該金鑰，備份隨即開始執行。" },
+  { name: 'reset_backup_key', risk: 'admin_only', riskLabel: '限系統管理員', summary: "重設還原金鑰：下一次備份會產生一組新的並顯示一次。既有的備份檔仍然只能以原金鑰開啟。" },
 ] as const;
 
 /** 每個操作的輸入 JSON Schema，可供表單產生或執行期驗證使用。 */
@@ -297,7 +301,7 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'preview_depreciation': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"period":{"default":null,"description":"Period (YYYY-MM). Defaults to this month.","type":["string","null"]}},"title":"DepreciationPeriodInput","type":"object"},
   'run_depreciation': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"period":{"default":null,"description":"Period (YYYY-MM). Defaults to this month.","type":["string","null"]},"run_on":{"default":null,"description":"Voucher date. Defaults to the last day of the period, since\ndepreciation is charged at period end.","format":"date","type":["string","null"]}},"title":"RunDepreciationInput","type":"object"},
   'list_expense_claims': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"include_done":{"default":false,"description":"Include settled and rejected claims; by default only pending ones.","type":"boolean"},"limit":{"default":null,"description":"Maximum rows, default 50.","format":"int64","type":["integer","null"]}},"title":"ListExpenseClaimsInput","type":"object"},
-  'submit_expense_claim': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"amount":{"description":"Amount, tax inclusive.","type":"string"},"claimant":{"default":null,"description":"Claimant. Defaults to the current actor.","type":["string","null"]},"dept_code":{"default":null,"description":"Department code.","type":["string","null"]},"document_no":{"default":null,"description":"Document number of the receipt (upload it with upload_document first).","type":["string","null"]},"memo":{"default":null,"type":["string","null"]},"pay_method":{"default":null,"description":"`reimburse` paid with the month-end run (default), or `petty_cash`\npaid immediately.","type":["string","null"]},"spent_on":{"default":null,"description":"Spend date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]},"suggested_account_code":{"default":null,"description":"Expense account suggested by AI from the receipt. A person decides the\nfinal account at the accounting step.","type":["string","null"]},"title":{"description":"What the money was spent on.","type":"string"}},"required":["title","amount"],"title":"SubmitExpenseClaimInput","type":"object"},
+  'submit_expense_claim': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"amount":{"description":"Amount, tax inclusive.","type":"string"},"claimant":{"default":null,"description":"Claimant. Defaults to the current actor.","type":["string","null"]},"dept_code":{"default":null,"description":"Department code.","type":["string","null"]},"document_no":{"default":null,"description":"Document number of the receipt (upload it with upload_document first).","type":["string","null"]},"memo":{"default":null,"type":["string","null"]},"pay_method":{"default":null,"description":"`reimburse` paid with the month-end run (default), or `petty_cash`\npaid immediately.","type":["string","null"]},"spent_on":{"default":null,"description":"Spend date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]},"suggested_account_code":{"default":null,"description":"Expense account suggested by whoever submitted the claim. A person decides the\nfinal account at the accounting step.","type":["string","null"]},"title":{"description":"What the money was spent on.","type":"string"}},"required":["title","amount"],"title":"SubmitExpenseClaimInput","type":"object"},
   'approve_expense_claim': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"account_code":{"default":null,"description":"Required at the accounting step; later steps may omit it to keep the\nexisting account.","type":["string","null"]},"claim_no":{"description":"Claim number, e.g. `EX2607-001`.","type":"string"},"note":{"default":null,"description":"Approval comment, kept on the record.","type":["string","null"]}},"required":["claim_no"],"title":"ApproveExpenseClaimInput","type":"object"},
   'reject_expense_claim': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"claim_no":{"type":"string"},"note":{"default":null,"description":"Why it was rejected. The claimant needs to know what to fix.","type":["string","null"]}},"required":["claim_no"],"title":"RejectExpenseClaimInput","type":"object"},
   'get_budget_status': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"from":{"default":null,"format":"date","type":["string","null"]},"to":{"default":null,"format":"date","type":["string","null"]},"version":{"default":null,"description":"Budget version code (e.g. `V3`). Defaults to the current version for\nthe year.","type":["string","null"]}},"title":"BudgetStatusInput","type":"object"},
@@ -337,6 +341,7 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'get_payroll_summary': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"period":{"default":null,"description":"Period (YYYY-MM). Defaults to the most recently computed one.","type":["string","null"]}},"title":"PayrollPeriodInput","type":"object"},
   'list_payslips': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"period":{"default":null,"description":"Period (YYYY-MM). Defaults to the most recently computed one.","type":["string","null"]}},"title":"PayrollPeriodInput","type":"object"},
   'run_payroll': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"bank_account_id":{"default":null,"description":"Which bank account pays. Defaults to the first 1102 bank account.","format":"int32","type":["integer","null"]},"note":{"default":null,"type":["string","null"]},"pay_on":{"default":null,"description":"Payment date (YYYY-MM-DD). Defaults to today; withholding resolves on it.","format":"date","type":["string","null"]},"period":{"default":null,"description":"Period (YYYY-MM). Defaults to this month.","type":["string","null"]}},"title":"RunPayrollInput","type":"object"},
+  'void_payroll_run': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"period":{"description":"Period (YYYY-MM) to undo.","type":"string"},"reason":{"description":"Reason for voiding. Required, and written into the audit summary.","type":"string"}},"required":["period","reason"],"title":"VoidPayrollRunInput","type":"object"},
   'get_hr_compliance': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"Query as of a date. Needed by the regulation and balance operations.","properties":{"as_of":{"default":null,"description":"Cut-off date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"AsOfInput","type":"object"},
   'list_withholding_statements': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"year":{"default":null,"description":"Income year. Defaults to the current year.","format":"int32","type":["integer","null"]}},"title":"WithholdingStatementsInput","type":"object"},
   'list_notices': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"id":{"default":null,"description":"One notice, from a previous listing. Given, the reply is that notice\nwith every version it has ever had instead of the list.","format":"int32","type":["integer","null"]},"include_ended":{"default":false,"description":"Include the ones already taken down or repealed.","type":"boolean"},"kind":{"default":null,"description":"Restrict to one kind, `announcement` or `policy`. Omit for both.","type":["string","null"]}},"title":"ListNoticesInput","type":"object"},
@@ -391,4 +396,5 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'get_backup_setting': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'update_backup_setting': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"access_key":{"default":null,"type":["string","null"]},"bucket":{"default":null,"type":["string","null"]},"enabled":{"default":null,"description":"Whether backups run at all. Turning it on needs the location, the\nbucket and both halves of the access key.","type":["boolean","null"]},"endpoint":{"default":null,"description":"The service address, e.g. `https://s3.ap-northeast-1.amazonaws.com`.","type":["string","null"]},"keep_days":{"default":null,"description":"How many days of backups the remote keeps.","format":"int32","type":["integer","null"]},"prefix":{"default":null,"description":"Folder inside the bucket. An empty string writes at the top.","type":["string","null"]},"region":{"default":null,"type":["string","null"]},"secret_key":{"default":null,"description":"Write only. Leave the field out to keep the stored key; an empty\nstring clears it.","type":["string","null"]}},"title":"UpdateBackupSettingInput","type":"object"},
   'confirm_backup_key': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
+  'reset_backup_key': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
 };

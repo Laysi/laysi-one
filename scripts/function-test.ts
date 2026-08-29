@@ -501,6 +501,37 @@ async function main() {
       return rows.replaceAll("\n", " / ");
     });
 
+    await check("H8", "月中才到職的人，同一期補算得回來", async () => {
+      const period = TODAY.slice(0, 7);
+      const late = await must("create_employee", {
+        name: "測試遲到職", hired_on: `${period}-15`, employment_type: "full_time",
+      });
+      await must("update_employee", {
+        emp_no: late.employee.emp_no, name: "測試遲到職", hired_on: `${period}-15`,
+        base_salary: "50000",
+        labor_insured_salary: "45800", health_insured_salary: "45800", pension_wage: "45800",
+      });
+      // The first run of this period is already posted, so voiding it is
+      // refused and a second run is the only way this person gets paid.
+      const refused = await op("void_payroll_run", { period, reason: "測試" });
+      expect(!refused.ok, "已過帳的期間竟然作廢得了");
+      const data = await must("run_payroll", { period, pay_on: TODAY });
+      expectEq(data.run.headcount, 1, "補算人數");
+      expect(
+        (data.skipped ?? []).filter((s: any) => s.reason === "本期已計薪").length === 2,
+        "已計薪的兩個人應被跳過",
+      );
+      const summary = await must("get_payroll_summary", { period });
+      expectEq(summary.run.run_count, 2, "本期計算次數");
+      expectEq(summary.run.headcount, 3, "本期累計人數");
+      expectEq(summary.period_runs.length, 2, "本期傳票數");
+      expect(
+        summary.periods.filter((p: string) => p === period).length === 1,
+        "期別選單重複列出同一期",
+      );
+      return `補算 ${data.run.headcount} 人 · ${data.run.voucher_no} · 本期共 ${summary.run.headcount} 人`;
+    });
+
     console.log("\nA 固定資產");
     let assetVoucher = "";
     await check("A1", "取得成本填未稅，營業稅另拆到進項稅額", async () => {

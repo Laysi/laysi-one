@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useCurrentUser } from '../auth';
+import { ConfirmModal } from '../components/ConfirmModal';
 import {
   apiTokenList,
   backupSetting,
   businessTime,
   callOp,
+  downloadFile,
   fileSizeLabel,
   getHealthz,
   issuedApiToken,
@@ -90,6 +92,7 @@ export function Security({ onToast, reloadKey }: Props) {
   const [backup, setBackup] = useState<BackupSetting | null>(null);
   const [backupForm, setBackupForm] = useState<BackupForm | null>(null);
   const [savingBackup, setSavingBackup] = useState(false);
+  const [resettingKey, setResettingKey] = useState(false);
   const [oidcForm, setOidcForm] = useState<OidcForm | null>(null);
   const [savingOidc, setSavingOidc] = useState(false);
 
@@ -98,6 +101,7 @@ export function Security({ onToast, reloadKey }: Props) {
   const canEditOidc = me.permissions.includes('update_oidc_setting');
   const canReadBackup = me.permissions.includes('get_backup_setting');
   const canEditBackup = me.permissions.includes('update_backup_setting');
+  const canResetBackupKey = me.permissions.includes('reset_backup_key');
 
   const load = useCallback(() => {
     setError(null);
@@ -127,6 +131,23 @@ export function Security({ onToast, reloadKey }: Props) {
   }, [canReadOidc, canReadBackup]);
 
   useEffect(load, [load, reloadKey]);
+
+  const awaitingRestoreKey = !!backup && backup.enabled && backup.age_recipient === '';
+
+  useEffect(() => {
+    if (!awaitingRestoreKey) return;
+    let left = 60;
+    const timer = setInterval(() => {
+      if (left-- <= 0) {
+        clearInterval(timer);
+        return;
+      }
+      callOp('get_backup_setting', {}, undefined, backupSetting)
+        .then(setBackup)
+        .catch(() => undefined);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [awaitingRestoreKey]);
 
   async function revoke(id: number, name: string) {
     setBusy(id);
@@ -227,6 +248,20 @@ export function Security({ onToast, reloadKey }: Props) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
       setSavingBackup(false);
+    }
+  }
+
+  async function resetBackupKey() {
+    setSavingBackup(true);
+    try {
+      await callOp('reset_backup_key', {}, '重設還原金鑰');
+      onToast('正在產生新的還原金鑰，稍候會顯示在本頁');
+      setBackup(await callOp('get_backup_setting', {}, undefined, backupSetting));
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingBackup(false);
+      setResettingKey(false);
     }
   }
 
@@ -556,10 +591,22 @@ export function Security({ onToast, reloadKey }: Props) {
                     <code className="secret-card__value num">{backup.restore_key_to_save}</code>
                     <p className="form-note">
                       備份檔以這組金鑰加密，遺失後任何人都無法還原。
-                      請先複製保存於系統之外。
+                      請先保存於系統之外。
                     </p>
-                    {canEditBackup && (
-                      <div className="toolbar doc-card__actions">
+                    <div className="toolbar doc-card__actions">
+                      <button
+                        className="btn btn--compact"
+                        onClick={() =>
+                          downloadFile(
+                            '還原金鑰.txt',
+                            `${backup.restore_key_to_save}\n`,
+                            'text/plain;charset=utf-8',
+                          )
+                        }
+                      >
+                        下載金鑰檔
+                      </button>
+                      {canEditBackup && (
                         <button
                           className="btn btn--compact"
                           disabled={savingBackup}
@@ -567,8 +614,8 @@ export function Security({ onToast, reloadKey }: Props) {
                         >
                           已保存，不再顯示
                         </button>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                 )}
                 {backupForm ? (
@@ -709,16 +756,24 @@ export function Security({ onToast, reloadKey }: Props) {
                         </div>
                       )}
                     </div>
-                    {canEditBackup && (
-                      <div className="toolbar doc-card__actions">
+                    <div className="toolbar doc-card__actions">
+                      {canEditBackup && (
                         <button
                           className="btn btn--compact"
                           onClick={() => setBackupForm(backupFormFrom(backup))}
                         >
                           {backup.bucket ? '變更設定' : '設定異地備份'}
                         </button>
-                      </div>
-                    )}
+                      )}
+                      {canResetBackupKey && backup.age_recipient !== '' && (
+                        <button
+                          className="btn btn--compact btn--secondary"
+                          onClick={() => setResettingKey(true)}
+                        >
+                          重設還原金鑰
+                        </button>
+                      )}
+                    </div>
                   </>
                 )}
               </>
@@ -770,6 +825,23 @@ export function Security({ onToast, reloadKey }: Props) {
 
           </section>
         </div>
+      )}
+
+      {resettingKey && (
+        <ConfirmModal
+          title="重設還原金鑰"
+          body={
+            <p className="form-warn">
+              下一次備份會產生一組新的金鑰並顯示一次。
+              已經備份出去的檔案仍然只能以原金鑰開啟。
+            </p>
+          }
+          confirmLabel="確認重設"
+          busyLabel="重設中…"
+          busy={savingBackup}
+          onConfirm={() => void resetBackupKey()}
+          onCancel={() => setResettingKey(false)}
+        />
       )}
     </div>
   );

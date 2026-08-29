@@ -1790,6 +1790,7 @@ textarea {
   color: var(--color-ink);
   text-align: left;
   border-bottom: var(--rule-width) dashed var(--rule-strong);
+  overflow-wrap: anywhere;
 }
 
 .link-cell:hover {

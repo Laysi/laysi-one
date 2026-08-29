@@ -393,11 +393,18 @@ pub enum StoreError {
     #[error("{date} 的{kind}卡已經有一張補登申請等著決定，決定後才能再送一張")]
     PunchCorrectionAlreadyOpen { date: String, kind: String },
 
-    #[error("{period} 的薪資已計算（傳票 {voucher}），同一期不能重複計算")]
-    PeriodAlreadyPaid { period: String, voucher: String },
-
     #[error("{period} 沒有任何一位在職員工需要計薪")]
     NobodyToPay { period: String },
+
+    #[error("{period} 沒有薪資作業可以作廢")]
+    PayrollRunNotFound { period: String },
+
+    #[error("{period} 的薪資傳票 {voucher} {status}，不能作廢重算。差額請在下一期補發或補扣。")]
+    PayrollNotVoidable {
+        period: String,
+        voucher: String,
+        status: String,
+    },
 
     #[error("{0}")]
     Domain(#[from] laysi_domain::DomainError),
@@ -1024,7 +1031,7 @@ impl Store {
         if status != "draft" && status != "pending" {
             return Err(StoreError::NotPostable {
                 no: no.to_string(),
-                status,
+                status: voucher_status_label(&status).to_string(),
             });
         }
 
@@ -3559,6 +3566,22 @@ impl Store {
         sqlx::query(
             "UPDATE backup_setting
                 SET age_identity_pending = '', updated_at = now(), updated_by = $1
+              WHERE id = 1",
+        )
+        .bind(by)
+        .execute(&self.pool)
+        .await?;
+        self.backup_setting().await
+    }
+
+    /// Forget both halves of the key pair so the backup job generates a new
+    /// one on its next pass. Archives already written stay encrypted to the
+    /// old recipient.
+    pub async fn reset_backup_key(&self, by: &str) -> Result<BackupSetting> {
+        sqlx::query(
+            "UPDATE backup_setting
+                SET age_recipient = '', age_identity_pending = '',
+                    updated_at = now(), updated_by = $1
               WHERE id = 1",
         )
         .bind(by)
@@ -6382,7 +6405,12 @@ impl Store {
 
     // HR: payroll
 
-    pub async fn payroll_runs(&self, limit: i64) -> Result<Vec<PayrollRun>> {
+    /// Runs newest first, or the single run `id` names.
+    ///
+    /// A period holds more than one run once somebody is paid late, so the
+    /// order within a period is fixed as well, and a caller that means one
+    /// particular run has to say which by id.
+    async fn payroll_run_rows(&self, id: Option<i32>, limit: i64) -> Result<Vec<PayrollRun>> {
         Ok(sqlx::query(
             "SELECT p.period, p.pay_on, p.headcount, p.gross_total, p.deduction_total,
                     p.net_total, p.employer_total, p.voucher_no, v.status AS voucher_status,
@@ -6390,15 +6418,21 @@ impl Store {
                     p.note, p.created_at, p.created_by
                FROM payroll_run p
                LEFT JOIN voucher v ON v.no = p.voucher_no
-              ORDER BY p.period DESC
-              LIMIT $1",
+              WHERE $1::int IS NULL OR p.id = $1
+              ORDER BY p.period DESC, p.id DESC
+              LIMIT $2",
         )
+        .bind(id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?
         .iter()
         .map(row_to_payroll_run)
         .collect())
+    }
+
+    pub async fn payroll_runs(&self, limit: i64) -> Result<Vec<PayrollRun>> {
+        self.payroll_run_rows(None, limit).await
     }
 
     /// Employee ids already holding a payslip for this period, across every
@@ -6538,19 +6572,6 @@ impl Store {
         }
 
         let mut tx = self.pool.begin().await?;
-
-        if let Some(row) = sqlx::query("SELECT voucher_no FROM payroll_run WHERE period = $1")
-            .bind(req.period)
-            .fetch_optional(&mut *tx)
-            .await?
-        {
-            return Err(StoreError::PeriodAlreadyPaid {
-                period: req.period.to_string(),
-                voucher: row
-                    .get::<Option<String>, _>("voucher_no")
-                    .unwrap_or_default(),
-            });
-        }
 
         let gross: Money = req.slips.iter().map(|s| s.gross).sum();
         let deduction: Money = req.slips.iter().map(|s| s.deduction).sum();
@@ -6711,13 +6732,82 @@ impl Store {
         }
 
         tx.commit().await?;
-        self.payroll_run(req.period)
+        self.payroll_run_rows(Some(run_id), 1)
             .await?
+            .into_iter()
+            .next()
             .ok_or_else(|| StoreError::NobodyToPay {
                 period: req.period.to_string(),
             })
     }
 
+    /// Undo every payroll run of a period: its payslips, the withholding
+    /// records it wrote and the vouchers it produced, so the period can be
+    /// computed again from the current master data.
+    ///
+    /// Only while every one of those vouchers is still unposted. A posted
+    /// amount has reached the ledger and the reports have counted it, so the
+    /// correction there is a difference in a later period, not a deletion.
+    /// `payslip` follows `payroll_run` by cascade; `withholding_record` and
+    /// `payroll_run` both point at the voucher, so they go before it.
+    pub async fn void_payroll_run(&self, period: &str) -> Result<VoidedPayroll> {
+        let mut tx = self.pool.begin().await?;
+
+        let rows = sqlx::query(
+            "SELECT p.headcount, p.voucher_no, v.status
+               FROM payroll_run p
+               LEFT JOIN voucher v ON v.no = p.voucher_no
+              WHERE p.period = $1
+                FOR UPDATE OF p",
+        )
+        .bind(period)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        if rows.is_empty() {
+            return Err(StoreError::PayrollRunNotFound {
+                period: period.to_string(),
+            });
+        }
+
+        let mut vouchers: Vec<String> = Vec::new();
+        let mut headcount = 0i32;
+        for r in &rows {
+            headcount += r.get::<i32, _>("headcount");
+            let Some(no) = r.get::<Option<String>, _>("voucher_no") else {
+                continue;
+            };
+            let status: String = r.get::<Option<String>, _>("status").unwrap_or_default();
+            if status != "pending" {
+                return Err(StoreError::PayrollNotVoidable {
+                    period: period.to_string(),
+                    voucher: no,
+                    status: voucher_status_label(&status).to_string(),
+                });
+            }
+            vouchers.push(no);
+        }
+
+        sqlx::query("DELETE FROM withholding_record WHERE voucher_no = ANY($1)")
+            .bind(&vouchers)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM payroll_run WHERE period = $1")
+            .bind(period)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM voucher WHERE no = ANY($1)")
+            .bind(&vouchers)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(VoidedPayroll {
+            period: period.to_string(),
+            headcount,
+            voucher_nos: vouchers,
+        })
+    }
     // Bulletin board: announcements and company rules.
 
     /// Every notice, newest first, carrying its current version.
@@ -8463,6 +8553,14 @@ pub struct NewLeaveRequest<'a> {
     pub actor: &'a str,
 }
 
+/// What a voided payroll run took with it, for the audit summary.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VoidedPayroll {
+    pub period: String,
+    pub headcount: i32,
+    pub voucher_nos: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PayrollRun {
     pub period: String,
@@ -8579,7 +8677,7 @@ fn ensure_voidable(no: &str, status: &str) -> Result<()> {
     } else {
         Err(StoreError::NotVoidable {
             no: no.to_string(),
-            status: status.to_string(),
+            status: voucher_status_label(status).to_string(),
         })
     }
 }
@@ -8590,7 +8688,7 @@ fn ensure_reversible(no: &str, status: &str) -> Result<()> {
     } else {
         Err(StoreError::NotReversible {
             no: no.to_string(),
-            status: status.to_string(),
+            status: voucher_status_label(status).to_string(),
         })
     }
 }
@@ -8682,6 +8780,18 @@ async fn resolve_department_id(tx: &mut Tx<'_>, dept_code: Option<&str>) -> Resu
     .ok_or_else(|| StoreError::DepartmentNotFound {
         code: dept_code.to_string(),
     })
+}
+
+/// A voucher status named the way the screens name it. `status` is a column
+/// value and never reaches the reader.
+fn voucher_status_label(status: &str) -> &'static str {
+    match status {
+        "draft" => "草稿",
+        "pending" => "待過帳",
+        "posted" => "已過帳",
+        "void" => "已作廢",
+        _ => "狀態不明",
+    }
 }
 
 /// Which page owns a voucher this system generated, named the way the screens
@@ -9703,12 +9813,147 @@ mod tests {
                 "應回傳作廢狀態錯誤"
             );
             assert!(
-                error.to_string().contains(status),
+                error.to_string().contains(voucher_status_label(status)),
                 "錯誤訊息沒有指出目前狀態"
+            );
+            assert!(
+                !error.to_string().contains(status),
+                "錯誤訊息出現了狀態代碼"
             );
         }
     }
 
+    /// A payroll run comes undone whole while its voucher is unposted, and not
+    /// at all once it is posted. The three deletes are ordered against foreign
+    /// keys that no unit test can see, so this one needs the database.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// a_payroll_run_is_undone_only_while_its_voucher_is_unposted -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn a_payroll_run_is_undone_only_while_its_voucher_is_unposted() {
+        use chrono::NaiveDate;
+
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let period = "2099-01";
+        let pay_on = NaiveDate::from_ymd_opt(2099, 1, 31).unwrap();
+
+        async fn seed(store: &Store, period: &str, pay_on: NaiveDate) -> String {
+            let mut tx = store.pool.begin().await.expect("應開得了交易");
+            let one = Money::ONE;
+            let lines = vec![
+                LineInput {
+                    account_code: "6111".into(),
+                    debit: one,
+                    credit: Money::ZERO,
+                    memo: None,
+                    bank_account_id: None,
+                    dept_code: None,
+                },
+                LineInput {
+                    account_code: "1102".into(),
+                    debit: Money::ZERO,
+                    credit: one,
+                    memo: None,
+                    bank_account_id: None,
+                    dept_code: None,
+                },
+            ];
+            let no = insert_voucher(
+                &mut tx,
+                pay_on,
+                "測試薪資",
+                &lines,
+                "pending",
+                "payroll",
+                "測試",
+                None,
+            )
+            .await
+            .expect("應建得了傳票");
+            sqlx::query(
+                "INSERT INTO payroll_run
+                   (period, pay_on, headcount, gross_total, deduction_total, net_total,
+                    employer_total, voucher_no, labor_version, health_version,
+                    pension_version, withholding_version, note, created_by)
+                 VALUES ($1,$2,1,1,0,1,0,$3,'測試','測試','測試','測試','測試','測試')",
+            )
+            .bind(period)
+            .bind(pay_on)
+            .bind(&no)
+            .execute(&mut *tx)
+            .await
+            .expect("應寫得了薪資作業");
+            sqlx::query(
+                "INSERT INTO withholding_record
+                   (paid_on, payee, income_code, gross_amount, basis, memo, voucher_no)
+                 VALUES ($1, '測試', '50', 1, 'rate', '測試', $2)",
+            )
+            .bind(pay_on)
+            .bind(&no)
+            .execute(&mut *tx)
+            .await
+            .expect("應寫得了扣繳紀錄");
+            tx.commit().await.expect("應提交得了");
+            no
+        }
+
+        async fn rows_left(store: &Store, no: &str) -> (i64, i64, i64) {
+            let r = sqlx::query(
+                "SELECT (SELECT count(*) FROM payroll_run WHERE voucher_no = $1) AS runs,
+                        (SELECT count(*) FROM voucher WHERE no = $1) AS vouchers,
+                        (SELECT count(*) FROM withholding_record WHERE voucher_no = $1) AS records",
+            )
+            .bind(no)
+            .fetch_one(&store.pool)
+            .await
+            .expect("應查得到");
+            (r.get("runs"), r.get("vouchers"), r.get("records"))
+        }
+
+        // Nothing to undo reads as an error rather than as a silent success.
+        let _ = store.void_payroll_run(period).await;
+        assert!(matches!(
+            store.void_payroll_run(period).await,
+            Err(StoreError::PayrollRunNotFound { .. })
+        ));
+
+        let unposted = seed(&store, period, pay_on).await;
+        let voided = store
+            .void_payroll_run(period)
+            .await
+            .expect("待過帳應作廢得了");
+        assert_eq!(voided.voucher_nos, vec![unposted.clone()]);
+        assert_eq!(voided.headcount, 1);
+        assert_eq!(rows_left(&store, &unposted).await, (0, 0, 0));
+
+        let posted = seed(&store, period, pay_on).await;
+        store.post_voucher(&posted).await.expect("應過得了帳");
+        let refused = store
+            .void_payroll_run(period)
+            .await
+            .expect_err("已過帳不得作廢");
+        assert!(matches!(refused, StoreError::PayrollNotVoidable { .. }));
+        assert!(
+            !refused.to_string().contains("posted"),
+            "錯誤訊息出現了狀態代碼"
+        );
+        assert_eq!(rows_left(&store, &posted).await, (1, 1, 1));
+
+        // Leave nothing behind: the run is gone, its posted voucher stays.
+        sqlx::query("DELETE FROM payroll_run WHERE period = $1")
+            .bind(period)
+            .execute(&store.pool)
+            .await
+            .expect("應清得掉");
+    }
     fn sample_token(created_at: DateTime<Utc>, rotate_days: Option<i32>) -> ApiToken {
         ApiToken {
             id: 1,

@@ -447,7 +447,7 @@ pub struct VoidVoucherInput {
 
 struct VoidVoucher;
 
-fn require_void_reason(reason: &str) -> Result<&str, OpError> {
+pub(crate) fn require_void_reason(reason: &str) -> Result<&str, OpError> {
     let reason = reason.trim();
     if reason.is_empty() {
         Err(OpError::BadInput("作廢理由必填，且不得僅含空白".into()))

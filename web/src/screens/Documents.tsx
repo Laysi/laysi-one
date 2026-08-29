@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  businessTime,
   callOp,
   documentList,
+  downloadFile,
   OpFailed,
   uploadedDocument,
   verifiedDocument,
@@ -31,8 +33,9 @@ export function Documents({ onToast, reloadKey }: Props) {
   const [data, setData] = useState<DocumentList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [verified, setVerified] = useState<Record<string, string>>({});
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [fetching, setFetching] = useState<string | null>(null);
+  const [openHash, setOpenHash] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
@@ -45,7 +48,7 @@ export function Documents({ onToast, reloadKey }: Props) {
   useEffect(load, [load, reloadKey]);
 
   async function upload(file: File) {
-    setBusy(true);
+    setUploading(file.name);
     try {
       const content = await readAsBase64(file);
       const d = await callOp(
@@ -55,28 +58,39 @@ export function Documents({ onToast, reloadKey }: Props) {
                         uploadedDocument,
                       );
       onToast(
-        `${d.document.doc_no} ${d.document.version_label} 已上傳，檔案指紋 ${d.document.checksum_short}`,
+        `${d.document.doc_no} ${d.document.version_label} 已上傳，內容雜湊 ${d.document.checksum_short}`,
       );
       load();
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
-      setBusy(false);
+      setUploading(null);
       if (picker.current) picker.current.value = '';
     }
   }
 
-  async function verify(d: DocumentRow) {
+  async function download(d: DocumentRow) {
+    setFetching(d.doc_no);
     try {
-      const r = await callOp('get_document', { doc_no: d.doc_no }, undefined, verifiedDocument);
-      setVerified((v) => ({
-        ...v,
-        [d.doc_no]: r.verified
-          ? `已自檔案儲存取回 ${r.byte_size_actual} 位元組，重算雜湊與登記值相符`
-          : '雜湊不符，檔案內容已遭變更',
-      }));
+      const r = await callOp(
+        'get_document',
+        { doc_no: d.doc_no, include_content: true },
+        undefined,
+        verifiedDocument,
+      );
+      if (!r.content_base64) {
+        onToast('檔案儲存沒有回傳內容，請再試一次');
+        return;
+      }
+      downloadFile(
+        d.file_name,
+        Uint8Array.from(atob(r.content_base64), (c) => c.charCodeAt(0)),
+        d.content_type || 'application/octet-stream',
+      );
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setFetching(null);
     }
   }
 
@@ -151,10 +165,10 @@ export function Documents({ onToast, reloadKey }: Props) {
             </span>
             <button
               className="btn btn--compact"
-              disabled={busy}
+              disabled={uploading !== null}
               onClick={() => picker.current?.click()}
             >
-              {busy ? '上傳中…' : '上傳檔案'}
+              {uploading ? '上傳中…' : '上傳檔案'}
             </button>
           </div>
 
@@ -164,45 +178,53 @@ export function Documents({ onToast, reloadKey }: Props) {
                 <tr>
                   <th>檔案</th>
                   <th>關聯</th>
-                  <th>版次</th>
-                  <th>內容雜湊</th>
+                  <th>內容雜湊（BLAKE3）</th>
                   <th className="align-right">大小</th>
-                  <th className="align-right">驗證</th>
                 </tr>
               </thead>
               <tbody>
+                {uploading && (
+                  <tr>
+                    <td colSpan={4} className="cell-muted">
+                      上傳中… {uploading}
+                    </td>
+                  </tr>
+                )}
                 {data.documents.map((d) => (
                   <tr key={d.doc_no}>
                     <td>
-                      {d.file_name}
+                      <button
+                        className="link-cell"
+                        disabled={fetching === d.doc_no}
+                        onClick={() => void download(d)}
+                      >
+                        {d.file_name}
+                      </button>
                       <span className="cell-hint cell-hint--block">
                         <span className="num">{d.doc_no}</span> · {d.kind_label} · {d.uploaded_by}
+                        {' · '}
+                        <span className="num">{businessTime(d.uploaded_at)}</span>
+                        {d.versions > 1 && ` · 共 ${d.versions} 版`}
+                        {fetching === d.doc_no && ' · 取回中…'}
                       </span>
                     </td>
                     <td className="cell-accounts num cell-nowrap">{d.link_ref || '—'}</td>
                     <td className="cell-accounts num">
-                      {d.version_label}
-                      {d.versions > 1 && (
-                        <span className="cell-hint">共 {d.versions} 版</span>
-                      )}
-                    </td>
-                    <td className="cell-accounts num cell-nowrap" title={d.checksum}>
-                      {d.checksum_short}
+                      <button
+                        className="link-cell num"
+                        onClick={() =>
+                          setOpenHash((h) => (h === d.doc_no ? null : d.doc_no))
+                        }
+                      >
+                        {openHash === d.doc_no ? d.checksum : d.checksum_short}
+                      </button>
                     </td>
                     <td className="num align-right">{d.size_label}</td>
-                    <td className="align-right">
-                      <button className="btn btn--compact btn--secondary" onClick={() => void verify(d)}>
-                        取回驗證
-                      </button>
-                      {verified[d.doc_no] && (
-                        <span className="cell-hint cell-hint--block">{verified[d.doc_no]}</span>
-                      )}
-                    </td>
                   </tr>
                 ))}
-                {data.documents.length === 0 && (
+                {data.documents.length === 0 && !uploading && (
                   <tr>
-                    <td colSpan={6} className="cell-muted">
+                    <td colSpan={4} className="cell-muted">
                       尚無文件。
                       <button className="link-cell" onClick={() => picker.current?.click()}>
                         上傳第一個檔案
