@@ -86,11 +86,6 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">工作日曆</h1>
-      <p className="page-lede">
-        未列出的日期依星期認定：週一至週五為工作日、週六為休息日、週日為例假。
-        休假時數與打卡推算的加班都以本表為準。
-      </p>
-
       <div className="toolbar toolbar--spaced">
         <button className="btn btn--ghost btn--compact" onClick={() => setYear(year - 1)}>
           ← {year - 1}
@@ -102,6 +97,21 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
         {data && (
           <span className="hint num">
             工作日 {data.workdays} 天 · 國定假日 {data.holidays} 天
+          </span>
+        )}
+        <span className="spacer" />
+        {data && (
+          <span className="cal-legend">
+            {data.kinds.map((k) => (
+              <span className="cal-legend__item" key={k.code}>
+                <span className={`cal-legend__swatch cal-day--${k.code}`} />
+                {k.label}
+              </span>
+            ))}
+            <span className="cal-legend__item">
+              <span className="cal-legend__swatch cal-day--stated" />
+              已登記
+            </span>
           </span>
         )}
         <span className="spacer" />

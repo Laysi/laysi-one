@@ -43,7 +43,6 @@ export function Dashboard({ onGo, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title page-title--hero">財務總覽</h1>
-      {data.ledger_started && <p className="page-lede">未過帳傳票不計入。</p>}
 
       {data.ledger_started ? (
         <div className="stat-grid">

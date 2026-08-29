@@ -13,6 +13,7 @@ import {
   type PayslipList,
 } from '../api/client';
 import { DateField } from '../components/DateField';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -205,10 +206,7 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
               </div>
             </>
           ) : (
-            <p className="state-note">
-              尚無任何期別的薪資計算紀錄。請由下方「計算本期薪資」開始，將產生一張
-              待過帳傳票。
-            </p>
+            <p className="state-note">尚無薪資計算紀錄，請由右側算出第一期。</p>
           )}
 
           <h3 className="section-title section-title--spaced">逐人薪資明細</h3>
@@ -327,9 +325,6 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                   {runPeriod.trim()} 已計算過。這次只算後來到職或當時漏算的人，另外產生一張傳票。
                 </p>
               )}
-              <p className="form-note">
-                產生的傳票狀態為<strong>待過帳</strong>。
-              </p>
             </div>
 
             <div>
@@ -391,10 +386,15 @@ export function Payroll({ onToast, reloadKey, onChanged }: Props) {
                       ))}
                     </p>
                   )}
-                  <p className="hint">
-                    扣繳率依 {result.withholding.ruleset.source_note}（
-                    {result.withholding.ruleset.effective_from} 起適用）。
-                  </p>
+                  <RulesetNote
+                    items={[
+                      {
+                        label: '扣繳',
+                        from: result.withholding.ruleset.effective_from,
+                        source: result.withholding.ruleset.source_note,
+                      },
+                    ]}
+                  />
                   <p className="hint">{result.employer_note}</p>
                 </div>
               ) : (

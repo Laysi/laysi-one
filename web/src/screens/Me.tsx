@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { callOp, myHome, OpFailed, trimDecimal, type MyHome } from '../api/client';
 import type { ScreenId } from '../nav';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onGo: (screen: ScreenId) => void;
@@ -31,10 +32,6 @@ export function Me({ onGo, reloadKey }: Props) {
       <div>
         <h1 className="page-title">我的</h1>
         <p className="state-note state-note--error">{error}</p>
-
-        <p className="hint">
-          本帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
-        </p>
       </div>
     );
   }
@@ -131,9 +128,7 @@ export function Me({ onGo, reloadKey }: Props) {
         </div>
       </section>
 
-      <p className="hint">
-        特休額度依年資與 {al.ruleset.source_note} 即時計算，已休天數只計本年度已核准的特休。
-      </p>
+      <RulesetNote items={[{ label: '特休', source: al.ruleset.source_note }]} />
     </div>
   );
 }

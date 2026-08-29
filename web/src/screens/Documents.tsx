@@ -85,7 +85,6 @@ export function Documents({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">文件管理</h1>
-      <p className="page-lede">上傳後不可覆寫，要修訂請另存新版本。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -147,6 +146,9 @@ export function Documents({ onToast, reloadKey }: Props) {
                 if (f) void upload(f);
               }}
             />
+            <span className="hint">
+              單檔 <span className="num">{mb}</span> MB 以內 · 同名再傳存為新版
+            </span>
             <button
               className="btn btn--compact"
               disabled={busy}
@@ -201,7 +203,10 @@ export function Documents({ onToast, reloadKey }: Props) {
                 {data.documents.length === 0 && (
                   <tr>
                     <td colSpan={6} className="cell-muted">
-                      尚無文件。請使用「上傳檔案」建立第一筆。
+                      尚無文件。
+                      <button className="link-cell" onClick={() => picker.current?.click()}>
+                        上傳第一個檔案
+                      </button>
                     </td>
                   </tr>
                 )}
@@ -210,12 +215,6 @@ export function Documents({ onToast, reloadKey }: Props) {
           </div>
 
           <p className="hint">{data.immutability_note}</p>
-          <p className="hint">
-            「取回驗證」會比對檔案與登記的指紋，不符時<strong>不交出內容</strong>。
-          </p>
-          <p className="hint">
-            單檔上限 <span className="num">{mb}</span> MB。
-          </p>
         </>
       )}
     </div>

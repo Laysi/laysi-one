@@ -110,14 +110,6 @@ export function Budget({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">預算與管理</h1>
-      {status?.version && (
-        <p className="page-lede">
-          預算版本 {status.version_label}。
-          {status.alert_percent
-            ? `執行率超過 ${status.alert_percent}% 會標示出來。`
-            : '超支會標示出來。'}
-        </p>
-      )}
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!status && !error && <p className="state-note">讀取中…</p>}
@@ -316,9 +308,12 @@ export function Budget({ onToast, reloadKey }: Props) {
                 {status.rows.length === 0 && (
                   <tr>
                     <td colSpan={5} className="cell-muted">
-                      {canSetBudget
-                        ? '請由上方「＋ 編列科目預算」加入第一個科目。'
-                        : '本版本尚未編列任何科目預算。'}
+                      本版本尚未編列任何科目預算。
+                      {canSetBudget && (
+                        <button className="link-cell" onClick={openAdd}>
+                          編列第一個科目
+                        </button>
+                      )}
                     </td>
                   </tr>
                 )}

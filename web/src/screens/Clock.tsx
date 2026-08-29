@@ -38,8 +38,8 @@ function ScheduleNote({ schedule }: { schedule: WorkSchedule }) {
       {schedule.flexible ? (
         <>
           彈性工時：<span className="num">{schedule.work_start}</span> 到{' '}
-          <span className="num">{schedule.latest_start}</span> 之間開始上班都算準時，
-          下班時間同步順延，工作總時數不變。
+          <span className="num">{schedule.latest_start}</span> 之間上班都算準時，
+          下班時間跟著順延。
         </>
       ) : (
         <>
@@ -208,9 +208,6 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
       <div>
         <h1 className="page-title">打卡</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">
-          本帳號尚未對應員工編號，請管理員完成連結後再打卡。
-        </p>
       </div>
     );
   }

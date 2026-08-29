@@ -156,9 +156,12 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
       {accounts && accounts.length === 0 && (
         <div className="placeholder">
           <div className="placeholder__title">尚未建立銀行帳戶</div>
-          <p>
-            收款、付款與薪資都要指定資金進出帳戶。請由上方「＋ 新增銀行帳戶」建立第一個。
-          </p>
+          <p>收款、付款與薪資都要指定資金進出的帳戶。</p>
+          <div className="placeholder__actions">
+            <button className="btn" onClick={() => setDrawer(true)}>
+              建立第一個銀行帳戶
+            </button>
+          </div>
         </div>
       )}
 
@@ -197,7 +200,6 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
         <div className="recon-columns">
           <section>
             <h2 className="section-title">銀行流水（未核銷 {unmatched}）</h2>
-            <p className="section-note">灰色為已核銷項目。</p>
             <div className="bank-list">
               {rows.map((t) => {
                 const done = Boolean(t.matched_voucher_no);

@@ -159,10 +159,6 @@ export function Regulations({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">法規版本</h1>
-      <p className="page-lede">
-        每一次計算都依日期取用當時適用的版本，新增版本不會改動已經算過的期間。
-      </p>
-
       {!data && <p className="state-note">讀取中…</p>}
 
       {data && (

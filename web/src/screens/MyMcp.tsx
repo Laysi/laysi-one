@@ -95,9 +95,6 @@ export function MyMcp({ onToast, reloadKey }: Props) {
       <div>
         <h1 className="page-title">我的 MCP</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">
-          本帳號尚未對應員工編號，請管理員完成連結後再核發 Token。
-        </p>
       </div>
     );
   }
@@ -110,10 +107,6 @@ export function MyMcp({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">我的 MCP</h1>
-      <p className="page-lede">
-        核發一組代表本人的 Token，讓 AI 助理以本人的身分連線。
-      </p>
-
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">
           <div className="stat-card__kicker">有效 Token</div>
@@ -137,9 +130,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
             </button>
           </div>
           <code className="secret-card__value num">{issued.secret}</code>
-          <p className="form-note">
-            請立即複製保存，遺失時只能重新核發。連線設定見下方「連線方式」。
-          </p>
+          <p className="form-note">請立即複製保存，遺失時只能重新核發。</p>
         </div>
       )}
 

@@ -139,10 +139,6 @@ export function McpTools({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">MCP 與 AI</h1>
-      <p className="page-lede">
-        本頁的開關只決定 AI 能呼叫哪些工具。
-      </p>
-
       <div className="toolbar toolbar--spaced">
         <button
           className={`chip${tab === 'tools' ? ' chip--on' : ''}`}

@@ -3,9 +3,9 @@ import {
   callOp,
   dimensionList,
   employeeList,
+  isZero,
   updatedEmployee,
   maskId,
-  money,
   OpFailed,
   trimDecimal,
   type DimensionList,
@@ -13,6 +13,7 @@ import {
   type EmployeeRow,
 } from '../api/client';
 import { DateField } from '../components/DateField';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -130,10 +131,10 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       left_on: e.left_on ?? '',
       status: e.status,
 
-      base_salary: '',
-      labor_insured_salary: '',
-      health_insured_salary: '',
-      pension_wage: '',
+      base_salary: amountOf(e.base_salary),
+      labor_insured_salary: amountOf(e.labor_insured_salary),
+      health_insured_salary: amountOf(e.health_insured_salary),
+      pension_wage: amountOf(e.pension_wage),
 
       id_no: e.id_no,
       bank_accounts: e.bank_accounts.map((b) => ({
@@ -148,12 +149,8 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
     setDrawer('edit');
   }
 
-  function currentAmount(
-    field: 'base_salary' | 'labor_insured_salary' | 'health_insured_salary' | 'pension_wage',
-  ): string {
-    const value = current?.[field];
-    if (!value || Number(value) === 0) return '尚未設定';
-    return `目前 ${money(value)}`;
+  function amountOf(value: string | undefined): string {
+    return !value || isZero(value) ? '' : trimDecimal(value);
   }
 
   function amountFields(f: FormState): Record<string, string> {
@@ -165,8 +162,10 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
     ] as const;
     const out: Record<string, string> = {};
     for (const k of keys) {
-      const v = f[k].trim();
-      if (v) out[k] = v;
+      const value = f[k].trim();
+      const was = drawer === 'edit' ? amountOf(current?.[k]) : '';
+      if (value === was) continue;
+      out[k] = value === '' ? '0' : value;
     }
     return out;
   }
@@ -329,7 +328,11 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
           {data.employees.length === 0 ? (
             <div className="placeholder">
               <div className="placeholder__title">名冊尚無資料</div>
-              <p>請由上方「＋ 新增員工」建立第一筆。</p>
+              <div className="placeholder__actions">
+                <button className="btn" onClick={openCreate}>
+                  新增第一位員工
+                </button>
+              </div>
             </div>
           ) : (
             <div className="table-scroll">
@@ -403,11 +406,15 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
             </div>
           )}
 
-          <p className="hint">
-            特休額度依年資與特休規則{' '}
-            <span className="num">{data.annual_leave_ruleset.version}</span>{' '}
-            計算（{data.annual_leave_ruleset.effective_from} 起適用）。
-          </p>
+          <RulesetNote
+            items={[
+              {
+                label: '特休',
+                version: data.annual_leave_ruleset.version,
+                from: data.annual_leave_ruleset.effective_from,
+              },
+            ]}
+          />
         </>
       )}
 
@@ -538,11 +545,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                 </label>
               </div>
 
-              <p className="form-warn">
-                {drawer === 'edit'
-                  ? '留空的欄位不會更動，要清成尚未設定請填 0。'
-                  : '留空表示尚未談定，薪資作業會擋下這個人。'}
-              </p>
+              <p className="form-warn">留空表示尚未談定，薪資作業會擋下這個人。</p>
 
               <div className="field-grid">
                 <label className="field">
@@ -551,7 +554,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     inputMode="decimal"
                     value={form.base_salary}
-                    placeholder={drawer === 'edit' ? currentAmount('base_salary') : '38000'}
+                    placeholder={drawer === 'edit' ? '尚未設定' : '38000'}
                     onChange={(e) => setField('base_salary', e.target.value)}
                   />
                 </label>
@@ -561,7 +564,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     inputMode="decimal"
                     value={form.labor_insured_salary}
-                    placeholder={drawer === 'edit' ? currentAmount('labor_insured_salary') : '38200'}
+                    placeholder={drawer === 'edit' ? '尚未設定' : '38200'}
                     onChange={(e) => setField('labor_insured_salary', e.target.value)}
                   />
                 </label>
@@ -571,7 +574,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     inputMode="decimal"
                     value={form.health_insured_salary}
-                    placeholder={drawer === 'edit' ? currentAmount('health_insured_salary') : '38200'}
+                    placeholder={drawer === 'edit' ? '尚未設定' : '38200'}
                     onChange={(e) => setField('health_insured_salary', e.target.value)}
                   />
                 </label>
@@ -581,7 +584,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     className="input num"
                     inputMode="decimal"
                     value={form.pension_wage}
-                    placeholder={drawer === 'edit' ? currentAmount('pension_wage') : '40100'}
+                    placeholder={drawer === 'edit' ? '尚未設定' : '40100'}
                     onChange={(e) => setField('pension_wage', e.target.value)}
                   />
                 </label>

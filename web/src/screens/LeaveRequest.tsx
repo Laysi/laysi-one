@@ -13,6 +13,7 @@ import {
 import type { ScreenId } from '../nav';
 import { DateField } from '../components/DateField';
 import { TimeField } from '../components/TimeField';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -104,9 +105,6 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
       <div>
         <h1 className="page-title">休假申請</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">
-          本帳號尚未對應員工編號，請管理員完成連結後再送出休假單。
-        </p>
       </div>
     );
   }
@@ -168,7 +166,6 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">休假申請</h1>
-      <p className="page-lede">送出後為待簽核，由主管決定是否核准。</p>
 
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">
@@ -313,9 +310,7 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         )}
       </div>
 
-      <p className="hint">
-        特休額度依年資與 {al.ruleset.source_note} 即時計算，已休天數只計本年度已核准的特休。
-      </p>
+      <RulesetNote items={[{ label: '特休', source: al.ruleset.source_note }]} />
     </div>
   );
 }

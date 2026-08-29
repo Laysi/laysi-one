@@ -8,6 +8,7 @@ import {
   type InsuranceQuote,
   type InsuranceSummary,
 } from '../api/client';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -279,24 +280,21 @@ export function Insurance({ onToast, reloadKey }: Props) {
                   <span>公司負擔</span>
                   <span className="num">{money(quote.employer_total)}</span>
                 </div>
-                <p className="hint">
-                  員工自付合計 <span className="num">{money(quote.employee_total)}</span>。
-                  費率取自勞保 {quote.labor.ruleset.version}、健保{' '}
-                  {quote.health.ruleset.version}、勞退 {quote.pension.ruleset.version} 規則。
-                </p>
+                <div className="doc-row doc-row--total">
+                  <span>員工自付</span>
+                  <span className="num">{money(quote.employee_total)}</span>
+                </div>
               </div>
             )}
           </div>
 
-          <p className="hint">
-            本頁的費率、上限與平均眷口數都來自勞保{' '}
-            <span className="num">{data.rulesets.labor.version}</span>、健保{' '}
-            <span className="num">{data.rulesets.health.version}</span>、勞退{' '}
-            <span className="num">{data.rulesets.pension.version}</span> 規則。
-          </p>
-          <p className="hint">
-            個人月薪與實發金額在「薪資作業」，限負責人檢視。
-          </p>
+          <RulesetNote
+            items={[
+              { label: '勞保', version: data.rulesets.labor.version },
+              { label: '健保', version: data.rulesets.health.version },
+              { label: '勞退', version: data.rulesets.pension.version },
+            ]}
+          />
         </>
       )}
     </div>

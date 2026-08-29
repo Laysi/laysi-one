@@ -6,7 +6,7 @@
 //! amounts at all. [`required_steps`] does one thing: compare the claim amount
 //! against that table to derive the steps it must pass.
 //!
-//! The account suggested by AI and the account decided by a human are separate
+//! The account suggested on submission and the account decided by a human are separate
 //! columns. Keeping both is what makes it possible to measure how accurate the
 //! suggestions are, and to tell which claims a person actually reviewed.
 //!
@@ -181,7 +181,7 @@ pub(crate) fn claim_json(claim: &ExpenseClaim, rules: &[ApprovalRule]) -> Value 
             .zip(claim.account_name.as_ref())
             .or_else(|| claim.suggested_account_code.as_ref().zip(claim.suggested_account_name.as_ref()))
             .map(|(c, n)| format!("{c} {n}")),
-        // Was the account decided by a person or suggested by AI? The screen
+        // Was the account decided by a person, or only suggested on submission? The screen
         // must distinguish them.
         "account_confirmed": claim.account_code.is_some(),
         "pay_method": claim.pay_method,
@@ -243,7 +243,7 @@ impl Operation for ListExpenseClaims {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀費用報支單：各單目前關卡、應經關卡（門檻查自公司簽核規則）、AI 建議科目與人員確認科目"
+        "讀費用報支單：各單目前關卡、應經關卡（門檻查自公司簽核規則）、送單時建議的科目與人員確認的科目"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListExpenseClaimsInput>()
@@ -346,7 +346,7 @@ pub struct SubmitExpenseClaimInput {
     /// Department code.
     #[serde(default)]
     pub dept_code: Option<String>,
-    /// Expense account suggested by AI from the receipt. A person decides the
+    /// Expense account suggested by whoever submitted the claim. A person decides the
     /// final account at the accounting step.
     #[serde(default)]
     pub suggested_account_code: Option<String>,
@@ -372,7 +372,7 @@ impl Operation for SubmitExpenseClaimOp {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "送出費用報支單（申請人送件關卡）。可帶入 AI 建議的科目與收據文件編號。不產生任何分錄。"
+        "送出費用報支單（申請人送件關卡）。可帶入建議的費用科目與收據文件編號。不產生任何分錄。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<SubmitExpenseClaimInput>()
@@ -385,9 +385,9 @@ impl Operation for SubmitExpenseClaimOp {
         }
         let pay_method = checked_pay_method(i.pay_method.as_deref())?;
 
-        // The suggested account must exist and be an expense account. AI
-        // getting the account kind wrong is common, and catching it only when
-        // the voucher is created would be far too late.
+        // The suggested account must exist and be an expense account. A wrong
+        // account kind here would only surface when the voucher is created,
+        // which is far too late.
         if let Some(code) = &i.suggested_account_code {
             let accounts = ctx.store.accounts().await?;
             let ok = accounts
@@ -520,13 +520,13 @@ impl Operation for ApproveExpenseClaim {
         if let Some(step) = step.filter(|s| s.role_code.as_deref() == Some("acct")) {
             if account_code.is_none() {
                 return Err(OpError::BadInput(format!(
-                    "第 {} 關為「{}」，要先指定費用科目才能簽核（AI 建議 {}）",
+                    "第 {} 關為「{}」，要先指定費用科目才能簽核（送單時建議 {}）",
                     step.step_no,
                     step.label,
                     claim
                         .suggested_account_code
                         .clone()
-                        .unwrap_or_else(|| "（無建議）".into())
+                        .unwrap_or_else(|| "（未填）".into())
                 )));
             }
         }

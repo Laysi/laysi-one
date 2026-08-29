@@ -439,7 +439,7 @@ export function Security({ onToast, reloadKey }: Props) {
                           onChange={(e) => setOidcField('redirect_url', e.target.value)}
                         />
                         <span className="field__hint">
-                          這個網址要一字不差地填進供應商的轉址白名單。{' '}
+                          填進供應商的轉址白名單，一字不差。{' '}
                           <button className="link-cell" onClick={() => void copyRedirect()}>
                             複製
                           </button>
@@ -555,8 +555,8 @@ export function Security({ onToast, reloadKey }: Props) {
                     </div>
                     <code className="secret-card__value num">{backup.restore_key_to_save}</code>
                     <p className="form-note">
-                      備份檔以這組金鑰加密，遺失後任何人都無法還原。請先複製保存於系統之外，
-                      再按下方按鈕；確認後備份開始執行。
+                      備份檔以這組金鑰加密，遺失後任何人都無法還原。
+                      請先複製保存於系統之外。
                     </p>
                     {canEditBackup && (
                       <div className="toolbar doc-card__actions">

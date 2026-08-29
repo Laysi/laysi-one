@@ -364,7 +364,6 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">帳號管理</h1>
-      <p className="page-lede">變更角色會讓該帳號登出，本人重新登入後才有新的權限。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!list && !error && <p className="state-note">讀取中…</p>}
@@ -381,7 +380,11 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
           {list.accounts.length === 0 ? (
             <div className="placeholder">
               <div className="placeholder__title">尚無帳號</div>
-              <p>請由上方「＋ 建立帳號」建立第一個。</p>
+              <div className="placeholder__actions">
+                <button className="btn" onClick={openCreate}>
+                  建立第一個帳號
+                </button>
+              </div>
             </div>
           ) : (
             <div className="table-scroll">
@@ -635,8 +638,7 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
                       </select>
                     )}
                     <span className="field__hint">
-                      {(matrix?.roles ?? []).find((r) => r.code === form.role_code)?.note ??
-                        '選擇角色後，下方顯示該角色的權限說明。'}
+                      {(matrix?.roles ?? []).find((r) => r.code === form.role_code)?.note ?? ''}
                       {drawer === 'create' && (
                         <>
                           {' '}

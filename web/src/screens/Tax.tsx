@@ -8,6 +8,7 @@ import {
   type VatReturn,
   type WithholdingList,
 } from '../api/client';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   reloadKey: number;
@@ -65,11 +66,6 @@ export function Tax({ reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">稅務</h1>
-      {vat && (
-        <p className="page-lede">
-          401 營業稅每 {vat.period_months} 個月一期。未過帳傳票不計入。
-        </p>
-      )}
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!vat && !error && <p className="state-note">讀取中…</p>}
@@ -101,7 +97,7 @@ export function Tax({ reloadKey }: Props) {
 
             {isZero(vat.output_tax) && isZero(vat.input_tax) && (
               <p className="hint">
-                本期尚無已過帳的銷項或進項，各欄皆為零。
+                本期沒有已過帳的銷項或進項。
                 {pending ? (
                   <>
                     {' '}將該 <span className="num">{vat.pending_vouchers}</span> 張待過帳傳票過帳，
@@ -167,10 +163,10 @@ export function Tax({ reloadKey }: Props) {
               </div>
             )}
 
-            <p className="hint">
-              上月扣繳稅款應於次月 10 日前繳納。扣繳率與起扣點依給付日適用的
-              扣繳規則計算（{wht.ruleset_versions.join('、') || '—'}）。
-            </p>
+            <p className="hint">上月扣繳稅款於次月 10 日前繳納。</p>
+            <RulesetNote
+              items={wht.ruleset_versions.map((v) => ({ label: '扣繳', version: v }))}
+            />
           </section>
         </div>
       )}
@@ -210,11 +206,16 @@ export function Tax({ reloadKey }: Props) {
               </>
             )}
           </p>
-          <p className="hint">
-            稅率 {vat.ruleset.rate_percent}% 與「每 {vat.period_months} 個月一期」都取自營業稅規則
-            （<span className="num">{vat.ruleset.version}</span>，{vat.ruleset.effective_from} 起）
-            。依據：{vat.ruleset.source_note}
-          </p>
+          <RulesetNote
+            items={[
+              {
+                label: `營業稅 ${vat.ruleset.rate_percent}% · 每 ${vat.period_months} 個月一期`,
+                version: vat.ruleset.version,
+                from: vat.ruleset.effective_from,
+                source: vat.ruleset.source_note,
+              },
+            ]}
+          />
         </>
       )}
     </div>

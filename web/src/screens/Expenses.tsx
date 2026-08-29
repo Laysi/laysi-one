@@ -154,8 +154,6 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
   return (
     <div>
       <h1 className="page-title">費用報支</h1>
-      <p className="page-lede">收據由 AI 初步分類，會計確認科目後才進入簽核。</p>
-
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
 
@@ -236,7 +234,7 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
                       {c.account_label ?? '—'}
 
                       {!c.account_confirmed && c.suggested_account_code && (
-                        <span className="cell-hint cell-hint--block">AI 建議，尚未確認</span>
+                        <span className="cell-hint cell-hint--block">尚未確認</span>
                       )}
                     </td>
                     <td className="num align-right">{money(c.amount)}</td>
@@ -321,8 +319,8 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
           </div>
 
           <p className="hint">
-            最後一關核准後開立傳票（借費用科目、貸應付帳款或零用金），狀態為待過帳。
-            月底彙總匯款的單據同時成為應付帳單，到「應付帳款」勾選送出付款單匯款。
+            最後一關核准後開立待過帳傳票：借費用科目、貸應付帳款或零用金。
+            月底彙總匯款的單據同時成為應付帳單，匯款在「應付帳款」送出。
           </p>
 
         </>
@@ -406,9 +404,7 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
                   <input className="input" value={memo} onChange={(e) => setMemo(e.target.value)} />
                 </label>
               </div>
-              <p className="form-note">
-                費用科目在會計那一關決定。有登入帳號的員工請自行到「請款申請」送單。
-              </p>
+              <p className="form-note">費用科目在會計那一關決定。</p>
             </div>
             <div className="drawer__foot">
               <button className="btn btn--secondary" onClick={() => setDrawer(false)}>

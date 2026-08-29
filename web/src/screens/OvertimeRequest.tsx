@@ -14,6 +14,7 @@ import {
 import type { ScreenId } from '../nav';
 import { DateField } from '../components/DateField';
 import { TimeField } from '../components/TimeField';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -73,7 +74,6 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
       <div>
         <h1 className="page-title">加班申請</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">本帳號尚未對應員工編號，請管理員完成連結後再送出加班單。</p>
       </div>
     );
   }
@@ -125,7 +125,6 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
   return (
     <div>
       <h1 className="page-title">加班申請</h1>
-      <p className="page-lede">核准後才列入當期薪資的加班費。</p>
 
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">
@@ -268,9 +267,7 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
         )}
       </div>
 
-      <p className="hint">
-        加班費依 {data.ruleset.source_note} 與加班日適用的規則計算，核准後隨當期薪資發放。
-      </p>
+      <RulesetNote items={[{ label: '加班費', source: data.ruleset.source_note }]} />
     </div>
   );
 }

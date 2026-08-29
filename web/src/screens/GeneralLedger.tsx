@@ -162,10 +162,6 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
   return (
     <div>
       <h1 className="page-title">傳票 · 總帳</h1>
-      <p className="page-lede">
-        已過帳傳票不能修改，要更正請開立反向分錄或作廢。
-      </p>
-
       <div className="toolbar">
         {FILTERS.map((f) => (
           <button
@@ -320,7 +316,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
                   <button className="choice" onClick={() => setCorrection({ ...correction, kind: 'reverse' })}>
                     <div className="choice__title">交易確實發生，僅金額或科目記錯</div>
                     <div className="choice__desc">
-                      例如金額或科目誤植，款項確實發生。另開一張借貸相反的傳票並過帳，原傳票不動。
+                      另開一張借貸相反的傳票並過帳，原傳票不動。
                     </div>
                   </button>
                 </div>

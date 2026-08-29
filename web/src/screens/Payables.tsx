@@ -146,7 +146,6 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">應付帳款</h1>
-      <p className="page-lede">勾選後送出付款單，由出納執行匯款。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!data && !error && <p className="state-note">讀取中…</p>}
@@ -246,7 +245,10 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
                 {bills.length === 0 && (
                   <tr>
                     <td colSpan={5} className="cell-muted">
-                      目前沒有待付帳款。請由上方「＋ 新增應付帳單」建立第一筆。
+                      目前沒有待付帳款。
+                      <button className="link-cell" onClick={() => setDrawer(true)}>
+                        新增應付帳單
+                      </button>
                     </td>
                   </tr>
                 )}

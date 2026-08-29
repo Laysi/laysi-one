@@ -278,9 +278,14 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
                 {data.assets.length === 0 && (
                   <tr>
                     <td colSpan={6} className="cell-muted">
-                      {canRegister
-                        ? '尚未登記固定資產。請由上方「＋ 登記資產」建立第一筆。'
-                        : '尚未登記固定資產。登記由會計維護。'}
+                      尚未登記固定資產。
+                      {canRegister ? (
+                        <button className="link-cell" onClick={openDrawer}>
+                          登記第一筆資產
+                        </button>
+                      ) : (
+                        '登記由會計維護。'
+                      )}
                     </td>
                   </tr>
                 )}
@@ -323,12 +328,8 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
           </div>
 
           <p className="hint">
-            「執行折舊」會開立一張借 <span className="num">6152 折舊費用</span>、貸{' '}
-            <span className="num">1602 累計折舊</span> 的傳票，狀態為待過帳。
-            同一期僅能提列一次。
-          </p>
-          <p className="hint">
-            年限依資產類別查耐用年數表。每筆提列保存當時查得的年數與規則版本。
+            「執行折舊」開立待過帳傳票，貸方依{' '}
+            <span className="num">{data.accum_accounts_label}</span> 分組。同一期只能提列一次。
           </p>
 
           {data.runs.length > 0 && (

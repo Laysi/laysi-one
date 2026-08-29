@@ -1950,52 +1950,6 @@ textarea {
   color: var(--color-ink-muted);
 }
 
-.ai-note {
-  border: var(--rule-width) dashed var(--rule-accent);
-  border-radius: var(--radius-md);
-  padding: var(--space-base) var(--space-xl);
-  margin-bottom: var(--space-4xl);
-  background: var(--wash-accent-soft);
-}
-
-.ai-note__row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2xl);
-}
-
-.ai-note__title {
-  font-size: var(--text-base);
-  color: var(--color-accent-darkest);
-}
-
-.ai-note__desc {
-  font-size: var(--text-sm);
-  color: var(--color-accent-note);
-  margin-top: var(--space-2xs);
-}
-
-.ai-note__steps {
-  margin-top: var(--space-xl);
-  padding-top: var(--space-lg);
-  border-top: var(--rule-width) solid var(--rule-accent-soft);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-  font-size: var(--text-sm-plus);
-  color: var(--color-accent-darkest);
-  line-height: var(--leading-normal);
-}
-
-.ai-note__code {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  background: var(--color-card);
-  border: var(--rule-width) solid var(--rule-accent);
-  border-radius: var(--radius-sm);
-  padding: 0 var(--space-sm);
-}
-
 .entry-grid {
   display: grid;
   grid-template-columns:
@@ -2099,6 +2053,34 @@ textarea {
   box-shadow: var(--shadow-toast);
   animation: laysi-rise-in var(--motion-base) var(--easing);
   z-index: var(--z-toast);
+}
+
+.ruleset-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-lg);
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+  margin-top: var(--space-2xl);
+}
+
+.ruleset-note__kicker {
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  color: var(--color-neutral-500);
+}
+
+.ruleset-note__item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  padding-left: var(--space-lg);
+  border-left: var(--rule-width) solid var(--rule-soft);
+}
+
+.ruleset-note__label {
+  color: var(--color-ink);
 }
 
 .placeholder {
@@ -2440,6 +2422,27 @@ textarea {
 
 .cal-day--stated {
   border-color: var(--rule-accent);
+}
+
+.cal-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+
+.cal-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.cal-legend__swatch {
+  width: var(--text-sm);
+  height: var(--text-sm);
+  border-radius: var(--radius-sm);
+  border: var(--rule-width) solid var(--rule-soft);
 }
 
 .cal-day--on {

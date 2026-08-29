@@ -138,9 +138,6 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
       <div>
         <h1 className="page-title">請款申請</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">
-          本帳號尚未對應員工編號，請管理員完成連結後再送出請款單。
-        </p>
       </div>
     );
   }
@@ -150,7 +147,6 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">請款申請</h1>
-      <p className="page-lede">先由會計確認費用科目，再依金額決定要經過幾關。</p>
 
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">
@@ -320,10 +316,6 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         </section>
       </div>
 
-      <p className="hint">
-        金額較大的單據會多一道關卡。
-        完成最後一關才會開立傳票。
-      </p>
     </div>
   );
 }

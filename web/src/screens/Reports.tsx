@@ -80,24 +80,23 @@ export function Reports({ reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">財務報表</h1>
-      <p className="page-lede">
-        {unposted && unposted.count > 0 ? (
-          <>
-            尚有 <span className="num">{unposted.count}</span> 張傳票（
-            <span className="num">{money(unposted.amount)}</span>）未過帳，未計入本表。
-            如需完整數字請先過帳。
-          </>
-        ) : (
-          '目前沒有未過帳的傳票。'
-        )}
-        {unposted && unposted.after_period.count > 0 && (
-          <>
-            {' '}另有 <span className="num">{unposted.after_period.count}</span> 張已過帳傳票（
-            <span className="num">{money(unposted.after_period.amount)}</span>）的日期在{' '}
-            <span className="num">{unposted.after_period.through}</span> 之後，落在本表期間外。
-          </>
-        )}
-      </p>
+      {unposted && (unposted.count > 0 || unposted.after_period.count > 0) && (
+        <p className="page-lede">
+          {unposted.count > 0 && (
+            <>
+              本表未計入 <span className="num">{unposted.count}</span> 張未過帳傳票（
+              <span className="num">{money(unposted.amount)}</span>）。
+            </>
+          )}
+          {unposted.after_period.count > 0 && (
+            <>
+              {' '}另有 <span className="num">{unposted.after_period.count}</span> 張已過帳傳票（
+              <span className="num">{money(unposted.after_period.amount)}</span>）日期在{' '}
+              <span className="num">{unposted.after_period.through}</span> 之後，不在本表期間內。
+            </>
+          )}
+        </p>
+      )}
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!bs && !error && <p className="state-note">讀取中…</p>}

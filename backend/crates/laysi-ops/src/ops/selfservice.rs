@@ -98,12 +98,13 @@ fn leave_kinds_json() -> Vec<Value> {
 }
 
 async fn actor_employee(ctx: &OpCtx) -> Result<Employee, OpError> {
-    let employee_id = ctx.employee_id.ok_or_else(|| {
-        OpError::BadInput("目前登入的帳號尚未連結員工資料，自助功能需對應一筆員工主檔".into())
-    })?;
-    ctx.store.employee_by_id(employee_id).await?.ok_or_else(|| {
-        OpError::BadInput("登入帳號連結的員工主檔不存在，請管理員檢查帳號設定".into())
-    })
+    let employee_id = ctx
+        .employee_id
+        .ok_or_else(|| OpError::BadInput("本帳號尚未連結員工編號，請洽系統管理員設定".into()))?;
+    ctx.store
+        .employee_by_id(employee_id)
+        .await?
+        .ok_or_else(|| OpError::BadInput("本帳號連結的員工編號查無資料，請洽系統管理員設定".into()))
 }
 
 fn service_through(employee: &Employee, today: NaiveDate) -> NaiveDate {

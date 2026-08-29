@@ -10,6 +10,7 @@ import {
   type MyOvertimeList,
 } from '../api/client';
 import type { ScreenId } from '../nav';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onGo: (screen: ScreenId) => void;
@@ -45,7 +46,6 @@ export function MyOvertime({ onGo, reloadKey }: Props) {
       <div>
         <h1 className="page-title">我的加班</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">本帳號尚未對應員工編號。請管理員完成連結後再回到本頁。</p>
       </div>
     );
   }
@@ -152,9 +152,7 @@ export function MyOvertime({ onGo, reloadKey }: Props) {
         </div>
       </section>
 
-      <p className="hint">
-        加班費依 {data.ruleset.source_note} 與加班日適用的規則計算，核准後隨當期薪資發放。
-      </p>
+      <RulesetNote items={[{ label: '加班費', source: data.ruleset.source_note }]} />
     </div>
   );
 }

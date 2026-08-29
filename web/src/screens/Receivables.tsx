@@ -184,7 +184,6 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   return (
     <div>
       <h1 className="page-title">應收帳款</h1>
-      <p className="page-lede">到期日加註底線者已逾票期。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!aging && !error && <p className="state-note">讀取中…</p>}
@@ -297,7 +296,10 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                 {rows.length === 0 && (
                   <tr>
                     <td colSpan={5} className="cell-muted">
-                      沒有符合條件的未收帳款。請由上方「＋ 新增應收單」建立第一筆。
+                      沒有符合條件的未收帳款。
+                      <button className="link-cell" onClick={() => setDrawer(true)}>
+                        新增應收單
+                      </button>
                     </td>
                   </tr>
                 )}

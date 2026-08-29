@@ -374,7 +374,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
       <div className="field-row" style={{ alignItems: 'baseline', justifyContent: 'space-between' }}>
         <div>
           <h1 className="page-title">首次設定</h1>
-          <p className="page-lede">可隨時略過，稍後從左側繼續。</p>
         </div>
         <button className="btn btn--ghost" onClick={onExit}>
           略過設定
@@ -806,10 +805,9 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
           <h3 className="section-title">首次設定完成</h3>
           {ownerExists === false && (
             <p className="section-note">
-              帳務、薪資與簽核門檻只有負責人看得到，請到「帳號管理」建立負責人帳號。
+              尚未建立負責人帳號，帳務與薪資要有負責人才看得到。
             </p>
           )}
-          <p className="section-note">員工名冊、會計科目與簽核流程之後隨時可以補。</p>
           <div className="wizard-actions">
             <button className="btn btn--ghost" onClick={() => setStep('owner')}>
               ← 上一步

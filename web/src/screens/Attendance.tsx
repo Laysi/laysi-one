@@ -18,6 +18,7 @@ import {
 import { DateField } from '../components/DateField';
 import { PunchTrail } from '../components/PunchTrail';
 import { useCurrentUser } from '../auth';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -450,7 +451,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       </button>
 
                       <p className="form-note">
-                        補登會覆蓋同一天同一格已有的時間，並記錄操作者。時間可填到秒。
+                        補登會覆蓋同一天同一格已有的時間，並留下更正紀錄。
                       </p>
                     </div>
                   </section>
@@ -725,9 +726,9 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                   </table>
                 </div>
               )}
-              <p className="hint">
-                加班費依 {overtime.ruleset.source_note} 與加班日適用的規則計算，核准後列入當期薪資。
-              </p>
+              <RulesetNote
+                items={[{ label: '加班費', source: overtime.ruleset.source_note }]}
+              />
             </>
           )}
 
@@ -875,12 +876,16 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
           </div>
 
           <p className="hint">{leave.annual_leave_note}</p>
-          <p className="hint">
-            額度依特休規則{' '}
-            <span className="num">{leave.annual_leave_ruleset.version}</span>{' '}
-            與年資計算（{leave.annual_leave_ruleset.effective_from} 起適用）。
-            依據：{leave.annual_leave_ruleset.source_note}
-          </p>
+          <RulesetNote
+            items={[
+              {
+                label: '特休',
+                version: leave.annual_leave_ruleset.version,
+                from: leave.annual_leave_ruleset.effective_from,
+                source: leave.annual_leave_ruleset.source_note,
+              },
+            ]}
+          />
         </>
       )}
     </div>

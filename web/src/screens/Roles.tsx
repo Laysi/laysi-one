@@ -175,7 +175,6 @@ export function Roles({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">角色與核准</h1>
-      <p className="page-lede">權限對照表由系統管理員維護，簽核流程由負責人維護。</p>
 
       {error && <p className="state-note state-note--error">{error}</p>}
       {!matrix && !error && <p className="state-note">讀取中…</p>}
@@ -246,7 +245,7 @@ export function Roles({ onToast, reloadKey }: Props) {
 
           {tab === 'matrix' && (
           <>
-          <p className="hint">● 完整　○ 有限　— 無。點選欄位可切換。</p>
+          <p className="hint">點欄位切換：● 完整　○ 有限　— 無</p>
 
           <div className="table-scroll table-scroll--sticky">
             <table className="table table--matrix">
@@ -323,11 +322,6 @@ export function Roles({ onToast, reloadKey }: Props) {
             關閉後立即生效，
             <strong>包含管理權限本身</strong>。
           </p>
-          <p className="hint">
-            本表格只管人員；
-            <span className="num">AI</span> 能呼叫哪些操作在「MCP 與 AI」設定。
-          </p>
-          <p className="hint">帳號與角色在「帳號管理」建立。</p>
           </>
           )}
 

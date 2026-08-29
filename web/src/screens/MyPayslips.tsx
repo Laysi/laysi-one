@@ -37,9 +37,6 @@ export function MyPayslips({ reloadKey }: Props) {
       <div>
         <h1 className="page-title">我的薪資單</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">
-          本帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
-        </p>
       </div>
     );
   }
@@ -68,9 +65,7 @@ export function MyPayslips({ reloadKey }: Props) {
       </div>
 
       {slips.length === 0 ? (
-        <p className="state-note">
-          尚無任何期別的薪資紀錄。薪資按期計算，算完才會產生薪資單。
-        </p>
+        <p className="state-note">尚無薪資單。每期薪資算完後在本頁出現。</p>
       ) : (
         <>
           <div className="toolbar">
@@ -213,7 +208,7 @@ export function MyPayslips({ reloadKey }: Props) {
                   </div>
                 </div>
 
-                <h3 className="section-title section-title--spaced">本期適用規則版本</h3>
+                <h3 className="section-title section-title--spaced">計算當時的規則版本</h3>
                 <div className="card fact-card">
                   <div className="fact">
                     <span className="fact__key">勞保</span>
@@ -232,10 +227,6 @@ export function MyPayslips({ reloadKey }: Props) {
                     <span className="fact__value num">{shown.rulesets.withholding}</span>
                   </div>
                 </div>
-
-                <p className="hint">
-                  這四個版本保存於本張薪資單。
-                </p>
               </section>
             </div>
           )}

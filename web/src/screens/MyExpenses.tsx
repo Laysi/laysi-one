@@ -79,9 +79,6 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
       <div>
         <h1 className="page-title">我的請款</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">
-          本帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
-        </p>
       </div>
     );
   }
@@ -100,7 +97,7 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
         <span className="spacer" />
         <div className="pay-bar__note">
           {data.employee.name}（{data.employee.emp_no}）累計送出 {data.claims.length} 張，
-          其中 {data.waiting_count} 張流程進行中。完成最後一關才會開立傳票，狀態為待過帳。
+          其中 {data.waiting_count} 張流程進行中。
         </div>
       </div>
 
@@ -194,7 +191,7 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
                   {c.account_label ?? '—'}
 
                   {!c.account_confirmed && c.suggested_account_code && (
-                    <span className="cell-hint cell-hint--block">AI 建議，尚未確認</span>
+                    <span className="cell-hint cell-hint--block">尚未確認</span>
                   )}
                 </td>
                 <td className="num align-right">{money(c.amount)}</td>
@@ -226,9 +223,6 @@ export function MyExpenses({ onGo, onToast, reloadKey }: Props) {
         </table>
       </div>
 
-      <p className="hint">
-        金額較大的單據會多一道關卡。已核准或已退回的單不再收件。
-      </p>
     </div>
   );
 }

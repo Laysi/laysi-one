@@ -9,6 +9,7 @@ import {
   type MyLeaveList,
 } from '../api/client';
 import type { ScreenId } from '../nav';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onGo: (screen: ScreenId) => void;
@@ -44,9 +45,6 @@ export function MyLeave({ onGo, reloadKey }: Props) {
       <div>
         <h1 className="page-title">我的休假</h1>
         <p className="state-note state-note--error">{error}</p>
-        <p className="hint">
-          本帳號尚未對應員工編號。請管理員完成連結後再回到本頁。
-        </p>
       </div>
     );
   }
@@ -149,10 +147,15 @@ export function MyLeave({ onGo, reloadKey }: Props) {
         </div>
 
         <p className="hint">{al.note}</p>
-        <p className="hint">
-          額度依年資即時計算，依據 {al.ruleset.source_note}（
-          {al.ruleset.effective_from} 起適用）。
-        </p>
+        <RulesetNote
+          items={[
+            {
+              label: '特休',
+              from: al.ruleset.effective_from,
+              source: al.ruleset.source_note,
+            },
+          ]}
+        />
       </section>
     </div>
   );

@@ -11,6 +11,7 @@ import {
   type WithholdingStatements,
 } from '../api/client';
 import { screenTitle, type ScreenId } from '../nav';
+import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
   onGo: (screen: ScreenId) => void;
@@ -360,11 +361,12 @@ export function Withholding({ onGo, canViewStatements, reloadKey }: Props) {
             </div>
           )}
 
-          {statements.rulesets.length > 0 && (
-            <p className="hint">
-              依 {statements.rulesets.map((r) => r.source_note).join('；')} 計算。
-            </p>
-          )}
+          <RulesetNote
+            items={statements.rulesets.map((r) => ({
+              label: '扣繳',
+              source: r.source_note,
+            }))}
+          />
         </>
       )}
     </div>

@@ -103,15 +103,6 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
     setRows(rows.filter((_, j) => j !== i));
   }
 
-  function fillFromAi() {
-    setMemo('支付 6 月電費');
-    setRows([
-      { account_code: '6118', debit: '8420', credit: '', dept_code: '' },
-      { account_code: '1102', debit: '', credit: '8420', dept_code: '' },
-    ]);
-    onToast('已帶入 AI 草稿 2 行，請確認會計科目');
-  }
-
   async function save() {
     setSaving(true);
     try {
@@ -245,16 +236,6 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
           </div>
 
           <div className={`balance${balanced ? ' balance--ok' : ''}`}>{message}</div>
-
-          <div className="ai-note">
-            <div className="ai-note__title">AI 的權限範圍</div>
-            <p className="ai-note__desc">
-              AI 只能<strong>草擬</strong>分錄，存為待確認；科目與是否入帳一律由人員確認。
-            </p>
-            <button className="btn btn--ghost" onClick={fillFromAi}>
-              帶入 AI 草擬分錄
-            </button>
-          </div>
         </div>
 
         <div className="drawer__foot">
