@@ -130,6 +130,22 @@ export function App() {
         <div className="login">
           <p className="state-note">確認登入狀態…</p>
         </div>
+      ) : auth.status === 'unreachable' ? (
+        <div className="login">
+          <div className="card login__panel">
+            <div className="login__brand">
+              <BrandMark height={20} />
+            </div>
+            <p className="state-note state-note--error login__alert">
+              {auth.problem?.message ?? '無法連線到伺服器，請確認伺服器已啟動。'}
+            </p>
+            <div className="login__actions">
+              <button className="btn" type="button" onClick={() => window.location.reload()}>
+                重新載入
+              </button>
+            </div>
+          </div>
+        </div>
       ) : signedIn && !auth.user?.must_change_password ? (
         <Workspace />
       ) : !signedIn && auth.setup.bootstrap_available ? (
