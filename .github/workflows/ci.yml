@@ -60,10 +60,6 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://laysi:ci@localhost:5432/laysi_ci
 
-      # The server refuses to start when this fails, so a brand file edited
-      # without re-signing must not reach main.
-      - run: cargo run -p laysi-brand --bin laysi-brandhash -- --verify
-
       # Known vulnerabilities in the dependency tree, against the RustSec
       # advisory database. The run itself is the record an audit asks for, so
       # it must not be conditional on anything.

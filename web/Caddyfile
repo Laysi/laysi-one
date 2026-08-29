@@ -21,16 +21,14 @@
 :80 {
 	encode zstd gzip
 
-	# REST and the brand mark. The mark must be reachable: the frontend has no
-	# local logo to fall back on, so a broken proxy shows a failed-to-load state
-	# rather than quietly substituting text.
+	# REST. The brand mark is a static file served by the SPA handler below,
+	# not a route on the server.
 	handle /v1/* {
 		reverse_proxy api:8080
 	}
 
-	# System health. Only the server process knows the brand integrity
-	# fingerprint and the RustFS connection state, and the security screen needs
-	# this route to report them truthfully.
+	# System health. Only the server process knows the RustFS connection state,
+	# and the security screen needs this route to report it truthfully.
 	handle /healthz {
 		reverse_proxy api:8080
 	}

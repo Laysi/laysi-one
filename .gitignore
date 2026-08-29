@@ -4,9 +4,5 @@
 .env
 *.log
 
-# Vendor signing key. Must never be committed.
-# Losing it makes the brand integrity manifest impossible to re-sign; keep an
-# offline backup.
-/backend/brand/vendor.key
 /scripts/node_modules/
 /scripts/bun.lock

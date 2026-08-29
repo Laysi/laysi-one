@@ -15,11 +15,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    // /v1 (REST and the brand mark), /mcp (MCP streamable HTTP) and /healthz
-    // are all proxied to the backend. The brand mark must go through the
-    // proxy because the frontend has no local logo to fall back on, and
-    // /healthz is the only place the security screen can read the brand
-    // fingerprint and the RustFS state.
+    // /v1 (REST), /mcp (MCP streamable HTTP) and /healthz are all proxied to
+    // the backend. /healthz is the only place the security screen can read
+    // the RustFS state.
     proxy: {
       '/v1': { target: API_TARGET, changeOrigin: true },
       '/mcp': { target: MCP_TARGET, changeOrigin: true },

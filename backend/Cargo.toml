@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/laysi-brand",
     "crates/laysi-domain",
     "crates/laysi-regulation",
     "crates/laysi-store",
@@ -16,7 +15,6 @@ license-file = "../LICENSE-BSL.txt"
 rust-version = "1.85"
 
 [workspace.dependencies]
-laysi-brand = { path = "crates/laysi-brand" }
 laysi-domain = { path = "crates/laysi-domain" }
 laysi-regulation = { path = "crates/laysi-regulation" }
 laysi-ops = { path = "crates/laysi-ops" }
@@ -43,11 +41,10 @@ base64 = "0.23"
 axum = "0.8"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
-ed25519-dalek = { version = "3" }
 hex = "0.4"
 openidconnect = "4.0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-# OS entropy only: session tokens, temporary passwords and the vendor key seed.
+# OS entropy only: session tokens and temporary passwords.
 # `rand` was three calls to fill a byte buffer, which is this crate underneath.
 getrandom = "0.4"
 rust_decimal = { version = "1", features = ["serde-with-str", "db-postgres"] }

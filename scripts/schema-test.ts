@@ -92,7 +92,6 @@ rejects("金額變成數字", employeeList, {
 // internals.
 accepts("未登入時的 /healthz", healthz, {
   status: "ok",
-  brand: { ok: true },
   db: { ok: true },
   rustfs: { ok: true },
 });

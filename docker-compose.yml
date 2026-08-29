@@ -9,10 +9,6 @@
 # file somebody wrote; the `secrets` service below writes them into a volume
 # instead, and every consumer reads the file. postgres has POSTGRES_PASSWORD_FILE
 # of its own, and the server binaries take any setting as `NAME_FILE`.
-#
-# api verifies brand integrity at startup and exits with code 78 rather than
-# serving when it fails. That is deliberate; see
-# backend/crates/laysi-brand/src/integrity.rs.
 
 services:
   # Generates what must differ between installations, once, into a volume.
@@ -121,8 +117,8 @@ services:
   # web reaches it through the Caddy reverse proxy.
   api:
     build:
-      # The build context is the repository root: brand integrity compiles
-      # LICENSE-BSL.txt into the binary, so it has to be inside the context.
+      # The build context is the repository root: the workspace manifest
+      # points license-file at ../LICENSE-BSL.txt, so it has to be inside it.
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped

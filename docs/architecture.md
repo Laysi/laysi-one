@@ -13,7 +13,7 @@ Laysi One 是面向台灣中小企業的財務＋人資正式產品。安裝時�
 1. **法規更新空間** — 勞保級距、健保費率、勞退、營業稅、基本工資每年會變，
    一律不得寫死在程式碼裡。
 2. **所有操作支援 MCP** — MCP 不是外掛，而是操作層本身。
-3. **BSL 防盜賣** — 字標由 Rust 產生、註解 prompt 阻卻、hash 完整性硬性檢查。
+3. **BSL 防盜賣** — 授權聲明寫在字標 SVG 與原始碼註解裡。
 4. **Docker Compose 自架**。
 
 ### 不做加值中心（0031）
@@ -44,7 +44,6 @@ Laysi One 是面向台灣中小企業的財務＋人資正式產品。安裝時�
 ## Crate 分層
 
 ```
-laysi-brand       品牌字標產生 + 完整性驗證（已完成，勿改）
 laysi-domain      純領域：Money、分錄、借貸平衡、試算表彙總。無 DB、無 async
 laysi-regulation  法規引擎：TOML 規則載入、生效日解析、純函式計算子
 laysi-store       sqlx repository、RustFS 健康探測
@@ -172,7 +171,7 @@ pub fn pension(rs: &Ruleset, contribution_wage: Money) -> Result<Money, Regulati
 pub fn vat(rs: &Ruleset, net_amount: Money) -> Result<Money, RegulationError>;
 ```
 
-規則以 `include_str!` 在編譯期嵌入（與品牌檔案同樣做法），另外由
+規則以 `include_str!` 在編譯期嵌入，另外由
 `laysi-store` 寫入 `reg_ruleset` 表供稽核與查詢。
 
 ### 由法規算出的金額必須連同版本一起存
@@ -1859,9 +1858,9 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 
 | 方法 | 路徑 | 說明 |
 |---|---|---|
-| GET | `/healthz` | 未登入：`{ status, brand: {ok}, db: {ok}, rustfs: {ok} }` |
-| — | — | 帶系統管理員 session cookie 時另加 `brand.{fingerprint, files, signed}`、`db.migration`、完整的 `rustfs`（含 endpoint、bucket）與 `operations` |
-| — | — | 前端也讀這一條（Caddy 與 vite 都要 proxy）：品牌指紋與 RustFS 狀態只有伺服器行程知道，`get_system_health` 從資料庫查不到 |
+| GET | `/healthz` | 未登入：`{ status, db: {ok}, rustfs: {ok} }` |
+| — | — | 帶系統管理員 session cookie 時另加 `db.migration`、完整的 `rustfs`（含 endpoint、bucket）與 `operations` |
+| — | — | 前端也讀這一條（Caddy 與 vite 都要 proxy）：RustFS 狀態只有伺服器行程知道，`get_system_health` 從資料庫查不到 |
 | POST | `/v1/auth/login` | 帳密登入並設定 session cookie；失敗訊息不區分帳號或密碼 |
 | POST | `/v1/auth/logout` | 撤銷目前 session 並清除 cookie |
 | GET | `/v1/auth/me` | 目前登入帳號；未登入回 401 |
@@ -1869,16 +1868,14 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | POST | `/v1/auth/bootstrap` | 安裝完全沒有帳號時建立第一個帳號（角色固定 `admin`）並直接簽發 session |
 | GET | `/v1/auth/oauth/start` | 啟用時建立 PKCE 流程並以 302 前往 discovery 的 authorization endpoint |
 | GET | `/v1/auth/oauth/callback` | 後端交換授權碼、驗證 id_token、建立 session，再以 302 回 `/` |
-| GET | `/v1/meta` | 公司、會計期間、身分、版本、授權、品牌出處字串 |
-| GET | `/v1/brand/mark.svg?h=28` | 字標，`Content-Type: image/svg+xml` |
-| GET | `/v1/brand/monogram.svg?h=64` | 組合標記 |
+| GET | `/v1/meta` | 公司、會計期間、身分、版本、授權 |
 | GET | `/v1/ops` | registry 清單：`[{name, risk, summary, enabled, input_schema}]` |
 | POST | `/v1/ops/{name}` | body 是 `{ input, prompt }`（兩者皆可省略）；回 `{ ok: true, data }` 或 `{ ok: false, error: {code, message} }` |
 | POST | `/mcp` | MCP streamable HTTP，Bearer token |
 
 **`/healthz` 分兩層回答**：這條路徑未登入就打得到（compose 的自檢在有帳號之前
 就要跑，Caddy 也直接放行），所以匿名的回答只有各部分起來了沒有。物件儲存的
-endpoint 與 bucket、migration 版本、品牌指紋描述的是這套安裝的內部，只在請求帶著
+endpoint 與 bucket、migration 版本描述的是這套安裝的內部，只在請求帶著
 系統管理員的 session cookie 時附上——那正是「安全與營運」畫面的讀者。
 
 **request body 的上限依路由分開設**（`AUTH_BODY_LIMIT`／`OPS_BODY_LIMIT`）。
@@ -1888,7 +1885,7 @@ axum 對每個 `Json`／`Bytes` 擷取器有自己的 2 MB 預設，對登入太
 檢查與訊息永遠輪不到。所以 `/v1/auth/*` 收到 64 KB，`/v1/ops/{name}` 與 `/mcp`
 收到 40 MB，兩者的關係由 `const _: () = assert!(...)` 在編譯期釘住。
 
-`/healthz` 與 `/v1/brand/*.svg` 是公開端點。`/v1/meta`、`/v1/ops*` 必須有
+`/healthz` 是公開端點。`/v1/meta`、`/v1/ops*` 必須有
 有效 session；`/mcp` 必須有自己的 Bearer 憑證。認證路由是操作註冊表唯一例外：
 登入若經過 dispatch，就會先被角色權限步驟要求一個尚未取得的身分，形成循環。
 `/v1/auth/bootstrap` 同樣未登入即可呼叫，但守門的是「安裝目前沒有任何帳號」，
@@ -1901,8 +1898,7 @@ axum 對每個 `Json`／`Bytes` 擷取器有自己的 2 MB 預設，對登入太
   "period": "2026 / 07", "period_state": "未結帳",
   "actor": "目前使用者", "actor_role": "acct", "employee_id": 1,
   "oauth": { "enabled": true, "provider": "https://accounts.example.com" },
-  "version": "0.1.0", "licence": "BSL",
-  "brand_build": "<16 碼指紋>" }
+  "version": "0.1.0", "licence": "BSL" }
 ```
 
 `setup_required` 只看 `company_setting.company_name`：空字串（包含只有空白）代表
@@ -1989,11 +1985,11 @@ Vite + React + TypeScript。設計語彙來自 **Classical** 設計系統：
 色階、字體、`--space-*`、`--radius-*`、`--shadow-*` 定義成 CSS 變數，元件
 **只能引用變數**，不得寫死 hex／字體名／px。
 
-Logo 一律 `<img src="/v1/brand/mark.svg">`，**前端不得自帶任何 logo 檔案或
-以文字重繪品牌名**。
+Logo 是 `web/public/mark.svg` 與 `web/public/monogram.svg` 兩個靜態檔，一律
+`<img src="/mark.svg">`，**不得以文字重繪品牌名**。
 
 **前端同樣不得自帶任何法規數字。** 稅率、級距、耐用年數一律由後端從 ruleset
-帶下來，這條規則與「不得自帶 logo」同級。畫面上要即時試算稅額時，用後端
+帶下來。畫面上要即時試算稅額時，用後端
 回傳的費率，不要在 TS 裡寫 `0.05`。金額運算用 `client.ts` 的
 `multiplyToDollars` / `addDecimals`（BigInt），不經過 `number`。
 
@@ -2081,7 +2077,7 @@ header 不能共用；`SYSTEM_NAV` 是第四棵樹但不是分頁（見下）。
 
 **這四個畫面原本掛在財務樹底下。** 基礎設定、角色與核准、MCP 與 AI、安全與營運
 四個畫面原本掛在 `FINANCE_NAV` 最底下，理由只是財務那棵樹最長，不是它們屬於
-財務。誰可以簽核什麼、AI 能呼叫哪些工具、品牌簽章有沒有通過，講的是這套系統
+財務。誰可以簽核什麼、AI 能呼叫哪些工具、備份要送去哪裡，講的是這套系統
 本身；會計結帳時不會打開它們，而會打開它們的人當下並不在做會計。它們背後的
 權限（`manage_access`、`manage_settings`）也是管理權限，所以多數角色根本不會
 看到這個分頁。
