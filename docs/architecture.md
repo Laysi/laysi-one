@@ -1377,9 +1377,22 @@ column，因此不可能與上面的區間不一致。
 
 法遵檢核的 `checked_all_passed` **只涵蓋實際算過的項目**。完整投保薪資級距、
 國定假日與例假出勤工資尚未收錄，會以 `checked = false`、`passed = null` 與
-`not_checked_reason` 回傳；`coverage_complete` 因此是 `false`，畫面不得把它
-改寫成「全部法規皆符合」。每月延長工時上限自 0057 起是**實際檢查**的項目：逐人
-加總當月已核准的加班時數，與 `overtime` ruleset 的上限比較。
+`not_checked_reason` 回傳，畫面不得把它改寫成「全部法規皆符合」。每月延長工時
+上限自 0057 起是**實際檢查**的項目：逐人加總當月已核准的加班時數，與 `overtime`
+ruleset 的上限比較。
+
+畫面依 `checked`／`passed` 分成待確認、未檢查、通過三段，**待確認排在最前面**，
+所以檢核項目的先後由狀態決定而不是由 Registry 的排列決定。每一個算得出來的項目
+帶 `screen`（`hr` 或 `hr_att`，與人資總覽同一組代碼），畫面據以畫出前往修正的
+按鈕；**因此 `failures[].message` 不寫「請到某某畫面」**，路徑由按鈕承擔，訊息
+只講哪裡不對。未檢查的項目沒有 `screen`：沒有東西可以修，一顆按鈕反而是假出口。
+
+「勞健保與勞退費額可依規則重算」不是檢核項目。它的 `passed` 恆為 `true`——級距為
+0 時重算出 0 也回報沒有差異，而規則缺漏會讓整個操作先失敗——它唯一的內容
+（三項公司負擔合計）就是「勞健保與勞退」那一頁本身。永遠亮著的綠燈比沒有燈更糟，
+所以連同 `evidence` 一起移除。同一條判準也移除了 `coverage_note`（說明版面配置）、
+`coverage_complete` 與 `available_domains`（沒有讀取端）、`missing_bracket_count`
+（等於某一項的 `failures` 筆數）。
 
 年度扣繳憑單以 `withholding_record` 的 `payee`／`payee_id` 分組。`basis = rate`
 依給付日 ruleset 計算，`basis = table` 只採來源系統帶入的
@@ -1387,6 +1400,13 @@ column，因此不可能與上面的區間不一致。
 `person_specific = false`，不自行拆出一份不存在的逐人資料。薪資模組的
 `payroll_year_totals` 另列為 `employee_income`，並與**薪資所得代號（50）**的紀錄
 對帳；兩邊若不同就回報差額，不用其中一邊覆蓋另一邊。
+
+**這一段是負責人才叫得動的操作，所以畫面靠 `permissions` 決定叫不叫**，不再送出
+一個註定被拒的請求再把錯誤印出來。對帳結果畫成一張兩列的比較表（薪資模組／扣繳
+紀錄／差額），`employee_income` 收在「逐人明細」開關後面——它是差額的佐證，不是
+這一頁的主體。`payroll_reconciliation.note`、`table_note`、`source_note` 與逐列的
+`source_note` 一併移除：對帳結論由差額欄位自己說，稅額缺值與「可能為多人合併」
+都已經是該列上的標記。
 
 **`run_payroll` 在同一個交易裡寫入這些給付紀錄。** 沒有它，扣繳頁永遠寫著「對不上，
 差一整年的薪資」，而畫面上沒有任何動作可以消除——那不是對帳，是一個做不完的待辦。

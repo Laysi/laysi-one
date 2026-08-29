@@ -1,15 +1,21 @@
 //! HR compliance checks and annual withholding statements.
 //!
 //! [`GetHrCompliance`] splits every item into `checked` and `passed`. Minimum
-//! wage, the labour insurance ceiling, premium recomputation and leave
-//! entitlement have usable rules, so they are checked per employee with the
-//! ruleset attached. The full insured-salary brackets and overtime multipliers
-//! do not, so they return `checked = false` with a `not_checked_reason`.
+//! wage, the labour insurance ceiling and leave entitlement have usable rules,
+//! so they are checked per employee with the ruleset attached. The full
+//! insured-salary brackets and overtime multipliers do not, so they return
+//! `checked = false` with a `not_checked_reason`.
+//!
+//! Every check carries a `screen`: where the finding is fixed. The failure
+//! message states what is wrong and the caller draws the way there, so no
+//! message names a screen in prose.
 //!
 //! Whether a bracket was filed at all needs no ruleset: employment, pay and a
 //! bracket of zero answer it between them, so that item is checked and can
 //! fail. Recomputing the premiums cannot answer it, because zero recomputes
-//! to zero and reports no difference.
+//! to zero and reports no difference — which is why recomputation is not
+//! itself an item: it can only ever pass, and the figures it would show are
+//! the insurance screen's own.
 //!
 //! Labour insurance, health insurance and pension all go through
 //! [`crate::ops::insurance::premiums_on`]; this module holds no rates,
@@ -48,6 +54,11 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
 }
 
 // HR compliance
+
+/// Where a finding of each kind is fixed. The caller turns these into the way
+/// there; the same codes the HR dashboard uses.
+const SCREEN_EMPLOYEES: &str = "hr";
+const SCREEN_ATTENDANCE: &str = "hr_att";
 
 struct GetHrCompliance;
 
@@ -91,7 +102,7 @@ fn unfiled_bracket_failures(staff: &[Employee]) -> Vec<Value> {
                 "missing": missing.labels(),
                 "base_salary": employee.base_salary.to_string(),
                 "message": format!(
-                    "本薪 {}，{} 還沒設定，請在「員工名冊」的編輯抽屜填入",
+                    "本薪 {}，{} 還沒設定",
                     money(employee.base_salary),
                     missing.labels().join("、"),
                 ),
@@ -123,7 +134,7 @@ impl Operation for GetHrCompliance {
     }
 
     fn summary(&self) -> &'static str {
-        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算、延長工時上限（已核准的加班申請與打卡推算各一項）與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。"
+        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、延長工時上限（已核准的加班申請與打卡推算各一項）與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。"
     }
 
     fn input_schema(&self) -> Value {
@@ -172,11 +183,6 @@ impl Operation for GetHrCompliance {
         let unfiled_failure_count = unfiled_failures.len();
 
         let mut labor_cap_failures = Vec::new();
-        let mut labor_employer = Money::ZERO;
-        let mut labor_employee = Money::ZERO;
-        let mut health_employer = Money::ZERO;
-        let mut health_employee = Money::ZERO;
-        let mut pension_employer = Money::ZERO;
         for employee in &staff {
             let premiums = premiums_on(
                 as_of,
@@ -184,12 +190,6 @@ impl Operation for GetHrCompliance {
                 employee.health_insured_salary,
                 employee.pension_wage,
             )?;
-            labor_employer += premiums.labor.employer;
-            labor_employee += premiums.labor.employee;
-            health_employer += premiums.health.employer;
-            health_employee += premiums.health.employee;
-            pension_employer += premiums.pension;
-
             if premiums.labor_capped {
                 labor_cap_failures.push(json!({
                     "emp_no": employee.emp_no,
@@ -330,7 +330,8 @@ impl Operation for GetHrCompliance {
                 "passed": minimum_failures.is_empty(),
                 "rulesets": [ruleset_json(minimum_rs)],
                 "failures": minimum_failures,
-                "scope_note": "逐人比對員工主檔的月薪與規則下限。中途到職當月的實發金額不列入比較。",
+                "screen": SCREEN_EMPLOYEES,
+                "scope_note": "中途到職當月的實發金額不列入比較。",
             }),
             json!({
                 "name": "在職員工的投保級距",
@@ -338,7 +339,8 @@ impl Operation for GetHrCompliance {
                 "passed": unfiled_failures.is_empty(),
                 "rulesets": [],
                 "failures": unfiled_failures,
-                "scope_note": "逐人檢查在職且已設定本薪的員工，勞保投保薪資、健保投保金額與勞退提繳工資有沒有填。",
+                "screen": SCREEN_EMPLOYEES,
+                "scope_note": "本薪為 0 的員工不列入。",
             }),
             json!({
                 "name": "勞保申報值與計費上限",
@@ -346,27 +348,7 @@ impl Operation for GetHrCompliance {
                 "passed": labor_cap_failures.is_empty(),
                 "rulesets": [ruleset_json(premium_rules.labor_rs)],
                 "failures": labor_cap_failures,
-                "scope_note": "只檢查申報的投保薪資有沒有超過計費上限。投保薪資分級表本身尚未收錄，另列為未檢查。",
-            }),
-            json!({
-                "name": "勞健保與勞退費額可依規則重算",
-                "checked": true,
-                "passed": true,
-                "rulesets": [
-                    ruleset_json(premium_rules.labor_rs),
-                    ruleset_json(premium_rules.health_rs),
-                    ruleset_json(premium_rules.pension_rs),
-                ],
-                "failures": [],
-                "evidence": {
-                    "employee_count": staff.len(),
-                    "labor_employer": labor_employer.to_string(),
-                    "labor_employee": labor_employee.to_string(),
-                    "health_employer": health_employer.to_string(),
-                    "health_employee": health_employee.to_string(),
-                    "pension_employer": pension_employer.to_string(),
-                },
-                "scope_note": "逐人以現行費率重算保費，確認申報的級距算得出金額。",
+                "screen": SCREEN_EMPLOYEES,
             }),
             json!({
                 "name": "每月延長工時上限",
@@ -374,7 +356,8 @@ impl Operation for GetHrCompliance {
                 "passed": overtime_failures.is_empty(),
                 "rulesets": [ruleset_json(overtime_rs)],
                 "failures": overtime_failures,
-                "scope_note": format!("逐人加總 {month} 已核准的加班時數，與規則上限比較。等簽核的申請不計入。"),
+                "screen": SCREEN_ATTENDANCE,
+                "scope_note": format!("{month} 已核准的加班，等簽核的申請不計入。"),
             }),
             json!({
                 "name": "打卡推算的延長工時",
@@ -382,9 +365,10 @@ impl Operation for GetHrCompliance {
                 "passed": punch_checked.then_some(punch_failures.is_empty()),
                 "rulesets": [ruleset_json(overtime_rs)],
                 "failures": punch_failures,
+                "screen": SCREEN_ATTENDANCE,
                 "not_checked_reason": (!punch_checked)
-                    .then_some("尚未設定上下班時間，打卡算不出加班時數。請系統管理員於「基礎設定」填寫。"),
-                "scope_note": format!("逐人以 {month} 的打卡推算加班時數，與規則的單日與每月上限比較。不論有沒有加班申請。"),
+                    .then_some("上下班時間還沒填，打卡算不出加班時數，請系統管理員設定。"),
+                "scope_note": format!("{month} 的打卡紀錄，不論有沒有加班申請。"),
             }),
             json!({
                 "name": "特休額度與已核准天數",
@@ -392,7 +376,8 @@ impl Operation for GetHrCompliance {
                 "passed": annual_failures.is_empty(),
                 "rulesets": [ruleset_json(annual_rs)],
                 "failures": annual_failures,
-                "scope_note": "依年資現算特休額度，再與本年度已核准的天數比較。超出額度只列為待確認，可能是公司加給。",
+                "screen": SCREEN_ATTENDANCE,
+                "scope_note": "超出額度可能是公司加給。",
             }),
         ];
         let unchecked = vec![
@@ -404,18 +389,17 @@ impl Operation for GetHrCompliance {
                     ruleset_json(premium_rules.pension_rs),
                 ],
                 None,
-                "本項未檢查：規則庫目前僅收錄費率、分攤方式與勞保計費上限，尚無完整的勞健保投保薪資分級表與勞退提繳工資級距。",
+                "規則庫只收錄費率、分攤方式與勞保計費上限，沒有投保薪資分級表，級距請自行核對。",
             ),
             unchecked_check(
                 "國定假日與例假出勤工資",
                 vec![ruleset_json(overtime_rs)],
                 Some("overtime"),
-                "本項未檢查：這兩種日子的工資按日加倍發給，而規則庫尚無國定假日日曆，無法判定某一天屬於哪一種。",
+                "規則庫沒有國定假日日曆，分不出某一天屬於哪一種，這兩種日子按日加倍的工資請自行核對。",
             ),
         ];
         checks.extend(unchecked);
         let (checked_count, unchecked_count) = coverage_counts(&checks);
-        let coverage_complete = unchecked_count == usize::default();
 
         let failure_count = minimum_failure_count
             + unfiled_failure_count
@@ -437,15 +421,11 @@ impl Operation for GetHrCompliance {
             json!({
                 "as_of": as_of,
                 "employee_count": staff.len(),
-                "missing_bracket_count": unfiled_failure_count,
                 "checked_all_passed": checked_all_passed,
-                "coverage_complete": coverage_complete,
                 "checked_count": checked_count,
                 "unchecked_count": unchecked_count,
                 "failure_count": failure_count,
                 "checks": checks,
-                "available_domains": laysi_regulation::DOMAINS,
-                "coverage_note": "「無差異」的範圍是已檢查的項目；未檢查的項目列在下方。",
             }),
             summary,
         ))
@@ -672,11 +652,6 @@ impl Operation for ListWithholdingStatements {
                     "withheld_complete": !statement.missing_withheld,
                     "payment_count": statement.payment_count,
                     "income_lines": income_lines,
-                    "source_note": if person_specific {
-                        "來源有給付對象的識別資料，可作為個人憑單。"
-                    } else {
-                        "來源沒有識別資料，這筆可能是多人合併，不能直接當成個人憑單。"
-                    },
                 })
             })
             .collect::<Vec<_>>();
@@ -744,10 +719,7 @@ impl Operation for ListWithholdingStatements {
                         payroll_withheld_difference.map(|amount| amount.to_string()),
                     "salary_withheld_complete": salary_withheld_complete,
                     "reconciled": payroll_reconciled,
-                    "note": "薪資模組與扣繳紀錄分開計算，本項只作對帳，差異照實列出。",
                 },
-                "table_note": "依扣繳稅額表的項目，稅額採用來源系統帶入的金額；來源沒有帶就留空。",
-                "source_note": "以來源紀錄帶的統一編號或身分證號辨識個人；來源只給合併總額時照實保留。",
             }),
             summary,
         ))
@@ -793,7 +765,10 @@ mod tests {
         assert_eq!(failures[0]["missing"].as_array().unwrap().len(), 3);
         let message = failures[0]["message"].as_str().unwrap();
         assert!(message.contains("勞保投保薪資"), "要說出缺哪一項");
-        assert!(message.contains("員工名冊"), "要說出去哪裡補");
+        assert!(
+            !message.contains("名冊"),
+            "去哪裡補由 check 的 screen 帶，訊息不寫路徑"
+        );
     }
 
     /// Items the rule library does not cover must not count as passed, nor

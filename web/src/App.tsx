@@ -533,7 +533,13 @@ function Workspace() {
                 <Payroll onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
               )}
               {screen === 'ins' && <Insurance onToast={showToast} reloadKey={reloadKey} />}
-              {screen === 'wht' && <Withholding onToast={showToast} reloadKey={reloadKey} />}
+              {screen === 'wht' && (
+                <Withholding
+                  onGo={go}
+                  canViewStatements={permissions.includes('list_withholding_statements')}
+                  reloadKey={reloadKey}
+                />
+              )}
               {screen === 'cal' && <WorkCalendar onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'notice' && (
                 <Notices
