@@ -209,7 +209,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_payroll_summary', risk: 'read_only', riskLabel: '唯讀', summary: "讀某一期的薪資彙總：應發、代扣、實發、公司負擔，並與總帳 6111 薪資支出對帳。不含任何個人金額。" },
   { name: 'list_payslips', risk: 'boss_only', riskLabel: '限負責人', summary: "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司負擔的勞健保與勞退。限負責人。以同一份規則重算一次，再與存下來的數字比對。" },
   { name: 'run_payroll', risk: 'high_risk', riskLabel: '高風險', summary: "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。已計薪的人不會再算一次，同一期可以為後來到職或漏算的人補算，各自產生一張傳票。" },
-  { name: 'get_hr_compliance', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、保費試算、延長工時上限（已核准的加班申請與打卡推算各一項）與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。" },
+  { name: 'get_hr_compliance', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、延長工時上限（已核准的加班申請與打卡推算各一項）與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。" },
   { name: 'list_withholding_statements', risk: 'boss_only', riskLabel: '限負責人', summary: "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限負責人；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。" },
   { name: 'list_notices', risk: 'read_only', riskLabel: '唯讀', summary: "讀公告與規章，含生效期間與版次；帶 id 則回該則的每一個版本" },
   { name: 'create_notice', risk: 'needs_confirm', riskLabel: '需人確認', summary: "發布一則公告或規章，記為第 1 版" },

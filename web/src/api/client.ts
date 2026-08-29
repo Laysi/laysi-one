@@ -1806,17 +1806,10 @@ export const complianceCheck = z.object({
   passed: z.boolean().nullable(),
   rulesets: z.array(rulesetRef),
   failures: z.array(complianceFailure),
+  screen: z.string().optional(),
   scope_note: z.string().optional(),
   not_checked_reason: z.string().optional(),
   required_domain: z.string().optional(),
-  evidence: z.object({
-    employee_count: z.number(),
-    labor_employer: z.string(),
-    labor_employee: z.string(),
-    health_employer: z.string(),
-    health_employee: z.string(),
-    pension_employer: z.string(),
-  }).optional(),
 });
 export type ComplianceCheck = z.infer<typeof complianceCheck>;
 
@@ -1824,14 +1817,10 @@ export const hrCompliance = z.object({
   as_of: z.string(),
   employee_count: z.number(),
   checked_all_passed: z.boolean(),
-  coverage_complete: z.boolean(),
   checked_count: z.number(),
   unchecked_count: z.number(),
   failure_count: z.number(),
   checks: z.array(complianceCheck),
-  available_domains: z.array(z.string()),
-  coverage_note: z.string(),
-  missing_bracket_count: z.number(),
 });
 export type HrCompliance = z.infer<typeof hrCompliance>;
 
@@ -1875,7 +1864,6 @@ export const withholdingStatement = z.object({
   withheld_complete: z.boolean(),
   payment_count: z.number(),
   income_lines: z.array(withholdingIncomeLine),
-  source_note: z.string(),
 });
 export type WithholdingStatement = z.infer<typeof withholdingStatement>;
 
@@ -1913,10 +1901,7 @@ export const withholdingStatements = z.object({
     withheld_difference: z.string().nullable(),
     salary_withheld_complete: z.boolean(),
     reconciled: z.boolean(),
-    note: z.string(),
   }),
-  table_note: z.string(),
-  source_note: z.string(),
 });
 export type WithholdingStatements = z.infer<typeof withholdingStatements>;
 
