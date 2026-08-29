@@ -7,6 +7,10 @@
 # is exported, because exporting one would silently be used for the other.
 
 set -eu
+# A failure in any but the last stage of a pipeline is otherwise invisible: a
+# pg_dump that dies mid-stream still leaves age writing a well-formed archive
+# of a truncated dump, and the pass reports success.
+set -o pipefail
 
 INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-86400}"
 # Same convention as the server binaries: compose cannot interpolate a secret
@@ -62,6 +66,12 @@ ensure_key() {
     echo "已產生還原金鑰，請到安全與營運頁保存後才會開始備份。"
 }
 
+# Everything that decides whether a key is due, in one round trip: it is asked
+# far more often than a backup runs.
+key_due() {
+    [ "$(get "enabled AND bucket <> '' AND endpoint <> '' AND age_recipient = ''")" = "t" ]
+}
+
 run_once() {
     [ "$(get enabled)" = "t" ] || return 0
 
@@ -107,10 +117,19 @@ run_once() {
     # sound because an object never changes after it is written. So "already
     # in the remote" means "already done", and the pass stays incremental even
     # though age output differs every time.
+    # Nothing there yet is the normal first pass, and a remote that cannot be
+    # listed only means every object is copied again, which the copy below
+    # reports if it is really unreachable.
     there s3 ls "${base}objects/" --recursive 2>/dev/null | awk '{print $4}' \
-        | sed "s|^${prefix:+$prefix/}objects/||;s|\.age$||" | sort > /tmp/have
-    here s3 ls "s3://$RUSTFS_BUCKET" --recursive 2>/dev/null | awk '{print $4}' \
-        | sort > /tmp/want
+        | sed "s|^${prefix:+$prefix/}objects/||;s|\.age$||" | sort > /tmp/have || true
+    # The source is the other way round: an empty listing is indistinguishable
+    # from a bucket that could not be read, and taking it for "nothing to copy"
+    # reports a backup holding no documents at all as a success.
+    if ! here s3 ls "s3://$RUSTFS_BUCKET" --recursive | awk '{print $4}' \
+        | sort > /tmp/want; then
+        note_result "無法讀取文件儲存" "$bytes"
+        return 1
+    fi
     comm -13 /tmp/have /tmp/want > /tmp/todo
     while read -r key; do
         [ -n "$key" ] || continue
@@ -130,14 +149,28 @@ run_once() {
         there s3 ls "${base}db/" | awk '{print $4}' | while read -r name; do
             when=$(echo "$name" | sed -n 's|^laysi-\(.*\)\.dump\.age$|\1|p')
             [ -n "$when" ] || continue
-            [ "$when" \< "$cutoff" ] && there s3 rm "${base}db/$name"
+            if [ "$when" \< "$cutoff" ]; then
+                there s3 rm "${base}db/$name"
+            fi
         done
     fi
 
     note_result "" "$bytes"
 }
 
+# The loop wakes far more often than it backs up. Somebody is on screen waiting
+# for the key -- on the first setup, and again whenever a lost one is reset --
+# and generating it only on the next pass would keep them waiting a whole day.
+KEY_POLL_SECONDS=5
+
 while true; do
     run_once || echo "備份未完成，將於下一次重試。"
-    sleep "$INTERVAL_SECONDS"
+    waited=0
+    while [ "$waited" -lt "$INTERVAL_SECONDS" ]; do
+        sleep "$KEY_POLL_SECONDS"
+        waited=$((waited + KEY_POLL_SECONDS))
+        if key_due; then
+            ensure_key
+        fi
+    done
 done

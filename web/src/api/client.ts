@@ -139,6 +139,15 @@ export function fileSizeLabel(bytes: number): string {
   return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
 }
 
+export function downloadFile(name: string, data: BlobPart, type: string) {
+  const url = URL.createObjectURL(new Blob([data], { type }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 export const meta = z.object({
   company: z.string(),
   tax_id: z.string(),
@@ -1353,6 +1362,7 @@ export const verifiedDocument = z.object({
   verified: z.boolean(),
   checksum_recomputed: z.string(),
   byte_size_actual: z.number(),
+  content_base64: z.string().nullable(),
 });
 export type VerifiedDocument = z.infer<typeof verifiedDocument>;
 
@@ -1618,9 +1628,22 @@ export const payrollRunRow = z.object({
 });
 export type PayrollRunRow = z.infer<typeof payrollRunRow>;
 
+export const payrollPeriodRow = z.object({
+  period: z.string(),
+  pay_on: z.string(),
+  headcount: z.number(),
+  gross_total: z.string(),
+  deduction_total: z.string(),
+  net_total: z.string(),
+  employer_total: z.string(),
+  run_count: z.number(),
+});
+export type PayrollPeriodRow = z.infer<typeof payrollPeriodRow>;
+
 export const payrollSummary = z.object({
   period: z.string(),
-  run: payrollRunRow.nullable(),
+  run: payrollPeriodRow.nullable(),
+  period_runs: z.array(payrollRunRow),
   runs: z.array(payrollRunRow),
   periods: z.array(z.string()),
   hr_posted_total: z.string(),
@@ -1670,7 +1693,7 @@ export type PayslipRow = z.infer<typeof payslipRow>;
 
 export const payslipList = z.object({
   period: z.string(),
-  run: payrollRunRow,
+  run: payrollPeriodRow.nullable(),
   rows: z.array(payslipRow),
   recompute_all_match: z.boolean(),
   recompute_note: z.string(),
@@ -1696,6 +1719,15 @@ export const payrollRunResult = z.object({
   employer_note: z.string(),
 });
 export type PayrollRunResult = z.infer<typeof payrollRunResult>;
+
+export const voidedPayroll = z.object({
+  voided: z.object({
+    period: z.string(),
+    headcount: z.number(),
+    voucher_nos: z.array(z.string()),
+  }),
+});
+export type VoidedPayroll = z.infer<typeof voidedPayroll>;
 
 export const insuranceRow = z.object({
   emp_no: z.string(),

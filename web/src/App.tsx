@@ -530,7 +530,12 @@ function Workspace() {
                 <Attendance onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
               )}
               {screen === 'pay' && (
-                <Payroll onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
+                <Payroll
+                  onToast={showToast}
+                  reloadKey={reloadKey}
+                  onChanged={reload}
+                  canVoid={permissions.includes('void_payroll_run')}
+                />
               )}
               {screen === 'ins' && <Insurance onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'wht' && (

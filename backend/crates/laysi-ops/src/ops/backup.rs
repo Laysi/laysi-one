@@ -31,6 +31,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(GetBackupSetting),
         Box::new(UpdateBackupSetting),
         Box::new(ConfirmBackupKey),
+        Box::new(ResetBackupKey),
     ]
 }
 
@@ -237,6 +238,38 @@ impl Operation for ConfirmBackupKey {
         Ok(OpOutcome::new(
             json!({ "blocked_reason": blocked_reason(&saved) }),
             "確認還原金鑰已保存 · 系統不再留存".to_string(),
+        ))
+    }
+}
+
+struct ResetBackupKey;
+
+#[async_trait]
+impl Operation for ResetBackupKey {
+    fn name(&self) -> &'static str {
+        "reset_backup_key"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "重設還原金鑰：下一次備份會產生一組新的並顯示一次。既有的備份檔仍然只能以原金鑰開啟。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<crate::Empty>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
+        let now = ctx.store.backup_setting().await?;
+        if now.age_recipient.is_empty() && now.age_identity_pending.is_empty() {
+            return Err(OpError::BadInput(
+                "目前沒有金鑰可以重設，第一次備份前會自行產生。".into(),
+            ));
+        }
+        let saved = ctx.store.reset_backup_key(&ctx.actor).await?;
+        Ok(OpOutcome::new(
+            json!({ "blocked_reason": blocked_reason(&saved) }),
+            "重設還原金鑰 · 既有備份檔仍只能以原金鑰開啟".to_string(),
         ))
     }
 }

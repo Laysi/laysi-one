@@ -886,6 +886,8 @@ mod tests {
     const SCHEMA: &str = concat!(
         include_str!("../../../migrations/0001_initial.sql"),
         include_str!("../../../migrations/0002_mcp_tool_grant_switch.sql"),
+        include_str!("../../../migrations/0006_void_payroll_run.sql"),
+        include_str!("../../../migrations/0007_reset_backup_key.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the
@@ -1084,6 +1086,7 @@ mod tests {
                 "get_oidc_setting",
                 "issue_api_token",
                 "list_user_accounts",
+                "reset_backup_key",
                 "reset_user_password",
                 "save_regulation",
                 "set_company_timezone",
