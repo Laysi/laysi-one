@@ -5434,9 +5434,9 @@ impl Store {
 
     /// System status as far as the database can see it.
     ///
-    /// The brand fingerprint and RustFS connectivity are not here; `/healthz`
-    /// answers those, because only the server process knows what it verified
-    /// at startup. The screen reads both and labels each source.
+    /// RustFS connectivity is not here; `/healthz` answers that, because only
+    /// the server process knows the connection state. The screen reads both
+    /// and labels each source.
     pub async fn system_stats(&self) -> Result<SystemStats> {
         let r = sqlx::query(
             "SELECT
@@ -7849,8 +7849,8 @@ pub struct ToolGrant {
     pub updated_at: DateTime<Utc>,
 }
 
-/// System status as far as the database can see it. The brand fingerprint
-/// and RustFS are answered by `/healthz`.
+/// System status as far as the database can see it. RustFS is answered by
+/// `/healthz`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SystemStats {
     pub posted_vouchers: i64,
@@ -9642,7 +9642,6 @@ pub fn env_or_file(key: &str) -> Option<String> {
 
 /// Token hash: BLAKE3 as hex.
 ///
-/// The same hash function as the brand integrity check (see `laysi-brand`).
 /// Cryptographic strength is required here: whoever obtains the database
 /// must not be able to derive a working token, and a glance-level digest
 /// like `fnv1a` would be nowhere near enough.

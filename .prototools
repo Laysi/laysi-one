@@ -1,12 +1,4 @@
 # Toolchain for this repository. `proto install` sets it up.
-#
-# zig is not a build dependency of the project: it is here because Rust links
-# through `cc` on Linux, and a machine without a system C compiler can borrow
-# zig's. See scripts/toolchain/ and the README.
 
 rust = "1.98.0"
-zig = "0.15.2"
 node = "26.8.1"
-
-[plugins]
-zig = "https://raw.githubusercontent.com/stk0vrfl0w/proto-toml-plugins/main/plugins/zig.toml"

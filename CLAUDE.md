@@ -33,10 +33,6 @@ cargo run -p laysi-server --bin laysi-admin -- seed-demo   # 示範資料，僅�
 # 從操作註冊表重新產生前端型別（改過 laysi-ops 就要跑）
 cargo run -p laysi-server --bin laysi-schema -- ../web/src/api/generated.ts
 
-# 品牌完整性（改過品牌檔就要跑，否則伺服器拒絕啟動）
-cargo run -p laysi-brand --bin laysi-brandhash -- --verify
-cargo run -p laysi-brand --bin laysi-brandhash -- --update
-
 # 端對端（需要容器起著；第二支沿用第一支留下的資料庫）
 bun scripts/function-test.ts     # 算出來的數字，以及每一次回應對不對得上前端 schema
 bun scripts/schema-live-test.ts  # 逐一核對唯讀操作的回應
@@ -136,24 +132,26 @@ FNV-1a，讀取端從來不取它。
 編得動（欄位名與排序共用 `ops/regulations.rs` 的 `FIELDS`，識別字不進畫面）；
 改結構走 `save_regulation` 本身，它收整份 `payload`。
 
-### 4. 品牌完整性：不通過就拒絕啟動
+### 4. 品牌資產是 `web/public/` 底下的靜態 SVG
 
-`laysi-brand` 在 `main()` 的第一步驗證品牌關鍵檔案的 BLAKE3 與 Ed25519 簽章，
-失敗即 `exit(78)`，連資料庫都不連。
+`mark.svg`（字標「LAYSI ONE」）、`monogram.svg`（方形的 L，給窄版面）、
+`favicon.svg`（分頁與應用程式圖示）三個檔，由 Caddy 與 vite 當一般靜態檔案送出，
+後端沒有任何品牌路由。三個檔各自帶著 BSL 1.1 的授權聲明。
+**不得用文字重繪品牌名稱**。
 
-**動到 `LICENSE-BSL.txt` 或 `laysi-brand/src/{glyphs,mark,integrity}.rs` 之後
-一定要跑 `laysi-brandhash --update`**，否則伺服器起不來。錯誤訊息會把指令印
-出來。私鑰在 `backend/brand/vendor.key`（已 gitignore）。
+字標原本由 Rust 即時組出來，並在啟動時驗 BLAKE3 與 Ed25519 簽章、不過就
+`exit(78)`。那套機制連同 `laysi-brand` crate、`backend/brand/` 的金鑰、
+`/v1/brand/*.svg` 兩條路由、`/healthz` 的 `brand`、`/v1/meta` 的 `brand_build`
+與安全營運頁的「品牌完整性」卡片一起移除。
 
-字標由 Rust 組出來，經 `GET /v1/brand/mark.svg`（「LAYSI ONE」）
-與 `GET /v1/brand/monogram.svg`（方形的 L，給窄版面）提供。
-「LAYSI」是 laysi.io 的原始向量外框（`glyphs.rs` 的 `WORDMARK_PATH`）；
-「ONE」原圖沒有，依原圖量出的線寬 `ONE_STROKE` 與圓角 `ONE_CORNER` 補畫，存成
-中線由 `stroke` 描出（`ONE_PATH`）。兩者共用同一個座標空間，不互相縮放。
-**前端不得自帶 logo 檔案，也不得用文字重繪品牌名稱**，唯一的例外是
-`web/public/favicon.svg`——分頁圖示在應用程式載入之前就要畫出來，走 `/v1` 等於把它綁在
-後端與代理上，而瀏覽器把 favicon 快取得特別久。該檔帶著 BSL 1.1 的授權聲明。
-畫的是兩道等長的粗弧繞成一個環，互為 180 度旋轉，中間留兩道缺口：一筆分錄的借方與
+`mark.svg` 的「LAYSI」是 laysi.io 的原始向量外框，以 `fill` 描繪；「ONE」原圖沒有，
+依原圖量出的線寬 `11.09` 與圓角半徑 `23.18` 補畫，存成中線由 `stroke` 描出。兩者
+共用同一個座標空間，不互相縮放，`viewBox` 就是含住兩者的框。`monogram.svg` 取同一個
+「L」單獨置中，四邊內縮 12。兩者的 `fill` 是 `currentColor`，但它們掛在 `<img>` 上，
+SVG 是獨立文件、繼承不到外面的 `color`——`.brand-mark` 那條 `color` 規則是留著的裝飾，
+要真的跟著主題走得改成 inline SVG。
+
+`favicon.svg` 畫的是兩道等長的粗弧繞成一個環，互為 180 度旋轉，中間留兩道缺口：一筆分錄的借方與
 貸方等量，而兩邊不相接。終端切平（與字標「ONE」的 butt 終端同一套）但不沿半徑切，
 內緣比外緣退後 16 度，所以兩道缺口是同向的斜槽而不是兩條輻線。**沒有底板**，
 `manifest.json` 指同一個檔。原本畫的是一個圓被一道 S 分成兩塊等面積的深藍與金，
@@ -283,7 +281,7 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
 
 ## 目前進度
 
-已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、品牌完整性、
+已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
 RustFS 物件儲存，以及 **37 個畫面、123 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 

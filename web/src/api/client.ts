@@ -157,7 +157,6 @@ export const meta = z.object({
   utc_offset: z.string(),
   version: z.string(),
   licence: z.string(),
-  brand_build: z.string(),
 });
 export type Meta = z.infer<typeof meta>;
 
@@ -1140,12 +1139,6 @@ export type SystemHealth = z.infer<typeof systemHealth>;
 
 export const healthz = z.object({
   status: z.string(),
-  brand: z.object({
-    ok: z.boolean(),
-    files: z.number().optional(),
-    signed: z.boolean().optional(),
-    fingerprint: z.string().optional(),
-  }),
   db: z.object({ ok: z.boolean(), migration: z.number().nullish() }),
   rustfs: z.object({ ok: z.boolean(), endpoint: z.string().optional() }),
   operations: z.number().optional(),

@@ -37,10 +37,16 @@ const OAUTH_OFF: OauthState = {
   password_login_disabled: false,
 };
 
-export type AuthStatus = 'loading' | 'signed-out' | 'signed-in';
+export type AuthStatus = 'loading' | 'signed-out' | 'signed-in' | 'unreachable';
+
+const UNREACHABLE: ApiError = {
+  code: 'network',
+  message: '無法連線到伺服器，請確認伺服器已啟動。',
+};
 
 export interface AuthValue {
   status: AuthStatus;
+  problem: ApiError | null;
   user: SessionUser | null;
   oauth: OauthState;
   setup: SetupState;
@@ -106,6 +112,7 @@ async function fetchMe(): Promise<{
 
 export function useAuthSession(): AuthValue {
   const [status, setStatus] = useState<AuthStatus>('loading');
+  const [problem, setProblem] = useState<ApiError | null>(null);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [oauth, setOauth] = useState<OauthState>(OAUTH_OFF);
   const [setup, setSetup] = useState<SetupState>(CLOSED_SETUP);
@@ -128,9 +135,10 @@ export function useAuthSession(): AuthValue {
         setUser(session.user);
         setStatus(session.user ? 'signed-in' : 'signed-out');
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (!live) return;
-        setStatus('signed-out');
+        setProblem(err instanceof AuthFailed ? err.error : UNREACHABLE);
+        setStatus('unreachable');
       });
     return () => {
       live = false;
@@ -189,5 +197,5 @@ export function useAuthSession(): AuthValue {
     return envelope.user;
   }, []);
 
-  return { status, user, oauth, setup, signIn, signOut, changePassword, bootstrap };
+  return { status, problem, user, oauth, setup, signIn, signOut, changePassword, bootstrap };
 }

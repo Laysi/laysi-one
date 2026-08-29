@@ -273,7 +273,7 @@ impl Operation for GetSystemHealth {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。品牌指紋與物件儲存連線由 /healthz 回答。"
+        "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。物件儲存連線由 /healthz 回答。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -320,7 +320,7 @@ impl Operation for GetSystemHealth {
                 "rulesets_missing": stale,
                 "as_of": ctx.today,
                 "note":
-                    "品牌完整性指紋與物件儲存連線狀態由服務健康檢查回報。",
+                    "物件儲存連線狀態由服務健康檢查回報。",
             }),
             summary,
         ))

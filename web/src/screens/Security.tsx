@@ -310,19 +310,6 @@ export function Security({ onToast, reloadKey }: Props) {
                 </span>
               </div>
               <div className="fact">
-                <span className="fact__key">品牌完整性</span>
-                <span className="fact__value">
-                  {hz?.brand.fingerprint ? (
-                    <>
-                      {hz.brand.signed ? '已簽章' : '未簽章'} · {hz.brand.files} 個檔案
-                      <span className="fact__note num">指紋 {hz.brand.fingerprint}</span>
-                    </>
-                  ) : (
-                    '無法讀取'
-                  )}
-                </span>
-              </div>
-              <div className="fact">
                 <span className="fact__key">帳務</span>
                 <span className="fact__value num">
                   已過帳 {health.stats.posted_vouchers} 張 · 待過帳{' '}

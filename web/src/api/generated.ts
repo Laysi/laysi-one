@@ -259,7 +259,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'list_api_tokens', risk: 'read_only', riskLabel: '唯讀', summary: "讀 API 與 MCP Token 清單：名稱、用途範圍、代表對象、最後使用時間、輪替期限。只保留前八碼與雜湊。" },
   { name: 'issue_api_token', risk: 'admin_only', riskLabel: '限系統管理員', summary: "核發一組新的 API 或 MCP Token。明文僅出現於本次回應。" },
   { name: 'revoke_api_token', risk: 'high_risk', riskLabel: '高風險', summary: "撤銷一組 Token。撤銷後不能復原，需要時重新核發。" },
-  { name: 'get_system_health', risk: 'read_only', riskLabel: '唯讀', summary: "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。品牌指紋與物件儲存連線由 /healthz 回答。" },
+  { name: 'get_system_health', risk: 'read_only', riskLabel: '唯讀', summary: "讀系統現況：migration 版本、傳票與稽核筆數、Token 現況、目前生效的法規版本。物件儲存連線由 /healthz 回答。" },
   { name: 'get_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀異地備份設定：儲存位置、桶子、路徑、保留天數與上次備份結果。存取金鑰不在回應內，設定後也無法取回。" },
   { name: 'update_backup_setting', risk: 'admin_only', riskLabel: '限系統管理員', summary: "設定異地備份：儲存位置、桶子、路徑、存取金鑰與保留天數。存取密鑰留空表示沿用原設定。" },
   { name: 'confirm_backup_key', risk: 'admin_only', riskLabel: '限系統管理員', summary: "確認還原金鑰已保存。確認後系統不再留存該金鑰，備份隨即開始執行。" },

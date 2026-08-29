@@ -20,7 +20,7 @@ export function BrandMark({ height = 28, variant = 'wordmark' }: Props) {
   return (
     <img
       className="brand-mark"
-      src={`/v1/brand/${path}?h=${height}`}
+      src={`/${path}`}
       height={height}
       alt="Laysi One"
       onError={() => setFailed(true)}

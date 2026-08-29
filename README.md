@@ -46,7 +46,6 @@ docker compose exec api laysi-admin create-user \
 
 ```
 backend/crates/
-  laysi-brand       品牌字標產生與完整性驗證
   laysi-domain      純領域：Money、分錄、借貸平衡
   laysi-regulation  法規引擎：TOML 規則載入、生效日解析
   laysi-store       sqlx repository、RustFS 存取
@@ -66,7 +65,7 @@ docs/architecture.md 跨層契約，動型別或端點前先讀
 工具鏈由 proto 管理，版本釘在倉庫根目錄的 `.prototools`：
 
 ```bash
-proto install              # rust、zig、node
+proto install              # rust、node
 cargo install cargo-watch  # scripts/dev 用它自動重建重啟伺服器
 
 # 資料庫與物件儲存在容器裡，伺服器與前端跑在本機
@@ -81,16 +80,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # 改過 laysi-ops 後重新產生前端型別
 cargo run -p laysi-server --bin laysi-schema -- ../web/src/api/generated.ts
-
-# 改過品牌檔後重簽（否則伺服器拒絕啟動）
-cargo run -p laysi-brand --bin laysi-brandhash -- --update
-```
-
-本機沒有系統 C 編譯器時（`ring` 之類的相依要編 C 原始碼），把 `scripts/toolchain`
-放進 PATH，裡面的 `cc` 與 `ar` 會轉呼叫 proto 裝的 zig：
-
-```fish
-set -x PATH (pwd)/scripts/toolchain $PATH
 ```
 
 管理指令直接在跑著的 api 容器裡執行：
@@ -117,7 +106,7 @@ bun scripts/schema-live-test.ts  # 沿用上一條留下的資料庫，逐一核
 ```
 
 `.github/workflows/ci.yml` 在每次 push 與 pull request 跑 `cargo fmt --check`、
-clippy、`cargo test`（含需要資料庫的那些）、品牌完整性、`generated.ts` 是否為最新，
+clippy、`cargo test`（含需要資料庫的那些）、`generated.ts` 是否為最新，
 以及前端的 typecheck 與 build。上面那兩支要容器，由人手動跑。
 
 ## 接上 AI 用戶端（MCP）
@@ -173,4 +162,4 @@ docker compose up -d --build
 Business Source License 1.1，見 [LICENSE-BSL.txt](LICENSE-BSL.txt)。原始碼公開
 可讀、可自架自用，但不得提供為競爭性的商業服務；Change Date 之後轉為 Apache 2.0。
 
-品牌字標由 `laysi-brand` 產生並簽章驗證，改過品牌檔後要重簽（見「開發」）。
+品牌字標是 `web/public/` 底下的靜態 SVG，檔案本身帶著 BSL 1.1 的授權聲明。

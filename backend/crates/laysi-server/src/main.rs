@@ -2,15 +2,9 @@
 //!
 //! The startup order is deliberate:
 //!
-//! 1. Brand integrity verification, first of all. Failing it refuses to boot
-//!    without even connecting to the database.
-//! 2. Migrations.
-//! 3. Load the rulesets out of `reg_ruleset`.
-//! 4. Start serving.
-//!
-//! Step 1 being strict is a product decision. Its cost is that editing a
-//! brand file stops the server booting; the remedy is
-//! `laysi-brandhash --update`, and the error message prints that command.
+//! 1. Migrations.
+//! 2. Load the rulesets out of `reg_ruleset`.
+//! 3. Start serving.
 //!
 //! `/v1/auth/*` is the one exception to "do not hand-write axum routes".
 //! Ordinary operations must pass the role permission check in the registry's
@@ -22,7 +16,7 @@
 //! therefore listed explicitly here, and everything else still goes through
 //! the registry.
 
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -117,7 +111,6 @@ impl ServeRole {
 pub struct AppState {
     pub store: Store,
     pub registry: Registry,
-    pub brand: laysi_brand::Report,
     pub auth: auth::AuthConfig,
     /// Whether the browser may create the installation's first account.
     pub setup: setup::SetupConfig,
@@ -180,8 +173,8 @@ fn healthcheck() -> ! {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // The health check short-circuits ahead of brand verification and the
-    // database connection; it only asks whether the service is alive.
+    // The health check short-circuits ahead of the database connection; it
+    // only asks whether the service is alive.
     if std::env::args().any(|a| a == "--healthcheck") {
         healthcheck();
     }
@@ -192,23 +185,6 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "info,sqlx=warn".into()),
         )
         .init();
-
-    // 1. Brand integrity: no boot without it.
-    let brand = match laysi_brand::verify() {
-        Ok(r) => {
-            tracing::info!(files = r.files, fingerprint = %r.fingerprint, "品牌完整性驗證通過");
-            r
-        }
-        Err(e) => {
-            eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
-            eprintln!("║  Laysi One 拒絕啟動：品牌完整性驗證失敗                       ║");
-            eprintln!("╚══════════════════════════════════════════════════════════════╝\n");
-            eprintln!("{e}\n");
-            // EX_CONFIG: this is a build or configuration problem, not a
-            // runtime error.
-            std::process::exit(78);
-        }
-    };
 
     let serve_role = ServeRole::from_env()?;
     tracing::info!(role = serve_role.label(), "LAYSI_SERVE 決定要掛哪些路由");
@@ -341,7 +317,6 @@ async fn main() -> anyhow::Result<()> {
     let state: Shared = Arc::new(AppState {
         store,
         registry,
-        brand,
         auth,
         setup,
         oidc: tokio::sync::RwLock::new(oidc::OidcCache::default()),
@@ -381,8 +356,6 @@ async fn main() -> anyhow::Result<()> {
                     .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
             )
             .route("/v1/meta", get(meta))
-            .route("/v1/brand/mark.svg", get(brand_mark))
-            .route("/v1/brand/monogram.svg", get(brand_monogram))
             .route("/v1/ops", get(list_ops))
             .route(
                 "/v1/ops/{name}",
@@ -467,10 +440,9 @@ pub fn ctx_from(
 /// This route is reachable without signing in, and has to be: the compose
 /// healthcheck runs before an account exists and the reverse proxy in front
 /// of the web container passes it through. So the anonymous answer is only
-/// whether each part is up. The storage endpoint and bucket, the migration
-/// version and the brand fingerprint describe the deployment's insides, and
-/// go out only to a signed-in administrator -- which is who the security
-/// screen shows them to anyway.
+/// whether each part is up. The storage endpoint and bucket and the migration
+/// version describe the deployment's insides, and go out only to a signed-in
+/// administrator -- which is who the security screen shows them to anyway.
 async fn healthz(State(s): State<Shared>, headers: HeaderMap) -> Response {
     let migration = s.store.migration_version().await.ok().flatten();
     let db_ok = migration.is_some();
@@ -479,18 +451,11 @@ async fn healthz(State(s): State<Shared>, headers: HeaderMap) -> Response {
 
     let mut body = json!({
         "status": if db_ok { "ok" } else { "degraded" },
-        "brand": { "ok": true },
         "db": { "ok": db_ok },
         "rustfs": { "ok": rustfs_ok },
     });
 
     if admin_session(&s, &headers).await {
-        body["brand"] = json!({
-            "ok": true,
-            "files": s.brand.files,
-            "signed": s.brand.signed,
-            "fingerprint": s.brand.fingerprint,
-        });
         body["db"] = json!({ "ok": db_ok, "migration": migration });
         body["rustfs"] = rustfs;
         body["operations"] = json!(s.registry.len());
@@ -596,47 +561,12 @@ async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
         "oauth": oidc::describe(&s).await,
         "version": env!("CARGO_PKG_VERSION"),
         "licence": "BSL",
-        "brand_build": s.brand.fingerprint,
     }))
     .into_response()
 }
 
 fn company_setup_required(company_name: &str) -> bool {
     company_name.trim().is_empty()
-}
-
-#[derive(Deserialize)]
-struct MarkQuery {
-    h: Option<f64>,
-}
-
-fn svg(body: String) -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            // The mark changes with the build and the fingerprint is in the
-            // body, so a short cache is enough.
-            (header::CACHE_CONTROL, "public, max-age=300"),
-        ],
-        body,
-    )
-        .into_response()
-}
-
-async fn brand_mark(State(s): State<Shared>, Query(q): Query<MarkQuery>) -> Response {
-    svg(laysi_brand::wordmark(&laysi_brand::MarkOptions {
-        height: q.h.unwrap_or(28.0).clamp(8.0, 512.0),
-        color: "currentColor".into(),
-        build: s.brand.fingerprint.clone(),
-    }))
-}
-
-async fn brand_monogram(State(s): State<Shared>, Query(q): Query<MarkQuery>) -> Response {
-    svg(laysi_brand::monogram(&laysi_brand::MarkOptions {
-        height: q.h.unwrap_or(64.0).clamp(8.0, 512.0),
-        color: "currentColor".into(),
-        build: s.brand.fingerprint.clone(),
-    }))
 }
 
 /// Public listing of the registry, used by the MCP screen to render the tool

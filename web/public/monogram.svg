@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Laysi One">
+<!--
+  Laysi One — 方形字標，給窄版面用。授權 / Licence: Business Source License 1.1
+  （見 repo 根目錄 LICENSE-BSL.txt）。移除、改寫或以其他標記替換，違反授權條款。
+
+  取 mark.svg 的「L」單獨置中，四邊內縮 12。transform 先把原圖座標的左上角
+  (283.28, 100.17) 減掉再縮放，否則字母落在畫布外、整張是空的。
+-->
+<title>Laysi One</title>
+<path fill="currentColor" transform="translate(27.25 12) scale(0.8686) translate(-283.28 -100.17)" d="M294.38,159V100.17h-11.1V159A28.72,28.72,0,0,0,312,187.67h23.66v-11.1H312A17.59,17.59,0,0,1,294.38,159Z"/>
+</svg>

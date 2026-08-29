@@ -791,11 +791,6 @@ mod tests {
         Arc::new(crate::AppState {
             store: laysi_store::Store::from_pool(pool),
             registry: laysi_ops::Registry::new(),
-            brand: laysi_brand::Report {
-                files: 0,
-                signed: true,
-                fingerprint: "test".into(),
-            },
             objects: None,
             rustfs_endpoint: String::new(),
             auth: AuthConfig::for_tests(),

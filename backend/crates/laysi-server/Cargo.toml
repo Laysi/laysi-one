@@ -7,7 +7,6 @@ rust-version.workspace = true
 description = "Laysi One 伺服器：REST 與 MCP 雙介面"
 
 [dependencies]
-laysi-brand.workspace = true
 laysi-domain.workspace = true
 laysi-ops.workspace = true
 laysi-regulation.workspace = true
