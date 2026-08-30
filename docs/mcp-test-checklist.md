@@ -107,7 +107,7 @@ streamable HTTP 規格要求的 DNS rebinding 防護。白名單是 `MCP_ALLOWED
 | F8 | 缺 `params.name` | `-32600` |
 | F9 | 輸入型別錯誤 | `isError: true`，不是協定層錯誤 |
 | F10 | 完全不給 `arguments` | 視為全部使用預設值，呼叫成功 |
-| F11 | 未連結員工的 Token 呼叫自助工具 | 拒絕，訊息說尚未連結員工資料 |
+| F11 | 未連結員工的 Token 呼叫自助工具 | 拒絕，訊息說尚未連結員工編號 |
 
 ## G 稽核
 

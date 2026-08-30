@@ -844,7 +844,7 @@ CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_
 是 `api_token.owner_employee_id`（`actor` 是顯示名稱、會同名，不能當鍵），只有自助
 核發會寫入；`revoke_my_api_token` 把它寫進 `WHERE`，別人的 id 是「查無此列」。
 同一欄也是 `mcp::token_identity` 取得 `employee_id` 的唯一來源——不從姓名猜，
-老闆代發的 Token 沒有 owner，自助操作對它一律回「尚未連結員工資料」。五個唯讀自助
+老闆代發的 Token 沒有 owner，自助操作對它一律回「尚未連結員工編號」。五個唯讀自助
 工具因此才對 AI 打開；寫入類與薪資明細維持關閉。
 
 **AI 工具開關改得動了**：`set_mcp_tool_grant` 是 `AdminOnly`，「MCP 與 AI」那一頁

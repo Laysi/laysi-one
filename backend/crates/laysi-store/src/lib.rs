@@ -10738,8 +10738,8 @@ mod tests {
             .await
             .expect_err("不得重複作廢");
         assert!(
-            matches!(second_void, StoreError::NotVoidable { ref status, .. } if status == "void")
+            matches!(second_void, StoreError::NotVoidable { ref status, .. } if status == "已作廢")
         );
-        assert!(second_void.to_string().contains("void"));
+        assert!(second_void.to_string().contains("已作廢"));
     }
 }
