@@ -77,6 +77,10 @@ const SOURCES: &[(&str, &str)] = &[
         "2026/overtime.toml",
         include_str!("../../../regulation/2026/overtime.toml"),
     ),
+    (
+        "2026/owner_insurance.toml",
+        include_str!("../../../regulation/2026/owner_insurance.toml"),
+    ),
 ];
 
 /// Regulation domains the system knows. A rule file's `domain` must be one
@@ -91,6 +95,7 @@ pub const DOMAINS: &[&str] = &[
     "annual_leave",
     "depreciation",
     "overtime",
+    "owner_insurance",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -330,10 +335,46 @@ pub fn health_insurance(
     })
 }
 
+/// National health insurance premium for a person insured as the employer.
+///
+/// The rate is the same one everybody pays, so it comes from the health
+/// insurance ruleset; only the split differs, and that comes from
+/// `owner_insurance`. The average-dependants multiplier is not applied,
+/// because it scales an employer share this split does not have.
+pub fn health_insurance_owner(
+    health_rs: &Ruleset,
+    owner_rs: &Ruleset,
+    insured_salary: Money,
+) -> Result<Contribution, RegulationError> {
+    health_rs.expect_domain("health_insurance")?;
+    owner_rs.expect_domain("owner_insurance")?;
+    let premium = insured_salary * health_rs.decimal("rate")?;
+    Ok(Contribution {
+        employer: to_dollars(premium * owner_rs.decimal("health_employer_share")?),
+        employee: to_dollars(premium * owner_rs.decimal("health_employee_share")?),
+        government: to_dollars(premium * owner_rs.decimal("health_government_share")?),
+    })
+}
+
 /// Employer pension contribution. Borne entirely by the employer.
 pub fn pension(rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError> {
     rs.expect_domain("pension")?;
     Ok(to_dollars(contribution_wage * rs.decimal("employer_rate")?))
+}
+
+/// Pension contributed by the company for a person insured as the employer.
+///
+/// A separate rate rather than a hardcoded zero: what an owner is owed is a
+/// regulated figure like any other, and an amendment that starts requiring a
+/// contribution must be a ruleset edit, not a release.
+pub fn pension_owner(
+    owner_rs: &Ruleset,
+    contribution_wage: Money,
+) -> Result<Money, RegulationError> {
+    owner_rs.expect_domain("owner_insurance")?;
+    Ok(to_dollars(
+        contribution_wage * owner_rs.decimal("pension_employer_rate")?,
+    ))
 }
 
 /// VAT amount.
@@ -358,13 +399,21 @@ pub fn vat_from_total(rs: &Ruleset, total_amount: Money) -> Result<Money, Regula
 
 /// Minimum wage check. `None` means compliant, `Some(floor)` means below the
 /// statutory minimum.
+///
+/// `basis` names the payload key the wage is measured against, `monthly` or
+/// `hourly`: the two floors are published together and neither one bounds the
+/// other, so an hourly rate compared against the monthly floor fails every
+/// time and a monthly salary compared against the hourly floor never fails.
+/// An unknown basis is a missing-field error rather than a fallback, for the
+/// same reason [`resolve`] never guesses.
 pub fn minimum_wage_shortfall(
     rs: &Ruleset,
-    monthly_salary: Money,
+    wage: Money,
+    basis: &str,
 ) -> Result<Option<Money>, RegulationError> {
     rs.expect_domain("minimum_wage")?;
-    let floor = rs.decimal("monthly")?;
-    Ok((monthly_salary < floor).then_some(floor))
+    let floor = rs.decimal(basis)?;
+    Ok((wage < floor).then_some(floor))
 }
 
 /// Annual leave days. `service_months` is completed months since hire.
@@ -491,21 +540,31 @@ pub fn overtime_monthly_max_hours(rs: &Ruleset) -> Result<Money, RegulationError
     rs.decimal("monthly_max_hours")
 }
 
-/// Pay for `hours` of overtime worked on a `day_type` by someone on
-/// `monthly_salary`.
+/// The ordinary hourly wage of someone on `monthly_salary`: the salary over
+/// the hours the ruleset says a month holds.
 ///
-/// The hourly wage is the monthly salary over the hours the ruleset says a
-/// month holds, and the hours are spent against the bands in order: the first
-/// band's multiplier up to its `up_to_hours`, then the next. A band without
-/// `up_to_hours` runs to the end.
+/// Someone already paid by the hour does not go through here; their rate is
+/// the ordinary hourly wage already, and dividing it would price their
+/// overtime below their ordinary time.
+pub fn ordinary_hourly_wage(rs: &Ruleset, monthly_salary: Money) -> Result<Money, RegulationError> {
+    rs.expect_domain("overtime")?;
+    Ok(monthly_salary / rs.decimal("monthly_hours")?)
+}
+
+/// Pay for `hours` of overtime worked on a `day_type` by someone whose
+/// ordinary wage is `hourly_wage`.
+///
+/// The hours are spent against the bands in order: the first band's
+/// multiplier up to its `up_to_hours`, then the next. A band without
+/// `up_to_hours` runs to the end. Monthly-paid callers convert with
+/// [`ordinary_hourly_wage`] first.
 pub fn overtime_pay(
     rs: &Ruleset,
-    monthly_salary: Money,
+    hourly_wage: Money,
     day_type: &str,
     hours: Money,
 ) -> Result<Money, RegulationError> {
     rs.expect_domain("overtime")?;
-    let hourly = monthly_salary / rs.decimal("monthly_hours")?;
     let types = payload_array(rs, "day_types")?;
     let matched = types
         .iter()
@@ -536,7 +595,7 @@ pub fn overtime_pay(
             Some(_) => field(rs, band, "up_to_hours")?.min(left),
             None => left,
         };
-        pay += hourly * multiplier * span;
+        pay += hourly_wage * multiplier * span;
         left -= span;
     }
     Ok(to_dollars(pay))
@@ -571,29 +630,30 @@ mod tests {
     fn overtime_walks_the_bands_and_reads_them_from_the_payload() {
         let rs = resolve("overtime", d(2026, 7, 25)).unwrap();
         // 40000 over 240 hours is 166.6667 an hour.
+        let wage = ordinary_hourly_wage(rs, dec!(40000)).unwrap();
         assert_eq!(
-            overtime_pay(rs, dec!(40000), "weekday", dec!(2)).unwrap(),
+            overtime_pay(rs, wage, "weekday", dec!(2)).unwrap(),
             dec!(447)
         );
         assert_eq!(
-            overtime_pay(rs, dec!(40000), "weekday", dec!(3)).unwrap(),
+            overtime_pay(rs, wage, "weekday", dec!(3)).unwrap(),
             dec!(725)
         );
         assert_eq!(
-            overtime_pay(rs, dec!(40000), "rest_day", dec!(3)).unwrap(),
+            overtime_pay(rs, wage, "rest_day", dec!(3)).unwrap(),
             dec!(725)
         );
         assert_eq!(
-            overtime_pay(rs, dec!(40000), "weekday", Money::ZERO).unwrap(),
+            overtime_pay(rs, wage, "weekday", Money::ZERO).unwrap(),
             Money::ZERO
         );
-        assert!(overtime_pay(rs, dec!(40000), "public_holiday", dec!(1)).is_err());
+        assert!(overtime_pay(rs, wage, "public_holiday", dec!(1)).is_err());
 
         let mut changed = rs.clone();
         changed.payload["day_types"][0]["bands"][0]["multiplier"] = "2".into();
         assert_ne!(
-            overtime_pay(&changed, dec!(40000), "weekday", dec!(2)).unwrap(),
-            overtime_pay(rs, dec!(40000), "weekday", dec!(2)).unwrap()
+            overtime_pay(&changed, wage, "weekday", dec!(2)).unwrap(),
+            overtime_pay(rs, wage, "weekday", dec!(2)).unwrap()
         );
 
         let types = overtime_day_types(rs).unwrap();
@@ -669,11 +729,58 @@ mod tests {
     #[test]
     fn minimum_wage_flags_only_shortfalls() {
         let rs = resolve("minimum_wage", d(2026, 7, 25)).unwrap();
-        assert_eq!(minimum_wage_shortfall(rs, dec!(45000)).unwrap(), None);
         assert_eq!(
-            minimum_wage_shortfall(rs, dec!(28000)).unwrap(),
+            minimum_wage_shortfall(rs, dec!(45000), "monthly").unwrap(),
+            None
+        );
+        assert_eq!(
+            minimum_wage_shortfall(rs, dec!(28000), "monthly").unwrap(),
             Some(dec!(29500))
         );
+    }
+
+    /// An hourly rate measured against the monthly floor fails every time,
+    /// and a monthly salary measured against the hourly floor never does.
+    /// The basis is what makes either answer mean anything.
+    #[test]
+    fn the_minimum_wage_floor_follows_the_pay_basis() {
+        let rs = resolve("minimum_wage", d(2026, 7, 25)).unwrap();
+        assert_eq!(
+            minimum_wage_shortfall(rs, dec!(200), "hourly").unwrap(),
+            None
+        );
+        assert_eq!(
+            minimum_wage_shortfall(rs, dec!(180), "hourly").unwrap(),
+            Some(dec!(196))
+        );
+        assert_eq!(
+            minimum_wage_shortfall(rs, dec!(200), "monthly").unwrap(),
+            Some(dec!(29500)),
+            "時薪拿去比月薪下限一定不合格"
+        );
+        assert!(matches!(
+            minimum_wage_shortfall(rs, dec!(200), "daily"),
+            Err(RegulationError::MissingField { .. })
+        ));
+    }
+
+    /// An owner bears the whole health insurance premium and has no pension
+    /// contributed for them. Both figures come from the ruleset, so the split
+    /// changes without a release.
+    #[test]
+    fn an_owner_pays_the_whole_health_premium_and_gets_no_pension() {
+        let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
+        let owner = resolve("owner_insurance", d(2026, 7, 25)).unwrap();
+
+        let staff = health_insurance(health, dec!(53000)).unwrap();
+        let boss = health_insurance_owner(health, owner, dec!(53000)).unwrap();
+        assert_eq!(boss.employer, Money::ZERO, "雇主身分沒有公司負擔那一半");
+        assert_eq!(boss.government, Money::ZERO, "政府不補助");
+        assert_eq!(boss.employee, dec!(2740), "53000 × 5.17% 全額自付");
+        assert_eq!(staff.employee, dec!(822), "受僱者只自付三成");
+
+        assert_eq!(pension_owner(owner, dec!(53000)).unwrap(), Money::ZERO);
+        assert!(pension_owner(health, dec!(53000)).is_err(), "領域要對得上");
     }
 
     #[test]

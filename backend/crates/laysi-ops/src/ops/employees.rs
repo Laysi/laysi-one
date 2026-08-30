@@ -111,6 +111,30 @@ pub(crate) fn employment_label(kind: &str) -> &'static str {
     }
 }
 
+/// Pay basis code stored on an hourly worker. It is a separate axis from
+/// `employment_type`: a part timer may be on a monthly salary and an hourly
+/// worker may be full time, so payroll asks this one.
+pub(crate) const BASIS_HOURLY: &str = "hourly";
+pub(crate) const BASIS_MONTHLY: &str = "monthly";
+
+/// Insured as the company's own owner rather than as one of its employees.
+pub(crate) const INSURED_OWNER: &str = "owner";
+pub(crate) const INSURED_EMPLOYEE: &str = "employee";
+
+pub(crate) fn pay_basis_label(basis: &str) -> &'static str {
+    match basis {
+        BASIS_HOURLY => "時薪",
+        _ => "月薪",
+    }
+}
+
+pub(crate) fn insured_as_label(insured_as: &str) -> &'static str {
+    match insured_as {
+        INSURED_OWNER => "負責人",
+        _ => "受僱者",
+    }
+}
+
 pub(crate) fn status_label(status: &str) -> &'static str {
     match status {
         "leaving" => "離職中",
@@ -342,6 +366,10 @@ impl Operation for ListEmployees {
                 "title": e.title,
                 "employment_type": e.employment_type,
                 "employment_label": employment_label(&e.employment_type),
+                "pay_basis": e.pay_basis,
+                "pay_basis_label": pay_basis_label(&e.pay_basis),
+                "insured_as": e.insured_as,
+                "insured_as_label": insured_as_label(&e.insured_as),
                 "hired_on": e.hired_on,
                 "left_on": e.left_on,
                 "status": e.status,

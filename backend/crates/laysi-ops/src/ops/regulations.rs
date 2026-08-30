@@ -45,6 +45,7 @@ fn domain_label(domain: &str) -> &'static str {
         "annual_leave" => "特別休假",
         "depreciation" => "固定資產折舊",
         "overtime" => "延長工時",
+        "owner_insurance" => "負責人投保",
         other => {
             debug_assert!(false, "法規領域 {other} 沒有顯示名稱");
             "其他"
@@ -69,6 +70,10 @@ const FIELDS: &[(&str, &str)] = &[
     ("employer_share", "雇主負擔比率"),
     ("employee_share", "員工負擔比率"),
     ("government_share", "政府補助比率"),
+    ("health_employer_share", "健保：公司負擔比率"),
+    ("health_employee_share", "健保：本人負擔比率"),
+    ("health_government_share", "健保：政府補助比率"),
+    ("pension_employer_rate", "勞退：公司提繳率"),
     ("period_months", "每期月數"),
     ("monthly", "每月最低工資"),
     ("hourly", "每小時最低工資"),
@@ -271,8 +276,13 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
             laysi_regulation::vat_from_total(rs, one)?;
         }
         "minimum_wage" => {
-            laysi_regulation::minimum_wage_shortfall(rs, one)?;
-            rs.decimal("hourly")?;
+            laysi_regulation::minimum_wage_shortfall(rs, one, "monthly")?;
+            laysi_regulation::minimum_wage_shortfall(rs, one, "hourly")?;
+        }
+        "owner_insurance" => {
+            let health = laysi_regulation::resolve("health_insurance", rs.effective_from)?;
+            laysi_regulation::health_insurance_owner(health, rs, one)?;
+            laysi_regulation::pension_owner(rs, one)?;
         }
         "annual_leave" => {
             laysi_regulation::annual_leave_days(rs, 132)?;
@@ -287,6 +297,9 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
                 laysi_regulation::overtime_pay(rs, one, &t.code, one)?;
             }
             laysi_regulation::overtime_monthly_max_hours(rs)?;
+            // The band walk no longer reads it, so this is what keeps a payload
+            // that dropped it from saving.
+            laysi_regulation::ordinary_hourly_wage(rs, one)?;
         }
         "withholding" => {
             let codes = rs

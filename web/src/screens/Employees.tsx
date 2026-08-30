@@ -27,6 +27,16 @@ const EMPLOYMENT_TYPES: { value: string; label: string }[] = [
   { value: 'contract', label: '約聘' },
 ];
 
+const PAY_BASES: { value: string; label: string }[] = [
+  { value: 'monthly', label: '月薪' },
+  { value: 'hourly', label: '時薪' },
+];
+
+const INSURED_AS: { value: string; label: string }[] = [
+  { value: 'employee', label: '受僱者' },
+  { value: 'owner', label: '負責人' },
+];
+
 const STATUSES: { value: string; label: string }[] = [
   { value: 'active', label: '在職' },
   { value: 'leaving', label: '離職中' },
@@ -46,6 +56,8 @@ interface FormState {
   dept_code: string;
   title: string;
   employment_type: string;
+  pay_basis: string;
+  insured_as: string;
   hired_on: string;
   left_on: string;
   status: string;
@@ -64,6 +76,8 @@ const EMPTY_FORM: FormState = {
   dept_code: '',
   title: '',
   employment_type: 'full_time',
+  pay_basis: 'monthly',
+  insured_as: 'employee',
   hired_on: '',
   left_on: '',
   status: 'active',
@@ -127,6 +141,8 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       dept_code: e.dept_code ?? '',
       title: e.title,
       employment_type: e.employment_type,
+      pay_basis: e.pay_basis,
+      insured_as: e.insured_as,
       hired_on: e.hired_on,
       left_on: e.left_on ?? '',
       status: e.status,
@@ -238,6 +254,8 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         dept_code: form.dept_code || null,
         title: form.title.trim(),
         employment_type: form.employment_type,
+        pay_basis: form.pay_basis,
+        insured_as: form.insured_as,
         hired_on: form.hired_on,
         left_on: form.left_on || null,
         status: form.status,
@@ -364,7 +382,8 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                         {e.dept_label ?? '未指定'}
                         <span className="cell-hint cell-hint--block">
                           {e.title ? `${e.title} · ` : ''}
-                          {e.employment_label}
+                          {e.employment_label} · {e.pay_basis_label}
+                          {e.insured_as === 'owner' && ` · ${e.insured_as_label}`}
                         </span>
                       </td>
                       <td className="num cell-nowrap">
@@ -496,6 +515,36 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                 </label>
 
                 <label className="field">
+                  計薪基準
+                  <select
+                    className="input"
+                    value={form.pay_basis}
+                    onChange={(e) => setField('pay_basis', e.target.value)}
+                  >
+                    {PAY_BASES.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
+                  投保身分
+                  <select
+                    className="input"
+                    value={form.insured_as}
+                    onChange={(e) => setField('insured_as', e.target.value)}
+                  >
+                    {INSURED_AS.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
                   到職日
                   <DateField
                     className="input"
@@ -549,12 +598,14 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
 
               <div className="field-grid">
                 <label className="field">
-                  本薪
+                  {form.pay_basis === 'hourly' ? '時薪' : '本薪'}
                   <input
                     className="input num"
                     inputMode="decimal"
                     value={form.base_salary}
-                    placeholder={drawer === 'edit' ? '尚未設定' : '38000'}
+                    placeholder={
+                      drawer === 'edit' ? '尚未設定' : form.pay_basis === 'hourly' ? '200' : '38000'
+                    }
                     onChange={(e) => setField('base_salary', e.target.value)}
                   />
                 </label>

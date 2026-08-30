@@ -39,10 +39,14 @@
 //! not individuals). Both read the same table; the difference is whether
 //! `dispatch` stops the caller. The filter is not written into the query.
 
+use crate::ops::attendance::{ordinary_hourly_wage, punch_days, WorkSchedule};
+#[cfg(test)]
+use crate::ops::employees::INSURED_EMPLOYEE;
+use crate::ops::employees::{pay_basis_label, BASIS_HOURLY, BASIS_MONTHLY};
 use crate::ops::insurance::{percent, premiums_on, ruleset_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{FixedOffset, NaiveDate};
 use laysi_domain::Money;
 use laysi_regulation::Ruleset;
 use laysi_store::{Employee, NewPayslip};
@@ -65,6 +69,11 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
 /// Withholding income code for salary. A code, not a rate; the rate is
 /// looked up in the payload.
 pub(crate) const SALARY_INCOME_CODE: &str = "50";
+
+/// Why somebody was left out of a run. Matched again when the run pays
+/// nobody, to tell "everyone is already paid" from "somebody is waiting on
+/// data", which are two different things to do next.
+const ALREADY_PAID: &str = "本期已計薪";
 
 /// Round to whole dollars. A rounding mode, not a regulated rate.
 fn to_dollars(v: Money) -> Money {
@@ -137,6 +146,29 @@ fn salary_withholding_rate(rs: &Ruleset) -> Result<(Money, String, String), OpEr
     ))
 }
 
+/// Hours one person's punches record in the period, breaks taken out.
+///
+/// Only complete days count: a day clocked in and never out has no length,
+/// and guessing one would put money on it. That day is a missed punch, and
+/// the correction flow exists to fix it before payroll runs.
+fn worked_hours_of(
+    punches: &[laysi_store::AttendancePunch],
+    schedule: &WorkSchedule,
+    employee_id: i32,
+    offset: FixedOffset,
+) -> Money {
+    let mine: Vec<_> = punches
+        .iter()
+        .filter(|p| p.employee_id == employee_id)
+        .cloned()
+        .collect();
+    let seconds: i64 = punch_days(&mine, offset)
+        .iter()
+        .filter_map(|d| d.worked_seconds(schedule))
+        .sum();
+    Decimal::from(seconds) / Decimal::from(3600)
+}
+
 /// Days this employee actually worked in the period. Someone who joined or
 /// left mid-period is paid pro rata by calendar day.
 ///
@@ -180,6 +212,7 @@ async fn compute_one(
     to: NaiveDate,
     pay_on: NaiveDate,
     overtime: Money,
+    worked_hours: Money,
 ) -> Result<Computed, OpError> {
     let month_days = Decimal::from((to - from).num_days() + 1);
     let days = Decimal::from(paid_days(e, from, to));
@@ -193,21 +226,30 @@ async fn compute_one(
     // Zero is "not agreed yet", not "unpaid": 0028 dropped the requirement that
     // a roster entry carry an amount. Saying so here is the point of that
     // change; a zero payslip would look like a computation rather than a gap.
+    let hourly = e.pay_basis == BASIS_HOURLY;
     if e.base_salary <= Decimal::ZERO {
         return Err(OpError::BadInput(format!(
-            "{} {} 尚未設定底薪，請先在「員工名冊」填上再計薪",
-            e.emp_no, e.name
+            "{} {} 尚未設定{}，請先在「員工名冊」填上再計薪",
+            e.emp_no,
+            e.name,
+            if hourly { "時薪" } else { "底薪" }
         )));
     }
 
-    // Joining or leaving mid-period prorates by calendar day. A full month
-    // gives days == month_days and a ratio of 1.
-    let base = to_dollars(e.base_salary * days / month_days);
+    // Hourly pay is the rate times the hours the punches record; a monthly
+    // salary is prorated by calendar day, so a full month gives days ==
+    // month_days and a ratio of 1. Proration does not apply to hourly pay:
+    // the hours already say how much of the period was worked.
+    let base = match hourly {
+        true => to_dollars(e.base_salary * worked_hours),
+        false => to_dollars(e.base_salary * days / month_days),
+    };
     let gross = base + overtime;
 
     // Premiums resolve on the period end: the version in force for this period.
     let p = premiums_on(
         to,
+        &e.insured_as,
         e.labor_insured_salary,
         e.health_insured_salary,
         e.pension_wage,
@@ -229,16 +271,18 @@ async fn compute_one(
         )));
     }
 
-    // Minimum wage check. This compares the monthly salary, not the period's
-    // net pay: someone who joined mid-month earns less than the monthly
-    // minimum by definition, which is not a breach.
+    // Minimum wage check. This compares the agreed rate, not the period's net
+    // pay: someone who joined mid-month earns less than the monthly minimum by
+    // definition, which is not a breach. The floor follows the pay basis; the
+    // two are published together and neither one bounds the other.
     let min_rs = laysi_regulation::resolve("minimum_wage", to)?;
-    let below_minimum = laysi_regulation::minimum_wage_shortfall(min_rs, e.base_salary)?;
+    let below_minimum =
+        laysi_regulation::minimum_wage_shortfall(min_rs, e.base_salary, &e.pay_basis)?;
 
-    let note = if days < month_days {
-        format!("在職 {days}／{month_days} 日，按曆日比例計薪")
-    } else {
-        String::new()
+    let note = match (hourly, days < month_days) {
+        (true, _) => format!("時薪制，本期出勤 {} 小時", worked_hours.normalize()),
+        (false, true) => format!("在職 {days}／{month_days} 日，按曆日比例計薪"),
+        (false, false) => String::new(),
     };
 
     Ok(Computed {
@@ -491,6 +535,7 @@ impl Operation for ListPayslips {
             // screen as with AR ageing and depreciation.
             let p = premiums_on(
                 period_end,
+                &s.insured_as,
                 s.labor_insured_salary,
                 s.health_insured_salary,
                 s.pension_wage,
@@ -605,19 +650,28 @@ impl Operation for RunPayroll {
 
         let staff = ctx.store.employees(true, None).await?;
 
+        // Hours actually worked in the period, for whoever is paid by the
+        // hour. Read once and split per person: `punch_days` walks a run of
+        // days and would fold two people's same date into one row.
+        let punches = ctx.store.punches(&period, None).await?;
+        let schedule = WorkSchedule::load(ctx).await?;
+
         // Approved overtime for the period, priced by the ruleset in force on
         // each day worked.
         let approved_overtime = ctx.store.approved_overtime(from, to).await?;
         let mut overtime_by_employee: BTreeMap<i32, (Money, Money)> = BTreeMap::new();
         for o in &approved_overtime {
             let rs = laysi_regulation::resolve("overtime", o.worked_on)?;
-            let salary = staff
-                .iter()
-                .find(|e| e.id == o.employee_id)
-                .map(|e| e.base_salary)
-                .unwrap_or(Money::ZERO);
+            let worker = staff.iter().find(|e| e.id == o.employee_id);
+            let salary = worker.map(|e| e.base_salary).unwrap_or(Money::ZERO);
             let pay = match salary > Money::ZERO {
-                true => laysi_regulation::overtime_pay(rs, salary, &o.day_type, o.hours)?,
+                true => {
+                    let basis = worker
+                        .map(|e| e.pay_basis.as_str())
+                        .unwrap_or(BASIS_MONTHLY);
+                    let wage = ordinary_hourly_wage(rs, basis, salary)?;
+                    laysi_regulation::overtime_pay(rs, wage, &o.day_type, o.hours)?
+                }
                 false => Money::ZERO,
             };
             let entry = overtime_by_employee
@@ -642,7 +696,7 @@ impl Operation for RunPayroll {
                 skipped.push(json!({
                     "emp_no": e.emp_no,
                     "name": e.name,
-                    "reason": "本期已計薪",
+                    "reason": ALREADY_PAID,
                 }));
                 continue;
             }
@@ -659,13 +713,26 @@ impl Operation for RunPayroll {
                 .map(|(_, pay)| *pay)
                 .unwrap_or(Money::ZERO);
 
-            let c = compute_one(ctx, e, from, to, pay_on, overtime).await?;
+            let worked_hours = worked_hours_of(&punches, &schedule, e.id, ctx.offset);
+            // An hourly worker with nothing clocked has no pay to compute.
+            // A payslip of zero would read as an amount somebody worked out.
+            if e.pay_basis == BASIS_HOURLY && worked_hours.is_zero() {
+                skipped.push(json!({
+                    "emp_no": e.emp_no,
+                    "name": e.name,
+                    "reason": "時薪制，本期無完整打卡紀錄",
+                }));
+                continue;
+            }
+
+            let c = compute_one(ctx, e, from, to, pay_on, overtime, worked_hours).await?;
             if let Some(floor) = c.below_minimum {
                 warnings.push(json!({
                     "emp_no": e.emp_no,
                     "name": e.name,
                     "issue": format!(
-                        "月薪 {} 低於法定最低工資 {}",
+                        "{} {} 低於法定最低工資 {}",
+                        pay_basis_label(&e.pay_basis),
                         money(e.base_salary),
                         money(floor)
                     ),
@@ -683,10 +750,25 @@ impl Operation for RunPayroll {
         }
 
         let (labor_v, health_v, pension_v, wht_v) = versions.ok_or_else(|| {
-            OpError::BadInput(if supplementary {
-                format!("{period} 在職員工都已計薪，沒有需要補算的人。")
-            } else {
-                format!("{period} 無在職員工需計薪")
+            // Somebody left out for a reason other than having been paid is
+            // the answer to why nobody is being paid. Reporting them as all
+            // paid would hide the one person who is waiting on something.
+            let waiting: Vec<String> = skipped
+                .iter()
+                .filter(|s| s["reason"] != ALREADY_PAID)
+                .map(|s| {
+                    format!(
+                        "{} {}（{}）",
+                        s["emp_no"].as_str().unwrap_or_default(),
+                        s["name"].as_str().unwrap_or_default(),
+                        s["reason"].as_str().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            OpError::BadInput(match (waiting.is_empty(), supplementary) {
+                (false, _) => format!("{period} 沒有人計得出薪資：{}", waiting.join("、")),
+                (true, true) => format!("{period} 在職員工都已計薪，沒有需要補算的人。"),
+                (true, false) => format!("{period} 無在職員工需計薪"),
             })
         })?;
 
@@ -851,6 +933,8 @@ mod tests {
             dept_label: None,
             title: "測試職稱".into(),
             employment_type: "full_time".into(),
+            pay_basis: BASIS_MONTHLY.into(),
+            insured_as: INSURED_EMPLOYEE.into(),
             hired_on: hired,
             left_on: left,
             status: "active".into(),
@@ -870,7 +954,14 @@ mod tests {
     /// 53,000 x 5% = 2,650, total 4,480, net 48,520.
     #[test]
     fn a_reference_payslip_is_reproducible_from_the_rulesets() {
-        let p = premiums_on(d(2026, 6, 30), n("45800"), n("53000"), n("53000")).unwrap();
+        let p = premiums_on(
+            d(2026, 6, 30),
+            INSURED_EMPLOYEE,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+        )
+        .unwrap();
         assert_eq!(p.labor.employee, n("1008"));
         assert_eq!(p.health.employee, n("822"));
 
@@ -982,6 +1073,88 @@ mod tests {
         assert!(
             err.to_string().contains("50"),
             "錯誤訊息要說是哪個代號：{err}"
+        );
+    }
+
+    /// Hours are counted per person. The punch rows arrive ordered by employee
+    /// and then by date, so a run that ignored the employee would fold two
+    /// people's punches on the same date into one day and pay one of them
+    /// nothing.
+    #[test]
+    fn worked_hours_are_counted_one_person_at_a_time() {
+        use crate::ops::attendance::business_instant;
+        use chrono::NaiveTime;
+        use laysi_store::AttendancePunch;
+        use std::collections::BTreeMap;
+
+        let tz = laysi_domain::default_business_offset();
+        let day = d(2026, 8, 3);
+        let at =
+            |t: &str| business_instant(day, NaiveTime::parse_from_str(t, "%H:%M").unwrap(), tz);
+        let punch = |employee_id: i32, kind: &str, t: &str| AttendancePunch {
+            id: 1,
+            employee_id,
+            emp_no: format!("E00{employee_id}"),
+            name: "測試員工".into(),
+            dept_label: None,
+            punched_on: day,
+            punched_at: at(t),
+            kind: kind.into(),
+            source: "clock".into(),
+            note: String::new(),
+            created_by: "測試員工".into(),
+        };
+        let schedule = WorkSchedule {
+            starts_at: None,
+            ends_at: None,
+            grace_minutes: 0,
+            grace_stated: false,
+            flex_minutes: 0,
+            break_start: None,
+            break_end: None,
+            calendar: BTreeMap::new(),
+        };
+
+        // Ordered by employee, then date, exactly as the query returns them.
+        let punches = vec![
+            punch(1, "in", "09:00"),
+            punch(1, "out", "13:00"),
+            punch(2, "in", "14:00"),
+            punch(2, "out", "18:30"),
+        ];
+        assert_eq!(worked_hours_of(&punches, &schedule, 1, tz), n("4"));
+        assert_eq!(worked_hours_of(&punches, &schedule, 2, tz), n("4.5"));
+        assert_eq!(
+            worked_hours_of(&punches, &schedule, 3, tz),
+            Money::ZERO,
+            "沒有打卡的人是 0 小時"
+        );
+
+        // A day clocked in and never out has no length, so it earns nothing
+        // until the correction is made.
+        let open = vec![punch(1, "in", "09:00")];
+        assert_eq!(worked_hours_of(&open, &schedule, 1, tz), Money::ZERO);
+    }
+
+    /// The two bases reach the ordinary hourly wage differently: an hourly
+    /// rate already is one, and dividing it by the ruleset's monthly hours
+    /// would price an hour of overtime below an hour of ordinary time.
+    #[test]
+    fn overtime_prices_an_hourly_worker_off_their_own_rate() {
+        let rs = laysi_regulation::resolve("overtime", d(2026, 8, 3)).unwrap();
+        assert_eq!(
+            ordinary_hourly_wage(rs, BASIS_HOURLY, n("200")).unwrap(),
+            n("200")
+        );
+        assert_eq!(
+            ordinary_hourly_wage(rs, BASIS_MONTHLY, n("48000")).unwrap(),
+            n("200"),
+            "48,000 ÷ 240 小時"
+        );
+        assert_eq!(
+            laysi_regulation::overtime_pay(rs, n("200"), "weekday", n("2")).unwrap(),
+            n("536"),
+            "200 × 1.34 × 2"
         );
     }
 }

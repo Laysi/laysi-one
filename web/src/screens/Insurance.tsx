@@ -20,6 +20,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [quote, setQuote] = useState<InsuranceQuote | null>(null);
   const [salary, setSalary] = useState('');
+  const [insuredAs, setInsuredAs] = useState('employee');
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
@@ -38,6 +39,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
                         'compute_insurance',
                         {
           insured_salary: salary.trim(),
+          insured_as: insuredAs,
         },
                         undefined,
                         insuranceQuote,
@@ -143,6 +145,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
                       )}
                       <span className="cell-hint cell-hint--block num">
                         {r.emp_no} · {r.dept_label ?? '未指定'} · {r.title}
+                        {r.insured_as === 'owner' && ` · ${r.insured_as_label}`}
                       </span>
                     </td>
                     <td className="num align-right">
@@ -231,6 +234,17 @@ export function Insurance({ onToast, reloadKey }: Props) {
                   }}
                 />
               </label>
+              <label className="field">
+                投保身分
+                <select
+                  className="input"
+                  value={insuredAs}
+                  onChange={(e) => setInsuredAs(e.target.value)}
+                >
+                  <option value="employee">受僱者</option>
+                  <option value="owner">負責人</option>
+                </select>
+              </label>
               <button className="btn" disabled={busy || !salary.trim()} onClick={() => void compute()}>
                 {busy ? '試算中…' : '試算'}
               </button>
@@ -243,7 +257,8 @@ export function Insurance({ onToast, reloadKey }: Props) {
               <div className="card doc-card">
                 <div className="doc-card__head">
                   <h3 className="section-title doc-card__title">
-                    級距 <span className="num">{money(quote.insured_salary)}</span>
+                    {quote.insured_as_label}級距{' '}
+                    <span className="num">{money(quote.insured_salary)}</span>
                   </h3>
                   <span className="doc-card__badge num">{quote.as_of} 適用</span>
                 </div>
@@ -263,13 +278,13 @@ export function Insurance({ onToast, reloadKey }: Props) {
                 </div>
                 <div className="doc-row">
                   <span>
-                    健保（率 {quote.health.rate_percent}%，平均眷口{' '}
-                    {quote.health.avg_dependents}）
+                    健保（率 {quote.health.rate_percent}%
+                    {quote.health.avg_dependents && `，平均眷口 ${quote.health.avg_dependents}`}）
                   </span>
                   <span className="num">{money(quote.health.employer)}</span>
                 </div>
                 <div className="doc-row doc-row--sub">
-                  <span>員工自付</span>
+                  <span>{quote.insured_as === 'owner' ? '本人自付' : '員工自付'}</span>
                   <span className="num">{money(quote.health.employee)}</span>
                 </div>
                 <div className="doc-row">
@@ -281,7 +296,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
                   <span className="num">{money(quote.employer_total)}</span>
                 </div>
                 <div className="doc-row doc-row--total">
-                  <span>員工自付</span>
+                  <span>{quote.insured_as === 'owner' ? '本人自付' : '員工自付'}</span>
                   <span className="num">{money(quote.employee_total)}</span>
                 </div>
               </div>
@@ -293,6 +308,9 @@ export function Insurance({ onToast, reloadKey }: Props) {
               { label: '勞保', version: data.rulesets.labor.version },
               { label: '健保', version: data.rulesets.health.version },
               { label: '勞退', version: data.rulesets.pension.version },
+              ...(data.rulesets.owner
+                ? [{ label: '負責人投保', version: data.rulesets.owner.version }]
+                : []),
             ]}
           />
         </>
