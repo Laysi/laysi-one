@@ -3,7 +3,6 @@ import {
   accountList,
   callOp,
   companySettings,
-  dimensionList,
   newBankAccount,
   newUserAccount,
   oidcSetting,
@@ -11,7 +10,6 @@ import {
   userAccountList,
   type Account,
   type CompanySettingRow,
-  type DimensionList,
   type NewUserAccount,
   type OidcSetting,
 } from '../api/client';
@@ -23,18 +21,17 @@ interface Props {
   onExit: () => void;
 }
 
-type Step = 'company' | 'bank' | 'dept' | 'hours' | 'sso' | 'owner' | 'done';
+type Step = 'company' | 'bank' | 'hours' | 'sso' | 'owner' | 'done';
 
 type HourCode = 'work_start' | 'work_end' | 'break_start' | 'break_end' | 'late_grace_minutes';
 
 const STEPS: { id: Step; label: string }[] = [
   { id: 'company', label: '① 公司資料' },
   { id: 'bank', label: '② 銀行帳戶' },
-  { id: 'dept', label: '③ 部門' },
-  { id: 'hours', label: '④ 上下班時間' },
-  { id: 'sso', label: '⑤ 外部登入' },
-  { id: 'owner', label: '⑥ 負責人帳號' },
-  { id: 'done', label: '⑦ 完成' },
+  { id: 'hours', label: '③ 上下班時間' },
+  { id: 'sso', label: '④ 外部登入' },
+  { id: 'owner', label: '⑤ 負責人帳號' },
+  { id: 'done', label: '⑥ 完成' },
 ];
 
 const GOOGLE_ISSUER = 'https://accounts.google.com';
@@ -146,7 +143,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
             );
       onToast(`已建立銀行帳戶「${bankName.trim()}」`);
       onProgress();
-      setStep('dept');
+      setStep('hours');
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -238,39 +235,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
       setSavingSso(false);
-    }
-  }
-
-  const [dims, setDims] = useState<DimensionList | null>(null);
-  const [deptLabel, setDeptLabel] = useState('');
-  const [savingDept, setSavingDept] = useState(false);
-
-  useEffect(() => {
-    if (step !== 'dept' || dims) return;
-    callOp('list_dimensions', {}, undefined, dimensionList).then(setDims).catch(() => setDims(null));
-  }, [step, dims]);
-
-  const deptDimension = dims?.dimensions.find((d) => d.code === 'department') ?? null;
-
-  async function saveDept() {
-    if (!deptLabel.trim()) {
-      onToast('請填寫部門名稱');
-      return;
-    }
-    setSavingDept(true);
-    try {
-      await callOp<unknown>(
-        'create_dimension_value',
-        { dimension_code: 'department', label: deptLabel.trim() },
-        '設定第一個部門',
-      );
-      onToast(`已建立部門「${deptLabel.trim()}」`);
-      onProgress();
-      setStep('hours');
-    } catch (e) {
-      onToast(e instanceof OpFailed ? e.error.message : String(e));
-    } finally {
-      setSavingDept(false);
     }
   }
 
@@ -491,7 +455,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                   ← 上一步
                 </button>
                 <span className="spacer" />
-                <button className="btn btn--ghost" onClick={() => setStep('dept')}>
+                <button className="btn btn--ghost" onClick={() => setStep('hours')}>
                   略過此步
                 </button>
                 <button className="btn" disabled={savingBank} onClick={() => void saveBank()}>
@@ -500,40 +464,6 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
               </div>
             </>
           )}
-        </div>
-      )}
-
-      {step === 'dept' && (
-        <div className="card wizard-panel">
-          <h3 className="section-title">第一個部門</h3>
-          {deptDimension && deptDimension.values.length > 0 && (
-            <p className="section-note">
-              目前已有：{deptDimension.values.map((v) => v.label).join('、')}
-            </p>
-          )}
-          <div className="field-grid">
-            <label className="field">
-              部門名稱
-              <input
-                className="input"
-                value={deptLabel}
-                placeholder="業務部"
-                onChange={(e) => setDeptLabel(e.target.value)}
-              />
-            </label>
-          </div>
-          <div className="wizard-actions">
-            <button className="btn btn--ghost" onClick={() => setStep('bank')}>
-              ← 上一步
-            </button>
-            <span className="spacer" />
-            <button className="btn btn--ghost" onClick={() => setStep('hours')}>
-              略過此步
-            </button>
-            <button className="btn" disabled={savingDept} onClick={() => void saveDept()}>
-              {savingDept ? '存檔中…' : '建立並繼續'}
-            </button>
-          </div>
         </div>
       )}
 
@@ -577,7 +507,7 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
             </label>
           </div>
           <div className="wizard-actions">
-            <button className="btn btn--ghost" onClick={() => setStep('dept')}>
+            <button className="btn btn--ghost" onClick={() => setStep('bank')}>
               ← 上一步
             </button>
             <span className="spacer" />
