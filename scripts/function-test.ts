@@ -201,6 +201,12 @@ async function main() {
     await check("S3", "公司設定寫得進去", async () => {
       const data = await must("update_company_setting", { code: "company_name", value: "功能測試股份有限公司" });
       expectEq(data.setting.value, "功能測試股份有限公司", "公司名稱");
+      // Work hours decide whether punch-derived overtime is checked at all, and
+      // the responses that answer it change shape once they are set. Leaving
+      // them empty keeps that branch out of the live schema check, which is how
+      // get_hr_compliance shipped a null where the screen expects a string.
+      await must("update_company_setting", { code: "work_start", value: "09:00" });
+      await must("update_company_setting", { code: "work_end", value: "18:00" });
       const meta = await fetch(`${BASE}/v1/meta`, { headers: { cookie } }).then((r) => r.json());
       expectEq(meta.setup_required, false, "填了公司名之後不該再要求首次設定");
       return meta.period;
