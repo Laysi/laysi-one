@@ -1537,6 +1537,7 @@ export const employeeList = z.object({
   active: z.number(),
   leaving: z.number(),
   by_dept: z.array(z.object({ label: z.string(), count: z.number() })),
+  departments: z.array(dimensionValue),
   avg_service_months: z.number(),
   avg_service_label: z.string(),
   annual_leave_ruleset: rulesetRef,

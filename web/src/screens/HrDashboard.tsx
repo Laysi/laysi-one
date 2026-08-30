@@ -6,7 +6,8 @@ import {
   money,
   type HrDashboard as HrDashboardData,
 } from '../api/client';
-import type { ScreenId } from '../nav';
+import { screenOp, type ScreenId } from '../nav';
+import { useCurrentUser } from '../auth';
 
 interface Props {
   onGo: (screen: ScreenId) => void;
@@ -29,8 +30,15 @@ function emphasise(text: string): ReactNode {
 }
 
 export function HrDashboard({ onGo, reloadKey }: Props) {
+  const { permissions } = useCurrentUser();
   const [data, setData] = useState<HrDashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const destination = (key: string): ScreenId | null => {
+    const id = DESTINATION[key];
+    const op = id ? screenOp(id) : null;
+    return id && op && permissions.includes(op) ? id : null;
+  };
 
   useEffect(() => {
     let live = true;
@@ -68,7 +76,7 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
           ) : (
             <div className="todo-list">
               {data.todos.map((t) => {
-                const to = DESTINATION[t.screen];
+                const to = destination(t.screen);
                 return (
                   <button
                     className="todo"
@@ -129,12 +137,12 @@ export function HrDashboard({ onGo, reloadKey }: Props) {
                 </span>
                 <span className="fact__value">
                   {emphasise(l.detail)}
-                  {DESTINATION[l.screen] && (
+                  {destination(l.screen) && (
                     <span className="fact__note">
                       <button
                         className="link-cell"
                         onClick={() => {
-                          const to = DESTINATION[l.screen];
+                          const to = destination(l.screen);
                           if (to) onGo(to);
                         }}
                       >

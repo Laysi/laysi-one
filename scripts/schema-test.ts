@@ -59,6 +59,7 @@ const list = {
   active: 1,
   leaving: 0,
   by_dept: [{ label: "未指定", count: 1 }],
+  departments: [{ code: "ADM", label: "行政部", active: true }],
   avg_service_months: 29,
   avg_service_label: "2 年 5 個月",
   annual_leave_ruleset: {

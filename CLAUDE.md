@@ -530,6 +530,15 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 才寫資料庫；取回時一定重算雜湊比對，對不上就不交出內容。**沒有 OCR**——`ocr_status`
 整欄已經刪掉，它是由 MIME 型別推出來、沒有任何判斷讀它的常數。
 
+**人資是一個角色**：`hr` 持有 `view_hr`／`manage_hr`／`view_payroll`／`manage_payroll`／
+`staff_self_service`，剛好開啟人資分頁的八個畫面，財務分頁與系統按鈕都不出現。原本
+人資只能設成 `acct`，為了核一張休假單而拿到全套財務權限。**逐人薪資明細不在裡面也不是
+漏掉的**：`list_payslips` 與 `list_withholding_statements` 掛在 `BossOnly` 底線上，
+矩陣拉不動它。名冊的部門下拉因此改由 `list_employees` 回的 `departments` 帶給畫面
+（與 `list_fixed_assets` 回 `categories` 同一個做法）——原本呼叫的 `list_dimensions`
+屬於 `view_masters`，那組權限也開著「基礎設定」，而呼叫端把失敗吞掉，少了它的角色會
+看到一個空的下拉。
+
 **角色權限由 `dispatch` 即時強制 deny-by-default**：每次都查
 `role_permission → permission.op_names`，不快取。矩陣之外還有**兩道風險底線**：
 `Risk::BossOnly` 綁 `boss`，管業務機密與權威（薪資明細、扣繳憑單、預算、

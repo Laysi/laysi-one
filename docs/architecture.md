@@ -775,6 +775,28 @@ Rust 那側的 `bootstrap_open()` 只是為了給出比違反約束更好的錯�
 `include_str!` 讀 `0001_initial.sql` 的 `INSERT INTO permission`，缺漏與重複都不准
 通過。
 
+### 人資是一個角色，不是會計的別名
+
+人資相關的 permission 原本只掛在負責人與會計身上，所以一位專職人資只能設成
+`acct`，連帶拿到開立傳票、過帳、應收應付、銀行核銷與稅務申報的完整財務權限——
+為了讓他核一張休假單。
+
+`hr` 持有五組：`view_hr`、`manage_hr`、`view_payroll`、`manage_payroll`、
+`staff_self_service`。這一組剛好打開人資分頁的八個畫面，財務分頁與系統按鈕
+一個都不出現。
+
+**逐人薪資明細不在裡面**，也不是漏掉的：`list_payslips` 與
+`list_withholding_statements` 掛在 `BossOnly` 底線上，權限矩陣拉不動它，給
+`hr` 一列 `view_payroll_details` 只會多一列不生效的資料列。人資算得出一期薪資
+（`run_payroll`）也對得起總帳（`get_payroll_summary`），逐人金額仍是負責人的事。
+
+**名冊的部門下拉因此改由 `list_employees` 帶回來。** 那個下拉原本呼叫
+`list_dimensions`，而它屬於 `view_masters`——同一組權限也開著「基礎設定」，所以
+為了一個部門清單就得把系統分頁交出去。呼叫端還把失敗吞掉（`.catch(() => null)`），
+於是少了那組權限的角色會看到一個空的下拉，畫面上沒有任何跡象。`list_employees`
+現在回一份 `departments`，與 `list_fixed_assets` 回 `categories` 同一個做法：
+畫面要的值由它讀的那個操作帶著走。
+
 ### 角色只在帳號上，員工主檔沒有角色
 
 `employee.role_code` 曾經存在，但決定權限的是 `user_account.role_code`。
@@ -1429,7 +1451,7 @@ column，因此不可能與上面的區間不一致。
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦與人資／財務銜接狀態 |
-| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、特休額度、約定的底薪與三個投保級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
+| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_leave_requests` | ReadOnly | `{ include_done?, limit? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度 |
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
