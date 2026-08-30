@@ -39,11 +39,19 @@ function weekend(at: number): boolean {
   return day === 0 || day === 6;
 }
 
-function spansWeekend(fromDay: string, toDay: string): boolean {
+function dayFlags(fromDay: string, toDay: string): { weekend: boolean; workday: boolean } {
+  const flags = { weekend: false, workday: false };
   for (let at = dayStart(fromDay); at <= dayStart(toDay); at += DAY_MS) {
-    if (weekend(at)) return true;
+    if (weekend(at)) flags.weekend = true;
+    else flags.workday = true;
   }
-  return false;
+  return flags;
+}
+
+function nextWorkday(day: string): string {
+  let at = dayStart(day);
+  while (weekend(at)) at += DAY_MS;
+  return new Date(at).toISOString().slice(0, 10);
 }
 
 function workingMinutes(
@@ -89,7 +97,7 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
     callOp('list_my_leave_requests', {}, undefined, myLeaveList)
       .then((d) => {
         setData(d);
-        const today = businessToday();
+        const today = nextWorkday(businessToday());
         setFromDay((v) => v || today);
         setToDay((v) => v || today);
         setFromTime((v) => v || d.schedule.work_start || '');
@@ -127,6 +135,7 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   const dailyMinutes = workStart && workEnd ? minutesOf(workEnd) - minutesOf(workStart) : 0;
   const hours = minutes / 60;
   const days = dailyMinutes > 0 ? minutes / dailyMinutes : 0;
+  const span = ordered ? dayFlags(fromDay, toDay) : null;
   const ready = ordered && minutes > 0;
   const kindLabel = data.leave_kinds.find((o) => o.kind === kind)?.label ?? kind;
 
@@ -250,14 +259,16 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
               )}
               {ordered && minutes === 0 && (
                 <p className="state-note state-note--error">
-                  所選時段落在上班時間之外，請改選 {workStart} 至 {workEnd} 之間的區間。
+                  {span && !span.workday
+                    ? '所選日期都是週六或週日，請改選平日。'
+                    : `所選時段落在上班時間之外，請改選 ${workStart} 至 ${workEnd} 之間的區間。`}
                 </p>
               )}
               {ready && (
                 <p className="form-note">
                   共 <span className="num">{round2(hours)}</span> 小時，等於{' '}
                   <span className="num">{round2(days)}</span> 日。
-                  {spansWeekend(fromDay, toDay) && '週六與週日不計入。'}
+                  {span?.weekend && '週六與週日不計入。'}
                 </p>
               )}
 

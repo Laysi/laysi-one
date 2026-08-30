@@ -33,6 +33,7 @@ const FIELD_LABEL: Record<string, string> = {
   customer: '客戶名稱',
   invoiceNo: '應收單號',
   amount: '金額',
+  issuedOn: '開立日期',
   dueOn: '到期日',
   revenue: '收入科目',
 };
@@ -60,6 +61,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   const [invoiceNo, setInvoiceNo] = useState('');
   const [amounts, setAmounts] = useState<TaxTriple>(EMPTY_TAX_TRIPLE);
   const [vat, setVat] = useState<VatInfo | null>(null);
+  const [issuedOn, setIssuedOn] = useState('');
   const [dueOn, setDueOn] = useState('');
   const [revenueAccountCode, setRevenueAccountCode] = useState('');
   const [memo, setMemo] = useState('');
@@ -83,6 +85,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
         setAging(a);
         setRows(l.invoices);
         setVat(l.vat);
+        setIssuedOn((v) => v || businessToday());
       })
       .catch((e: Error) => setError(e.message));
   }, [onlyOverdue]);
@@ -105,6 +108,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
     if (!customer.trim()) blank.push('customer');
     if (!invoiceNo.trim()) blank.push('invoiceNo');
     if (!amounts.total.trim() && !amounts.net.trim()) blank.push('amount');
+    if (!issuedOn) blank.push('issuedOn');
     if (!dueOn) blank.push('dueOn');
     if (!revenueAccountCode) blank.push('revenue');
     setMissing(blank);
@@ -119,6 +123,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                         {
             customer: customer.trim(),
             invoice_no: invoiceNo.trim(),
+            issued_on: issuedOn,
             ...(amounts.total.trim() ? { amount: amounts.total.trim() } : {}),
             ...(amounts.net.trim() ? { net_amount: amounts.net.trim() } : {}),
             ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
@@ -135,6 +140,7 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
       setCustomer('');
       setInvoiceNo('');
       setAmounts(EMPTY_TAX_TRIPLE);
+      setIssuedOn(businessToday());
       setDueOn('');
       setMemo('');
       setDrawer(false);
@@ -405,6 +411,17 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
                   missing={missing.includes('amount')}
                   onChange={setAmounts}
                 />
+                <label className="field">
+                  開立日期
+                  <DateField
+                    className="input"
+                    value={issuedOn}
+                    onChange={(v) => setIssuedOn(v)}
+                  />
+                  {missing.includes('issuedOn') && (
+                    <span className="field__hint field__hint--missing">未填</span>
+                  )}
+                </label>
                 <label className="field">
                   到期日
                   <DateField

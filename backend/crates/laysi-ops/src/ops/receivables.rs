@@ -257,7 +257,7 @@ fn validate_ar_invoice(input: &CreateArInvoiceInput, issued_on: NaiveDate) -> Re
         return Err(OpError::BadInput("應收單號與客戶都要填寫".into()));
     }
     if input.due_on < issued_on {
-        return Err(OpError::BadInput("到期日不得早於發生日".into()));
+        return Err(OpError::BadInput("到期日不得早於開立日期".into()));
     }
     if input.revenue_account_code.trim().is_empty()
         || input.receivable_account_code.trim().is_empty()
@@ -281,7 +281,7 @@ impl Operation for CreateArInvoice {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立應收單據，並一併產生待過帳傳票（借應收帳款／貸指定收益科目＋代收營業稅）。營業稅依發生日適用的稅率拆出，零稅率與免稅填 0；傳票過帳後才列入未收合計。"
+        "建立應收單據，並一併產生待過帳傳票（借應收帳款／貸指定收益科目＋代收營業稅）。營業稅依開立日期適用的稅率拆出，零稅率與免稅填 0；傳票過帳後才列入未收合計。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateArInvoiceInput>()

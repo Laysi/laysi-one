@@ -277,7 +277,7 @@ fn validate_ap_bill(input: &CreateApBillInput, billed_on: NaiveDate) -> Result<(
         return Err(OpError::BadInput("帳單號碼與供應商都要填寫".into()));
     }
     if input.due_on < billed_on {
-        return Err(OpError::BadInput("到期日不得早於帳單日".into()));
+        return Err(OpError::BadInput("到期日不得早於帳單日期".into()));
     }
     if input.debit_account_code.trim().is_empty()
         || input.payable_account_code.trim().is_empty()
@@ -301,7 +301,7 @@ impl Operation for CreateApBill {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立應付帳單，並一併產生待過帳傳票（借指定科目＋進項稅額／貸應付帳款）。進項稅額依帳單日適用的稅率拆出，不可扣抵時填 0；傳票過帳後才會列入未付合計，實際匯款另行執行。"
+        "建立應付帳單，並一併產生待過帳傳票（借指定科目＋進項稅額／貸應付帳款）。進項稅額依帳單日期適用的稅率拆出，不可扣抵時填 0；傳票過帳後才會列入未付合計，實際匯款另行執行。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateApBillInput>()
