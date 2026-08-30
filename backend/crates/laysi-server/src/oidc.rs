@@ -175,7 +175,7 @@ impl OidcState {
             // The message reaches the settings screen, so it says what to fix
             // rather than what the library returned; the detail goes to the
             // log for whoever is reading it.
-            tracing::warn!(%error, "外部登入 discovery 失敗");
+            tracing::warn!(%error, "external login discovery failed");
             anyhow!("讀不到這個供應商的登入設定，請確認供應商網址")
         })?;
         let provider = provider_key(metadata.issuer().as_str());
@@ -346,7 +346,7 @@ pub async fn current(state: &Shared) -> Option<Arc<OidcState>> {
     let setting = match state.store.oidc_setting().await {
         Ok(setting) => setting,
         Err(error) => {
-            tracing::error!(%error, "讀取外部登入設定失敗");
+            tracing::error!(%error, "reading the external login settings failed");
             return None;
         }
     };
@@ -372,13 +372,13 @@ pub async fn current(state: &Shared) -> Option<Arc<OidcState>> {
         || (failure.is_empty() && setting.enabled && setting.verified_at.is_none());
     if stale {
         if let Err(error) = state.store.record_oidc_verification(&failure).await {
-            tracing::error!(%error, "寫入外部登入驗證結果失敗");
+            tracing::error!(%error, "writing the external login verification result failed");
         }
     }
     let resolved = match built {
         Ok(built) => built.map(Arc::new),
         Err(error) => {
-            tracing::warn!(%error, "外部登入設定目前無法使用");
+            tracing::warn!(%error, "the external login settings are currently unusable");
             None
         }
     };
@@ -411,7 +411,7 @@ fn redirect(location: &str) -> Response {
             response
         }
         Err(error) => {
-            tracing::error!(%error, "OIDC 產生了無效的重新導向網址");
+            tracing::error!(%error, "OIDC produced an invalid redirect URL");
             auth::error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "oidc_redirect_error",
@@ -535,7 +535,7 @@ async fn resolve_account(
         Ok(user) => return Ok(user),
         Err(LinkedUserError::Unlinked) => {}
         Err(LinkedUserError::Store(error)) => {
-            tracing::error!(%error, "依 OIDC subject 查詢本機帳號失敗");
+            tracing::error!(%error, "looking up the local account by OIDC subject failed");
             return Err(lookup_failed());
         }
     }
@@ -552,7 +552,7 @@ async fn resolve_account(
     };
 
     let existing = state.store.users_by_email(email).await.map_err(|error| {
-        tracing::error!(%error, "依電子郵件查詢本機帳號失敗");
+        tracing::error!(%error, "looking up the local account by email failed");
         lookup_failed()
     })?;
     if existing.len() > 1 {
@@ -571,10 +571,10 @@ async fn resolve_account(
             .link_identity(user.id, oidc.provider(), identity.subject, email)
             .await
             .map_err(|error| {
-                tracing::error!(%error, "把外部身分連到既有帳號失敗");
+                tracing::error!(%error, "linking the external identity to an existing account failed");
                 lookup_failed()
             })?;
-        tracing::info!(username = %user.username, "外部登入連到既有帳號");
+        tracing::info!(username = %user.username, "external login linked to an existing account");
         return Ok(user);
     }
 
@@ -596,7 +596,7 @@ async fn resolve_account(
         .user_by_username(username)
         .await
         .map_err(|error| {
-            tracing::error!(%error, "檢查登入名稱是否已被使用失敗");
+            tracing::error!(%error, "checking whether the username is taken failed");
             lookup_failed()
         })?
         .is_some();
@@ -626,7 +626,7 @@ async fn resolve_account(
         })
         .await
         .map_err(|error| {
-            tracing::error!(%error, "以外部身分建立帳號失敗");
+            tracing::error!(%error, "creating an account from the external identity failed");
             auth::error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "oidc_provision_failed",
@@ -653,7 +653,7 @@ pub async fn callback(
         return disabled();
     };
     if let Some(error) = query.error {
-        tracing::warn!(%error, "IdP 拒絕或取消 OIDC 登入");
+        tracing::warn!(%error, "the IdP refused or cancelled the OIDC login");
         return auth::error_response(
             StatusCode::BAD_REQUEST,
             "oidc_provider_error",
@@ -678,7 +678,7 @@ pub async fn callback(
     let exchange = match oidc.client.exchange_code(AuthorizationCode::new(code)) {
         Ok(exchange) => exchange.set_pkce_verifier(pending.verifier),
         Err(error) => {
-            tracing::error!(%error, "外部登入的供應商未提供可用的 token endpoint");
+            tracing::error!(%error, "the external login provider offers no usable token endpoint");
             return auth::error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "oidc_token_endpoint_missing",
@@ -691,7 +691,7 @@ pub async fn callback(
         Err(_) => {
             // The error body is not logged, in case an upstream response
             // unexpectedly contains the code or a token.
-            tracing::warn!("OIDC 授權碼交換失敗");
+            tracing::warn!("OIDC authorization code exchange failed");
             return auth::error_response(
                 StatusCode::BAD_GATEWAY,
                 "oidc_token_exchange_failed",
@@ -710,7 +710,7 @@ pub async fn callback(
     let claims = match id_token.claims(&verifier, &pending.nonce) {
         Ok(claims) => claims,
         Err(_) => {
-            tracing::warn!("OIDC id_token 或 nonce 驗證失敗");
+            tracing::warn!("OIDC id_token or nonce verification failed");
             return auth::error_response(
                 StatusCode::UNAUTHORIZED,
                 "oidc_id_token_invalid",
@@ -753,7 +753,7 @@ pub async fn callback(
 
     if let Some(required) = oidc.allowed_hd.as_deref() {
         if !hd_matches(required, claims.additional_claims().hd.as_deref()) {
-            tracing::warn!("外部登入的帳號不屬於公司電子郵件網域");
+            tracing::warn!("the external account is outside the company hosted domain");
             return auth::error_response(
                 StatusCode::FORBIDDEN,
                 "oidc_domain_not_allowed",
@@ -784,13 +784,13 @@ pub async fn callback(
     }
     // An account an administrator created carries a generated password and the
     // flag that forces changing it. Someone arriving through the IdP was never
-    // given that password, and the change-password form asks for it before it
-    // lets anyone past, so leaving the flag set locks them out of a login that
-    // just succeeded. Only the flag is cleared: the hash still answers
-    // `reset_user_password` if they ever want a password after all.
+    // given that password and needs none, so leaving the flag set puts a
+    // password form in front of a login that just succeeded. Only the flag is
+    // cleared: the hash still answers `reset_user_password` if they ever want
+    // a password after all.
     if user.must_change_password {
         if let Err(error) = state.store.clear_must_change_password(user.id).await {
-            tracing::error!(%error, "外部登入後清除強制變更密碼旗標失敗");
+            tracing::error!(%error, "clearing the forced password change flag after external login failed");
         }
     }
     let secret = match auth::issue_session(&state, &user, &headers).await {

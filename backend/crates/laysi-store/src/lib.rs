@@ -3453,8 +3453,8 @@ impl Store {
     /// Drop the "change this password before continuing" flag without
     /// touching the hash. Set when an administrator generates a temporary
     /// password, it has no meaning for someone who signed in through the
-    /// identity provider instead: they never received that password, and the
-    /// change-password form asks for it before it will let them past.
+    /// identity provider instead: they never received that password and need
+    /// none.
     pub async fn clear_must_change_password(&self, user_id: i32) -> Result<()> {
         sqlx::query("UPDATE user_account SET must_change_password = false WHERE id = $1")
             .bind(user_id)

@@ -430,7 +430,7 @@ pub async fn seed(store: &laysi_store::Store, today: NaiveDate) {
     match store.work_calendar().await {
         Ok(days) if !days.is_empty() => return,
         Err(e) => {
-            tracing::warn!(error = %e, "讀取工作日曆失敗，略過自動更新");
+            tracing::warn!(error = %e, "reading the work calendar failed, skipping the automatic refresh");
             return;
         }
         _ => {}
@@ -439,11 +439,11 @@ pub async fn seed(store: &laysi_store::Store, today: NaiveDate) {
         match fetch(year).await {
             Ok(f) => match store.import_work_calendar(&f.days, "").await {
                 Ok((written, _)) => {
-                    tracing::info!(year, source = %f.source, written, "工作日曆已自動更新")
+                    tracing::info!(year, source = %f.source, written, "work calendar refreshed automatically")
                 }
-                Err(e) => tracing::warn!(year, error = %e, "工作日曆寫入失敗"),
+                Err(e) => tracing::warn!(year, error = %e, "writing the work calendar failed"),
             },
-            Err(e) => tracing::info!(year, reason = %e, "工作日曆未自動更新"),
+            Err(e) => tracing::info!(year, reason = %e, "work calendar was not refreshed"),
         }
     }
 }

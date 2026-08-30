@@ -378,7 +378,7 @@ pub(crate) fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, OpError
     serde_path_to_error::deserialize(v).map_err(|e| {
         let path = e.path().to_string();
         let message = e.into_inner().to_string();
-        tracing::debug!(%path, %message, "輸入解析失敗");
+        tracing::debug!(%path, %message, "input parse failed");
         OpError::BadInput(describe_input_error(&path, &message))
     })
 }
@@ -408,7 +408,7 @@ fn type_zh(raw: &str) -> &'static str {
         "sequence" | "seq" | "array" | "tuple" => "陣列",
         "null" | "unit" | "none" => "空值",
         other => {
-            tracing::debug!(type_name = other, "沒有對應中文名稱的型別");
+            tracing::debug!(type_name = other, "type has no display name");
             "其他型別"
         }
     }
@@ -732,7 +732,7 @@ impl Registry {
             )
             .await
         {
-            tracing::error!(tool = op.name(), error = %e, "稽核紀錄寫入失敗");
+            tracing::error!(tool = op.name(), error = %e, "audit log write failed");
         }
     }
 }
