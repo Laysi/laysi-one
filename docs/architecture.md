@@ -1614,7 +1614,7 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 `owner_employee_id` 不是猜的，是本人在自己的 session 裡按下按鈕寫進去的。於是
 五個唯讀自助工具因此對 AI 打開：沒有這一步，「我的 MCP」在全新安裝上會發出
 一把什麼都不能呼叫的 Token。老闆代發的 Token 依然沒有 owner，自助操作對它一律
-回「尚未連結員工資料」，不猜。
+回「尚未連結員工編號」，不猜。
 
 寫入類與薪資明細維持關閉。`punch_clock` 最明確：讓助理替你打卡的工具就是偽造出勤
 紀錄的工具；`issue_my_api_token` 若對 AI 開放，Token 就能再生 Token，撤銷也追不上。

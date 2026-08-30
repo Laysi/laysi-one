@@ -161,14 +161,12 @@ async function lastAudit(tool: string, actor: string) {
 }
 
 async function main() {
-  const health = await fetch(`${API_URL}/healthz`).then((r) => r.json());
-  const registryOps = Number(health.operations);
   const enabledTools = Number(await scalar("SELECT count(*) FROM mcp_tool_grant WHERE enabled"));
   const disabledTools = Number(await scalar("SELECT count(*) FROM mcp_tool_grant WHERE NOT enabled"));
   const auditStart = Number((await scalar("SELECT coalesce(max(id),0) FROM ai_audit_log")) || 0);
 
   console.log(`MCP 端對端測試 · ${MCP_URL}`);
-  console.log(`註冊表 ${registryOps} 個操作，工具開關 ${enabledTools} 開 / ${disabledTools} 關\n`);
+  console.log(`工具開關 ${enabledTools} 開 / ${disabledTools} 關；註冊表的筆數由 E5 核對\n`);
 
   console.log("L 前置：真實登入與真實核發");
   await check("L1", "帳號密碼登入取得 session", async () => {
@@ -471,20 +469,22 @@ async function main() {
     });
 
     await check("E5", "工具開關名稱集合等於註冊表", async () => {
+      // The registry is only reachable over an authenticated /v1/ops, so the
+      // count is read here rather than up front: /healthz answers whether the
+      // process is serving, not what it serves.
+      const registry: string[] = await fetch(`${API_URL}/v1/ops`, { headers: { cookie } })
+        .then((r) => r.json())
+        .then((d: any) => d.operations.map((o: any) => o.name));
       expect(
-        enabledTools + disabledTools === registryOps,
-        `開關 ${enabledTools + disabledTools} 筆，註冊表 ${registryOps} 個操作`,
+        enabledTools + disabledTools === registry.length,
+        `開關 ${enabledTools + disabledTools} 筆，註冊表 ${registry.length} 個操作`,
       );
       const orphan = await rows(
         `SELECT tool_name FROM mcp_tool_grant WHERE tool_name NOT IN (
-           SELECT jsonb_array_elements_text($$${JSON.stringify(
-             await fetch(`${API_URL}/v1/ops`, { headers: { cookie } })
-               .then((r) => r.json())
-               .then((d: any) => d.operations.map((o: any) => o.name)),
-           )}$$::jsonb))`,
+           SELECT jsonb_array_elements_text($$${JSON.stringify(registry)}$$::jsonb))`,
       );
       expect(orphan.length === 0, `開關裡有註冊表沒有的名稱：${orphan.map((r) => r[0]).join("、")}`);
-      return `${registryOps} 個操作`;
+      return `${registry.length} 個操作`;
     });
 
     console.log("\nF tools/call（SDK）");
@@ -578,7 +578,7 @@ async function main() {
       const r = await c.callTool({ name: "get_my_home", arguments: {} });
       await c.close();
       expect(r.isError === true, "應被拒絕");
-      expect(textOf(r).includes("尚未連結員工資料"), textOf(r));
+      expect(textOf(r).includes("尚未連結員工編號"), textOf(r));
       return textOf(r);
     });
 

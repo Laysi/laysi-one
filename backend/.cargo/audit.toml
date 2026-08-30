@@ -1,0 +1,22 @@
+# Advisories cargo audit reports against Cargo.lock that no upgrade closes.
+# Both are transitive and neither has a fixed version we can move to, so the
+# choice is to record why each one is accepted or to leave the check red and
+# stop reading it. Re-check on every dependency bump: an entry that has become
+# upgradable belongs in Cargo.toml, not here.
+
+[advisories]
+ignore = [
+    # rkyv 0.7.46, out-of-bounds read on archives holding Rc/Arc. Reached
+    # through rust_decimal's optional `rkyv` feature, which we do not enable:
+    # `cargo tree -i rkyv` finds no path into the build, so the crate is a
+    # lockfile entry rather than compiled code. rust_decimal 1.42.1 is the
+    # latest release and still pins the 0.7 line, so the fixed 0.8.17 is not
+    # reachable without dropping rust_decimal itself.
+    "RUSTSEC-2026-0235",
+
+    # rsa 0.9.10, Marvin timing sidechannel on private-key operations. Reached
+    # through openidconnect, which uses it to verify id_token signatures — a
+    # public-key path, and the private key is the IdP's, not ours. The advisory
+    # has no fixed release.
+    "RUSTSEC-2023-0071",
+]
