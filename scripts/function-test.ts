@@ -538,6 +538,97 @@ async function main() {
       return `補算 ${data.run.headcount} 人 · ${data.run.voucher_no} · 本期共 ${summary.run.headcount} 人`;
     });
 
+    await check("H9", "時薪制依打卡工時計薪，沒有打卡就不發薪資單", async () => {
+      const period = TODAY.slice(0, 7);
+      const hire = `${period}-01`;
+      const created = await must("create_employee", {
+        name: "測試時薪", hired_on: hire, employment_type: "part_time",
+        pay_basis: "hourly",
+      });
+      const empNo = created.employee.emp_no;
+      await must("update_employee", {
+        emp_no: empNo, name: "測試時薪", hired_on: hire,
+        employment_type: "part_time", pay_basis: "hourly",
+        base_salary: "200",
+        labor_insured_salary: "13500", health_insured_salary: "13500", pension_wage: "13500",
+      });
+
+      // No punches yet: an hourly worker has no pay to compute, and a zero
+      // payslip would read as an amount somebody worked out. Everybody else
+      // is already paid, so the run pays nobody — and it must say which of
+      // the two reasons that is.
+      const dry = await op("run_payroll", { period, pay_on: TODAY });
+      expect(!dry.ok, "沒有打卡卻發得出時薪薪資單");
+      expect(dry.error!.message.includes(empNo), dry.error!.message);
+      expect(dry.error!.message.includes("打卡"), dry.error!.message);
+
+      // 09:00 to 18:00 with no break is nine hours; 200 x 9 = 1,800.
+      for (const [kind, at] of [["in", "09:00:00"], ["out", "18:00:00"]]) {
+        await must("correct_punch", {
+          emp_no: empNo, punched_on: `${period}-02`, kind, at, note: "測試補登",
+        });
+      }
+      const paid = await must("run_payroll", { period, pay_on: TODAY });
+      expectEq(paid.run.headcount, 1, "計薪人數");
+      const slips = await must("list_payslips", { period });
+      const mine = (slips.rows ?? []).find((r: any) => r.emp_no === empNo);
+      expect(mine, "找不到時薪員工的薪資單");
+      expectEq(money(mine.base_salary), 180000, "時薪 200 × 9 小時");
+      expect(mine.note.includes("9"), `附註沒有寫出工時：${mine.note}`);
+      return `${empNo} 應發 ${mine.base_salary}（${mine.note}）`;
+    });
+
+    await check("H10", "負責人的健保全額自付，勞退不提繳，勞保與受僱者相同", async () => {
+      const staff = await must("compute_insurance", {
+        insured_salary: "45800", health_insured_salary: "53000", pension_wage: "53000",
+        as_of: TODAY,
+      });
+      const boss = await must("compute_insurance", {
+        insured_salary: "45800", health_insured_salary: "53000", pension_wage: "53000",
+        insured_as: "owner", as_of: TODAY,
+      });
+      expectEq(money(boss.labor.employer), money(staff.labor.employer), "勞保公司負擔");
+      expectEq(money(boss.labor.employee), money(staff.labor.employee), "勞保本人自付");
+      expectEq(money(boss.health.employer), 0, "健保沒有公司負擔那一份");
+      expectEq(money(boss.health.government), 0, "健保沒有政府補助");
+      expectEq(money(boss.health.employee), 274000, "53,000 × 5.17% 全額自付");
+      expectEq(money(boss.pension.employer), 0, "勞退不提繳");
+      expect(boss.health.owner_ruleset, "沒有回報依哪一版負責人規則計算");
+      expect(!staff.health.owner_ruleset, "受僱者不該帶負責人規則");
+      return `健保自付 ${boss.health.employee} · 勞退 ${boss.pension.employer} · 依 ${boss.health.owner_ruleset.version}`;
+    });
+
+    await check("H11", "負責人的健保投保金額低於受僱員工最高者會被檢核出來", async () => {
+      const created = await must("create_employee", {
+        name: "測試負責人身分", hired_on: "2026-01-01", insured_as: "owner",
+      });
+      const empNo = created.employee.emp_no;
+      await must("update_employee", {
+        emp_no: empNo, name: "測試負責人身分", hired_on: "2026-01-01", insured_as: "owner",
+        base_salary: "80000",
+        health_insured_salary: "13500",
+      });
+      const low = await must("get_hr_compliance", { as_of: TODAY });
+      const check = (low.checks ?? []).find((c: any) => c.name.includes("負責人"));
+      expect(check, "檢核表沒有負責人那一項");
+      expectEq(check.checked, true, "名冊上有負責人，該項要真的檢查");
+      expectEq(check.passed, false, "投保金額低於受僱員工最高者，卻通過了");
+      // 勞保與勞退留白是投保事實，不是漏填，所以不進「尚未設定投保級距」。
+      const unfiled = (low.checks ?? []).find((c: any) => c.name.includes("投保級距"));
+      expect(
+        !(unfiled.failures ?? []).some((f: any) => f.emp_no === empNo),
+        "負責人被當成漏填勞保與勞退",
+      );
+      await must("update_employee", {
+        emp_no: empNo, name: "測試負責人身分", hired_on: "2026-01-01", insured_as: "owner",
+        health_insured_salary: "53000",
+      });
+      const fixed = await must("get_hr_compliance", { as_of: TODAY });
+      const after = (fixed.checks ?? []).find((c: any) => c.name.includes("負責人"));
+      expectEq(after.passed, true, "改成不低於員工最高者之後仍未通過");
+      return `${check.failures[0].message} → 修正後通過`;
+    });
+
     console.log("\nA 固定資產");
     let assetVoucher = "";
     await check("A1", "取得成本填未稅，營業稅另拆到進項稅額", async () => {

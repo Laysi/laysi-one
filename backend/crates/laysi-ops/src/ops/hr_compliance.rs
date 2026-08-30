@@ -31,7 +31,9 @@
 //! and never used to fill the gap.
 
 use crate::ops::attendance::{punch_days, summarise, OvertimeLimits, WorkSchedule};
-use crate::ops::employees::service_months;
+use crate::ops::employees::{
+    pay_basis_label, service_months, BASIS_HOURLY, INSURED_EMPLOYEE, INSURED_OWNER,
+};
 use crate::ops::insurance::{missing_brackets, premiums_on, ruleset_json};
 use crate::ops::payroll::SALARY_INCOME_CODE;
 use crate::ops::tax::{code_rule, withhold};
@@ -156,13 +158,23 @@ impl Operation for GetHrCompliance {
 
         let minimum_rs = laysi_regulation::resolve("minimum_wage", as_of)?;
         let annual_rs = laysi_regulation::resolve("annual_leave", as_of)?;
-        let premium_rules = premiums_on(as_of, Money::ZERO, Money::ZERO, Money::ZERO)?;
+        let premium_rules = premiums_on(
+            as_of,
+            INSURED_EMPLOYEE,
+            Money::ZERO,
+            Money::ZERO,
+            Money::ZERO,
+        )?;
 
         let mut minimum_failures = Vec::new();
         for employee in &staff {
-            if let Some(required) =
-                laysi_regulation::minimum_wage_shortfall(minimum_rs, employee.base_salary)?
-            {
+            // The floor follows the pay basis: an hourly rate held against the
+            // monthly floor fails every time and says nothing.
+            if let Some(required) = laysi_regulation::minimum_wage_shortfall(
+                minimum_rs,
+                employee.base_salary,
+                &employee.pay_basis,
+            )? {
                 minimum_failures.push(json!({
                     "emp_no": employee.emp_no,
                     "name": employee.name,
@@ -170,7 +182,8 @@ impl Operation for GetHrCompliance {
                     "required": required.to_string(),
                     "difference": (required - employee.base_salary).to_string(),
                     "message": format!(
-                        "月薪 {}，比規則下限少 {}",
+                        "{} {}，比規則下限少 {}",
+                        pay_basis_label(&employee.pay_basis),
                         money(employee.base_salary),
                         money(required - employee.base_salary)
                     ),
@@ -186,6 +199,7 @@ impl Operation for GetHrCompliance {
         for employee in &staff {
             let premiums = premiums_on(
                 as_of,
+                &employee.insured_as,
                 employee.labor_insured_salary,
                 employee.health_insured_salary,
                 employee.pension_wage,
@@ -207,10 +221,57 @@ impl Operation for GetHrCompliance {
         }
         let labor_cap_failure_count = labor_cap_failures.len();
 
+        // An owner's health insurance salary may not be below the highest one
+        // filed for anybody they employ (National Health Insurance Act art. 20
+        // subpara. 1). Nothing on the roster stops it being typed that way, and
+        // the bureau finds it at the next audit rather than at the keyboard.
+        let highest_employee_bracket = staff
+            .iter()
+            .filter(|e| e.insured_as != INSURED_OWNER)
+            .map(|e| e.health_insured_salary)
+            .max()
+            .unwrap_or(Money::ZERO);
+        let mut owner_bracket_failures = Vec::new();
+        for employee in staff
+            .iter()
+            .filter(|e| e.insured_as == INSURED_OWNER && !e.health_insured_salary.is_zero())
+        {
+            if employee.health_insured_salary < highest_employee_bracket {
+                owner_bracket_failures.push(json!({
+                    "emp_no": employee.emp_no,
+                    "name": employee.name,
+                    "actual": employee.health_insured_salary.to_string(),
+                    "required": highest_employee_bracket.to_string(),
+                    "difference": (highest_employee_bracket - employee.health_insured_salary)
+                        .to_string(),
+                    "message": format!(
+                        "健保投保金額 {}，低於受僱員工最高的 {}",
+                        money(employee.health_insured_salary),
+                        money(highest_employee_bracket)
+                    ),
+                }));
+            }
+        }
+        let owner_bracket_failure_count = owner_bracket_failures.len();
+        let owner_count = staff
+            .iter()
+            .filter(|e| e.insured_as == INSURED_OWNER)
+            .count();
+
         let taken = ctx.store.annual_leave_taken(as_of.year()).await?;
         let taken_by_employee: BTreeMap<i32, Money> = taken.into_iter().collect();
         let mut annual_failures = Vec::new();
-        for employee in &staff {
+        // Part-time leave is granted in proportion to agreed working hours,
+        // and the roster does not record those hours. Comparing them against
+        // the full-time entitlement would pass everybody regardless.
+        let part_time: Vec<&laysi_store::Employee> = staff
+            .iter()
+            .filter(|e| e.employment_type == "part_time" || e.pay_basis == BASIS_HOURLY)
+            .collect();
+        for employee in staff
+            .iter()
+            .filter(|e| e.employment_type != "part_time" && e.pay_basis != BASIS_HOURLY)
+        {
             let entitlement = Money::from(laysi_regulation::annual_leave_days(
                 annual_rs,
                 service_months(employee.hired_on, as_of),
@@ -351,6 +412,17 @@ impl Operation for GetHrCompliance {
                 "screen": SCREEN_EMPLOYEES,
             }),
             json!({
+                "name": "負責人的健保投保金額",
+                "checked": owner_count > 0,
+                "not_checked_reason": (owner_count == 0)
+                    .then_some("名冊上沒有以負責人身分投保的人。"),
+                "passed": owner_bracket_failures.is_empty(),
+                "rulesets": [],
+                "failures": owner_bracket_failures,
+                "screen": SCREEN_EMPLOYEES,
+                "scope_note": "尚未填投保金額的不列入。",
+            }),
+            json!({
                 "name": "每月延長工時上限",
                 "checked": true,
                 "passed": overtime_failures.is_empty(),
@@ -377,7 +449,12 @@ impl Operation for GetHrCompliance {
                 "rulesets": [ruleset_json(annual_rs)],
                 "failures": annual_failures,
                 "screen": SCREEN_ATTENDANCE,
-                "scope_note": "超出額度可能是公司加給。",
+                "scope_note": match part_time.len() {
+                    0 => "超出額度可能是公司加給。".to_string(),
+                    n => format!(
+                        "超出額度可能是公司加給。{n} 位兼職或時薪員工不列入：特休按約定工時比例給予，本系統未記錄約定工時。"
+                    ),
+                },
             }),
         ];
         let unchecked = vec![
@@ -404,6 +481,7 @@ impl Operation for GetHrCompliance {
         let failure_count = minimum_failure_count
             + unfiled_failure_count
             + labor_cap_failure_count
+            + owner_bracket_failure_count
             + overtime_failure_count
             + punch_failure_count
             + annual_failure_count;

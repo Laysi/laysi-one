@@ -18,6 +18,9 @@
 //! insured persons, not by this employee's actual dependants. The screen must
 //! say so.
 
+#[cfg(test)]
+use crate::ops::employees::BASIS_MONTHLY;
+use crate::ops::employees::{insured_as_label, INSURED_EMPLOYEE, INSURED_OWNER};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -55,6 +58,9 @@ pub(crate) struct Premiums {
     pub labor_rs: &'static Ruleset,
     pub health_rs: &'static Ruleset,
     pub pension_rs: &'static Ruleset,
+    /// The owner shares that priced health and pension, when the person is
+    /// insured as the employer. `None` for everybody else.
+    pub owner_rs: Option<&'static Ruleset>,
 }
 
 impl Premiums {
@@ -76,8 +82,15 @@ impl Premiums {
 /// brackets are different tables, and an employee may be at the labour
 /// ceiling while still climbing the health brackets. No applicable version
 /// is an error; the system does not compute someone's premium from a guess.
+///
+/// `insured_as` picks which set of shares applies. Someone insured as the
+/// company's own owner bears the health premium in full and has no pension
+/// contributed for them; both figures come from the `owner_insurance`
+/// ruleset, so neither share appears here. Labour insurance is the same
+/// split either way, which is why only two of the three change.
 pub(crate) fn premiums_on(
     as_of: NaiveDate,
+    insured_as: &str,
     labor_insured: Money,
     health_insured: Money,
     pension_wage: Money,
@@ -85,17 +98,30 @@ pub(crate) fn premiums_on(
     let labor_rs = laysi_regulation::resolve("labor_insurance", as_of)?;
     let health_rs = laysi_regulation::resolve("health_insurance", as_of)?;
     let pension_rs = laysi_regulation::resolve("pension", as_of)?;
+    let owner_rs = match insured_as == INSURED_OWNER {
+        true => Some(laysi_regulation::resolve("owner_insurance", as_of)?),
+        false => None,
+    };
 
     let cap = labor_rs.decimal("max_insured_salary")?;
     Ok(Premiums {
         labor: laysi_regulation::labor_insurance(labor_rs, labor_insured)?,
-        health: laysi_regulation::health_insurance(health_rs, health_insured)?,
-        pension: laysi_regulation::pension(pension_rs, pension_wage)?,
+        health: match owner_rs {
+            Some(owner) => {
+                laysi_regulation::health_insurance_owner(health_rs, owner, health_insured)?
+            }
+            None => laysi_regulation::health_insurance(health_rs, health_insured)?,
+        },
+        pension: match owner_rs {
+            Some(owner) => laysi_regulation::pension_owner(owner, pension_wage)?,
+            None => laysi_regulation::pension(pension_rs, pension_wage)?,
+        },
         labor_base: labor_insured.min(cap),
         labor_capped: labor_insured > cap,
         labor_rs,
         health_rs,
         pension_rs,
+        owner_rs,
     })
 }
 
@@ -140,6 +166,12 @@ impl MissingBrackets {
 /// agreed yet (0028), so there is nothing to file. `leaving` is employed
 /// until the leaving date and is judged like `active`.
 ///
+/// An owner is judged on health insurance alone. Labour insurance is not
+/// compulsory for them (Labour Insurance Act art. 8 makes it a choice for an
+/// employer who actually works), and no pension is contributed for them at
+/// all, so a blank in either is a fact about the enrolment rather than a
+/// filing nobody made.
+///
 /// This says nothing about what the bracket should be. The insured salary
 /// bracket table is not in the rule library, and a guessed figure would be
 /// worse than none.
@@ -147,10 +179,11 @@ pub(crate) fn missing_brackets(e: &Employee) -> MissingBrackets {
     if e.status == "left" || e.base_salary <= Money::ZERO {
         return MissingBrackets::default();
     }
+    let owner = e.insured_as == INSURED_OWNER;
     MissingBrackets {
-        labor: e.labor_insured_salary.is_zero(),
+        labor: !owner && e.labor_insured_salary.is_zero(),
         health: e.health_insured_salary.is_zero(),
-        pension: e.pension_wage.is_zero(),
+        pension: !owner && e.pension_wage.is_zero(),
     }
 }
 
@@ -173,6 +206,8 @@ pub(crate) fn test_employee(
         dept_label: None,
         title: "測試職稱".into(),
         employment_type: "full_time".into(),
+        pay_basis: BASIS_MONTHLY.into(),
+        insured_as: INSURED_EMPLOYEE.into(),
         hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         left_on: None,
         status: status.into(),
@@ -235,15 +270,20 @@ impl Operation for GetInsuranceSummary {
         let mut capped = 0usize;
         let mut unfiled = Vec::new();
         let mut sets: Option<(Value, Value, Value)> = None;
+        let mut owner_set: Option<Value> = None;
 
         for e in &staff {
             let missing = missing_brackets(e);
             let p = premiums_on(
                 as_of,
+                &e.insured_as,
                 e.labor_insured_salary,
                 e.health_insured_salary,
                 e.pension_wage,
             )?;
+            if owner_set.is_none() {
+                owner_set = p.owner_rs.map(ruleset_json);
+            }
             labor_er += p.labor.employer;
             labor_ee += p.labor.employee;
             health_er += p.health.employer;
@@ -273,6 +313,8 @@ impl Operation for GetInsuranceSummary {
                 "dept_label": e.dept_label,
                 "title": e.title,
                 "status": e.status,
+                "insured_as": e.insured_as,
+                "insured_as_label": insured_as_label(&e.insured_as),
                 "labor_insured_salary": e.labor_insured_salary.to_string(),
                 "labor_charged_on": p.labor_base.to_string(),
                 "labor_capped": p.labor_capped,
@@ -297,7 +339,7 @@ impl Operation for GetInsuranceSummary {
         let (labor_set, health_set, pension_set) = match sets {
             Some(s) => s,
             None => {
-                let p = premiums_on(as_of, Money::ZERO, Money::ZERO, Money::ZERO)?;
+                let p = premiums_on(as_of, "", Money::ZERO, Money::ZERO, Money::ZERO)?;
                 (
                     ruleset_json(p.labor_rs),
                     ruleset_json(p.health_rs),
@@ -315,7 +357,7 @@ impl Operation for GetInsuranceSummary {
 
         // The three explanatory lines on screen. Every number in them is read
         // from the payload, so a rate change updates the wording too.
-        let notes = json!([
+        let mut notes = json!([
             {
                 "title": "勞保投保薪資有上限",
                 "body": format!(
@@ -349,6 +391,30 @@ impl Operation for GetInsuranceSummary {
                 "version": pension_rs.version,
             },
         ]);
+
+        // Only when somebody on the roster is insured that way. A page where
+        // nobody is has no use for the paragraph.
+        if let Some(owner_rs) = staff
+            .iter()
+            .any(|e| e.insured_as == INSURED_OWNER)
+            .then(|| laysi_regulation::resolve("owner_insurance", as_of))
+            .transpose()?
+        {
+            let owners = staff
+                .iter()
+                .filter(|e| e.insured_as == INSURED_OWNER)
+                .count();
+            notes.as_array_mut().expect("剛才建的是陣列").push(json!({
+                "title": "負責人的健保與勞退分開計算",
+                "body": format!(
+                    "{owners} 位以負責人身分投保：健保保費自付 {}%，公司不分攤、政府不補助；勞退提繳率 {}%。勞保分擔比率與受僱者相同。",
+                    percent(owner_rs.decimal("health_employee_share")?),
+                    percent(owner_rs.decimal("pension_employer_rate")?),
+                ),
+                "source": owner_rs.source_note,
+                "version": owner_rs.version,
+            }));
+        }
 
         // A count on its own reads as if everyone is enrolled, so the number
         // of people with no filed bracket travels with it.
@@ -390,7 +456,12 @@ impl Operation for GetInsuranceSummary {
                 "employer_total": employer_total.to_string(),
                 "employee_total": (labor_ee + health_ee).to_string(),
                 "notes": notes,
-                "rulesets": { "labor": labor_set, "health": health_set, "pension": pension_set },
+                "rulesets": {
+                    "labor": labor_set,
+                    "health": health_set,
+                    "pension": pension_set,
+                    "owner": owner_set,
+                },
                 // The employer share is not in the ledger yet. State that rather
                 // than letting it look like a booked expense.
                 "posted_to_ledger": false,
@@ -420,6 +491,10 @@ pub struct ComputeInsuranceInput {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub pension_wage: Option<Money>,
+    /// `employee` or `owner`. An owner bears the health premium in full and
+    /// has no pension contributed for them. Defaults to `employee`.
+    #[serde(default)]
+    pub insured_as: Option<String>,
     /// Date whose rules apply (YYYY-MM-DD). Defaults to today.
     #[serde(default)]
     pub as_of: Option<NaiveDate>,
@@ -446,12 +521,17 @@ impl Operation for ComputeInsurance {
             return Err(OpError::BadInput("投保薪資不可以是負數".into()));
         }
         let as_of = i.as_of.unwrap_or(ctx.today);
+        let insured_as = i.insured_as.as_deref().unwrap_or(INSURED_EMPLOYEE);
+        if !matches!(insured_as, INSURED_EMPLOYEE | INSURED_OWNER) {
+            return Err(OpError::BadInput("投保身分只能是受僱者或負責人".into()));
+        }
         let health = i.health_insured_salary.unwrap_or(i.insured_salary);
         let pension_wage = i.pension_wage.unwrap_or(health);
-        let p = premiums_on(as_of, i.insured_salary, health, pension_wage)?;
+        let p = premiums_on(as_of, insured_as, i.insured_salary, health, pension_wage)?;
 
         let summary = format!(
-            "試算保費 · 勞保級距 {} 健保級距 {} · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）員工自付 {} · 依勞保 {}、健保 {}、勞退 {} 規則",
+            "試算保費 · {} · 勞保級距 {} 健保級距 {} · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）本人自付 {} · 依勞保 {}、健保 {}、勞退 {} 規則",
+            insured_as_label(insured_as),
             money(i.insured_salary),
             money(health),
             money(p.employer_total()),
@@ -467,6 +547,8 @@ impl Operation for ComputeInsurance {
         Ok(OpOutcome::new(
             json!({
                 "as_of": as_of,
+                "insured_as": insured_as,
+                "insured_as_label": insured_as_label(insured_as),
                 "insured_salary": i.insured_salary.to_string(),
                 "labor_charged_on": p.labor_base.to_string(),
                 "labor_capped": p.labor_capped,
@@ -484,14 +566,24 @@ impl Operation for ComputeInsurance {
                     "employee": p.health.employee.to_string(),
                     "government": p.health.government.to_string(),
                     "rate_percent": percent(p.health_rs.decimal("rate")?),
-                    "avg_dependents": p.health_rs.decimal("avg_dependents")?.to_string(),
+                    // Not applied to an owner: it scales an employer share
+                    // their split does not have.
+                    "avg_dependents": match p.owner_rs {
+                        Some(_) => None,
+                        None => Some(p.health_rs.decimal("avg_dependents")?.to_string()),
+                    },
                     "ruleset": ruleset_json(p.health_rs),
+                    "owner_ruleset": p.owner_rs.map(ruleset_json),
                 },
                 "pension": {
                     "contribution_wage": pension_wage.to_string(),
                     "employer": p.pension.to_string(),
-                    "rate_percent": percent(p.pension_rs.decimal("employer_rate")?),
+                    "rate_percent": match p.owner_rs {
+                        Some(owner) => percent(owner.decimal("pension_employer_rate")?),
+                        None => percent(p.pension_rs.decimal("employer_rate")?),
+                    },
                     "ruleset": ruleset_json(p.pension_rs),
+                    "owner_ruleset": p.owner_rs.map(ruleset_json),
                 },
                 "employer_total": p.employer_total().to_string(),
                 "employee_total": p.employee_total().to_string(),
@@ -522,7 +614,14 @@ mod tests {
     /// bracket and pension wage both 53,000.
     #[test]
     fn the_five_reference_benchmarks_come_out_of_the_ruleset() {
-        let p = premiums_on(d(2026, 7, 26), n("45800"), n("53000"), n("53000")).unwrap();
+        let p = premiums_on(
+            d(2026, 7, 26),
+            INSURED_EMPLOYEE,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+        )
+        .unwrap();
         assert_eq!(p.labor.employer, n("3527"), "公司負擔勞保");
         assert_eq!(p.labor.employee, n("1008"), "員工自付勞保");
         assert_eq!(
@@ -537,12 +636,70 @@ mod tests {
         assert_eq!(p.employee_total(), n("1830"), "1008 + 822");
     }
 
+    /// An owner is not an employee of their own company: they bear the whole
+    /// health premium and nothing is contributed to their pension account.
+    /// Labour insurance splits the same way for both, so it must not move.
+    #[test]
+    fn an_owner_is_priced_on_the_owner_shares() {
+        let staff = premiums_on(
+            d(2026, 7, 26),
+            INSURED_EMPLOYEE,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+        )
+        .unwrap();
+        let boss = premiums_on(
+            d(2026, 7, 26),
+            INSURED_OWNER,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+        )
+        .unwrap();
+
+        assert_eq!(boss.labor, staff.labor, "勞保分擔比率兩者相同");
+        assert_eq!(boss.health.employer, Money::ZERO, "健保沒有公司負擔那一份");
+        assert_eq!(boss.health.employee, n("2740"), "健保全額自付");
+        assert_eq!(boss.pension, Money::ZERO, "勞退不提繳");
+        assert_eq!(boss.employer_total(), n("3527"), "公司只剩勞保那一筆");
+        assert!(boss.owner_rs.is_some(), "要說得出依哪一版算的");
+        assert!(staff.owner_rs.is_none());
+    }
+
+    /// Labour insurance and pension are blank by design for an owner, so a
+    /// zero there is not an unfiled enrolment. Health insurance still is.
+    #[test]
+    fn an_owner_is_only_chased_for_the_health_bracket() {
+        let mut boss = test_employee("active", n("80000"), Money::ZERO, Money::ZERO, Money::ZERO);
+        boss.insured_as = INSURED_OWNER.into();
+        let m = missing_brackets(&boss);
+        assert_eq!(m.labels(), vec!["健保投保金額"]);
+
+        boss.health_insured_salary = n("80000");
+        assert!(!missing_brackets(&boss).any(), "填了健保就沒有待辦");
+    }
+
     /// Above the ceiling, labour insurance still charges the ceiling, and the
     /// ceiling comes from the rules rather than from here.
     #[test]
     fn a_salary_above_the_cap_is_charged_at_the_cap() {
-        let capped = premiums_on(d(2026, 7, 26), n("120000"), n("53000"), n("53000")).unwrap();
-        let at_cap = premiums_on(d(2026, 7, 26), n("45800"), n("53000"), n("53000")).unwrap();
+        let capped = premiums_on(
+            d(2026, 7, 26),
+            INSURED_EMPLOYEE,
+            n("120000"),
+            n("53000"),
+            n("53000"),
+        )
+        .unwrap();
+        let at_cap = premiums_on(
+            d(2026, 7, 26),
+            INSURED_EMPLOYEE,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+        )
+        .unwrap();
         assert_eq!(capped.labor, at_cap.labor);
         assert!(capped.labor_capped, "要標出來是按上限收的");
         assert!(!at_cap.labor_capped, "剛好等於上限不算「超過」");
@@ -698,7 +855,14 @@ mod tests {
     /// guessed rate.
     #[test]
     fn a_date_with_no_ruleset_is_refused_never_guessed() {
-        let err = premiums_on(d(2025, 12, 31), n("45800"), n("53000"), n("53000")).unwrap_err();
+        let err = premiums_on(
+            d(2025, 12, 31),
+            INSURED_EMPLOYEE,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+        )
+        .unwrap_err();
         assert!(matches!(err, OpError::Regulation(_)));
         assert!(err.to_string().contains("新增涵蓋該日期的版本"));
     }

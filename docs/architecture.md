@@ -146,6 +146,7 @@ government_share = "0.10"
 | `annual_leave` | `tiers` 陣列：`{months=6, days=3}` … 依勞基法第 38 條 |
 | `depreciation` | `methods`、`useful_lives` |
 | `overtime` | `monthly_hours=240` `monthly_max_hours=46`、`day_types` 陣列：`{code, label, max_hours, bands[{up_to_hours?, multiplier}]}` 依勞基法第 24 條 |
+| `owner_insurance` | `health_employer_share=0` `health_employee_share=1.00` `health_government_share=0` `pension_employer_rate=0` |
 
 驗證基準（**必須寫成單元測試**，數值取自原型的 `ins` / `pay` 區塊）：
 
@@ -169,7 +170,34 @@ pub fn labor_insurance(rs: &Ruleset, insured_salary: Money) -> Result<Contributi
 pub fn health_insurance(rs: &Ruleset, insured_salary: Money) -> Result<Contribution, RegulationError>;
 pub fn pension(rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError>;
 pub fn vat(rs: &Ruleset, net_amount: Money) -> Result<Money, RegulationError>;
+
+/// 負責人身分：費率仍取自 health_insurance，只有分擔比率取自 owner_insurance。
+pub fn health_insurance_owner(health_rs: &Ruleset, owner_rs: &Ruleset, insured_salary: Money)
+    -> Result<Contribution, RegulationError>;
+pub fn pension_owner(owner_rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError>;
+
+/// basis 是 payload 鍵名（monthly／hourly），不認得的鍵回 MissingField 而不是回退。
+pub fn minimum_wage_shortfall(rs: &Ruleset, wage: Money, basis: &str)
+    -> Result<Option<Money>, RegulationError>;
+
+/// 平日每小時工資額。月薪除以 monthly_hours；時薪制不經過這裡。
+pub fn ordinary_hourly_wage(rs: &Ruleset, monthly_salary: Money) -> Result<Money, RegulationError>;
+/// 第二個參數是平日每小時工資額，不是月薪。
+pub fn overtime_pay(rs: &Ruleset, hourly_wage: Money, day_type: &str, hours: Money)
+    -> Result<Money, RegulationError>;
 ```
+
+### 負責人投保是獨立 domain，不是 `health_insurance` 的一個欄位
+
+費率沒有變——健保 5.17% 對誰都一樣，所以它留在 `health_insurance`；換掉的是分擔
+比率。把 `owner` 節點塞進 `health_insurance` 的 payload 會逼出一個新版本，而
+`resolve()` 以 `effective_from` 取最大值，同一天生效的兩版誰勝出由資料庫回傳順序
+決定——那是沒有答案的。獨立 domain 沒有這個問題，法源也真的是另一條（健保法第 27 條
+第 1 款第 1 目、勞退條例第 7 條）。
+
+**勞保沒有負責人節點**：勞保條例第 15 條第 1 款對「實際從事勞動之雇主」與受僱者是
+同一組 70／20／10，抄一份到這裡只會多一個會漂走的副本。
+`premiums_on` 因此只換健保與勞退兩項。
 
 規則以 `include_str!` 在編譯期嵌入，另外由
 `laysi-store` 寫入 `reg_ruleset` 表供稽核與查詢。
@@ -1232,7 +1260,7 @@ impl Registry {
 |---|---|---|
 | `create_account` | NeedsConfirm | `report_group` 與 `cash_flow_section` 都必填；損益科目明確送 `null`。`normal_side` 依 kind 採慣例值，但可覆寫 |
 | `update_account` | NeedsConfirm | 完整更新或以 `is_active = false` 停用；不提供刪除，既有分錄仍保留 |
-| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 一次收整份清單；不建立登入帳號 |
+| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 一次收整份清單；`pay_basis`（`monthly`／`hourly`）與 `insured_as`（`employee`／`owner`）不帶時取前者；不建立登入帳號 |
 | `update_employee` | NeedsConfirm | 除四個金額外完整更新；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 不帶＝不動、給清單＝整份取代；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
 | `create_bank_account` | NeedsConfirm | `gl_code` 必須指向啟用中的可入帳資產科目 |
 | `create_dimension_value` | NeedsConfirm | 只在既有 `dimension` 下新增項目；不建立分類。`code` 留空時取 `label` |
@@ -1363,6 +1391,41 @@ column，因此不可能與上面的區間不一致。
 程式卻是先讀再無條件更新。現在 `UPDATE` 自己帶 `status = 'pending'` 並檢查
 `rows_affected`，兩位主管同時按下去只有一位會成功。
 
+### 計薪基準與投保身分（0008）
+
+員工主檔有兩個獨立的欄位，兩者都不是 `employment_type`：
+
+- **`pay_basis`（`monthly`／`hourly`）決定 `base_salary` 是什麼**。月薪制照曆日
+  比例計薪（在職日 ÷ 當月日數），時薪制以打卡工時計薪。**它與 `employment_type`
+  是兩個軸**：兼職可以領月薪，正職也可能按時計酬，所以計薪不看僱用型態。
+  0008 之前 `part_time` 只印在名冊上，沒有任何計算讀它，於是兼職員工領的是一份
+  按曆日比例攤開的月薪。
+- **`insured_as`（`employee`／`owner`）決定套哪一組分擔比率**。見上文
+  「負責人投保是獨立 domain」。
+
+時薪制的三個後果：
+
+1. **工時只採完整的打卡日**（`PunchDay::worked_seconds`，休息時間已扣除）。只打上班
+   沒打下班的那一天長度不明，猜一個等於在上面掛錢；那是漏打卡，補登流程負責。
+2. **本期沒有完整打卡的時薪員工不產生薪資單**，列進 `skipped` 並說明原因。一張 0 元
+   薪資單看起來像算出來的金額，而不是還沒有資料。
+3. **加班費以本人的時薪計價**：`ordinary_hourly_wage` 對月薪制除以 `monthly_hours`，
+   對時薪制直接回傳本人時薪。少了這一步，時薪員工的加班費會被除以 240，一小時加班
+   反而比一小時正常工時便宜。
+
+**最低工資的下限跟著 `pay_basis` 走**：`minimum_wage` 的 `monthly` 與 `hourly`
+是兩個並列的下限，互不涵蓋。時薪拿去比月薪下限必定不合格，月薪拿去比時薪下限則永遠
+合格——兩種寫法都讓那個檢核項目說不出任何事。
+
+**特休不檢核兼職與時薪員工**：部分工時的特休按約定工時比例給予，而本系統沒有記錄
+約定工時。以全時額度去比，等於每一個兼職員工都通過。檢核項目照實把他們排除並在
+`scope_note` 說有幾位。
+
+**負責人的健保投保金額不得低於受僱員工最高者**（健保法第 20 條），列為
+`get_hr_compliance` 的一個檢核項目而不是寫入端的驗證：名冊存的是申報事實，
+在鍵盤上擋下一個數字不是這一層的事，但那個數字要有人說出來。名冊上沒有負責人時
+該項回 `checked = false`。
+
 ### 人資模組（0008）
 
 | name | risk | input | output 重點 |
@@ -1378,7 +1441,7 @@ column，因此不可能與上面的區間不一致。
 | `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票 |
 | `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
 | `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額 |
-| `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, as_of? }` | 單一級距試算與三份 ruleset |
+| `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, as_of? }` | 單一級距試算與三份 ruleset；`insured_as = "owner"` 另回 `owner_ruleset` |
 | `get_hr_compliance` | ReadOnly | `{ as_of? }` | `checks[]`；逐項帶 `checked`、`passed`、ruleset 與差異 |
 | `list_withholding_statements` | BossOnly | `{ year? }` | 逐給付對象年度所得；`table` 稅額缺值保持 `null` |
 

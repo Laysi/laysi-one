@@ -189,6 +189,8 @@ fn profile_json(employee: &Employee, months: u32) -> Value {
         "title": employee.title,
         "employment_type": employee.employment_type,
         "employment_label": crate::ops::employees::employment_label(&employee.employment_type),
+        "pay_basis": employee.pay_basis,
+        "pay_basis_label": crate::ops::employees::pay_basis_label(&employee.pay_basis),
         "hired_on": employee.hired_on,
         "left_on": employee.left_on,
         "status": employee.status,
@@ -1909,6 +1911,7 @@ mod tests {
             name: "王小明".into(),
             dept_label: None,
             day_type: "weekday".into(),
+            pay_basis: crate::ops::employees::BASIS_MONTHLY.into(),
             from_at: NaiveDate::from_ymd_opt(2026, 8, 25)
                 .unwrap()
                 .and_hms_opt(18, 0, 0)

@@ -28,6 +28,7 @@
 //! `missing_ops` on [`ListRoles`] is post-deployment diagnostics — a correct
 //! build keeps it empty, which the migration coverage test enforces.
 
+use crate::ops::employees::{BASIS_MONTHLY, INSURED_EMPLOYEE};
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -769,6 +770,8 @@ async fn link_employee(
             dept_code: None,
             title: "",
             employment_type: "full_time",
+            pay_basis: BASIS_MONTHLY,
+            insured_as: INSURED_EMPLOYEE,
             hired_on: ctx.today,
             left_on: None,
             status: "active",

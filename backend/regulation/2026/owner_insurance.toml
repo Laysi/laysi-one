@@ -1,0 +1,30 @@
+# Insurance shares for a company's own owner
+#
+# The rates are not here: the health insurance rate is the same 5.17% for
+# everybody, so it stays in `health_insurance`. What differs is who pays it.
+#
+# National Health Insurance Act art. 27 subpara. 1 item 1: the premium of an
+# insured person who is an employer is borne by that person in full. There is
+# no employer half and no government subsidy, because the employer is the
+# insuring unit.
+#
+# Labour Pension Act art. 7 and 14: the mandatory 6% is contributed for
+# employees. An owner is not one, so nothing is contributed for them; art. 7
+# para. 2 lets an owner who actually works pay in voluntarily, and that is
+# their own money rather than a company cost, so it is not a rate here.
+#
+# Labour insurance has no entry: art. 15 subpara. 1 of the Labour Insurance
+# Act splits the premium 70/20/10 for an owner who actually works exactly as
+# it does for an employee, so `labor_insurance` already answers it. An
+# identical copy here would only be a second number to keep in step.
+
+domain = "owner_insurance"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "全民健康保險法第 27 條第 1 款第 1 目；勞工退休金條例第 7 條、第 14 條"
+
+[payload]
+health_employer_share = "0"
+health_employee_share = "1.00"
+health_government_share = "0"
+pension_employer_rate = "0"

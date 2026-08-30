@@ -544,7 +544,10 @@ impl Store {
     /// installation that entered the amendment by hand first keeps its own.
     /// Generate them from the factory TOML with `scripts/regulation-sql.ts`
     /// rather than writing the payload twice.
-    const REGULATION_UPDATES: &[(&str, &str)] = &[];
+    const REGULATION_UPDATES: &[(&str, &str)] = &[(
+        "2026-01-01_owner_insurance.sql",
+        include_str!("../../../regulation-updates/2026-01-01_owner_insurance.sql"),
+    )];
 
     /// Apply every regulation update this build ships and has not applied.
     ///
@@ -5544,11 +5547,11 @@ impl Store {
 
         let employee_id: i32 = sqlx::query(
             "INSERT INTO employee
-                (emp_no, name, dept_id, title, employment_type,
+                (emp_no, name, dept_id, title, employment_type, pay_basis, insured_as,
                  hired_on, left_on, status, base_salary, labor_insured_salary,
                  health_insured_salary, pension_wage, id_no,
                  note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
              RETURNING id",
         )
         .bind(req.emp_no)
@@ -5556,6 +5559,8 @@ impl Store {
         .bind(dept_id)
         .bind(req.title)
         .bind(req.employment_type)
+        .bind(req.pay_basis)
+        .bind(req.insured_as)
         .bind(req.hired_on)
         .bind(req.left_on)
         .bind(req.status)
@@ -5609,13 +5614,14 @@ impl Store {
         sqlx::query(
             "UPDATE employee
                 SET name = $2, dept_id = $3, title = $4,
-                    employment_type = $5, hired_on = $6, left_on = $7,
-                    status = $8,
-                    base_salary = COALESCE($9::numeric, base_salary),
-                    labor_insured_salary = COALESCE($10::numeric, labor_insured_salary),
-                    health_insured_salary = COALESCE($11::numeric, health_insured_salary),
-                    pension_wage = COALESCE($12::numeric, pension_wage),
-                    id_no = $13, note = $14
+                    employment_type = $5, pay_basis = $6, insured_as = $7,
+                    hired_on = $8, left_on = $9,
+                    status = $10,
+                    base_salary = COALESCE($11::numeric, base_salary),
+                    labor_insured_salary = COALESCE($12::numeric, labor_insured_salary),
+                    health_insured_salary = COALESCE($13::numeric, health_insured_salary),
+                    pension_wage = COALESCE($14::numeric, pension_wage),
+                    id_no = $15, note = $16
               WHERE emp_no = $1",
         )
         .bind(req.emp_no)
@@ -5623,6 +5629,8 @@ impl Store {
         .bind(dept_id)
         .bind(req.title)
         .bind(req.employment_type)
+        .bind(req.pay_basis)
+        .bind(req.insured_as)
         .bind(req.hired_on)
         .bind(req.left_on)
         .bind(req.status)
@@ -5653,7 +5661,7 @@ impl Store {
     pub async fn employees(&self, include_left: bool, q: Option<&str>) -> Result<Vec<Employee>> {
         let mut staff: Vec<Employee> = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.employment_type,
+                    e.title, e.employment_type, e.pay_basis, e.insured_as,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.note
@@ -5713,7 +5721,7 @@ impl Store {
     pub async fn employee(&self, emp_no: &str) -> Result<Employee> {
         let mut found = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.employment_type,
+                    e.title, e.employment_type, e.pay_basis, e.insured_as,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.note
@@ -5739,7 +5747,7 @@ impl Store {
     pub async fn employee_by_id(&self, id: i32) -> Result<Option<Employee>> {
         let mut found = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.employment_type,
+                    e.title, e.employment_type, e.pay_basis, e.insured_as,
                     e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.note
@@ -5919,7 +5927,7 @@ impl Store {
     ) -> Result<Vec<OvertimeRequest>> {
         Ok(sqlx::query(
             "SELECT o.request_no, o.employee_id, e.emp_no, e.name, d.label AS dept_label,
-                    o.day_type, o.from_at, o.to_at, o.worked_on, o.hours, e.base_salary,
+                    o.day_type, o.from_at, o.to_at, o.worked_on, o.hours, e.base_salary, e.pay_basis,
                     o.reason, o.status, o.decided_by,
                     COALESCE(r.name, o.decided_role) AS decided_role,
                     o.decided_at, o.decision_note, o.created_at, o.created_by
@@ -5950,7 +5958,7 @@ impl Store {
     ) -> Result<Vec<OvertimeRequest>> {
         Ok(sqlx::query(
             "SELECT o.request_no, o.employee_id, e.emp_no, e.name, d.label AS dept_label,
-                    o.day_type, o.from_at, o.to_at, o.worked_on, o.hours, e.base_salary,
+                    o.day_type, o.from_at, o.to_at, o.worked_on, o.hours, e.base_salary, e.pay_basis,
                     o.reason, o.status, o.decided_by,
                     COALESCE(r.name, o.decided_role) AS decided_role,
                     o.decided_at, o.decision_note, o.created_at, o.created_by
@@ -6481,7 +6489,7 @@ impl Store {
             "SELECT p.period, p.pay_on,
                     p.labor_version, p.health_version, p.pension_version,
                     p.withholding_version,
-                    s.employee_id, e.emp_no, e.name, e.title, d.label AS dept_label,
+                    s.employee_id, e.emp_no, e.name, e.title, e.insured_as, d.label AS dept_label,
                     s.base_salary, s.overtime, s.allowance, s.gross,
                     s.labor_insured_salary, s.health_insured_salary, s.pension_wage,
                     s.labor_employee, s.health_employee, s.income_tax,
@@ -8303,9 +8311,15 @@ pub struct Employee {
     pub dept_id: Option<i32>,
     pub title: String,
     pub employment_type: String,
+    /// `monthly` or `hourly`. It decides what `base_salary` means and how
+    /// payroll turns it into a period's pay.
+    pub pay_basis: String,
+    /// `employee` or `owner`. Which set of insurance shares applies.
+    pub insured_as: String,
     pub hired_on: NaiveDate,
     pub left_on: Option<NaiveDate>,
     pub status: String,
+    /// Monthly salary, or the hourly rate when `pay_basis` is `hourly`.
     pub base_salary: Money,
     /// Insured salary filed with the labour insurance bureau. A fact, not a
     /// rule; the ceiling comes from the ruleset.
@@ -8348,6 +8362,8 @@ pub struct WriteEmployee<'a> {
     pub dept_code: Option<&'a str>,
     pub title: &'a str,
     pub employment_type: &'a str,
+    pub pay_basis: &'a str,
+    pub insured_as: &'a str,
     pub hired_on: NaiveDate,
     pub left_on: Option<NaiveDate>,
     pub status: &'a str,
@@ -8515,7 +8531,11 @@ pub struct OvertimeRequest {
     pub to_at: NaiveDateTime,
     pub worked_on: NaiveDate,
     pub hours: Money,
+    /// The requester's monthly salary, or their hourly rate when `pay_basis`
+    /// is `hourly`. Overtime is priced off the ordinary hourly wage, and the
+    /// two bases reach it differently.
     pub base_salary: Money,
+    pub pay_basis: String,
     pub reason: String,
     pub status: String,
     pub decided_by: String,
@@ -8593,6 +8613,11 @@ pub struct Payslip {
     pub emp_no: String,
     pub name: String,
     pub title: String,
+    /// Read from the roster as it stands now, not snapshotted with the slip.
+    /// The recomputation on the payslip screen is a second path over current
+    /// rules, and a changed insurance identity shows up there the same way a
+    /// retroactive rate change does.
+    pub insured_as: String,
     pub dept_label: Option<String>,
     pub base_salary: Money,
     pub overtime: Money,
@@ -9177,6 +9202,8 @@ fn row_to_employee(r: &PgRow) -> Employee {
         dept_label: r.get("dept_label"),
         title: r.get("title"),
         employment_type: r.get("employment_type"),
+        pay_basis: r.get("pay_basis"),
+        insured_as: r.get("insured_as"),
         hired_on: r.get("hired_on"),
         left_on: r.get("left_on"),
         status: r.get("status"),
@@ -9250,6 +9277,7 @@ fn row_to_overtime(r: &PgRow) -> OvertimeRequest {
         worked_on: r.get("worked_on"),
         hours: r.get("hours"),
         base_salary: r.get("base_salary"),
+        pay_basis: r.get("pay_basis"),
         reason: r.get("reason"),
         status: r.get("status"),
         decided_by: r.get("decided_by"),
@@ -9536,6 +9564,7 @@ fn row_to_payslip(r: &PgRow) -> Payslip {
         emp_no: r.get("emp_no"),
         name: r.get("name"),
         title: r.get("title"),
+        insured_as: r.get("insured_as"),
         dept_label: r.get("dept_label"),
         base_salary: r.get("base_salary"),
         overtime: r.get("overtime"),
@@ -10254,6 +10283,8 @@ mod tests {
                 dept_code: None,
                 title: "",
                 employment_type: "full_time",
+                pay_basis: "monthly",
+                insured_as: "employee",
                 hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                 left_on: None,
                 status: "active",
@@ -10351,6 +10382,8 @@ mod tests {
                 dept_code: None,
                 title: "",
                 employment_type: "full_time",
+                pay_basis: "monthly",
+                insured_as: "employee",
                 hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                 left_on: None,
                 status: "active",

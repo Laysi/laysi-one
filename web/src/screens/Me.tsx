@@ -103,7 +103,7 @@ export function Me({ onGo, reloadKey }: Props) {
             <span className="fact__value">
               {p.status_label}
               <span className="fact__note num">
-                {p.employment_label} · {p.hired_on} 起
+                {p.employment_label} · {p.pay_basis_label} · {p.hired_on} 起
                 {p.left_on ? ` · ${p.left_on} 離職` : ''}
               </span>
             </span>

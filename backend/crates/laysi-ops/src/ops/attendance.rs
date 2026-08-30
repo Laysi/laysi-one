@@ -17,7 +17,7 @@
 //! layer. Whether the request is still pending is decided by the store during
 //! the update, so two managers acting at once cannot both win.
 
-use crate::ops::employees::service_months;
+use crate::ops::employees::{service_months, BASIS_HOURLY};
 use crate::ops::insurance::ruleset_json;
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -1287,6 +1287,22 @@ pub(crate) async fn correction_auto_approves(ctx: &OpCtx) -> Result<bool, OpErro
 
 // Overtime requests
 
+/// The ordinary hourly wage the overtime multipliers apply to.
+///
+/// An hourly rate is that wage already. Dividing it by the ruleset's monthly
+/// hours, as a monthly salary must be, would price an hour of overtime below
+/// an hour of ordinary time.
+pub(crate) fn ordinary_hourly_wage(
+    rs: &laysi_regulation::Ruleset,
+    basis: &str,
+    base_salary: Money,
+) -> Result<Money, laysi_regulation::RegulationError> {
+    match basis {
+        BASIS_HOURLY => Ok(base_salary),
+        _ => laysi_regulation::ordinary_hourly_wage(rs, base_salary),
+    }
+}
+
 /// One overtime request, with the pay derived from the ruleset in force on
 /// the day worked.
 ///
@@ -1301,7 +1317,10 @@ pub(crate) fn overtime_json(o: &OvertimeRequest) -> Result<Value, OpError> {
         .map(|t| t.label)
         .unwrap_or_else(|| o.day_type.clone());
     let pay = (o.base_salary > Money::ZERO)
-        .then(|| laysi_regulation::overtime_pay(rs, o.base_salary, &o.day_type, o.hours))
+        .then(|| {
+            let wage = ordinary_hourly_wage(rs, &o.pay_basis, o.base_salary)?;
+            laysi_regulation::overtime_pay(rs, wage, &o.day_type, o.hours)
+        })
         .transpose()?;
 
     Ok(json!({
@@ -1339,7 +1358,8 @@ pub(crate) fn overtime_month_totals(
         let pay = (o.base_salary > Money::ZERO)
             .then(|| {
                 let rs = laysi_regulation::resolve("overtime", o.worked_on)?;
-                laysi_regulation::overtime_pay(rs, o.base_salary, &o.day_type, o.hours)
+                let wage = ordinary_hourly_wage(rs, &o.pay_basis, o.base_salary)?;
+                laysi_regulation::overtime_pay(rs, wage, &o.day_type, o.hours)
             })
             .transpose()?
             .unwrap_or(Money::ZERO);

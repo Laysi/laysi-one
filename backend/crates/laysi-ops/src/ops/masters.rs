@@ -22,6 +22,7 @@
 //! entered, never validated or corrected against a ruleset. Creating an
 //! employee does not create a `user_account`; logins stay with `laysi-admin`.
 
+use crate::ops::employees::{BASIS_HOURLY, BASIS_MONTHLY, INSURED_EMPLOYEE, INSURED_OWNER};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -59,6 +60,14 @@ fn default_full_time() -> String {
 
 fn default_active_status() -> String {
     "active".into()
+}
+
+fn default_monthly_basis() -> String {
+    BASIS_MONTHLY.into()
+}
+
+fn default_insured_employee() -> String {
+    INSURED_EMPLOYEE.into()
 }
 
 // Accounts
@@ -323,6 +332,16 @@ pub struct EmployeeInput {
     /// One of `full_time`, `part_time`, `contract`.
     #[serde(default = "default_full_time")]
     pub employment_type: String,
+    /// `monthly` or `hourly`. It decides what `base_salary` means: a monthly
+    /// salary prorated by calendar day, or an hourly rate paid on the hours
+    /// the punches record. A separate axis from `employment_type`, because a
+    /// part timer may be on a monthly salary.
+    #[serde(default = "default_monthly_basis")]
+    pub pay_basis: String,
+    /// `employee` or `owner`. An owner bears the health insurance premium in
+    /// full and has no pension contributed for them.
+    #[serde(default = "default_insured_employee")]
+    pub insured_as: String,
     /// Hire date.
     pub hired_on: NaiveDate,
     /// Planned or actual leaving date. Required when status is leaving or left.
@@ -439,6 +458,12 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
     ) {
         return Err(OpError::BadInput("僱用型態只能是正職、兼職或約聘".into()));
     }
+    if !matches!(input.pay_basis.as_str(), BASIS_MONTHLY | BASIS_HOURLY) {
+        return Err(OpError::BadInput("計薪基準只能是月薪或時薪".into()));
+    }
+    if !matches!(input.insured_as.as_str(), INSURED_EMPLOYEE | INSURED_OWNER) {
+        return Err(OpError::BadInput("投保身分只能是受僱者或負責人".into()));
+    }
     if !matches!(input.status.as_str(), "active" | "leaving" | "left") {
         return Err(OpError::BadInput("狀態只能是在職、離職中或已離職".into()));
     }
@@ -546,6 +571,8 @@ fn employee_write<'a>(
             .filter(|value| !value.is_empty()),
         title: input.title.trim(),
         employment_type: input.employment_type.as_str(),
+        pay_basis: input.pay_basis.as_str(),
+        insured_as: input.insured_as.as_str(),
         hired_on: input.hired_on,
         left_on: input.left_on,
         status: input.status.as_str(),
@@ -998,6 +1025,8 @@ mod tests {
             dept_code: None,
             title: String::new(),
             employment_type: "full_time".into(),
+            pay_basis: BASIS_MONTHLY.into(),
+            insured_as: INSURED_EMPLOYEE.into(),
             hired_on: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
             left_on: None,
             status: "active".into(),
