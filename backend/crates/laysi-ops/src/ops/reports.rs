@@ -617,7 +617,7 @@ fn cash_flow(opening: Money, rows: &[AccountMovement]) -> CashFlow {
 
     // Operating activities start from profit. Revenue and expense are already
     // inside that single figure, so P&L accounts must have a NULL
-    // cash_flow_section (enforced by the CHECK in migrations/0006) or the same
+    // cash_flow_section (enforced by the CHECK in migrations/0001) or the same
     // money would be counted twice.
     cf.profit = rows
         .iter()

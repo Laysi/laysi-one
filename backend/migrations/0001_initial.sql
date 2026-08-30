@@ -205,6 +205,7 @@ CREATE TABLE ai_audit_log (
     voucher_no text,
     reverted boolean DEFAULT false NOT NULL,
     channel text DEFAULT 'mcp'::text NOT NULL,
+    client_ip text,
     CONSTRAINT ai_audit_log_pkey PRIMARY KEY (id),
     CONSTRAINT ai_audit_log_channel_check CHECK ((channel = ANY (ARRAY['ui'::text, 'mcp'::text]))),
     CONSTRAINT ai_audit_log_outcome_check CHECK ((outcome = ANY (ARRAY['ok'::text, 'blocked'::text, 'error'::text])))
@@ -212,6 +213,12 @@ CREATE TABLE ai_audit_log (
 CREATE INDEX ai_audit_log_at_idx ON public.ai_audit_log USING btree (at DESC);
 COMMENT ON COLUMN ai_audit_log.channel IS
     'ui=已登入的人在畫面上操作；mcp=AI 透過 MCP 呼叫。只有 mcp 受 mcp_tool_grant 管制。';
+-- client_ip is text rather than inet because the value arrives in a proxy
+-- header that nothing else validates. The server parses it and binds NULL when
+-- it is not an address, so a malformed header cannot fail the audit write and
+-- lose the record of the very request worth keeping.
+COMMENT ON COLUMN ai_audit_log.client_ip IS
+    '呼叫來源位址，取自前置代理的 X-Forwarded-For。代理沒有帶這個標頭時為空。';
 
 CREATE TABLE account (
     code text NOT NULL,
@@ -572,6 +579,8 @@ CREATE TABLE employee (
     dept_dimension text GENERATED ALWAYS AS ( CASE WHEN (dept_id IS NULL) THEN NULL::text ELSE 'department'::text END) STORED,
     title text DEFAULT ''::text NOT NULL,
     employment_type text DEFAULT 'full_time'::text NOT NULL,
+    pay_basis text DEFAULT 'monthly'::text NOT NULL,
+    insured_as text DEFAULT 'employee'::text NOT NULL,
     hired_on date NOT NULL,
     left_on date,
     status text NOT NULL,
@@ -588,6 +597,8 @@ CREATE TABLE employee (
     CONSTRAINT employee_dept_id_dept_dimension_fkey FOREIGN KEY (dept_id, dept_dimension) REFERENCES dimension_value(id, dimension_code),
     CONSTRAINT employee_base_salary_check CHECK ((base_salary >= (0)::numeric)),
     CONSTRAINT employee_employment_type_check CHECK ((employment_type = ANY (ARRAY['full_time'::text, 'part_time'::text, 'contract'::text]))),
+    CONSTRAINT employee_pay_basis_check CHECK ((pay_basis = ANY (ARRAY['monthly'::text, 'hourly'::text]))),
+    CONSTRAINT employee_insured_as_check CHECK ((insured_as = ANY (ARRAY['employee'::text, 'owner'::text]))),
     CONSTRAINT employee_health_insured_salary_check CHECK ((health_insured_salary >= (0)::numeric)),
     CONSTRAINT employee_labor_insured_salary_check CHECK ((labor_insured_salary >= (0)::numeric)),
     CONSTRAINT employee_leaving_has_a_date CHECK (((status <> 'leaving'::text) OR (left_on IS NOT NULL))),
@@ -600,7 +611,16 @@ CREATE INDEX employee_status_idx ON public.employee USING btree (status, emp_no)
 COMMENT ON TABLE employee IS
     '員工主檔。三個投保級距是向主管機關申報的事實；費率與上限來自 backend/regulation/，不在這裡。';
 COMMENT ON COLUMN employee.base_salary IS
-    '月底薪。0 表示尚未設定，薪資作業會擋下這樣的員工而不是發出 0 元薪資單。';
+    '底薪。0 表示尚未設定，薪資作業會擋下這樣的員工而不是發出 0 元薪資單。';
+-- employment_type is how someone is hired; pay_basis is how they are paid.
+-- They are not the same axis: a part timer may be on a monthly salary, and a
+-- full timer may not.
+COMMENT ON COLUMN employee.pay_basis IS
+    '計薪基準。monthly 時 base_salary 是月底薪，按曆日比例計薪；hourly 時 base_salary 是時薪，依打卡工時計薪。';
+-- Which set of shares applies, not the shares themselves: those live in the
+-- owner_insurance ruleset.
+COMMENT ON COLUMN employee.insured_as IS
+    '投保身分。owner 為公司負責人：健保保費全額自付，勞退不強制提繳。分擔比率在 owner_insurance 規則，不在這裡。';
 COMMENT ON COLUMN employee.id_no IS
     '身分證字號，勞保申報與扣繳憑單都要用到。寫入時驗檢查碼；畫面預設遮罩顯示，稽核紀錄不留此欄的值。';
 
@@ -1436,12 +1456,12 @@ INSERT INTO permission (code, label, note, op_names, sort_order) VALUES
     ('view_payroll', '看薪資彙總', '全公司薪資總額與總帳對帳，不含任何個人金額', '{get_payroll_summary}', 90),
     ('view_hr', '看人資資料', '人資總覽、名冊、出勤休假、打卡、投保摘要、保費試算與法遵檢核', '{get_hr_dashboard,list_employees,list_leave_requests,get_insurance_summary,compute_insurance,get_hr_compliance,list_attendance_punches,list_punch_corrections,list_overtime_requests,list_notices,list_work_calendar}', 91),
     ('view_payroll_details', '看個人薪資明細', '個人薪資明細與年度扣繳憑單限負責人；全公司彙總會計亦可查看', '{list_payslips,list_withholding_statements}', 92),
-    ('manage_payroll', '執行薪資作業', '計算一期薪資並產生待過帳薪資傳票，不含正式過帳', '{run_payroll}', 93),
+    ('manage_payroll', '執行薪資作業', '計算一期薪資並產生待過帳薪資傳票，並在傳票過帳前作廢重算', '{run_payroll,void_payroll_run}', 93),
     ('manage_hr', '人事異動與請假', '建立與維護員工主檔，維護工作日曆，對待簽休假單與補登申請作成決定，並補登打卡', '{decide_leave_request,create_employee,update_employee,correct_punch,decide_punch_correction,decide_overtime_request,create_notice,update_notice,set_work_calendar_day,refresh_work_calendar}', 95),
     ('staff_self_service', '使用員工自助', '只回傳目前登入帳號所連結員工本人的首頁、薪資、休假、打卡、補登申請、報支進度與 MCP Token', '{get_my_home,list_my_payslips,list_my_leave_requests,request_leave,list_my_expense_claims,submit_my_expense_claim,attach_my_expense_receipt,punch_clock,list_my_punches,issue_my_api_token,list_my_api_tokens,revoke_my_api_token,submit_my_punch_correction,list_my_punch_corrections,submit_my_overtime_request,list_my_overtime_requests,list_my_notices,mark_my_notices_read}', 96),
-    ('view_audit', '看稽核紀錄', '查看每次操作的呼叫者、參數摘要、結果與被拒絕紀錄', '{list_ai_audit}', 97),
+    ('view_audit', '看稽核紀錄', '查看每次操作與登入的呼叫者、來源位址、參數摘要、結果與被拒絕紀錄', '{list_ai_audit}', 97),
     ('view_system', '看安全與系統狀態', '查看權限對照表、Token 後設資料與系統健康狀態', '{list_roles,list_api_tokens,get_system_health}', 98),
-    ('manage_access', '改權限與 MCP', '建立與檢視登入帳號、修改公司設定與角色權限，並簽發或撤銷 API／MCP Token', '{update_company_setting,set_company_timezone,set_role_permission,issue_api_token,revoke_api_token,create_user_account,update_user_account,change_user_role,reset_user_password,unlink_user_identity,delete_user_account,list_user_accounts,get_oidc_setting,update_oidc_setting,get_backup_setting,update_backup_setting,confirm_backup_key}', 100);
+    ('manage_access', '改權限與 MCP', '建立與檢視登入帳號、修改公司設定與角色權限，開關 AI 工具，並簽發或撤銷 API／MCP Token', '{update_company_setting,set_company_timezone,set_role_permission,set_mcp_tool_grant,issue_api_token,revoke_api_token,create_user_account,update_user_account,change_user_role,reset_user_password,unlink_user_identity,delete_user_account,list_user_accounts,get_oidc_setting,update_oidc_setting,get_backup_setting,update_backup_setting,confirm_backup_key,reset_backup_key}', 100);
 
 INSERT INTO role_permission (role_code, permission_code, level, note, updated_at, updated_by) VALUES
     ('acct', 'view_reports', 'full', '會計要用總覽、試算表與三張報表完成日常帳務。', '2026-08-24 16:26:05.694728+00', 'migration 0011'),
@@ -1549,7 +1569,7 @@ INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
     ('upload_document', true, 'needs_confirm', '上傳一份檔案到 RustFS，存下 BLAKE3 雜湊', '2026-08-24 16:26:05.516218+00'),
     ('list_imports', true, 'read_only', '讀匯入來源、批次紀錄與對外整合現況', '2026-08-24 16:26:05.516218+00'),
     ('preview_import', true, 'needs_confirm', '匯入預覽：解析、驗證、逐列回報問題。不寫入任何資料。', '2026-08-24 16:26:05.516218+00'),
-    ('list_ai_audit', true, 'read_only', '讀 AI 稽核紀錄', '2026-08-24 16:26:05.327083+00'),
+    ('list_ai_audit', true, 'read_only', '讀稽核紀錄', '2026-08-24 16:26:05.327083+00'),
     ('update_company_setting', false, 'admin_only', '改公司設定，對 AI 預設關閉。', '2026-08-24 16:26:05.457454+00'),
     ('list_roles', true, 'read_only', '讀角色權限對照表：哪個角色有哪些權限。', '2026-08-24 16:26:05.457454+00'),
     ('list_dimensions', true, 'read_only', '讀部門清單', '2026-08-24 16:26:05.457454+00'),
@@ -1566,6 +1586,7 @@ INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
     ('list_expense_claims', true, 'read_only', '讀費用報支單與目前關卡', '2026-08-24 16:26:05.516218+00'),
     ('decide_leave_request', false, 'needs_confirm', '准假或駁回。對 AI 關閉：核准請假屬主管職責。', '2026-08-24 16:26:05.608173+00'),
     ('run_payroll', false, 'high_risk', '計算並產生某一期的薪資傳票。對 AI 關閉。', '2026-08-24 16:26:05.608173+00'),
+    ('void_payroll_run', false, 'high_risk', '刪除一整期的薪資單、扣繳紀錄與待過帳傳票。對 AI 關閉。', '2026-08-24 16:26:05.608173+00'),
     ('get_insurance_summary', true, 'read_only', '讀勞健保與勞退：公司負擔、員工自付、逐人投保級距。費率全部來自規則庫。', '2026-08-24 16:26:05.608173+00'),
     ('create_account', false, 'needs_confirm', '新增科目會改變三張財務報表的分類結構，AI 預設不得自行擴充科目表。', '2026-08-24 16:26:05.704868+00'),
     ('update_account', false, 'needs_confirm', '修改或停用科目會影響後續入帳與報表分類，AI 預設關閉。', '2026-08-24 16:26:05.704868+00'),
@@ -1644,7 +1665,11 @@ INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
     ('refresh_work_calendar', false, 'needs_confirm', '向政府資料開放平臺取行事曆。對 AI 關閉。', '2026-08-24 16:26:06.21788+00'),
     ('get_backup_setting', false, 'admin_only', '讀異地備份設定，對 AI 關閉：這是系統本身的設定。', '2026-08-24 16:26:06.21788+00'),
     ('update_backup_setting', false, 'admin_only', '改異地備份的目的地與保留天數，對 AI 關閉。', '2026-08-24 16:26:06.21788+00'),
-    ('confirm_backup_key', false, 'admin_only', '確認已保存還原金鑰，對 AI 關閉：保存與否只有人回答得了。', '2026-08-24 16:26:06.21788+00');
+    ('confirm_backup_key', false, 'admin_only', '確認已保存還原金鑰，對 AI 關閉：保存與否只有人回答得了。', '2026-08-24 16:26:06.21788+00'),
+    ('reset_backup_key', false, 'admin_only', '重設還原金鑰，對 AI 關閉：這是系統本身的設定。', '2026-08-24 16:26:06.21788+00'),
+    -- Seeded off, and set_mcp_tool_grant also refuses to enable itself: an
+    -- administrator's MCP token could otherwise open every other tool.
+    ('set_mcp_tool_grant', false, 'admin_only', '開啟或關閉一項 AI 工具。預設關閉：開著等於讓 AI 決定 AI 做得了什麼。', '2026-08-24 16:26:06.21788+00');
 
 INSERT INTO account (code, name, kind, normal_side, is_postable, parent_code, sort_order, report_group, cash_flow_section, is_active) VALUES
     ('1101', '現金', 'asset', 'debit', true, NULL, 10, 'current_asset', 'cash', true),
@@ -1677,23 +1702,30 @@ INSERT INTO account (code, name, kind, normal_side, is_postable, parent_code, so
 INSERT INTO dimension (code, label, note, sort_order) VALUES
     ('department', '部門', '', 10);
 
+-- Labels carry the unit; note stays empty on every row. The controls answer
+-- what a note used to explain: fiscal_year is a 1-12 picker, the clock fields
+-- are hour and minute selects, and an empty setting shows 「（尚未設定）」.
 INSERT INTO company_setting (code, label, value, note, editable, sort_order, updated_at, updated_by) VALUES
     ('company_name', '公司名稱', '', '', true, 10, '2026-08-24 16:26:05.457454+00', ''),
-    ('business_utc_offset', '記帳時區', '+08:00', '出勤日期與單據日期以此時區判定。有出勤紀錄之後不能變更。', false, 15, '2026-08-24 16:26:06.151977+00', ''),
+    ('business_utc_offset', '記帳時區', '+08:00', '', false, 15, '2026-08-24 16:26:06.151977+00', ''),
     ('tax_id', '統一編號', '', '', true, 20, '2026-08-24 16:26:05.457454+00', ''),
-    ('fiscal_year', '會計年度起始月份', '1', '會計年度起始月份，填 1 到 12。財務報表的預設期間依此設定。', true, 30, '2026-08-24 16:26:05.457454+00', ''),
-    ('currency', '記帳本位幣', 'TWD', '記帳本位幣固定為新臺幣。', false, 50, '2026-08-24 16:26:05.457454+00', ''),
-    ('budget_alert_percent', '預算提醒門檻', '', '執行率超過設定的百分比就示警；留空不示警。', true, 80, '2026-08-24 16:26:05.516218+00', ''),
-    ('work_start', '上班時間', '', '判定遲到與計算正常工時的基準，格式 HH:MM。留空不判定遲到，也不計加班時數。', true, 80, '2026-08-24 16:26:05.730849+00', ''),
-    ('work_end', '下班時間', '', '一天正常工時的結束時間，格式 HH:MM。留空不計加班時數。', true, 90, '2026-08-24 16:26:05.730849+00', ''),
-    ('break_start', '休息開始時間', '', '不計入工作時數的休息區間，格式 HH:MM。留空不扣除休息時間。', true, 92, '2026-08-24 16:26:06.21788+00', ''),
-    ('break_end', '休息結束時間', '', '休息區間的結束時間，格式 HH:MM。兩端都填了才扣除。', true, 94, '2026-08-24 16:26:06.21788+00', ''),
-    ('flex_window_minutes', '彈性上班區間（分鐘）', '', '上班時間之後這幾分鐘內到班都算準時，下班時間順延相同分鐘數，工作總時數不變。留空表示不採彈性工時。', true, 95, '2026-08-24 16:26:05.772462+00', ''),
-    ('late_grace_minutes', '遲到寬限分鐘', '', '上班時間之後幾分鐘內不計遲到。留空視為 0。', true, 100, '2026-08-24 16:26:05.730849+00', ''),
-    ('punch_correction_policy', '補登申請', '人資審核', '員工送出補登申請後的處理方式：人資審核，或自動通過。', true, 110, '2026-08-24 16:26:06.052964+00', ''),
-    ('session_idle_minutes', '閒置多久要重新登入（分鐘）', '60', '超過這段時間沒有操作就要重新登入。每一次操作都重新計時。', true, 200, '2026-08-24 16:26:06.21788+00', 'migration 0014'),
-    ('session_max_hours', '一次登入最長時數', '168', '從登入那一刻起算的上限，期間有沒有操作都一樣。', true, 210, '2026-08-24 16:26:06.21788+00', 'migration 0014'),
-    ('mcp_rate_limit_per_minute', 'MCP 每分鐘呼叫上限', '60', '單一 Token 每分鐘可呼叫的次數，填 0 表示不限。', true, 220, '2026-08-24 16:26:06.21788+00', 'migration 0014');
+    ('fiscal_year', '會計年度起始月份', '1', '', true, 30, '2026-08-24 16:26:05.457454+00', ''),
+    ('currency', '記帳本位幣', 'TWD', '', false, 50, '2026-08-24 16:26:05.457454+00', ''),
+    ('budget_alert_percent', '預算提醒門檻（%）', '', '', true, 80, '2026-08-24 16:26:05.516218+00', ''),
+    ('work_start', '上班時間', '', '', true, 80, '2026-08-24 16:26:05.730849+00', ''),
+    ('work_end', '下班時間', '', '', true, 90, '2026-08-24 16:26:05.730849+00', ''),
+    ('break_start', '休息開始時間', '', '', true, 92, '2026-08-24 16:26:06.21788+00', ''),
+    ('break_end', '休息結束時間', '', '', true, 94, '2026-08-24 16:26:06.21788+00', ''),
+    ('flex_window_minutes', '彈性上班區間（分鐘）', '', '', true, 95, '2026-08-24 16:26:05.772462+00', ''),
+    ('late_grace_minutes', '遲到寬限（分鐘）', '', '', true, 100, '2026-08-24 16:26:05.730849+00', ''),
+    ('punch_correction_policy', '補登申請處理方式', '人資審核', '', true, 110, '2026-08-24 16:26:06.052964+00', ''),
+    ('session_idle_minutes', '閒置登出（分鐘）', '60', '', true, 200, '2026-08-24 16:26:06.21788+00', ''),
+    ('session_max_hours', '單次登入上限（小時）', '168', '', true, 210, '2026-08-24 16:26:06.21788+00', ''),
+    ('mcp_rate_limit_per_minute', 'MCP 每分鐘呼叫上限', '60', '', true, 220, '2026-08-24 16:26:06.21788+00', ''),
+    -- 1825 days is five years, the period the Labor Standards Act requires
+    -- attendance records to be kept; an audit record about attendance should
+    -- outlive nothing it describes.
+    ('audit_keep_days', '稽核紀錄保存（天）', '1825', '', true, 230, '2026-08-24 16:26:06.21788+00', '');
 
 INSERT INTO approval_rule (step_no, role_code, label, condition_note, min_amount) VALUES
     (1, NULL, '申請人上傳', '上傳收據', NULL),

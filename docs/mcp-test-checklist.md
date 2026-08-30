@@ -73,8 +73,8 @@ streamable HTTP 規格要求的 DNS rebinding 防護。白名單是 `MCP_ALLOWED
 
 ## D 速率限制
 
-`MCP_RATE_LIMIT_PER_MINUTE`（預設 60，0 為不限制），以 Token 編號分桶。
-設為 0 時 D1、D2 略過。
+上限是「基礎設定」的 `mcp_rate_limit_per_minute`（預設 60，0 為不限制），以 Token
+編號分桶。設為 0 時 D1、D2 略過。
 
 | 編號 | 檢查項目 | 期望 |
 |---|---|---|
@@ -141,7 +141,7 @@ LAYSI_USER=... LAYSI_PASSWORD=... bun scripts/mcp-role-matrix.ts
 
 | 編號 | 檢查項目 | 期望 |
 |---|---|---|
-| INV1 | 帶身分底線的工具 | `admin_only` 與 `boss_only` 的 18 個對 AI 全部關閉，AI 碰不到 |
+| INV1 | 帶身分底線的工具 | `admin_only` 與 `boss_only` 的 25 個對 AI 全部關閉，AI 碰不到 |
 | INV2 | 各角色的 `tools/list` | 七份清單完全相同：工具清單只看工具開關，不看角色 |
 | INV3 | 每一次拒絕 | 都在該身分底下留一筆 `outcome = blocked` 的稽核 |
 | 逐格 | 應可執行的唯讀工具 | 不得回權限類錯誤 |

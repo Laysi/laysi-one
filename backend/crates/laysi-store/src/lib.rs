@@ -2431,26 +2431,6 @@ impl Store {
                 .rows_affected(),
         )
     }
-    /// Full tool grant listing. `tool_grants` returns only the switches,
-    /// while the security screen also needs the risk and the description.
-    pub async fn tool_grant_details(&self) -> Result<Vec<ToolGrant>> {
-        Ok(sqlx::query(
-            "SELECT tool_name, enabled, risk, note, updated_at
-               FROM mcp_tool_grant ORDER BY tool_name",
-        )
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| ToolGrant {
-            tool_name: r.get("tool_name"),
-            enabled: r.get("enabled"),
-            risk: r.get("risk"),
-            note: r.get("note"),
-            updated_at: r.get("updated_at"),
-        })
-        .collect())
-    }
-
     /// Turn one AI tool on or off.
     ///
     /// `None` means the name has no row. Every registered operation is seeded
@@ -7500,7 +7480,7 @@ pub struct WorkCalendarDay {
 }
 
 /// One company setting. Regulation values never appear here (see
-/// migrations/0006).
+/// migrations/0001).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CompanySetting {
     pub code: String,

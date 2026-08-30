@@ -101,7 +101,7 @@ TEST_DB=laysi_function_test TEST_PORT=8091 bun scripts/function-test.ts   # 可�
 
 ## 其他兩層
 
-- `cargo test --workspace`：240 個單元測試。另有 9 個需要資料庫的案例，
+- `cargo test --workspace`：257 個單元測試。另有 13 個需要資料庫的案例，
   用 `TEST_DATABASE_URL=... cargo test --workspace -- --ignored` 跑。
   **改過欄位或 SQL 之後 `--workspace` 可能沿用舊的測試二進位**（時鐘偏移會讓
   cargo 誤判 Fresh），單獨跑該 crate 會通過而 workspace 仍紅——先

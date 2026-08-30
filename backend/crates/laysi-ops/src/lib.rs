@@ -880,15 +880,10 @@ mod tests {
     /// out of it, so a switch or a permission that the schema does not actually
     /// seed cannot pass by being described in a test.
     ///
-    /// Every migration that touches `permission` or `mcp_tool_grant` belongs
-    /// here, in order: the later rows win, the same way the later statement
-    /// wins in the database.
-    const SCHEMA: &str = concat!(
-        include_str!("../../../migrations/0001_initial.sql"),
-        include_str!("../../../migrations/0002_mcp_tool_grant_switch.sql"),
-        include_str!("../../../migrations/0006_void_payroll_run.sql"),
-        include_str!("../../../migrations/0007_reset_backup_key.sql"),
-    );
+    /// A later migration that seeds `permission` or `mcp_tool_grant` has to be
+    /// concatenated after this one: the later rows win, the same way the later
+    /// statement wins in the database.
+    const SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
 
     /// The rows of one multi-row INSERT, one string per row, without the
     /// leading `('`.
@@ -943,6 +938,26 @@ mod tests {
             Vec::<&&str>::new(),
             "mcp_tool_grant 指到不存在的操作"
         );
+    }
+
+    /// The seeded risk must be the operation's own risk. `mcp-role-matrix.ts`
+    /// reads this column to assert that nothing carrying an identity floor is
+    /// open to AI, so a row that understates its tier makes that check pass
+    /// over the very tool it exists to catch.
+    #[test]
+    fn every_mcp_tool_grant_carries_the_operation_risk() {
+        let registry = Registry::new();
+        for row in inserted_rows("mcp_tool_grant") {
+            let mut parts = row.split('\'');
+            let name = parts.next().expect("grant 沒有工具名");
+            let seeded = parts.nth(1).expect("grant 沒有風險分級");
+            let op = registry.get(name).expect("grant 指到不存在的操作");
+            assert_eq!(
+                seeded,
+                op.risk().as_db(),
+                "{name} 的 mcp_tool_grant.risk 與操作本身不符"
+            );
+        }
     }
 
     /// Every registry operation must be governed by exactly one permission.
