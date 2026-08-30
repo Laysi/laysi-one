@@ -1428,6 +1428,7 @@ INSERT INTO role (code, name, note, sort_order) VALUES
     ('admin', '系統管理員', '管理帳號、權限與系統設定，不含薪資資料', 5),
     ('boss', '負責人', '公司的最終決定者：薪資、預算與簽核門檻', 10),
     ('acct', '會計', '可開立傳票、不可付款', 20),
+    ('hr', '人資', '員工主檔、出勤休假、薪資作業與勞健保，不涉及帳務', 25),
     ('cashier', '出納', '執行匯款，不涉及分錄', 30),
     ('manager', '主管', '簽核部門的費用報支', 40),
     ('accountant', '會計師', '事務所端，調整分錄與年度結算', 50),
@@ -1539,7 +1540,12 @@ INSERT INTO role_permission (role_code, permission_code, level, note, updated_at
     ('accountant', 'view_masters', 'full', '會計師需要科目與分類定義判讀報表。', '2026-08-24 16:26:05.694728+00', 'migration 0011'),
     ('admin', 'manage_regulations', 'full', '修法後由系統管理員新增版本。', '2026-08-24 16:26:06.151977+00', 'migration 0009'),
     ('boss', 'manage_regulations', 'full', '負責人保留這組操作的完整權限。', '2026-08-24 16:26:06.151977+00', 'migration 0009'),
-    ('acct', 'manage_regulations', 'full', '會計申報前要查得到適用的費率。', '2026-08-24 16:26:06.151977+00', 'migration 0009');
+    ('acct', 'manage_regulations', 'full', '會計申報前要查得到適用的費率。', '2026-08-24 16:26:06.151977+00', 'migration 0009'),
+    ('hr', 'view_hr', 'full', '人資查看名冊、出勤休假、投保摘要與法遵檢核。', '2026-08-31 00:00:00+00', 'seed'),
+    ('hr', 'manage_hr', 'full', '人資維護員工主檔與工作日曆，並決定休假、加班與補登申請。', '2026-08-31 00:00:00+00', 'seed'),
+    ('hr', 'view_payroll', 'full', '人資計薪後要與總帳核對薪資總額。', '2026-08-31 00:00:00+00', 'seed'),
+    ('hr', 'manage_payroll', 'full', '人資負責計算一期薪資並產生待過帳傳票。', '2026-08-31 00:00:00+00', 'seed'),
+    ('hr', 'staff_self_service', 'full', '人資以員工身分只能查看與申請自己的資料。', '2026-08-31 00:00:00+00', 'seed');
 
 INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
     ('get_dashboard', true, 'read_only', '讀總覽數字', '2026-08-24 16:26:05.327083+00'),

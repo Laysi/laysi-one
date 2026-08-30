@@ -333,6 +333,17 @@ impl Operation for ListEmployees {
         let staff = ctx.store.employees(i.include_left, i.q.as_deref()).await?;
         let rs = laysi_regulation::resolve("annual_leave", ctx.today)?;
         let taken = ctx.store.annual_leave_taken(ctx.today.year()).await?;
+        // The roster's own department picker. Reading it from list_dimensions
+        // would put the roster behind a second permission, and that permission
+        // also opens the settings screen.
+        let departments = ctx
+            .store
+            .dimensions()
+            .await?
+            .into_iter()
+            .find(|d| d.code == "department")
+            .map(|d| d.values)
+            .unwrap_or_default();
 
         let mut rows = Vec::with_capacity(staff.len());
         let mut by_dept: Vec<(String, usize)> = Vec::new();
@@ -429,6 +440,7 @@ impl Operation for ListEmployees {
                 "by_dept": by_dept.iter()
                     .map(|(d, n)| json!({ "label": d, "count": n }))
                     .collect::<Vec<_>>(),
+                "departments": departments,
                 "avg_service_months": avg_months,
                 "avg_service_label": service_label(avg_months),
                 "annual_leave_ruleset": crate::ops::insurance::ruleset_json(rs),

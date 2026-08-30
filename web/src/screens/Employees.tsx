@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   callOp,
-  dimensionList,
   employeeList,
   isZero,
   updatedEmployee,
   maskId,
   OpFailed,
   trimDecimal,
-  type DimensionList,
   type EmployeeList,
   type EmployeeRow,
 } from '../api/client';
@@ -102,7 +100,6 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [missing, setMissing] = useState<string[]>([]);
-  const [dims, setDims] = useState<DimensionList | null>(null);
 
   const load = useCallback(() => {
     setError(null);
@@ -120,11 +117,6 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
   }, [q, includeLeft]);
 
   useEffect(load, [load, reloadKey]);
-
-  useEffect(() => {
-    if (!drawer) return;
-    if (!dims) callOp('list_dimensions', {}, undefined, dimensionList).then(setDims).catch(() => setDims(null));
-  }, [drawer, dims]);
 
   function openCreate() {
     setCurrent(null);
@@ -295,8 +287,9 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
     }
   }
 
-  const deptValues = (dims?.dimensions.find((d) => d.code === 'department')?.values ?? [])
-    .filter((v) => v.active || v.code === form.dept_code);
+  const deptValues = (data?.departments ?? []).filter(
+    (v) => v.active || v.code === form.dept_code,
+  );
 
   return (
     <div>
