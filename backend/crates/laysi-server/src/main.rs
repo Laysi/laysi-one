@@ -161,11 +161,11 @@ fn healthcheck() -> ! {
     match probe() {
         Ok(true) => std::process::exit(0),
         Ok(false) => {
-            eprintln!("healthcheck：/healthz 沒有回 200");
+            eprintln!("healthcheck: /healthz did not return 200");
             std::process::exit(1)
         }
         Err(e) => {
-            eprintln!("healthcheck：無法連線 127.0.0.1:{port}：{e}");
+            eprintln!("healthcheck: cannot reach 127.0.0.1:{port}: {e}");
             std::process::exit(1)
         }
     }
@@ -187,7 +187,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let serve_role = ServeRole::from_env()?;
-    tracing::info!(role = serve_role.label(), "LAYSI_SERVE 決定要掛哪些路由");
+    tracing::info!(
+        role = serve_role.label(),
+        "LAYSI_SERVE decides which routes are mounted"
+    );
 
     let database_url = laysi_store::env_or_file("DATABASE_URL")
         .unwrap_or_else(|| "postgres://postgres:postgres@localhost:5432/laysi".into());
@@ -220,15 +223,15 @@ async fn main() -> anyhow::Result<()> {
     // paths that have no Store at hand. update_company_setting republishes
     // them, so a change needs no restart.
     laysi_ops::load_policy_settings(&store).await;
-    tracing::info!(offset = %laysi_domain::format_business_offset(offset), "記帳時區");
-    tracing::info!(version = ?store.migration_version().await?, "migrations 完成");
+    tracing::info!(offset = %laysi_domain::format_business_offset(offset), "business time zone");
+    tracing::info!(version = ?store.migration_version().await?, "migrations applied");
 
     // 3. Rulesets
     //
     // `reg_ruleset` is the authority; the embedded factory set only fills
     // rows the table does not have. Nothing may compute before this runs.
     let n = store.reload_regulations().await?;
-    tracing::info!(rulesets = n, "法規版本已載入");
+    tracing::info!(rulesets = n, "regulation rulesets loaded");
 
     // The work calendar, once, on the first boot that finds it empty and can
     // reach the open-data platform. Spawned rather than awaited: a new
@@ -267,8 +270,8 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(days) = days {
                     match store.purge_audit(days).await {
                         Ok(0) => {}
-                        Ok(n) => tracing::info!(removed = n, days, "已清除逾期稽核紀錄"),
-                        Err(error) => tracing::error!(%error, "清除逾期稽核紀錄失敗"),
+                        Ok(n) => tracing::info!(removed = n, days, "expired audit rows removed"),
+                        Err(error) => tracing::error!(%error, "removing expired audit rows failed"),
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(86_400)).await;
@@ -292,12 +295,14 @@ async fn main() -> anyhow::Result<()> {
                     created,
                     "RustFS 物件儲存就緒"
                 ),
-                Err(e) => tracing::warn!(error = %e, "RustFS 連得上設定但 bucket 備妥失敗"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "RustFS is configured but the bucket could not be prepared")
+                }
             }
             Some(o)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "RustFS 未設定，文件模組停用，其餘功能不受影響");
+            tracing::warn!(error = %e, "RustFS is not configured, documents are disabled, everything else is unaffected");
             None
         }
     };
@@ -335,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
     // person who presses it.
     if serve_role.serves_rest() {
         let enabled = oidc::current(&state).await.is_some();
-        tracing::info!(enabled, "外部登入設定已讀取");
+        tracing::info!(enabled, "external login settings loaded");
     }
 
     // `/healthz` is mounted in all three roles: the compose healthcheck relies
@@ -385,7 +390,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    tracing::info!(%bind, "Laysi One 開始服務");
+    tracing::info!(%bind, "Laysi One is serving");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -522,7 +527,7 @@ async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
     let settings = match s.store.company_settings().await {
         Ok(settings) => settings,
         Err(error) => {
-            tracing::error!(%error, "讀取 /v1/meta 的公司設定失敗");
+            tracing::error!(%error, "reading the company settings for /v1/meta failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({

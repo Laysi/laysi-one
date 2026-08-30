@@ -63,7 +63,7 @@ ensure_key() {
         "UPDATE backup_setting
             SET age_recipient = \$k\$$public\$k\$, age_identity_pending = \$k\$$identity\$k\$
           WHERE id = 1" > /dev/null
-    echo "已產生還原金鑰，請到安全與營運頁保存後才會開始備份。"
+    echo "restore key generated; backups start once it is saved from the security and operations screen."
 }
 
 # Everything that decides whether a key is due, in one round trip: it is asked
@@ -164,7 +164,7 @@ run_once() {
 KEY_POLL_SECONDS=5
 
 while true; do
-    run_once || echo "備份未完成，將於下一次重試。"
+    run_once || echo "backup did not finish; it will be retried on the next run."
     waited=0
     while [ "$waited" -lt "$INTERVAL_SECONDS" ]; do
         sleep "$KEY_POLL_SECONDS"

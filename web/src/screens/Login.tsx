@@ -8,7 +8,6 @@ export function Login() {
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [failure, setFailure] = useState<AuthFailed | null>(null);
@@ -43,11 +42,10 @@ export function Login() {
     setMismatch(false);
     setBusy(true);
     try {
-      await changePassword(currentPassword, newPassword);
+      await changePassword(newPassword);
     } catch (err) {
       setFailure(err instanceof AuthFailed ? err : new AuthFailed({ code: 'network', message: String(err) }));
     } finally {
-      setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       setBusy(false);
@@ -68,23 +66,13 @@ export function Login() {
 
             <form onSubmit={(e) => void submitChange(e)}>
               <label className="login__field">
-                <span className="login__label">目前的密碼</span>
-                <input
-                  className="entry-input"
-                  type="password"
-                  autoComplete="current-password"
-                  value={currentPassword}
-                  autoFocus
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                />
-              </label>
-              <label className="login__field">
                 <span className="login__label">新密碼（至少 8 個字元）</span>
                 <input
                   className="entry-input"
                   type="password"
                   autoComplete="new-password"
                   value={newPassword}
+                  autoFocus
                   onChange={(e) => setNewPassword(e.target.value)}
                 />
               </label>

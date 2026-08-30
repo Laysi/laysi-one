@@ -575,8 +575,8 @@ email 當登入名稱的正常路徑。`create_user_account` 仍然建得出其�
 `admin` 帳號，那條路沒有被擋。
 
 精靈在這個狀態下把「登入方式」寫成「密碼（已停用）」、欄位轉成強調色並把建立鈕關掉，
-同一個判斷因此在按下去之前就看得見。停用的開關本身也放在精靈第五步，而不是留到事後的
-安全與營運頁：它與第六步是同一個決定，分開問就會出現「關掉密碼登入，然後發一組密碼給
+同一個判斷因此在按下去之前就看得見。停用的開關本身也放在精靈第四步，而不是留到事後的
+安全與營運頁：它與第五步是同一個決定，分開問就會出現「關掉密碼登入，然後發一組密碼給
 負責人」這種走得完、但結果沒有人登得進去的路徑。
 
 帳號管理（`screens/Accounts.tsx`）的建立抽屜用的是同一個欄位與同一組判斷，因為精靈之後
@@ -588,8 +588,8 @@ email 當登入名稱的正常路徑。`create_user_account` 仍然建得出其�
 ### 外部登入會清掉 `must_change_password`
 
 系統管理員用 `create_user_account` 建的帳號帶著一組產生的密碼與這個旗標。從 IdP 進來
-的人沒拿過那組密碼，而變更密碼表單會先要求「目前的密碼」，於是旗標會把一次成功的
-登入擋在自己的畫面外。`oauth_callback` 因此在發 session 之前清掉旗標。
+的人沒拿過那組密碼，也不需要密碼，旗標卻會在一次成功的登入後再擺一張密碼表單。
+`oauth_callback` 因此在發 session 之前清掉旗標。
 
 只清旗標，不動 `password_hash`：那組密碼仍在，本人之後真想改用密碼登入時
 `reset_user_password` 還叫得動。清掉雜湊會讓帳號變成只有外部身分進得來，而
@@ -804,6 +804,11 @@ Token 一併撤銷，操作回報各撤了幾個。
 `create_user_account` 是唯一不需要 shell 就能建立登入的路徑。它不收密碼——密碼由
 系統產生、只在該次回應出現一次、`must_change_password = true`，所以建立帳號的人
 無法長期使用別人的帳號。連結員工用 `employee_no` 而非姓名，姓名會重複。
+
+**強制變更密碼那一步不再問目前的密碼**：那張表單接在剛才用臨時密碼登入成功的下一
+步，session 已經證明過同一件事，再問一次只是把剛打完的字再打一次。
+`change_password` 因此只在 `must_change_password` 為 false 時驗 `current_password`
+（輸入欄位改為選填），其餘呼叫仍要證明。
 
 `list_user_accounts` 是它的讀取面，同在管理員底線上：誰能登入與誰發帳號是同一件
 事。查詢不選 `password_hash`，回傳型別是 `UserAccountRow` 而不是帶雜湊、刻意不實作
@@ -1909,7 +1914,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | POST | `/v1/auth/login` | 帳密登入並設定 session cookie；失敗訊息不區分帳號或密碼 |
 | POST | `/v1/auth/logout` | 撤銷目前 session 並清除 cookie |
 | GET | `/v1/auth/me` | 目前登入帳號；未登入回 401 |
-| POST | `/v1/auth/change-password` | 驗證目前密碼後更新 Argon2id 雜湊並清除 `must_change_password` |
+| POST | `/v1/auth/change-password` | 更新 Argon2id 雜湊並清除 `must_change_password`；`current_password` 只在強制變更以外的呼叫才驗 |
 | POST | `/v1/auth/bootstrap` | 安裝完全沒有帳號時建立第一個帳號（角色固定 `admin`）並直接簽發 session |
 | GET | `/v1/auth/oauth/start` | 啟用時建立 PKCE 流程並以 302 前往 discovery 的 authorization endpoint |
 | GET | `/v1/auth/oauth/callback` | 後端交換授權碼、驗證 id_token、建立 session，再以 302 回 `/` |

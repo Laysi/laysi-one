@@ -69,7 +69,7 @@ fn main() -> std::io::Result<()> {
     match out {
         Some(path) => {
             std::fs::write(&path, &ts)?;
-            eprintln!("已寫入 {path}（{} 個操作）", registry.len());
+            eprintln!("wrote {path} ({} operations)", registry.len());
         }
         None => print!("{ts}"),
     }

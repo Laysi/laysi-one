@@ -161,7 +161,7 @@ pub async fn bootstrap(
         Ok(true) => {}
         Ok(false) => return already_done(),
         Err(error) => {
-            tracing::error!(%error, "初始化前無法確認安裝狀態");
+            tracing::error!(%error, "cannot confirm the install state before bootstrap");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "setup_store_error",
@@ -193,7 +193,7 @@ pub async fn bootstrap(
         // Logged rather than audited: this is an unauthenticated caller on an
         // installation that has no accounts yet, so an audit row would let
         // anyone who can reach the port fill the table.
-        tracing::warn!(%username, "網頁初始化的 SETUP_TOKEN 不正確");
+        tracing::warn!(%username, "web bootstrap rejected: wrong SETUP_TOKEN");
         return error_response(
             StatusCode::FORBIDDEN,
             "setup_token_invalid",
@@ -205,7 +205,7 @@ pub async fn bootstrap(
         match tokio::task::spawn_blocking(move || password::hash_password(&password)).await {
             Ok(Ok(hash)) => hash,
             Ok(Err(error)) => {
-                tracing::error!(%error, "初始化時產生密碼雜湊失敗");
+                tracing::error!(%error, "hashing the password during bootstrap failed");
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "password_hash_error",
@@ -213,7 +213,7 @@ pub async fn bootstrap(
                 );
             }
             Err(error) => {
-                tracing::error!(%error, "密碼雜湊工作無法完成");
+                tracing::error!(%error, "the password hashing task did not finish");
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "password_worker_error",
@@ -247,7 +247,7 @@ pub async fn bootstrap(
         Ok(Some(user)) => user,
         Ok(None) => return already_done(),
         Err(error) => {
-            tracing::error!(%error, "建立第一個帳號失敗");
+            tracing::error!(%error, "creating the first account failed");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "setup_store_error",
@@ -277,7 +277,7 @@ pub async fn bootstrap(
         )
         .await
     {
-        tracing::error!(%error, "初始化稽核紀錄寫入失敗，帳號已建立");
+        tracing::error!(%error, "bootstrap audit write failed; the account was created");
     }
 
     tracing::info!(

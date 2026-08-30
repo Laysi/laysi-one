@@ -1840,7 +1840,7 @@ export const complianceCheck = z.object({
   failures: z.array(complianceFailure),
   screen: z.string().optional(),
   scope_note: z.string().optional(),
-  not_checked_reason: z.string().optional(),
+  not_checked_reason: z.string().nullish(),
   required_domain: z.string().optional(),
 });
 export type ComplianceCheck = z.infer<typeof complianceCheck>;

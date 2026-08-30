@@ -13,13 +13,13 @@ use laysi_store::{CreateUser, Store};
 use std::collections::HashMap;
 
 const USAGE: &str = "\
-用法：
+Usage:
   laysi-admin create-user --username <u> --role <role> --display-name <n> [--employee-no <E001>] [--email <e>]
   laysi-admin reset-password --username <u>
   laysi-admin link-employee --username <u> --employee-no <E001>
   laysi-admin link-oauth --username <u> --provider <p> --subject <sub>
   laysi-admin list-users
-  laysi-admin seed-demo [--force]        種入示範資料（僅供評估用的拋棄式安裝）";
+  laysi-admin seed-demo [--force]        seed demo data (throwaway evaluation installs only)";
 
 struct Cli {
     command: String,
@@ -29,7 +29,7 @@ struct Cli {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("錯誤：{error:#}");
+        eprintln!("error: {error:#}");
         std::process::exit(1);
     }
 }
@@ -45,8 +45,11 @@ async fn run() -> anyhow::Result<()> {
         .unwrap_or_else(|| "postgres://postgres:postgres@localhost:5432/laysi".into());
     let store = Store::connect(&database_url, 2)
         .await
-        .context("無法連上資料庫")?;
-    store.migrate().await.context("無法套用資料庫 migrations")?;
+        .context("cannot connect to the database")?;
+    store
+        .migrate()
+        .await
+        .context("cannot apply database migrations")?;
 
     match cli.command.as_str() {
         "create-user" => create_user(&store, &cli).await,
@@ -55,14 +58,14 @@ async fn run() -> anyhow::Result<()> {
         "link-oauth" => link_oauth(&store, &cli).await,
         "list-users" => list_users(&store).await,
         "seed-demo" => seed_demo(&store, &cli).await,
-        _ => unreachable!("parse_args 已拒絕未知子指令"),
+        _ => unreachable!("parse_args already rejected unknown subcommands"),
     }
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Cli> {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
-        bail!("缺少子指令\n\n{USAGE}");
+        bail!("missing subcommand\n\n{USAGE}");
     };
     if matches!(command.as_str(), "-h" | "--help" | "help") {
         return Ok(Cli {
@@ -71,23 +74,23 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Cli> {
         });
     }
     let allowed = allowed_options(&command)
-        .ok_or_else(|| anyhow!("不支援的子指令「{command}」\n\n{USAGE}"))?;
+        .ok_or_else(|| anyhow!("unsupported subcommand \"{command}\"\n\n{USAGE}"))?;
     let mut options = HashMap::new();
     while let Some(flag) = args.next() {
         if !flag.starts_with("--") {
-            bail!("預期旗標，收到「{flag}」\n\n{USAGE}");
+            bail!("expected a flag, got \"{flag}\"\n\n{USAGE}");
         }
         if !allowed.contains(&flag.as_str()) {
-            bail!("子指令 {command} 不接受參數「{flag}」\n\n{USAGE}");
+            bail!("subcommand {command} takes no option \"{flag}\"\n\n{USAGE}");
         }
         let value = if valueless(&flag) {
             "true".to_string()
         } else {
             args.next()
-                .ok_or_else(|| anyhow!("參數 {flag} 缺少值\n\n{USAGE}"))?
+                .ok_or_else(|| anyhow!("option {flag} has no value\n\n{USAGE}"))?
         };
         if options.insert(flag.clone(), value).is_some() {
-            bail!("參數 {flag} 重複出現");
+            bail!("option {flag} given twice");
         }
     }
     Ok(Cli { command, options })
@@ -122,20 +125,25 @@ fn required<'a>(cli: &'a Cli, flag: &str) -> anyhow::Result<&'a str> {
         .get(flag)
         .map(String::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("子指令 {} 缺少必要參數 {flag}\n\n{USAGE}", cli.command))
+        .ok_or_else(|| {
+            anyhow!(
+                "subcommand {} is missing the required option {flag}\n\n{USAGE}",
+                cli.command
+            )
+        })
 }
 
 async fn validate_role(store: &Store, code: &str) -> anyhow::Result<()> {
-    let roles = store.roles().await.context("無法讀取角色清單")?;
+    let roles = store.roles().await.context("cannot read the role list")?;
     if roles.iter().any(|role| role.code == code) {
         return Ok(());
     }
     let legal = roles
         .iter()
-        .map(|role| format!("{}（{}）", role.code, role.name))
+        .map(|role| format!("{} ({})", role.code, role.name))
         .collect::<Vec<_>>()
-        .join("、");
-    bail!("角色「{code}」不存在；合法值：{legal}");
+        .join(", ");
+    bail!("role \"{code}\" does not exist; valid values: {legal}");
 }
 
 async fn create_user(store: &Store, cli: &Cli) -> anyhow::Result<()> {
@@ -146,10 +154,10 @@ async fn create_user(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     if store
         .user_by_username(username)
         .await
-        .context("無法檢查登入名稱")?
+        .context("cannot check the username")?
         .is_some()
     {
-        bail!("登入名稱「{username}」已經存在");
+        bail!("username \"{username}\" already exists");
     }
 
     let employee_id = match cli.options.get("--employee-no") {
@@ -157,7 +165,7 @@ async fn create_user(store: &Store, cli: &Cli) -> anyhow::Result<()> {
             store
                 .employee(employee_no.trim())
                 .await
-                .with_context(|| format!("找不到員工編號「{}」", employee_no.trim()))?
+                .with_context(|| format!("no employee numbered \"{}\"", employee_no.trim()))?
                 .id,
         ),
         None => None,
@@ -165,7 +173,7 @@ async fn create_user(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     let email = cli.options.get("--email").map_or("", |value| value.trim());
     let temporary = password::temporary_password();
     let password_hash = password::hash_password(&temporary)
-        .map_err(|error| anyhow!("無法產生 Argon2id 密碼雜湊：{error}"))?;
+        .map_err(|error| anyhow!("cannot produce the Argon2id password hash: {error}"))?;
     let user = store
         .create_user(CreateUser {
             username,
@@ -179,13 +187,13 @@ async fn create_user(store: &Store, cli: &Cli) -> anyhow::Result<()> {
             created_by: "laysi-admin",
         })
         .await
-        .context("建立使用者帳號失敗")?;
+        .context("creating the user account failed")?;
 
     // stdout carries only the one-time secret, so the caller can pipe it
     // directly into a password manager.
     println!("{temporary}");
     eprintln!(
-        "已建立帳號 {}（{}，角色 {}）；首次登入必須更換密碼。",
+        "created account {} ({}, role {}); the password must be changed at the first sign-in.",
         user.username, user.display_name, user.role_code
     );
     Ok(())
@@ -196,18 +204,18 @@ async fn reset_password(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     let user = store
         .user_by_username(username)
         .await
-        .context("查詢使用者帳號失敗")?
-        .ok_or_else(|| anyhow!("找不到使用者帳號「{username}」"))?;
+        .context("looking up the user account failed")?
+        .ok_or_else(|| anyhow!("no user account named \"{username}\""))?;
     let temporary = password::temporary_password();
     let password_hash = password::hash_password(&temporary)
-        .map_err(|error| anyhow!("無法產生 Argon2id 密碼雜湊：{error}"))?;
+        .map_err(|error| anyhow!("cannot produce the Argon2id password hash: {error}"))?;
     store
         .set_password_hash(user.id, Some(&password_hash), true)
         .await
-        .context("重設密碼失敗")?;
+        .context("resetting the password failed")?;
 
     println!("{temporary}");
-    eprintln!("已重設帳號 {username} 的密碼；下次登入必須更換。");
+    eprintln!("password reset for {username}; it must be changed at the next sign-in.");
     Ok(())
 }
 
@@ -222,18 +230,18 @@ async fn link_employee(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     let user = store
         .user_by_username(username)
         .await
-        .context("查詢使用者帳號失敗")?
-        .ok_or_else(|| anyhow!("找不到使用者帳號「{username}」"))?;
+        .context("looking up the user account failed")?
+        .ok_or_else(|| anyhow!("no user account named \"{username}\""))?;
     let employee = store
         .employee(employee_no)
         .await
-        .with_context(|| format!("找不到員工編號「{employee_no}」"))?;
+        .with_context(|| format!("no employee numbered \"{employee_no}\""))?;
     store
         .set_employee_link(user.id, Some(employee.id))
         .await
-        .context("連結員工資料失敗")?;
+        .context("linking the employee record failed")?;
     eprintln!(
-        "已把帳號 {username} 連到員工 {employee_no}（{}）。",
+        "linked account {username} to employee {employee_no} ({}).",
         employee.name
     );
     Ok(())
@@ -247,19 +255,19 @@ async fn link_oauth(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     let username = required(cli, "--username")?.trim();
     let provider = normalize_provider(required(cli, "--provider")?);
     if provider.is_empty() {
-        bail!("--provider 不可為空");
+        bail!("--provider must not be empty");
     }
     let subject = required(cli, "--subject")?;
     let user = store
         .user_by_username(username)
         .await
-        .context("查詢使用者帳號失敗")?
-        .ok_or_else(|| anyhow!("找不到使用者帳號「{username}」"))?;
+        .context("looking up the user account failed")?
+        .ok_or_else(|| anyhow!("no user account named \"{username}\""))?;
     store
         .link_identity(user.id, &provider, subject, &user.email)
         .await
-        .context("連結 OAuth 身分失敗；請確認 provider 與 subject 尚未被其他帳號使用")?;
-    eprintln!("已把 {provider} 的 subject「{subject}」連到帳號 {username}。");
+        .context("linking the OAuth identity failed; check that the provider and subject are not already used by another account")?;
+    eprintln!("linked {provider} subject \"{subject}\" to account {username}.");
     Ok(())
 }
 
@@ -282,20 +290,20 @@ async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     if let Some(owner) = store
         .users()
         .await
-        .context("讀取使用者清單失敗")?
+        .context("reading the user list failed")?
         .into_iter()
         .find(|u| u.role_code == "boss" && u.employee_id.is_none())
     {
         let manager = store
             .employee(laysi_server::demo::OWNER_EMPLOYEE_NO)
             .await
-            .context("找不到示範用的負責人員工資料")?;
+            .context("the demo owner employee record is missing")?;
         store
             .set_employee_link(owner.id, Some(manager.id))
             .await
-            .context("連結負責人帳號與員工資料失敗")?;
+            .context("linking the owner account to its employee record failed")?;
         eprintln!(
-            "已把負責人帳號 {} 連到員工 {}（{}）。",
+            "linked owner account {} to employee {} ({}).",
             owner.username,
             laysi_server::demo::OWNER_EMPLOYEE_NO,
             manager.name
@@ -310,15 +318,15 @@ async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     if store
         .user_by_username(username)
         .await
-        .context("無法檢查示範帳號")?
+        .context("cannot check the demo account")?
         .is_none()
     {
         let employee = store
             .employee(laysi_server::demo::STAFF_EMPLOYEE_NO)
             .await
-            .context("找不到示範員工，示範資料可能沒有種完")?;
+            .context("the demo employee is missing; the demo data may be incomplete")?;
         let password_hash = password::hash_password(&temporary)
-            .map_err(|error| anyhow!("無法產生 Argon2id 密碼雜湊：{error}"))?;
+            .map_err(|error| anyhow!("cannot produce the Argon2id password hash: {error}"))?;
         store
             .create_user(CreateUser {
                 username,
@@ -332,18 +340,18 @@ async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
                 created_by: "laysi-admin",
             })
             .await
-            .context("建立示範員工帳號失敗")?;
+            .context("creating the demo employee account failed")?;
         println!("{temporary}");
         eprintln!(
-            "已建立員工自助示範帳號 {username}（{}）；首次登入必須更換密碼。",
+            "created self-service demo account {username} ({}); the password must be changed at the first sign-in.",
             employee.name
         );
     } else {
-        eprintln!("帳號 {username} 已存在，未重新建立；需要新密碼請用 reset-password。");
+        eprintln!("account {username} already exists and was left alone; use reset-password for a new one.");
     }
 
-    eprintln!("已種入示範資料：{calls} 次操作，全部經由 Registry::dispatch，稽核紀錄完整。");
-    eprintln!("這是拋棄式安裝用的評估資料，不要種在正式帳務上。");
+    eprintln!("demo data seeded: {calls} operations, all through Registry::dispatch, with a complete audit trail.");
+    eprintln!("this is evaluation data for throwaway installs; do not seed it onto real books.");
     Ok(())
 }
 
@@ -352,8 +360,11 @@ fn cell(value: &str) -> String {
 }
 
 async fn list_users(store: &Store) -> anyhow::Result<()> {
-    let users = store.users().await.context("讀取使用者清單失敗")?;
-    println!("登入名稱\t角色\t狀態\t需換密碼\t員工主鍵\t顯示名稱\t電子郵件");
+    let users = store
+        .users()
+        .await
+        .context("reading the user list failed")?;
+    println!("username\trole\tstatus\tmust_change_password\temployee_id\tdisplay_name\temail");
     for user in users {
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -361,9 +372,9 @@ async fn list_users(store: &Store) -> anyhow::Result<()> {
             cell(&user.role_code),
             cell(&user.status),
             if user.must_change_password {
-                "是"
+                "yes"
             } else {
-                "否"
+                "no"
             },
             user.employee_id
                 .map(|id| id.to_string())
@@ -396,13 +407,16 @@ mod tests {
             "--employee-no",
             "E001",
         ]))
-        .expect("文件中的 create-user 形狀應可解析");
+        .expect("the documented create-user shape should parse");
         assert_eq!(cli.command, "create-user");
         assert_eq!(
-            required(&cli, "--username").expect("應有 username"),
+            required(&cli, "--username").expect("username should be present"),
             "owner"
         );
-        assert_eq!(required(&cli, "--role").expect("應有 role"), "boss");
+        assert_eq!(
+            required(&cli, "--role").expect("role should be present"),
+            "boss"
+        );
     }
 
     #[test]
@@ -423,7 +437,7 @@ mod tests {
     #[test]
     fn force_is_a_valueless_flag() {
         let cli =
-            parse_args(strings(&["seed-demo", "--force"])).expect("seed-demo --force 應可解析");
+            parse_args(strings(&["seed-demo", "--force"])).expect("seed-demo --force should parse");
         assert!(cli.options.contains_key("--force"));
         assert!(parse_args(strings(&["list-users", "--force"])).is_err());
     }

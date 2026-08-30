@@ -151,7 +151,7 @@ async fn audit_denied_token(
         )
         .await
     {
-        tracing::error!(%error, token_id = token.id, "MCP 認證拒絕的稽核寫入失敗");
+        tracing::error!(%error, token_id = token.id, "audit write for the refused MCP authentication failed");
     }
 }
 
@@ -201,7 +201,7 @@ fn auth_error(error: McpAuthError) -> Response {
             "MCP Bearer token 無效、類型不符、已撤銷或已過期",
         ),
         McpAuthError::Store(error) => {
-            tracing::error!(%error, "MCP token 查詢失敗");
+            tracing::error!(%error, "MCP token lookup failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "目前無法驗證 MCP token，請稍後再試",
@@ -234,7 +234,7 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
     // is the DNS rebinding guard the streamable HTTP spec requires, so it
     // comes first.
     if !origin_allowed(&headers, &s.mcp_allowed_origins) {
-        tracing::warn!("MCP 請求的 Origin 不在允許清單內，已拒絕");
+        tracing::warn!("MCP request refused: Origin is not on the allow list");
         return (
             StatusCode::FORBIDDEN,
             Json(json!({
@@ -276,7 +276,7 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
             )
             .await
         {
-            tracing::error!(%error, "MCP 速率限制的稽核寫入失敗");
+            tracing::error!(%error, "audit write for the MCP rate limit failed");
         }
         return rate_limited_error();
     }

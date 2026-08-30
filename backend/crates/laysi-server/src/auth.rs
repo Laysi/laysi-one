@@ -160,7 +160,7 @@ impl IntoResponse for AuthError {
                 error_response(StatusCode::UNAUTHORIZED, "unauthorized", "請先登入再繼續")
             }
             Self::Store(error) => {
-                tracing::error!(%error, "驗證 session 時查詢資料庫失敗");
+                tracing::error!(%error, "the database lookup while verifying the session failed");
                 error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "auth_store_error",
@@ -219,7 +219,7 @@ fn set_cookie(response: &mut Response, value: String) {
             response.headers_mut().append(header::SET_COOKIE, value);
         }
         Err(error) => {
-            tracing::error!(%error, "伺服器產生了無效的 session cookie");
+            tracing::error!(%error, "the server produced an invalid session cookie");
         }
     }
 }
@@ -255,7 +255,7 @@ pub(crate) async fn issue_session(
         })
         .await
         .map_err(|error| {
-            tracing::error!(%error, "建立登入 session 失敗");
+            tracing::error!(%error, "creating the login session failed");
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "session_create_error",
@@ -344,7 +344,7 @@ pub(crate) async fn write_auth_audit(
         )
         .await
     {
-        tracing::error!(%error, event, "認證稽核紀錄寫入失敗");
+        tracing::error!(%error, event, "authentication audit write failed");
     }
 }
 
@@ -362,7 +362,7 @@ async fn password_matches(password: String, encoded: String) -> Result<bool, Res
     tokio::task::spawn_blocking(move || password::verify_password(&password, &encoded))
         .await
         .map_err(|error| {
-            tracing::error!(%error, "密碼驗證工作無法完成");
+            tracing::error!(%error, "the password verification task did not finish");
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "password_worker_error",
@@ -403,7 +403,7 @@ pub async fn login(
         }
         Ok(_) => {}
         Err(error) => {
-            tracing::error!(%error, "登入前無法確認帳號數量");
+            tracing::error!(%error, "cannot count the accounts before sign-in");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "auth_store_error",
@@ -415,7 +415,7 @@ pub async fn login(
     let user = match state.store.user_by_username(input.username.trim()).await {
         Ok(user) => user,
         Err(error) => {
-            tracing::error!(%error, "登入時查詢帳號失敗");
+            tracing::error!(%error, "the account lookup during sign-in failed");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "auth_store_error",
@@ -539,7 +539,7 @@ pub async fn logout(State(state): State<Shared>, headers: HeaderMap) -> Response
     if let Some(secret) = cookie_secret(&headers) {
         let token_hash = laysi_store::token_hash(secret);
         if let Err(error) = state.store.revoke_session(&token_hash, "使用者登出").await {
-            tracing::error!(%error, "撤銷登入 session 失敗");
+            tracing::error!(%error, "revoking the login session failed");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "session_revoke_error",
@@ -596,7 +596,7 @@ async fn setup_json(state: &Shared, signed_in: bool) -> Value {
         && match state.store.bootstrap_open().await {
             Ok(open) => open,
             Err(error) => {
-                tracing::error!(%error, "查詢初始化狀態失敗");
+                tracing::error!(%error, "the bootstrap state lookup failed");
                 false
             }
         };
@@ -608,7 +608,8 @@ async fn setup_json(state: &Shared, signed_in: bool) -> Value {
 
 #[derive(Deserialize)]
 pub struct ChangePasswordInput {
-    current_password: String,
+    #[serde(default)]
+    current_password: Option<String>,
     new_password: String,
 }
 
@@ -621,23 +622,33 @@ pub async fn change_password(
         Ok(verified) => verified,
         Err(error) => return error.into_response(),
     };
-    let Some(current_hash) = verified.session.user.password_hash.clone() else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "local_password_not_set",
-            "本帳號未設定本機密碼，請洽管理員重設密碼",
-        );
-    };
-    let current_matches = match password_matches(input.current_password, current_hash).await {
-        Ok(matches) => matches,
-        Err(response) => return response,
-    };
-    if !current_matches {
-        return error_response(
-            StatusCode::UNAUTHORIZED,
-            "current_password_incorrect",
-            "目前密碼不正確",
-        );
+    // The forced first change is the step right after the login that proved the
+    // current password, so asking for it again establishes nothing the session
+    // has not already established. Every other change still has to prove it.
+    if !verified.session.user.must_change_password {
+        let Some(current_hash) = verified.session.user.password_hash.clone() else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "local_password_not_set",
+                "本帳號未設定本機密碼，請洽管理員重設密碼",
+            );
+        };
+        let current_matches = match password_matches(
+            input.current_password.unwrap_or_default(),
+            current_hash,
+        )
+        .await
+        {
+            Ok(matches) => matches,
+            Err(response) => return response,
+        };
+        if !current_matches {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "current_password_incorrect",
+                "目前密碼不正確",
+            );
+        }
     }
     if input.new_password.chars().count() < MIN_PASSWORD_CHARS {
         return error_response(
@@ -652,7 +663,7 @@ pub async fn change_password(
         match tokio::task::spawn_blocking(move || password::hash_password(&new_password)).await {
             Ok(Ok(hash)) => hash,
             Ok(Err(error)) => {
-                tracing::error!(%error, "產生新密碼雜湊失敗");
+                tracing::error!(%error, "hashing the new password failed");
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "password_hash_error",
@@ -660,7 +671,7 @@ pub async fn change_password(
                 );
             }
             Err(error) => {
-                tracing::error!(%error, "密碼雜湊工作無法完成");
+                tracing::error!(%error, "the password hashing task did not finish");
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "password_worker_error",
@@ -689,7 +700,7 @@ pub async fn change_password(
             Json(body).into_response()
         }
         Err(error) => {
-            tracing::error!(%error, "更新密碼雜湊失敗");
+            tracing::error!(%error, "updating the password hash failed");
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "password_update_error",
@@ -730,7 +741,7 @@ pub(crate) async fn user_json_with_role(state: &Shared, user: &UserAccount) -> V
     let name = match state.store.role_name(&user.role_code).await {
         Ok(name) => name,
         Err(error) => {
-            tracing::error!(%error, "查詢角色名稱失敗，改用角色代碼顯示");
+            tracing::error!(%error, "the role name lookup failed, falling back to the role code");
             None
         }
     };
@@ -761,7 +772,7 @@ pub(crate) async fn user_json_with_role(state: &Shared, user: &UserAccount) -> V
             ops
         }
         Err(error) => {
-            tracing::error!(%error, "查詢角色權限失敗，導覽將不列出任何分段");
+            tracing::error!(%error, "the role permission lookup failed, navigation will list no sections");
             Vec::new()
         }
     };

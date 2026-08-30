@@ -340,7 +340,7 @@ impl ObjectStore {
             .send()
             .await;
         if let Err(e) = outcome {
-            tracing::warn!(key, error = %e, "上傳失敗後清不掉物件，bucket 裡留下一個孤兒");
+            tracing::warn!(key, error = %e, "could not remove the object after a failed upload, an orphan is left in the bucket");
         }
     }
 
