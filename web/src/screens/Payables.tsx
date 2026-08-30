@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  businessToday,
   callOp,
   docNumberHint,
   isZero,
@@ -17,6 +18,7 @@ import {
   type TaxTriple,
 } from '../components/TaxAmountFields';
 import { DateField } from '../components/DateField';
+import { useCurrentUser } from '../auth';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -37,6 +39,7 @@ function sumCents(values: string[]): string {
 }
 
 export function Payables({ onToast, reloadKey, onChanged }: Props) {
+  const canPay = useCurrentUser().permissions.includes('create_payment_batch');
   const [data, setData] = useState<PayablesResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
@@ -46,6 +49,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
   const [vendor, setVendor] = useState('');
   const [billNo, setBillNo] = useState('');
   const [amounts, setAmounts] = useState<TaxTriple>(EMPTY_TAX_TRIPLE);
+  const [billedOn, setBilledOn] = useState('');
   const [dueOn, setDueOn] = useState('');
   const [debitAccountCode, setDebitAccountCode] = useState('');
   const [memo, setMemo] = useState('');
@@ -56,7 +60,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
     callOp('list_payables', {}, undefined, payablesResult)
       .then((d) => {
         setData(d);
-
+        setBilledOn((v) => v || businessToday());
         setPicked((p) => p.filter((no) => d.bills.some((b) => b.bill_no === no && b.state === 'open')));
       })
       .catch((e: Error) => setError(e.message));
@@ -69,10 +73,11 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
       !vendor.trim() ||
       !billNo.trim() ||
       (!amounts.total.trim() && !amounts.net.trim()) ||
+      !billedOn ||
       !dueOn ||
       !debitAccountCode
     ) {
-      onToast('供應商、帳單號碼、金額、到期日與借方科目都要填寫');
+      onToast('供應商、帳單號碼、金額、帳單日期、到期日與借方科目都要填寫');
       return;
     }
     setSavingBill(true);
@@ -82,6 +87,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
                         {
             vendor: vendor.trim(),
             bill_no: billNo.trim(),
+            billed_on: billedOn,
             ...(amounts.total.trim() ? { amount: amounts.total.trim() } : {}),
             ...(amounts.net.trim() ? { net_amount: amounts.net.trim() } : {}),
             ...(amounts.tax.trim() ? { tax_amount: amounts.tax.trim() } : {}),
@@ -98,6 +104,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
       setVendor('');
       setBillNo('');
       setAmounts(EMPTY_TAX_TRIPLE);
+      setBilledOn(businessToday());
       setDueOn('');
       setDebitAccountCode('');
       setMemo('');
@@ -112,7 +119,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
   }
 
   function toggle(b: ApBill) {
-    if (b.state !== 'open' || !b.recognised) return;
+    if (!canPay || b.state !== 'open' || !b.recognised) return;
     setPicked((p) => (p.includes(b.bill_no) ? p.filter((x) => x !== b.bill_no) : [...p, b.bill_no]));
   }
 
@@ -152,24 +159,28 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
 
       {data && (
         <>
-          <div className="card pay-bar">
-            <div>
-              <div className="pay-bar__kicker">已勾選 {chosen.length} 筆，合計</div>
-              <div className="pay-bar__total num">{money(total)}</div>
-            </div>
-            <span className="spacer" />
+          {canPay ? (
+            <div className="card pay-bar">
+              <div>
+                <div className="pay-bar__kicker">已勾選 {chosen.length} 筆，合計</div>
+                <div className="pay-bar__total num">{money(total)}</div>
+              </div>
+              <span className="spacer" />
 
-            <div className="pay-bar__note">
-              實際匯款由出納執行。
+              <div className="pay-bar__note">
+                實際匯款由出納執行。
+              </div>
+              <button
+                className={`btn${chosen.length === 0 ? ' btn--off' : ''}`}
+                disabled={chosen.length === 0 || busy}
+                onClick={() => void submit()}
+              >
+                {busy ? '送出中…' : '送出付款單'}
+              </button>
             </div>
-            <button
-              className={`btn${chosen.length === 0 ? ' btn--off' : ''}`}
-              disabled={chosen.length === 0 || busy}
-              onClick={() => void submit()}
-            >
-              {busy ? '送出中…' : '送出付款單'}
-            </button>
-          </div>
+          ) : (
+            <p className="state-note">付款單由出納送出。</p>
+          )}
 
           <p className={`recon${data.reconciled ? '' : ' recon--off'}`}>
             {data.reconciled ? (
@@ -202,7 +213,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
             <table className="table table--inset">
               <thead>
                 <tr>
-                  <th className="col-check" />
+                  {canPay && <th className="col-check" />}
                   <th>供應商</th>
                   <th>內容</th>
                   <th>付款日</th>
@@ -212,7 +223,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
               <tbody>
                 {bills.map((b) => {
                   const on = picked.includes(b.bill_no);
-                  const pickable = b.state === 'open' && b.recognised;
+                  const pickable = canPay && b.state === 'open' && b.recognised;
                   return (
                     <tr
                       key={b.bill_no}
@@ -221,9 +232,13 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
                       }`}
                       onClick={() => toggle(b)}
                     >
-                      <td>
-                        <span className={`checkbox${on ? ' checkbox--on' : ''}`}>{on ? '✓' : ''}</span>
-                      </td>
+                      {canPay && (
+                        <td>
+                          <span className={`checkbox${on ? ' checkbox--on' : ''}`}>
+                            {on ? '✓' : ''}
+                          </span>
+                        </td>
+                      )}
                       <td>
                         {b.vendor}
                         {!b.recognised && <span className="tag tag--pale">來源傳票未過帳</span>}
@@ -244,7 +259,7 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
                 })}
                 {bills.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="cell-muted">
+                    <td colSpan={canPay ? 5 : 4} className="cell-muted">
                       目前沒有待付帳款。
                       <button className="link-cell" onClick={() => setDrawer(true)}>
                         新增應付帳單
@@ -256,9 +271,11 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
             </table>
           </div>
 
-          <p className="hint">
-            送出付款單會開立一張借應付帳款、貸銀行存款的傳票，每張帳單一行。
-          </p>
+          {canPay && (
+            <p className="hint">
+              送出付款單會開立一張借應付帳款、貸銀行存款的傳票，每張帳單一行。
+            </p>
+          )}
         </>
       )}
 
@@ -297,6 +314,14 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
                   ratePercent={data?.vat.rate_percent ?? null}
                   onChange={setAmounts}
                 />
+                <label className="field">
+                  帳單日期
+                  <DateField
+                    className="input"
+                    value={billedOn}
+                    onChange={(v) => setBilledOn(v)}
+                  />
+                </label>
                 <label className="field">
                   到期日
                   <DateField
