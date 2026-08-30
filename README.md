@@ -42,6 +42,35 @@ docker compose exec api laysi-admin create-user \
 指令會把一次性的暫時密碼印在 stdout，首次登入必須更換。角色代碼有
 `admin`、`boss`、`acct`、`cashier`、`manager`、`accountant`、`staff`。
 
+## 正式部署
+
+正式環境不在機器上編譯，直接取用 GHCR 上的映像。推上 `v*` 標籤時，
+`.github/workflows/release.yml` 會建置 `api`、`web`、`backup` 三個映像推到
+`ghcr.io/laysi/laysi-one-*`，並把 `docker-compose.prod.yml` 附在 Release 上，
+版本已經釘在該次標籤。
+
+```bash
+curl -LO https://github.com/Laysi/laysi-one/releases/latest/download/docker-compose.prod.yml
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml logs secrets   # 初始化代碼
+```
+
+不需要原始碼、不需要建置環境、同樣不需要 `.env`：初始化流程與快速開始一節相同，
+代碼寫在 `setup/初始化代碼.txt`。要換版本就換一份新的 Release 檔案，或設
+`LAYSI_VERSION`。
+
+三個映像都同時出 `linux/amd64` 與 `linux/arm64`，`pull` 會自己挑，不必指定。
+
+`web` 發布 `${WEB_PORT:-8088}`、`mcp` 發布 `${MCP_PORT:-8089}`，兩者都是純 HTTP。
+網域與 TLS 由前面的反向代理負責，本套件不含。
+
+升版：
+
+```bash
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
 ## 專案結構
 
 ```

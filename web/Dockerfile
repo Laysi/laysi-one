@@ -1,4 +1,6 @@
-FROM node:26-slim AS build
+# The bundle Vite emits is the same bytes on any architecture, so this stage
+# runs natively and only the Caddy stage below is built for the target.
+FROM --platform=$BUILDPLATFORM node:26-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./

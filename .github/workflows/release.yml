@@ -1,0 +1,106 @@
+# Publishes the deployment images on a version tag.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Three images go to ghcr.io — api (the server binary, run twice as api and
+# mcp), web (Caddy plus the built bundle) and backup — each tagged with the
+# version and with `latest`, and each published for linux/amd64 and
+# linux/arm64 under one manifest, so `docker compose pull` picks the right one
+# on an Apple silicon Mac or an ARM server without being told.
+#
+# docker-compose.prod.yml is attached to the release with LAYSI_VERSION pinned
+# to that tag, so downloading it and running
+# `docker compose -f docker-compose.prod.yml up -d` deploys exactly this build.
+#
+# CI (ci.yml) still guards the code; this workflow only packages a tag that
+# already passed it.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # The build context is the repository root: the workspace manifest
+          # points license-file at ../LICENSE-BSL.txt.
+          - name: api
+            context: .
+            file: backend/Dockerfile
+          - name: web
+            context: ./web
+            file: ./web/Dockerfile
+          - name: backup
+            context: ./backup
+            file: ./backup/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only the runtime stages are emulated. backend/Dockerfile and
+      # web/Dockerfile build on the runner's own architecture and cross-compile;
+      # backup is an apk install with nothing to compile.
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercases the owner (ghcr.io rejects uppercase) and emits the
+      # org.opencontainers.image.* labels that link the package back here.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Per image, or the three would evict each other from one scope.
+          # backend/Dockerfile keeps cargo's target directory on a cache mount,
+          # which no registry cache carries, so the api build compiles from
+          # scratch every time; the cache saves the base layers only.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  release:
+    needs: images
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The attached copy pins LAYSI_VERSION to this tag. The copy in the
+      # repository keeps `latest`, which is what a git clone should follow.
+      - name: Pin the compose file to this tag
+        run: sed -i "s/\${LAYSI_VERSION:-latest}/\${LAYSI_VERSION:-${GITHUB_REF_NAME#v}}/g" docker-compose.prod.yml
+
+      # `gh` is preinstalled on the runner. Upload rather than fail when the
+      # release already exists, which is the case for a tag cut in the web UI.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" docker-compose.prod.yml --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" docker-compose.prod.yml --clobber

@@ -1,0 +1,191 @@
+# Laysi One: production deployment from pre-built images.
+#
+#   curl -LO https://github.com/Laysi/laysi-one/releases/latest/download/docker-compose.prod.yml
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml logs secrets   # the initialisation code
+#   open http://localhost:8088
+#
+# This file is self-contained: no repository checkout, no build context and no
+# .env. It is docker-compose.yml with every `build:` replaced by an image from
+# ghcr.io, published by .github/workflows/release.yml on a version tag. The
+# reasoning behind each service lives in docker-compose.yml; only what differs
+# is commented here.
+#
+# LAYSI_VERSION pins all three images to one release. The copy attached to a
+# release has the tag substituted in, so a downloaded file is reproducible;
+# the copy in the repository defaults to `latest`.
+
+services:
+  # Generates what must differ between installations, once, into a volume.
+  # Never regenerates: a new database password against an existing pgdata
+  # volume would leave a database nobody can open.
+  secrets:
+    image: alpine:3.24
+    volumes:
+      - secrets:/secrets
+      # The initialisation code has to reach a person, and the person is at a
+      # browser rather than a terminal. Compose creates ./setup when missing.
+      - ./setup:/out:Z
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        umask 022
+        gen() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48; }
+        # Alphanumeric only: the password is interpolated into a connection
+        # string, where a punctuation character breaks the string rather than
+        # becoming part of the password.
+        [ -s /secrets/pg_password ] || gen > /secrets/pg_password
+        [ -s /secrets/setup_token ] || gen > /secrets/setup_token
+        [ -s /secrets/database_url ] || printf 'postgres://%s:%s@postgres:5432/%s' \
+            "$${POSTGRES_USER:-laysi}" "$$(cat /secrets/pg_password)" "$${POSTGRES_DB:-laysi}" \
+            > /secrets/database_url
+        chmod 0444 /secrets/*
+        if [ ! -e /out/初始化代碼.txt ] && [ ! -e /out/.written ]; then
+            {
+                printf '初始化代碼：%s\n\n' "$$(cat /secrets/setup_token)"
+                printf '建立第一個帳號時輸入。建立後本檔案沒有用途，可以刪除。\n'
+            } > /out/初始化代碼.txt && touch /out/.written || \
+                echo "無法寫入 setup/，代碼只在下一行。"
+        fi
+        echo "初始化代碼：$$(cat /secrets/setup_token)"
+        echo "也寫在 setup/初始化代碼.txt。建立第一個帳號時輸入。"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laysi}
+      POSTGRES_DB: ${POSTGRES_DB:-laysi}
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laysi}
+      POSTGRES_PASSWORD_FILE: /secrets/pg_password
+      POSTGRES_DB: ${POSTGRES_DB:-laysi}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=zh-TW --locale=C.UTF-8"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laysi} -d ${POSTGRES_DB:-laysi}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rustfs:
+    image: rustfs/rustfs:1.0.0-rc.3
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
+      # The one credential that cannot come from a file. What keeps this bucket
+      # closed is that neither 9000 nor 9001 is published.
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
+    volumes:
+      - rustfsdata:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/ | grep -qE '^[2344][0-9][0-9]$$'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  api:
+    image: ghcr.io/laysi/laysi-one-api:${LAYSI_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      LAYSI_SERVE: app
+      DATABASE_URL_FILE: /secrets/database_url
+      BIND_ADDR: 0.0.0.0:8080
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
+      RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
+      # Only the Vite dev server needs CORS; here the frontend is same-origin
+      # behind web. Left empty in production rather than pointing at localhost.
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-}
+      SETUP_ALLOW_WEB: ${SETUP_ALLOW_WEB:-true}
+      SETUP_TOKEN_FILE: /secrets/setup_token
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - secrets:/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/laysi-server", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Same image as api, differing only in LAYSI_SERVE and the published port.
+  # This is the only backend port published: put TLS and a domain behind a
+  # reverse proxy of your choice. None is bundled.
+  mcp:
+    image: ghcr.io/laysi/laysi-one-api:${LAYSI_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      LAYSI_SERVE: mcp
+      DATABASE_URL_FILE: /secrets/database_url
+      BIND_ADDR: 0.0.0.0:8080
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
+      RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - secrets:/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/laysi-server", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    ports:
+      - "${MCP_PORT:-8089}:8080"
+
+  backup:
+    image: ghcr.io/laysi/laysi-one-backup:${LAYSI_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL_FILE: /secrets/database_url
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
+      RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    volumes:
+      - secrets:/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+
+  web:
+    image: ghcr.io/laysi/laysi-one-web:${LAYSI_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8088}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  rustfsdata:
+  secrets:
