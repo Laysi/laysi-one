@@ -608,7 +608,8 @@ async fn setup_json(state: &Shared, signed_in: bool) -> Value {
 
 #[derive(Deserialize)]
 pub struct ChangePasswordInput {
-    current_password: String,
+    #[serde(default)]
+    current_password: Option<String>,
     new_password: String,
 }
 
@@ -621,23 +622,33 @@ pub async fn change_password(
         Ok(verified) => verified,
         Err(error) => return error.into_response(),
     };
-    let Some(current_hash) = verified.session.user.password_hash.clone() else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "local_password_not_set",
-            "本帳號未設定本機密碼，請洽管理員重設密碼",
-        );
-    };
-    let current_matches = match password_matches(input.current_password, current_hash).await {
-        Ok(matches) => matches,
-        Err(response) => return response,
-    };
-    if !current_matches {
-        return error_response(
-            StatusCode::UNAUTHORIZED,
-            "current_password_incorrect",
-            "目前密碼不正確",
-        );
+    // The forced first change is the step right after the login that proved the
+    // current password, so asking for it again establishes nothing the session
+    // has not already established. Every other change still has to prove it.
+    if !verified.session.user.must_change_password {
+        let Some(current_hash) = verified.session.user.password_hash.clone() else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "local_password_not_set",
+                "本帳號未設定本機密碼，請洽管理員重設密碼",
+            );
+        };
+        let current_matches = match password_matches(
+            input.current_password.unwrap_or_default(),
+            current_hash,
+        )
+        .await
+        {
+            Ok(matches) => matches,
+            Err(response) => return response,
+        };
+        if !current_matches {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "current_password_incorrect",
+                "目前密碼不正確",
+            );
+        }
     }
     if input.new_password.chars().count() < MIN_PASSWORD_CHARS {
         return error_response(

@@ -52,7 +52,7 @@ export interface AuthValue {
   setup: SetupState;
   signIn: (username: string, password: string) => Promise<SessionUser>;
   signOut: () => Promise<void>;
-  changePassword: (currentPassword: string, newPassword: string) => Promise<SessionUser>;
+  changePassword: (newPassword: string) => Promise<SessionUser>;
   bootstrap: (input: BootstrapInput) => Promise<SessionUser>;
 }
 
@@ -169,11 +169,11 @@ export function useAuthSession(): AuthValue {
     }
   }, []);
 
-  const changePassword = useCallback(async (currentPassword: string, newPassword: string) => {
+  const changePassword = useCallback(async (newPassword: string) => {
     const res = await fetch('/v1/auth/change-password', {
       method: 'POST',
       headers: JSON_HEADERS,
-      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+      body: JSON.stringify({ new_password: newPassword }),
     });
     const envelope = await readEnvelope(res);
     if (!res.ok || !envelope.user) throw failure(res, envelope);

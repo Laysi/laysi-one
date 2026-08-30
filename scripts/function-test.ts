@@ -233,7 +233,7 @@ async function main() {
       const res = await fetch(`${BASE}/v1/auth/change-password`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie },
-        body: JSON.stringify({ current_password: data.temporary_password, new_password: BOSS_PASSWORD }),
+        body: JSON.stringify({ new_password: BOSS_PASSWORD }),
       });
       expect(res.status === 200, `變更密碼 HTTP ${res.status}`);
       const set = (res.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
