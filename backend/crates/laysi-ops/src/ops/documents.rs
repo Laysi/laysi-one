@@ -221,7 +221,7 @@ pub struct UploadDocumentInput {
     pub note: Option<String>,
 }
 
-/// Permitted document kinds. Kept in step with the CHECK in migrations/0007.
+/// Permitted document kinds. Kept in step with the CHECK in migrations/0001.
 const KINDS: [&str; 7] = [
     "receipt",
     "vendor_bill",

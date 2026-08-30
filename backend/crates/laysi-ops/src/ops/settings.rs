@@ -1941,7 +1941,7 @@ impl Operation for ListApprovalRules {
 mod tests {
     use super::*;
 
-    /// The display labels must cover every value permitted by migrations/0006.
+    /// The display labels must cover every value permitted by migrations/0001.
     /// A gap shows as "ungrouped" on the chart of accounts, which reads as if
     /// the account were unconfigured.
     #[test]

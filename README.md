@@ -147,7 +147,7 @@ age -d -i <保存的還原金鑰檔> laysi-<時間>.dump.age | pg_restore -d <�
 
 ### 0.1.0 開發資料庫
 
-本版本改寫了既有的 `0002`、`0004`、`0005`、`0006`、`0007` 與 `0008` migration。
+本版本把 `0002` 到 `0008` 七份 migration 合併進 `0001_initial.sql`。
 migration checksum 會驗證，套用過舊版的開發資料庫起不來，升級前請重建：
 
 ```bash

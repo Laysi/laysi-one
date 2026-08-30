@@ -64,15 +64,15 @@ scripts/dev stop       # 停掉兩個容器
 `laysi-store/build.rs` 會 `rerun-if-changed=../../migrations`——**沒有它，新增一個
 migration 檔不會觸發重編**，伺服器會帶著舊的 migration 集合啟動且不報錯。
 
-**上線前的 migration 已經全部合併進 `migrations/0001_initial.sql`**（先是 63 份，
-後來是 0002 到 0014 那 13 份），單一決定的來龍去脈在 git 歷史裡
-（`git log --diff-filter=D -- backend/migrations`）。合併只有在還沒有安裝要沿用時
-做得了；**0001 一旦被套用過就不再更動**——改一個位元組，現有的資料庫就會拒絕啟動；
-schema 要變就新增下一個編號。
+**`migrations/` 底下只有 `0001_initial.sql` 一個檔**：上線前的每一份 migration 都
+合併進去了，前後三輪，來龍去脈在 git 歷史裡
+（`git log --diff-filter=D -- backend/migrations`）。
+合併只有在還沒有安裝要沿用時做得了；**0001 一旦被套用過就不再更動**——改一個位元組，
+現有的資料庫就會拒絕啟動；schema 要變就新增 0002。
 
-**四位數編號多半指 git 歷史，不是檔案**：`migrations/` 底下只有 0001（合併後的種子）
-與其後新增的 0002、0003，所以文件裡的 0009、0044、0057 一律要用
-`git log --diff-filter=D -- backend/migrations` 去找，不要當成檔名。
+**文件不寫 migration 編號**：合併過三輪之後同一個四位數指過三份不同的 migration，
+而指出去的檔案一份都不存在。要追某個決定的來由，用 `git log -S` 找那段程式或那個
+欄位名。
 
 ## 架構：四個關鍵設計
 
@@ -99,7 +99,7 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 ### 3. 法規數值只能存在於 `reg_ruleset` 資料表
 
 **任何法規數字（費率、級距、上限、天數）都不得出現在 Rust 原始碼中。**
-它們住在 `reg_ruleset`（0009），畫面在「法規版本」，操作是 `save_regulation`／
+它們住在 `reg_ruleset`，畫面在「法規版本」，操作是 `save_regulation`／
 `delete_regulation`（`AdminOnly`）。
 
 - 計算子一律接收 `&Ruleset`，而 ruleset 是用 `as_of` 日期解析出來的。
@@ -109,17 +109,17 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 - 法規更新 = 新增一版 `effective_from` 較晚的規則，不改程式、不發版、不重啟。
   `save_regulation` 寫完就重讀重裝。
 
-****廠商送新版走 `backend/regulation-updates/`，不走 `migrations/`**：費率是資料不是
-schema，而 0001 合併過六十三份 migration，下一次合併時一則費率修正會擋在路上。
-`Store::REGULATION_UPDATES` 逐檔 `include_str!`，套用過的檔名記在 `reg_update`
-（0012），**一個資料庫只跑一次**——所以管理員刪掉的版本不會在下次啟動回來，而這正是
+**廠商送新版走 `backend/regulation-updates/`，不走 `migrations/`**：費率是資料不是
+schema，而 0001 已經合併過三輪 migration，下一次合併時一則費率修正會擋在路上。
+`Store::REGULATION_UPDATES` 逐檔 `include_str!`，套用過的檔名記在 `reg_update`，
+**一個資料庫只跑一次**——所以管理員刪掉的版本不會在下次啟動回來，而這正是
 `seed_regulations()` 那條「只在表空時寫」要守的性質。一個檔一條敘述（`sqlx::query`
 只收一條；`raw_sql` 會讓 `laysi-ops` 的 async trait 邊界證不出 `Send`），一律
 `ON CONFLICT (domain, version) DO NOTHING`，檔案由 `scripts/regulation-sql.ts` 從
-出廠 TOML 產出，不要手抄 payload。`reg_ruleset.checksum` 在 0012 刪掉：寫入時算的
+出廠 TOML 產出，不要手抄 payload。`reg_ruleset` 沒有 `checksum` 欄位：寫入時算的
 FNV-1a，讀取端從來不取它。
 
-`laysi-regulation` 仍然不碰 SQL**：伺服器啟動時把整張表交給 `install()`，
+**`laysi-regulation` 仍然不碰 SQL**：伺服器啟動時把整張表交給 `install()`，
 `resolve()` 回 `&'static Ruleset`，計算子維持同步純函式，`cargo test` 不需要資料庫。
 `backend/regulation/<年度>/<domain>.toml` 只是**出廠預設值**，`seed_regulations()`
 **只在表空的時候寫入**——逐列補寫會讓刪掉的舊版在下一次重新載入時自己回來。
@@ -220,9 +220,9 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
   「組」不是「把」。
   推論：內部識別字（操作名、資料表欄位、環境變數、`dispatch`／`Registry`
   這類函式與型別名）不出現在畫面上；`boss` 角色一律稱**負責人**，不稱「老闆」
-  （0022 把種子資料一起改了），`admin` 稱**系統管理員**。這條同樣適用於
+  （種子資料一起改了），`admin` 稱**系統管理員**。這條同樣適用於
   `permission.note`／`integration.detail`／`mcp_tool_grant.note` 這些會被畫面讀出的
-  欄位，以及權限錯誤訊息（0037）——「另由 `adjust_entry` 管理」「限系統管理員執行，
+  欄位，以及權限錯誤訊息——「另由 `adjust_entry` 管理」「限系統管理員執行，
   目前身分為「boss」」都是同一個毛病。
   **一個未決的例外**：`ops/selfservice.rs` 的 `scope_note` 與 `identity_note` 帶著
   `ctx.employee_id`、`created_by`、`claimant`、`BLAKE3`。畫面不讀這兩個欄位，它們是
@@ -287,7 +287,7 @@ RustFS 物件儲存，以及 **37 個畫面、126 個操作**，分成三個分�
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
   費用報支／預算／財務報表、文件管理／資料匯入。**不做電子發票**：開立統一發票是
-  加值中心的事（0031 拿掉了那個模組），銷項稅額改由應收單自己拆到 2211。
+  加值中心的事，銷項稅額改由應收單自己拆到 2211。
 - **系統 6 畫面**：基礎設定／帳號管理／角色核准／法規版本／MCP／安全營運。原本掛在財務樹底下，
   但那是管理這套系統，不是財務工作。**它不是第四個分頁**：前三個是每天待著的
   地方，這個是偶爾去一次的地方，所以放在左下角帳號列旁邊，角色開不起任何一個
@@ -303,15 +303,15 @@ RustFS 物件儲存，以及 **37 個畫面、126 個操作**，分成三個分�
 則多出休假申請、請款申請與打卡三個畫面。要補人資那三個之前先回去讀
 `財務系統原型.dc.html`，不要自行補兩個畫面。
 
-**公告與規章是同一張表，每一版都留著（0004、0005、0006）**：`notice` 只存身分
+**公告與規章是同一張表，每一版都留著**：`notice` 只存身分
 （`kind` 分 `announcement` 與 `policy`）、廢止日與指向現行版本的 `version_no`；標題、
 內文與生效日住在 `notice_version`，**只增不改**。改動這三者任一項就是新的一版，設定
 下架／廢止日不算。舊版任何看得到這一頁的人都讀得到——`list_notices` 與
 `list_my_notices` 帶 `id` 就回該則的每一個版本，兩邊回的是同一份。
-0004 原本的做法是改寫規章就刪掉閱讀確認，那條路把「誰在哪一天讀過哪一段文字」銷毀，
-而那是勞資雙方事後唯一拿得出來的東西；0005 因此把確認整套移除，改成保存版本。
+原本的做法是改寫規章就刪掉閱讀確認，那條路把「誰在哪一天讀過哪一段文字」銷毀，
+而那是勞資雙方事後唯一拿得出來的東西；確認因此整套移除，改成保存版本。
 
-**未讀是「看到哪一刻為止」，不是簽核（0006）**：`notice_read` 一人一列只記時刻，
+**未讀是「看到哪一刻為止」，不是簽核**：`notice_read` 一人一列只記時刻，
 沒有版本、人資那一面也讀不到它。`mark_my_notices_read` 由本人按下，對 AI 一律關閉。
 沒有紀錄＝全部未讀（新人要看得到他到職前就貼上的規章）。**不要用「最近 N 天」推估
 未讀**——那是每個人都一樣的數字，消不掉，而畫面上那個數字消不掉就等於沒有用。
@@ -324,7 +324,7 @@ RustFS 物件儲存，以及 **37 個畫面、126 個操作**，分成三個分�
 **內容一律折疊**：卡片預設只顯示標題與日期，點標題展開。員工端把**還沒看過的**那幾則
 預設展開——提醒要看的東西就是要看得到的東西。
 
-**固定資產登記得進去（0039）**：`create_fixed_asset` 同一交易寫登記簿與取得傳票
+**固定資產登記得進去**：`create_fixed_asset` 同一交易寫登記簿與取得傳票
 （借資產科目與 1284 進項稅額／貸付款科目）。成本填**未稅**金額——它同時是 1601 的
 借方與折舊基礎；營業稅走 `split_vat`，稅率不進 Rust。**每筆資產一定要指向一張傳票**
 （付款科目二選一產生新傳票，或填既有傳票號），否則登記簿會宣稱一筆總帳沒見過的
@@ -332,7 +332,7 @@ RustFS 物件儲存，以及 **37 個畫面、126 個操作**，分成三個分�
 與總帳 2101 對帳，正解是在那裡以 1601 為借方科目開單再回填傳票號。耐用年數與稅率
 一律由 `list_fixed_assets` 回的 `categories`／`vat` 帶給畫面，**前端不得自帶**。
 
-**單據編號的計數器鍵是（前綴, 期間）**（0041）。原本一個前綴一列、換期間就歸 1，
+**單據編號的計數器鍵是（前綴, 期間）**。原本一個前綴一列、換期間就歸 1，
 往前走對、往回走會發回已經用過的號碼：提列 9 月折舊後再算 8 月薪資，`V2608-001`
 撞上 UNIQUE，薪資作業直接以資料庫錯誤收場而畫面上繞不過去。
 
@@ -358,7 +358,7 @@ RustFS 物件儲存，以及 **37 個畫面、126 個操作**，分成三個分�
 散句瀏覽器與密碼管理程式都收不到。`readonly` 不用 `disabled`——`disabled` 的欄位不會
 隨表單送出，密碼管理程式就只存得到密碼、下次登入頁自動填不出帳號。
 
-**變更角色是獨立操作（0044）**：`change_user_role` 拒絕呼叫者自己的帳號（那是唯一
+**變更角色是獨立操作**：`change_user_role` 拒絕呼叫者自己的帳號（那是唯一
 會多出權限的方向；建帳號時本來就指定得了任何角色）、拒絕清空最後一個啟用中的系統
 管理員，並在同一個交易撤銷該帳號的登入 session 與本人核發的 MCP Token——`dispatch`
 每次現查角色，但 `api_token.actor_role` 是核發當下的快照，不撤等於舊角色永遠叫得動。
@@ -369,7 +369,7 @@ RustFS 物件儲存，以及 **37 個畫面、126 個操作**，分成三個分�
 少了它，薪資會分部門、CSV 匯入會分部門，只有畫面上手開的傳票分不了，於是不匯入
 CSV 的小公司永遠只看得到「未指定」那一行部門損益。
 
-**月底彙總匯款的報支單同時是一張應付帳單（0042）**：最後一關產生的傳票貸 2101，
+**月底彙總匯款的報支單同時是一張應付帳單**：最後一關產生的傳票貸 2101，
 而應付帳款頁比對 `ap_bill` 明細合計與 2101 總帳餘額，所以只動總帳的那一筆會讓兩邊
 永遠差一個報支金額，而畫面上修不掉——「新增應付帳單」一定會自己再開一張傳票，補一張
 只會把差額變成兩倍。核准因此在同一個交易裡寫 `ap_bill`，帳單號碼即報支單號、供應商記
@@ -385,26 +385,26 @@ Token。三件事要一起做——session 查詢帶 `u.status = 'active'`，但
 關掉了什麼，畫面照實說；`list_user_accounts` 另回連結員工的在職狀態，帳號管理不必跳到
 名冊才看得出這個人已經離職。
 
-**四張沒有寫入路徑的表刪掉（0059–0062）**：判準與 0058 的 `hr_flow_step` 相同——
+**四張沒有寫入路徑的表刪掉**：判準與異動單的 `hr_flow_step` 相同——
 全 codebase 沒有任何東西寫得進去的表，是穿著資料表外衣的常數。
 `attendance`（月統計）讓 `get_attendance` 每次回空清單、對帳每次回「沒有可對照的
 資料」、月份選單每次是空的，而 `run_payroll` 的加班費退路恆為 0；操作與畫面上那
 半頁一起移除，月份選單改讀 `punch_months()`。`dimension` 的專案、成本中心、付款
 條件三列後端零命中，而基礎設定對四個分類全部畫「新增值」，建出來的項目永遠沒人
-讀。`integration` 七列有四列在公告自己還沒實作（含 0031 已刪的電子發票），剩下三
+讀。`integration` 七列有四列在公告自己還沒實作（含已刪的電子發票），剩下三
 列裡 REST 與 MCP 是同義反覆，而物件儲存那列把 `live` 寫死成 `true`，實際上伺服器
 把它當成選配——那個問題「文件管理」本來就現查現答。`import_source` 六列有五列
 `supported = false`；那一欄留著（它決定檔案交給哪個解析器），列刪掉。
-`security_policy` 在 0035 刪掉最後一列「只是宣稱」之後，`enforced` 全為 true，
+`security_policy` 刪掉最後一列「只是宣稱」之後，`enforced` 全為 true，
 分辨不了任何東西，兩列搬進 `ops/security.rs` 的 `FIXED_RULES`。
 
-**「控制規則」整張卡與 `get_security_policy` 刪掉（0011）**：同一條判準往下一層。
+**「控制規則」整張卡與 `get_security_policy` 刪掉**：同一條判準往下一層。
 四列裡兩列是編進 Rust 的常數，另外兩列（AI 禁止事項、金額門檻）由 `mcp_tool_grant`
 與 `approval_rule` 現算，而改得動它們的開關在「MCP 與 AI」與「角色與核准」——那張卡
 只是把別頁的設定再念一次，念完還得附一句叫人去別頁調整，違反「看得到就要按得動」。
 `view_system` 少一個操作，側邊「安全與營運」改由 `list_api_tokens` 決定畫不畫。
 
-**異動單整套刪掉（0058）**：`hr_flow_step`／`employee_movement`／
+**異動單整套刪掉**：`hr_flow_step`／`employee_movement`／
 `employee_movement_step` 三張表與三個操作、「到離職與異動」畫面全數移除。四種異動
 裡，調薪與調部門結案時只寫一個欄位，而名冊的編輯抽屜一步就寫得到，也沒有任何機制
 要求走異動單；到職結案不寫任何東西；`hr_flow_step` 全 codebase 沒有寫入路徑，
@@ -437,7 +437,7 @@ Token。三件事要一起做——session 查詢帶 `u.status = 'active'`，但
 本地 00:00–08:00 之間會少一天，而同一頁用 `businessTime()` 印的登入、稽核、打卡
 時間全是對的。
 
-**記帳時區是 `company_setting.business_utc_offset`，不是常數（0052）**：
+**記帳時區是 `company_setting.business_utc_offset`，不是常數**：
 `business_time`／`business_today` 收 offset，行程層那一份在 `laysi_ops::business_offset()`，
 每次呼叫由 `OpCtx.offset` 帶著走，前端由 `/v1/meta` 的 `utc_offset` 拿。改時區由
 `set_company_timezone` 在同一交易改寫 `attendance_punch` 與 `punch_correction` 的 CHECK，
@@ -451,7 +451,7 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 的時間是伺服器時鐘換算 +08:00——瀏覽器時區不是 +08:00 時，打卡卡片會用一種時間往前數、
 記錄另一種時間，差幾小時就整整差幾小時，而畫面上沒有任何跡象。
 
-**角色只在帳號上，員工主檔沒有角色（0040）**：權限由 `user_account.role_code` 決定，
+**角色只在帳號上，員工主檔沒有角色**：權限由 `user_account.role_code` 決定，
 `employee.role_code` 誰也不讀，卻在名冊上跟職稱、僱用型態排成一串。整欄拿掉，不是
 換個標籤。
 
@@ -461,7 +461,7 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 掛不上的（零用金 1101、一個科目多個帳戶）由 `unattributed_cash` 另列一筆，
 **卡片合計恆等於總帳現金餘額**，那不是差額，是還沒說錢放在哪個帳戶。
 
-**一期可以計算不只一次**：0054 拿掉 `payroll_run.period` 的 UNIQUE，計薪之後才到職的
+**一期可以計算不只一次**：`payroll_run.period` 沒有 UNIQUE，計薪之後才到職的
 人由第二次計算補發，`run_payroll` 跳過已持有薪資單的人。**已過帳的期間補算是唯一的
 路**，作廢在那裡被擋下。所以 `payroll_runs` 的排序要帶 `p.id DESC`，`record_payroll_run`
 依 id 回傳它剛寫的那一列（依期別再查會拿到該期排最前面的那一列），而
@@ -469,7 +469,7 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 規則版本走 `period_runs`，期別選單逐期只列一次。作廢的按鈕要該期每一張傳票都還沒過帳
 才畫。
 
-**薪資改得回來，但只到過帳為止（0006）**：`void_payroll_run` 作廢一整期，薪資單、
+**薪資改得回來，但只到過帳為止**：`void_payroll_run` 作廢一整期，薪資單、
 扣繳紀錄與傳票在同一交易刪掉，主檔改好後重新計算。改了到職日卻無法重算就是它要解的
 問題——`run_payroll` 跳過已有薪資單的人，`discard_voucher` 又拒絕薪資產生的傳票。
 **該期任何一張傳票不是待過帳就整個拒絕**：已過帳的金額報表算過了，那裡的更正是下一期
@@ -514,28 +514,28 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 `get_insurance_summary` 本來就逐人列出三個級距，而持有它的只有負責人與會計。
 逐月薪資單仍在 `list_payslips`，仍限負責人。
 
-**員工的銀行帳戶一人多筆（0049）**：`employee.bank_account` 那一欄自由文字只裝得下
+**員工的銀行帳戶一人多筆**：`employee.bank_account` 那一欄自由文字只裝得下
 一個帳戶，而薪轉戶與收退款的帳戶常常不是同一個。`employee_bank_account` 把銀行名稱與
 帳號分成兩欄——自助頁只印銀行與尾碼，欄位分開就不必猜一個字串在哪裡結束；`is_payroll`
 以 `WHERE is_payroll` 的 partial UNIQUE 索引限制至多一筆，發薪當天只有一個去向。
 `bank_accounts` 不帶＝不動、給清單＝整份取代，與四個金額同一族的三態；至多一筆可標為
 薪轉，一筆都沒標時以第一筆為準。`account_no` 與 `id_no` 同列 `REDACTED_FIELDS`。
 
-**`employee.id_no` 完整保存（0032）**，寫入時驗一個英文字母加九碼數字的檢查碼。
+**`employee.id_no` 完整保存**，寫入時驗一個英文字母加九碼數字的檢查碼。
 勞保申報與扣繳憑單都要完整字號，擋著只會讓人資另外開一份 Excel。**遮罩是顯示層
 的事**（名冊預設 `A12*****89`，一顆鈕整批切換）；稽核紀錄由 `redact_for_audit`
 的 `REDACTED_FIELDS` 依欄位名換成「[已遮蔽]」，長度規則擋不到十個字元的字號。
 
 **文件內容在 RustFS，資料庫只留物件鍵與 BLAKE3**。先配編號、檔案進桶子成功
-才寫資料庫；取回時一定重算雜湊比對，對不上就不交出內容。**沒有 OCR**——0003 把
-`ocr_status` 整欄刪掉，它是由 MIME 型別推出來、沒有任何判斷讀它的常數。
+才寫資料庫；取回時一定重算雜湊比對，對不上就不交出內容。**沒有 OCR**——`ocr_status`
+整欄已經刪掉，它是由 MIME 型別推出來、沒有任何判斷讀它的常數。
 
 **角色權限由 `dispatch` 即時強制 deny-by-default**：每次都查
-`role_permission → permission.op_names`，不快取。矩陣之外還有**兩道風險底線**
-（0023）：`Risk::BossOnly` 綁 `boss`，管業務機密與權威（薪資明細、扣繳憑單、預算、
+`role_permission → permission.op_names`，不快取。矩陣之外還有**兩道風險底線**：
+`Risk::BossOnly` 綁 `boss`，管業務機密與權威（薪資明細、扣繳憑單、預算、
 簽核門檻）；`Risk::AdminOnly` 綁 `admin`，管系統本身（權限矩陣、API Token、公司設定、
 建立帳號）。**裝機的人不該因此看得到全公司薪資**，所以這兩件事是兩個角色。分離之所以
-成立：底線在矩陣之外，`set_role_permission` 拉不動它；而 `change_user_role`（0044）
+成立：底線在矩陣之外，`set_role_permission` 拉不動它；而 `change_user_role`
 **拒絕變更呼叫者自己的角色**，所以系統管理員仍然升不了自己。
 系統管理員另持 `manage_masters`（首次設定要建銀行帳戶與部門），該組裡的
 `set_approval_rule` 仍擋在負責人底線後。
@@ -556,18 +556,18 @@ OIDC 四項設定齊全時採 discovery + Authorization Code + PKCE，登入的�
 就不再產生**。`RUSTFS_SECRET_KEY` 是唯一的例外。政策值進 `company_setting`，
 `BIND_ADDR`／埠號是 compose 佈線、不是設定。
 
-**新政策值進 `company_setting`，不另建鍵值表**（0014 的三項：閒置逾時、一次登入最長
+**新政策值進 `company_setting`，不另建鍵值表**（目前三項：閒置逾時、一次登入最長
 時數、MCP 每分鐘呼叫上限）。沒有 `Store` 可用的路徑要照 `business_offset` 那條路：啟動
 時讀進行程內的 atomic，`update_company_setting` 寫完重新發布，不必重啟。
 **session cookie 的 `Secure` 由 `X-Forwarded-Proto` 推導，不是設定**；
 `CORS_ALLOWED_ORIGIN` 與 `MCP_ALLOWED_ORIGINS` 留在環境變數，它們不是設定。
 
-**異地備份的目的地在畫面上（0013）**：`backup_setting` 單列表，`AdminOnly` 的三個操作
+**異地備份的目的地在畫面上**：`backup_setting` 單列表，`AdminOnly` 的三個操作
 在「安全與營運」。金鑰非對稱，**私鑰由 `backup` 容器產生**（持有 `age` 的那一方），
 顯示一次，`confirm_backup_key` 之前**備份不執行**——不然第一份備份會含有開啟它自己的
 鑰匙。伺服器不引入 `age` crate。
 
-**外部登入的設定在畫面上，不在環境變數（0047）**：`oidc_setting` 單列表，安全與營運頁
+**外部登入的設定在畫面上，不在環境變數**：`oidc_setting` 單列表，安全與營運頁
 由系統管理員填；存檔推進 `updated_at`，伺服器以它當快取指紋重建 client，**不必重啟**。
 `client_secret` 不經任何操作回傳，且列在 `REDACTED_FIELDS`。建立成敗寫回
 `verified_at`／`verify_error`——discovery 是伺服器層的事，而按儲存的人要看得到能不能用；
@@ -610,14 +610,14 @@ email 的登入名稱。
 登入頁的欄位所以是 `type="text"`；`type="email"` 會讓瀏覽器擋下 `admin` 這個值。
 第二個帳號起才是人：精靈第五步用 `create_user_account` 建負責人。
 
-**`password_login_disabled`（0048）讓帳號密碼登入整個關掉，系統管理員例外**：
+**`password_login_disabled`讓帳號密碼登入整個關掉，系統管理員例外**：
 判斷點不在寫入端而在讀取端——`auth::login` 不直接讀這個欄位，而是問 `oidc::current()`
 現在建不建得出可用 client，只有真的建得出來才擋。IdP 掛掉或設定有誤，`current()` 回
 `None`，密碼登入立刻對所有人恢復，不必有人發現並手動把開關關回去；這與 `verified_at`
 是同一份自我修復機制的另一個消費端。只在密碼**已驗證正確之後**才判斷，不會變成第二個
 帳號列舉管道。登入頁對稱地收起密碼欄位，改畫一顆「系統管理員改用密碼登入」的展開連結。
 
-**解除連結與刪除是兩件事（0046）**：`unlink_user_identity` 同一交易刪 `user_identity`
+**解除連結與刪除是兩件事**：`unlink_user_identity` 同一交易刪 `user_identity`
 並撤銷未過期的 session（不撤等於沒解），拒絕 `password_hash IS NULL` 的帳號——解完
 沒有人登得進去，而畫面上補不回密碼，那條路只剩主機上的 `laysi-admin reset-password`。
 `delete_user_account` 拒絕還連著外部身分的帳號：自動建帳號讓刪除自己撤銷自己，下一次
@@ -626,7 +626,7 @@ email 的登入名稱。
 
 **第一個帳號可以在網頁上建立（`POST /v1/auth/bootstrap`，畫面 `screens/Init.tsx`）**，
 它是 `/v1/auth/*` 例外的下一層：連要被檢查的身分都還不存在，所以守門條件是安裝
-本身的狀態。保證來自 SQL 不是 Rust——0021 的 `install_bootstrap` 是單列表，
+本身的狀態。保證來自 SQL 不是 Rust——`install_bootstrap` 是單列表，
 `bootstrap_first_user` 在同一個交易裡先 `INSERT ... WHERE NOT EXISTS (帳號)
 ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事後清空
 `user_account` 也不會重新打開。角色寫死 `admin`（`laysi_ops::ROLE_ADMIN`）**不是
@@ -638,13 +638,13 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 未登入的判斷資料來自 `/v1/auth/me` 的 `setup` 欄位。**這不是 Registry 操作，
 也不是導覽畫面**，所以不計入操作與畫面的數量。
 
-**忘記密碼由 `reset_user_password`（0029）重發一組臨時密碼**，它同時撤銷該帳號所有
+**忘記密碼由 `reset_user_password`重發一組臨時密碼**，它同時撤銷該帳號所有
 登入工作階段——不撤等於沒換。兩個拒絕：`password_hash IS NULL` 的帳號只用外部身分
 登入（發密碼等於繞過 IdP 的多因素），以及自己的帳號（畫面上不出現按鈕：重設會把自己
 登出，密碼視窗會跟著消失）。真的忘了自己的密碼只能請另一個管理員重設，或用
 `laysi-admin reset-password`。
 
-**休假單收的是時段，時數與天數由後端算（0056）**：`request_leave` 只收 `from_at`／
+**休假單收的是時段，時數與天數由後端算**：`request_leave` 只收 `from_at`／
 `to_at` 兩個當地時刻，`hours` 是這段區間落在上下班時間內的部分（逐日相加，週六與
 週日不計），`days` 等於 `hours` 除以一天的上班時數，兩者在送出當下定案並存下來——
 上下班時間是單一現值、沒有生效日，事後改它不該回頭改寫已核准的單。`from_on`／`to_on`
@@ -652,7 +652,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 休假單**，畫面在那個狀態不畫表單，改請系統管理員去填；國定假日不在系統裡，跨到國定
 假日的休假會多算那一天。
 
-**計薪基準與僱用型態是兩個軸（0008）**：`employee.pay_basis` 是 `monthly` 或
+**計薪基準與僱用型態是兩個軸**：`employee.pay_basis` 是 `monthly` 或
 `hourly`，決定 `base_salary` 是月底薪還是時薪；`employment_type` 只是僱用型態，兼職
 也可以領月薪。時薪制以打卡工時計薪（`PunchDay::worked_seconds`，只採打了上下班的完整
 日），**本期沒有完整打卡就不產生薪資單**而是列進 `skipped`——一張 0 元薪資單看起來像
@@ -663,7 +663,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 時薪員工**——部分工時的特休按約定工時比例給予，而系統沒有記錄約定工時，用全時額度比
 等於全部通過。
 
-**負責人的投保分擔比率在 `owner_insurance` domain（0008）**：`employee.insured_as`
+**負責人的投保分擔比率在 `owner_insurance` domain**：`employee.insured_as`
 是 `employee` 或 `owner`，`premiums_on` 據以換掉健保與勞退兩項——健保保費全額自付
 （健保法第 27 條第 1 款第 1 目）、勞退不強制提繳（勞退條例第 7 條）。**費率不在那裡**：
 健保 5.17% 對誰都一樣，仍取自 `health_insurance`，換掉的只有分擔比率。
@@ -679,7 +679,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 產生待過帳傳票（借 6111 ／貸 2117、1102）；公司負擔的保費**不在那張傳票裡**，那條
 銜接還沒接上，畫面照實標成未接上，不逕行併進 6111。
 
-**工作日曆只存例外（0010）**：`work_calendar` 一天一列，只放與星期不同的日期——
+**工作日曆只存例外**：`work_calendar` 一天一列，只放與星期不同的日期——
 預設是週一至週五工作日、週六休息日、週日例假，而政府辦公日曆表多出來的資訊剛好就是
 國定假日、調整放假與補行上班，一年約二十列。五種日別
 （`workday`／`rest_day`／`regular_leave`／`holiday`／`natural_disaster`）由
@@ -700,19 +700,19 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 不是換個名字的國定假日。**每一種休息日仍以休息日費率計價**：第 39、40 條是按日加倍而
 不是時數級距，payload 沒有那個形狀。
 
-**加班要先申請再核准，加班費由規則庫算（0057）**：`submit_my_overtime_request` 收起訖
+**加班要先申請再核准，加班費由規則庫算**：`submit_my_overtime_request` 收起訖
 時刻，時數等於區間長度；`decide_overtime_request` 核准後，`run_payroll` 依 `overtime.toml`
 的倍數與「月薪 ÷ `monthly_hours`」算出金額，**倍數與時數上限都不在 Rust 裡**。加班費
 **不存欄位**——它是時數乘一個有生效日的倍數，存下來等於凍結一個修法有權回頭改的數字，
 與扣繳稅額同一條理由。平日申請的時段不得與上下班時間重疊（那段時間月薪已經給付），
 一日與每月上限（勞基法第 32 條）由規則庫給，超過就擋下並說出還剩多少。**沒有核准
-紀錄的加班不計入**（0059 之後也沒有第二個來源可以沿用）。**國定假日與例假不做**：
+紀錄的加班不計入**（也沒有第二個來源可以沿用）。**國定假日與例假不做**：
 那兩種日子按日加倍發給，而規則庫沒有國定假日日曆，判定不了某一天屬於哪一種；週六與
 週日一律當休息日，與休假時數的假設同一套。打卡推導出的加班仍然只有時數。
 
-**底薪 0 表示尚未設定，不是不給薪**（0028 把 `CHECK (base_salary > 0)` 放寬成
-`>= 0`）。人先存在，薪資之後才談定；該擋的地方在計薪，`run_payroll` 遇到 0 底薪回
-「尚未設定底薪」而不是發出 0 元薪資單。**`create_user_account` 一定會有一筆員工主檔，
+**底薪 0 表示尚未設定，不是不給薪**（CHECK 是 `base_salary >= 0`）。人先存在，薪資
+之後才談定；該擋的地方在計薪，`run_payroll` 遇到 0 底薪回「尚未設定底薪」而不是發出
+0 元薪資單。**`create_user_account` 一定會有一筆員工主檔，
 沒有開關**：`link_employee()` 既有編號就連結，指不到人（含留空）就建一筆只有姓名與
 到職日的員工主檔，留空時由 `next_employee_no()` 依 `E###` 配號，部門與金額留給人資。
 沒有這條，全新安裝的第一天發不出可用的帳號：建人要薪資、薪資是人資的資料、人資權限
@@ -736,7 +736,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 補登的時間欄用純文字不用 `<input type="time">`：後者的 12／24 小時制跟著瀏覽器
 語系走，也不收秒，而 `correct_punch` 收秒。
 
-**彈性工時（0019）與遲到寬限是兩件事**：寬限原諒遲到但下班時間不動，彈性把整天
+**彈性工時與遲到寬限是兩件事**：寬限原諒遲到但下班時間不動，彈性把整天
 往後移、長度不變。`expected_end()` 因此吃「幾點到」，`overtime_seconds()` 收
 `(arrived, left)`。早到不縮短當天。留空＝不採彈性工時。
 
@@ -782,7 +782,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 密碼」，於是一次成功的登入被擋在自己的畫面外。只清旗標不動雜湊：那組密碼還在，之後
 真的想用密碼登入時 `reset_user_password` 仍叫得動。
 
-**漏打卡由本人送出補登申請（0045）**：`submit_my_punch_correction` 不收任何指定
+**漏打卡由本人送出補登申請**：`submit_my_punch_correction` 不收任何指定
 對象的欄位，對象由 `ctx.employee_id` 決定；申請寫在 `punch_correction`，**核准才
 寫進 `attendance_punch`**，而且核准與寫入在同一個交易（`punch_in_tx` 是從
 `record_punch` 拆出來的寫入半段）。要不要審核是公司設定
@@ -794,7 +794,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 員工端的時間欄用 `components/TimeField`（時、分兩個下拉），不是純文字：那條「補登
 用純文字」的規則是為了 `correct_punch` 收秒，而本人憑記憶填的時間沒有秒。
 
-**每一次更正打卡都留下原時刻（0007）**：`punch_in_tx` 是 `ON CONFLICT DO UPDATE`，
+**每一次更正打卡都留下原時刻**：`punch_in_tx` 是 `ON CONFLICT DO UPDATE`，
 被改掉的那個時刻只存在於 `punch_correction.replaced_at`（`NULL` ＝該時段原本是空的）。
 人資的 `correct_punch` 因此也寫一列 `punch_correction`，寫入當下即為已核准——不寫等於
 一次更正之後，原本的時間在系統裡哪裡都不存在，而出勤紀錄要保存五年。`record_punch`
@@ -805,7 +805,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 新時刻、寫的人、日期、事由），人資與員工兩邊同一個元件。畫面取 `list_punch_corrections`
 一律 `include_done: true`，「含已決定」在前端過濾——分兩次取會讓其中一邊看到半條鏈。
 
-**打卡（0016）記錄到秒**，時數與加班以秒計算、遲到在秒的精度上比較；
+**打卡記錄到秒**，時數與加班以秒計算、遲到在秒的精度上比較；
 `correct_punch` 收 `HH:MM:SS`，只給分鐘時記為秒零。勞基法第 30 條第 7 項要求的是
 「至分鐘為止」，記到秒是超過而非符合，所以程式與畫面都不宣稱這是法規要求。
 `punch_clock` **不收時間欄位**，
@@ -827,9 +827,9 @@ CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_
 `submit_expense_claim`，就是因為後者帶 `claimant`；自助版本另外不收費用科目
 （留給會計那一關）也不收文件編號（職員沒有文件權限，填得進來的必然是別人的）。
 
-**收據是送位元組，不是指既有文件（0020）**：`attach_my_expense_receipt` 收
+**收據是送位元組，不是指既有文件**：`attach_my_expense_receipt` 收
 `file_name` ＋ `content_base64`，輸入指不到任何既有文件。`claim_no` 指的是單、
-單屬於人，所以 0020 給 `expense_claim` 加了 `employee_id` 並寫進 `WHERE`——
+單屬於人，所以 `expense_claim` 有 `employee_id` 並寫進 `WHERE`——
 `claimant` 是顯示名稱、會同名，不能當寫入側的鍵；會計代建的單那一欄是 NULL，
 自助這側看不到。只有 `submitted`／`approving` 收件。先建單再附件（`link_ref`
 要單號），所以上傳失敗時單已存在，畫面要說哪幾個沒附上並請去「我的請款」補，
@@ -839,22 +839,20 @@ CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_
 超過 512 位元組的字串改記長度。判準是值的長度不是欄位名，新的帶位元組操作自動
 涵蓋；是哪個檔案由 `document_version` 的 BLAKE3 回答（那是落地位元組的雜湊）。
 
-**用 MCP 不是主管特權（0017、0018）**：`issue_my_api_token` 不收 `actor`／
+**用 MCP 不是主管特權**：`issue_my_api_token` 不收 `actor`／
 `actor_role`，一律取自 session，所以那把 Token 能做的事與本人完全相同。所有權的鍵
 是 `api_token.owner_employee_id`（`actor` 是顯示名稱、會同名，不能當鍵），只有自助
 核發會寫入；`revoke_my_api_token` 把它寫進 `WHERE`，別人的 id 是「查無此列」。
 同一欄也是 `mcp::token_identity` 取得 `employee_id` 的唯一來源——不從姓名猜，
-老闆代發的 Token 沒有 owner，自助操作對它一律回「尚未連結員工資料」。0018 因此
-才把五個唯讀自助工具對 AI 打開；寫入類與薪資明細維持關閉。
+老闆代發的 Token 沒有 owner，自助操作對它一律回「尚未連結員工資料」。五個唯讀自助
+工具因此才對 AI 打開；寫入類與薪資明細維持關閉。
 
-**AI 工具開關改得動了（0002）**：`set_mcp_tool_grant` 是 `AdminOnly`，「MCP 與 AI」那一頁
+**AI 工具開關改得動了**：`set_mcp_tool_grant` 是 `AdminOnly`，「MCP 與 AI」那一頁
 的「AI 可用」欄對有權限的人畫成開關。它自己那一列種成關閉且**拒絕把自己打開**——開了等於
 讓管理員的 MCP Token 自行開啟其餘每一項，所以那一列不畫開關，改印「無法對 AI 開啟」。
-0002 重寫整列 `manage_access` 而不是附加一個名字，因為下面那兩個測試是把 migration 當
-文字讀的，只看得見 INSERT。
 
-**新增操作時 `mcp_tool_grant` 與 `permission` 要同步**：`laysi-ops` 有兩個測試以
+**新增操作時 `mcp_tool_grant` 與 `permission` 要同步**：`laysi-ops` 有三個測試以
 `include_str!` 讀 `0001_initial.sql` 的種子資料，比對 Registry 與 grant 的名稱集合、
-以及每個操作恰好屬於一條 permission。少一筆 grant，AI 看得到一個叫不動的工具；少一條
-permission，deny-by-default 讓那個操作永遠打不開。合併之前這兩個測試要按順序重播十幾份
-migration 才算得出最終狀態，現在種子只有一份，兩邊直接比對。
+每個操作恰好屬於一條 permission，以及每一列 grant 的風險分級與操作本身相同。少一筆
+grant，AI 看得到一個叫不動的工具；少一條 permission，deny-by-default 讓那個操作永遠
+打不開；分級寫低了，`scripts/mcp-role-matrix.ts` 的 INV1 會放過它本來要抓的那個工具。
