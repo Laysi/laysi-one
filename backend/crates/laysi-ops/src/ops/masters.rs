@@ -1180,9 +1180,7 @@ mod tests {
         // Not collected yet is not an error.
         input.id_no = String::new();
         assert!(validate_employee(&input).is_ok());
-        assert!(CreateEmployee
-            .summary()
-            .contains("登入帳號由系統管理員另行建立"));
+        assert!(CreateEmployee.summary().contains("登入帳號另行核發"));
     }
 
     #[test]
