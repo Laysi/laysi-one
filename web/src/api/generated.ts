@@ -194,7 +194,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_cash_flow', risk: 'read_only', riskLabel: '唯讀', summary: "讀現金流量表（間接法）：從本期損益調整非現金科目的變動，分營業、投資、籌資三段。期末現金會與現金科目餘額對帳。省略期間表示當月。" },
   { name: 'create_account', risk: 'needs_confirm', riskLabel: '需人確認', summary: "建立會計科目。報表分組與現金流量活動別為必填，決定科目出現在資產負債表、損益表與現金流量表的哪一段；借貸方向依類別帶入慣例值，備抵科目可覆寫。" },
   { name: 'update_account', risk: 'needs_confirm', riskLabel: '需人確認', summary: "完整更新或停用會計科目。報表分組與現金流量活動別仍必填；停用只阻止新分錄，歷史帳保留。" },
-  { name: 'create_employee', risk: 'needs_confirm', riskLabel: '需人確認', summary: "建立員工主檔。員工編號留空會自動配號；身分證字號會驗檢查碼，勞保申報與扣繳憑單都要用到；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號由系統管理員另行建立。" },
+  { name: 'create_employee', risk: 'needs_confirm', riskLabel: '需人確認', summary: "建立員工主檔。員工編號留空會自動配號；身分證字號會驗檢查碼，勞保申報與扣繳憑單都要用到；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號另行核發。" },
   { name: 'update_employee', risk: 'needs_confirm', riskLabel: '需人確認', summary: "更新員工主檔。本薪與三項投保級距沒帶就不變更，帶 0 表示尚未設定；身分證字號會驗檢查碼；狀態為待離職或已離職時必須填離職日。狀態改為已離職會在同一個交易停用該員工的登入帳號、結束登入工作階段並撤銷 MCP Token，不等離職日；唯一啟用中的系統管理員不能這樣關掉。" },
   { name: 'create_employee_login', risk: 'needs_confirm', riskLabel: '需人確認', summary: "為名冊上的人核發一般職員登入帳號，用來打卡、請假與請款。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；地址落在外部登入的網域內時改為免密碼。角色固定為一般職員，其餘角色請由系統管理員在「帳號管理」建立。" },
   { name: 'create_bank_account', risk: 'needs_confirm', riskLabel: '需人確認', summary: "建立銀行帳戶，必須綁定一個啟用中的可入帳資產科目；未綁定總帳科目時，銀行收付款與核銷無法入帳。" },
