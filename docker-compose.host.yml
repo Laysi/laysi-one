@@ -1,0 +1,38 @@
+# The overlay the one.laysi.io install runs with, on top of
+# docker-compose.prod.yml. Two things the shipped file cannot know:
+#
+# 1. cloudflared and vaultwarden already share a podman network called `proxy`
+#    on that host. Joining web and mcp to it lets the tunnel reach them by
+#    container name, so neither publishes a port on the host at all.
+#
+# 2. podman-compose translates every depends_on into `podman --requires`, which
+#    demands the dependency be *running*. The `secrets` service exits as soon as
+#    it has written the volume, so that edge blocks every other service from
+#    starting with "container state improper". Dropping it from postgres removes
+#    it transitively from the rest. The cost is start ordering on an install
+#    with empty volumes: run `podman-compose ... up -d secrets` once first.
+#
+#   podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml up -d
+
+services:
+  postgres:
+    depends_on: !override []
+
+  web:
+    container_name: laysi-web
+    ports: !override []
+    networks:
+      - default
+      - proxy
+
+  mcp:
+    container_name: laysi-mcp
+    ports: !override []
+    networks:
+      - default
+      - proxy
+
+networks:
+  default: {}
+  proxy:
+    external: true

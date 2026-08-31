@@ -1,0 +1,116 @@
+# Deploys a published version to one.laysi.io, on demand.
+#
+#   gh workflow run deploy.yml -f version=0.1.0
+#
+# The host holds no registry credentials: the runner pulls with its own
+# GITHUB_TOKEN and streams the images down the SSH connection. It reaches the
+# host through the same Cloudflare Tunnel that serves the site, so the
+# deployment publishes nothing to the internet of its own.
+#
+# release.yml builds the images; this only moves one of them onto the host.
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Image tag to deploy
+        default: latest
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEPLOY_HOST: one-ssh.laysi.io
+  DEPLOY_USER: jiazhen
+  DEPLOY_DIR: laysi-one
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+
+      - name: Configure ssh
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned rather than trusted on first use: the tunnel is reachable by
+          # anyone, and the host key is what proves this is the right machine.
+          printf '%s ssh-ed25519 %s\n' "$DEPLOY_HOST" \
+            'AAAAC3NzaC1lZDI1NTE5AAAAIDox4bXtSWIXclSaq+WyCW5beXroElVK0Lf/yWFLpsQ2' \
+            > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host $DEPLOY_HOST
+              User $DEPLOY_USER
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              ProxyCommand cloudflared access ssh --hostname %h
+          EOF
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send the images
+        env:
+          VERSION: ${{ inputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -eu
+          # ghcr rejects an uppercase path; github.repository keeps the owner's case.
+          base=$(printf 'ghcr.io/%s' "$REPOSITORY" | tr 'A-Z' 'a-z')
+          names=""
+          for n in api web backup; do
+              docker pull --platform linux/amd64 "$base-$n:$VERSION"
+              names="$names $base-$n:$VERSION"
+          done
+          # gzip -1: the tunnel is the slow half, not the compression.
+          docker save $names | gzip -1 | ssh "$DEPLOY_HOST" 'gunzip | podman load'
+
+      - name: Restart the stack
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          ssh "$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
+          scp docker-compose.prod.yml docker-compose.host.yml "$DEPLOY_HOST:$DEPLOY_DIR/"
+          # Detached: recreating containers reconfigures the podman bridge that
+          # cloudflared sits on, which resets this very SSH connection. The step
+          # below reconnects to find out how it went.
+          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && printf 'LAYSI_VERSION=%s\n' '$VERSION' > .env && \
+            setsid nohup podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml \
+            up -d --force-recreate > deploy.log 2>&1 < /dev/null & sleep 2"
+
+      - name: Wait for the stack, then check the site
+        run: |
+          set -eu
+          for _ in $(seq 60); do
+              if ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
+                  'podman ps --format "{{.Names}} {{.Status}}" | grep -q "laysi-one_api_1 Up.*healthy"'; then
+                  ok=yes
+                  break
+              fi
+              sleep 5
+          done
+          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && podman ps -a --format '{{.Names}} | {{.Status}}' | grep laysi; tail -5 deploy.log"
+          [ "${ok:-}" = yes ] || { echo "api never reported healthy"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://one.laysi.io/)
+          echo "https://one.laysi.io/ -> $code"
+          [ "$code" = 200 ]
