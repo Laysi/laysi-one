@@ -138,7 +138,7 @@ async function startServer(): Promise<ReturnType<typeof Bun.spawn>> {
       RUSTFS_ENDPOINT: process.env.RUSTFS_ENDPOINT ?? "http://localhost:9000",
       RUSTFS_ACCESS_KEY: process.env.RUSTFS_ACCESS_KEY ?? "laysi",
       RUSTFS_SECRET_KEY: process.env.RUSTFS_SECRET_KEY ?? "devsecret-change-me",
-      RUSTFS_BUCKET: `${TEST_DB}-documents`,
+      RUSTFS_BUCKET: `${TEST_DB.replaceAll("_", "-")}-documents`,
       SETUP_ALLOW_WEB: "true",
       SESSION_COOKIE_SECURE: "false",
       RUST_LOG: "warn",
@@ -746,6 +746,83 @@ async function main() {
       const history = await must("list_notices", { id: policyId });
       expectEq(history.versions.length, 4, "廢止不刪任何版本");
       return `${row.status_label}，仍存 ${history.versions.length} 版`;
+    });
+
+    console.log("\nP 員工資料");
+    let personEmpNo = "";
+    await check("P1", "生日存得進去也讀得回來", async () => {
+      const made = await must("create_employee", {
+        name: "附件測試", hired_on: "2026-02-01", birthday: "1994-05-02",
+      });
+      personEmpNo = made.employee.emp_no;
+      const list = await must("list_employees", { q: personEmpNo });
+      const row = list.employees.find((e: any) => e.emp_no === personEmpNo);
+      expectEq(row.birthday, "1994-05-02", "生日");
+      const bad = await op("update_employee", {
+        emp_no: personEmpNo, name: "附件測試", hired_on: "2026-02-01", birthday: "2026-03-01",
+      });
+      expect(!bad.ok, "到職之後的生日竟然存得進去");
+      return `${personEmpNo} · ${row.birthday}`;
+    });
+
+    await check("P2", "投保級距的建議值來自法規，不是寫死的數字", async () => {
+      const list = await must("list_employees", { q: personEmpNo });
+      const suggestion = list.insured_suggestion;
+      const regs = await must("list_regulations", { as_of: TODAY });
+      const payloadOf = (domain: string) =>
+        regs.domains
+          .find((d: any) => d.domain === domain)
+          .versions.find((v: any) => v.in_force).payload;
+      expectEq(money(suggestion.floor), money(payloadOf("minimum_wage").monthly), "下限取自最低工資");
+      expectEq(
+        money(suggestion.labor_ceiling),
+        money(payloadOf("labor_insurance").max_insured_salary),
+        "上限取自勞保投保薪資上限",
+      );
+      return `${suggestion.floor} ～ ${suggestion.labor_ceiling}`;
+    });
+
+    await check("P3", "人資核發的是一般職員帳號，同一個人不會有第二組", async () => {
+      const issued = await must("create_employee_login", {
+        emp_no: personEmpNo, email: "attach@test.local",
+      });
+      expectEq(issued.username, "attach@test.local", "登入名稱");
+      expect(issued.temporary_password, "沒有回傳臨時密碼");
+      const role = await psql(TEST_DB, "SELECT role_code FROM user_account WHERE username = 'attach@test.local'");
+      expectEq(role, "staff", "角色");
+      const again = await op("create_employee_login", {
+        emp_no: personEmpNo, email: "attach2@test.local",
+      });
+      expect(!again.ok, "竟然核發得出第二組帳號");
+      return `${issued.username} · ${issued.role_name}`;
+    });
+
+    let attachedNo = "";
+    await check("P4", "員工附件上傳後取得回來，內容雜湊相符", async () => {
+      const content = Buffer.from("身分證掃描檔測試內容").toString("base64");
+      const up = await must("upload_employee_document", {
+        emp_no: personEmpNo, file_name: "id.txt", content_base64: content, kind: "id_document",
+      });
+      attachedNo = up.document.doc_no;
+      const list = await must("list_employee_documents", { emp_no: personEmpNo });
+      expectEq(list.documents.length, 1, "附件數");
+      const got = await must("get_employee_document", {
+        emp_no: personEmpNo, doc_no: attachedNo, include_content: true,
+      });
+      expectEq(got.verified, true, "雜湊比對");
+      expectEq(got.content_base64, content, "取回的內容");
+      return `${attachedNo} · ${up.document.kind_label} · ${up.document.checksum_short}`;
+    });
+
+    await check("P5", "別人的附件編號查無此附件", async () => {
+      const other = await must("create_employee", { name: "另一位", hired_on: "2026-02-01" });
+      const r = await op("get_employee_document", {
+        emp_no: other.employee.emp_no, doc_no: attachedNo,
+      });
+      expect(!r.ok, "竟然讀得到別人的附件");
+      const mine = await must("list_employee_documents", { emp_no: other.employee.emp_no });
+      expectEq(mine.documents.length, 0, "附件數");
+      return r.error!.message;
     });
 
     console.log("\nZ 收尾");

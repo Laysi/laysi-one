@@ -32,6 +32,10 @@ pub mod ops;
 pub const ROLE_BOSS: &str = "boss";
 /// The role that owns the system: permissions, tokens, settings, logins.
 pub const ROLE_ADMIN: &str = "admin";
+/// The role every new hire starts on: their own attendance, leave and claims,
+/// and nothing else. HR issues this one; every other role is the
+/// administrator's to grant.
+pub const ROLE_STAFF: &str = "staff";
 /// Login name of the account the browser creates at first run. It stands for
 /// the installation rather than a person, so it is the one login that is not
 /// an email address and the one that keeps `email` empty: an address would
@@ -883,7 +887,10 @@ mod tests {
     /// A later migration that seeds `permission` or `mcp_tool_grant` has to be
     /// concatenated after this one: the later rows win, the same way the later
     /// statement wins in the database.
-    const SCHEMA: &str = include_str!("../../../migrations/0001_initial.sql");
+    const SCHEMA: &str = concat!(
+        include_str!("../../../migrations/0001_initial.sql"),
+        include_str!("../../../migrations/0002_employee_records.sql"),
+    );
 
     /// The rows of one multi-row INSERT, one string per row, without the
     /// leading `('`.

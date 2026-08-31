@@ -50,7 +50,7 @@ pub(crate) fn human_size(bytes: i64) -> String {
 }
 
 /// Display label for a document kind. Presentation only.
-fn kind_label(kind: &str) -> &'static str {
+pub(crate) fn kind_label(kind: &str) -> &'static str {
     match kind {
         "receipt" => "收據",
         "vendor_bill" => "供應商帳單",
@@ -58,6 +58,8 @@ fn kind_label(kind: &str) -> &'static str {
         "bank" => "銀行文件",
         "contract" => "合約",
         "closing" => "結帳文件",
+        "id_document" => "證件",
+        "personnel" => "人事文件",
         _ => "其他",
     }
 }
@@ -71,7 +73,7 @@ pub(crate) fn short_checksum(sum: &str) -> String {
     format!("{}…{}", &sum[..4], &sum[sum.len() - 4..])
 }
 
-fn document_json(d: &laysi_store::DocumentRow) -> Value {
+pub(crate) fn document_json(d: &laysi_store::DocumentRow) -> Value {
     json!({
         "doc_no": d.doc_no,
         "name": d.name,
@@ -242,6 +244,14 @@ const LINK_TYPES: [&str; 9] = [
     "period",
     "other",
 ];
+
+/// Personnel files are linked to an employee and reached only through the
+/// employee-scoped operations, so this list deliberately leaves `employee`
+/// out: `upload_document` belongs to a permission that also opens every
+/// finance document.
+pub(crate) const EMPLOYEE_LINK_TYPE: &str = "employee";
+/// Kinds an employee attachment may carry.
+pub(crate) const EMPLOYEE_KINDS: [&str; 3] = ["id_document", "contract", "personnel"];
 
 #[async_trait]
 impl Operation for UploadDocument {

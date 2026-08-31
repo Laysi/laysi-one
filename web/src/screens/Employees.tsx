@@ -1,12 +1,20 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  businessTime,
   callOp,
+  downloadFile,
+  employeeDocumentList,
   employeeList,
+  fetchedEmployeeDocument,
   isZero,
+  issuedEmployeeLogin,
   updatedEmployee,
   maskId,
   OpFailed,
   trimDecimal,
+  uploadedEmployeeDocument,
+  type DocumentRow,
+  type EmployeeDocumentList,
   type EmployeeList,
   type EmployeeRow,
 } from '../api/client';
@@ -17,6 +25,22 @@ interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
   onChanged: () => void;
+  canIssueLogin: boolean;
+  canUploadDocument: boolean;
+  canReadDocuments: boolean;
+}
+
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(new Error('無法讀取此檔案'));
+    r.onload = () => {
+      const s = String(r.result);
+      const comma = s.indexOf(',');
+      resolve(comma < 0 ? s : s.slice(comma + 1));
+    };
+    r.readAsDataURL(file);
+  });
 }
 
 const EMPLOYMENT_TYPES: { value: string; label: string }[] = [
@@ -56,6 +80,7 @@ interface FormState {
   employment_type: string;
   pay_basis: string;
   insured_as: string;
+  birthday: string;
   hired_on: string;
   left_on: string;
   status: string;
@@ -76,6 +101,7 @@ const EMPTY_FORM: FormState = {
   employment_type: 'full_time',
   pay_basis: 'monthly',
   insured_as: 'employee',
+  birthday: '',
   hired_on: '',
   left_on: '',
   status: 'active',
@@ -88,7 +114,14 @@ const EMPTY_FORM: FormState = {
   note: '',
 };
 
-export function Employees({ onToast, reloadKey, onChanged }: Props) {
+export function Employees({
+  onToast,
+  reloadKey,
+  onChanged,
+  canIssueLogin,
+  canUploadDocument,
+  canReadDocuments,
+}: Props) {
   const [data, setData] = useState<EmployeeList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
@@ -100,6 +133,18 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [missing, setMissing] = useState<string[]>([]);
+
+  const [files, setFiles] = useState<EmployeeDocumentList | null>(null);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [fetching, setFetching] = useState<string | null>(null);
+  const [kind, setKind] = useState('id_document');
+  const picker = useRef<HTMLInputElement>(null);
+
+  const [loginFor, setLoginFor] = useState<EmployeeRow | null>(null);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [issuing, setIssuing] = useState(false);
+  const [issued, setIssued] = useState<{ username: string; password: string | null } | null>(null);
 
   const load = useCallback(() => {
     setError(null);
@@ -118,10 +163,22 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
 
   useEffect(load, [load, reloadKey]);
 
+  const loadFiles = useCallback(
+    (empNo: string) => {
+      setFilesError(null);
+      setFiles(null);
+      callOp('list_employee_documents', { emp_no: empNo }, undefined, employeeDocumentList)
+        .then(setFiles)
+        .catch((e: Error) => setFilesError(e.message));
+    },
+    [],
+  );
+
   function openCreate() {
     setCurrent(null);
     setForm(EMPTY_FORM);
     setMissing([]);
+    setFiles(null);
     setDrawer('create');
   }
 
@@ -135,6 +192,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       employment_type: e.employment_type,
       pay_basis: e.pay_basis,
       insured_as: e.insured_as,
+      birthday: e.birthday ?? '',
       hired_on: e.hired_on,
       left_on: e.left_on ?? '',
       status: e.status,
@@ -154,11 +212,40 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       note: e.note,
     });
     setMissing([]);
+    setKind('id_document');
     setDrawer('edit');
+    if (canReadDocuments) loadFiles(e.emp_no);
   }
 
   function amountOf(value: string | undefined): string {
     return !value || isZero(value) ? '' : trimDecimal(value);
+  }
+
+  type InsuredKey = 'labor_insured_salary' | 'health_insured_salary' | 'pension_wage';
+
+  function insuredFrom(base: string, basis: string): Record<InsuredKey, string> | null {
+    const bounds = data?.insured_suggestion;
+    const wage = Number(base);
+    if (!bounds || basis !== 'monthly' || !Number.isFinite(wage) || wage <= 0) return null;
+    const floored = Math.max(wage, Number(bounds.floor));
+    return {
+      labor_insured_salary: String(Math.min(floored, Number(bounds.labor_ceiling))),
+      health_insured_salary: String(floored),
+      pension_wage: String(floored),
+    };
+  }
+
+  function setBaseSalary(value: string) {
+    setForm((f) => {
+      const next = { ...f, base_salary: value };
+      const now = insuredFrom(value, f.pay_basis);
+      if (!now) return next;
+      const was = insuredFrom(f.base_salary, f.pay_basis);
+      for (const key of Object.keys(now) as InsuredKey[]) {
+        if (f[key] === '' || (was && f[key] === was[key])) next[key] = now[key];
+      }
+      return next;
+    });
   }
 
   function amountFields(f: FormState): Record<string, string> {
@@ -248,6 +335,7 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         employment_type: form.employment_type,
         pay_basis: form.pay_basis,
         insured_as: form.insured_as,
+        birthday: form.birthday || null,
         hired_on: form.hired_on,
         left_on: form.left_on || null,
         status: form.status,
@@ -284,6 +372,93 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function upload(file: File) {
+    if (!current) return;
+    setUploading(file.name);
+    try {
+      const d = await callOp(
+        'upload_employee_document',
+        {
+          emp_no: current.emp_no,
+          file_name: file.name,
+          content_base64: await readAsBase64(file),
+          kind,
+        },
+        `上傳 ${current.name} 的 ${file.name}`,
+        uploadedEmployeeDocument,
+      );
+      onToast(`${d.document.doc_no} ${d.document.version_label} 已上傳`);
+      loadFiles(current.emp_no);
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setUploading(null);
+      if (picker.current) picker.current.value = '';
+    }
+  }
+
+  async function download(d: DocumentRow) {
+    if (!current) return;
+    setFetching(d.doc_no);
+    try {
+      const r = await callOp(
+        'get_employee_document',
+        { emp_no: current.emp_no, doc_no: d.doc_no, include_content: true },
+        undefined,
+        fetchedEmployeeDocument,
+      );
+      if (!r.content_base64) {
+        onToast('檔案儲存沒有回傳內容，請再試一次');
+        return;
+      }
+      downloadFile(
+        d.file_name,
+        Uint8Array.from(atob(r.content_base64), (c) => c.charCodeAt(0)),
+        d.content_type || 'application/octet-stream',
+      );
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setFetching(null);
+    }
+  }
+
+  async function copyPassword(password: string) {
+    try {
+      await navigator.clipboard.writeText(password);
+      onToast('已複製密碼');
+    } catch {
+      onToast('這個瀏覽器不允許代為複製，請手動選取密碼');
+    }
+  }
+
+  function openLogin(e: EmployeeRow) {
+    setLoginFor(e);
+    setLoginEmail('');
+    setIssued(null);
+  }
+
+  async function issueLogin() {
+    if (!loginFor) return;
+    setIssuing(true);
+    try {
+      const d = await callOp(
+        'create_employee_login',
+        { emp_no: loginFor.emp_no, email: loginEmail.trim() },
+        `為 ${loginFor.name} 核發登入帳號`,
+        issuedEmployeeLogin,
+      );
+      setIssued({ username: d.username, password: d.temporary_password });
+      onToast(`${d.employee_name} 的登入帳號已建立，角色為${d.role_name}`);
+      onChanged();
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setIssuing(false);
     }
   }
 
@@ -381,6 +556,11 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                       </td>
                       <td className="num cell-nowrap">
                         {e.hired_on}
+                        {e.birthday && (
+                          <span className="cell-hint cell-hint--block num">
+                            生日 {e.birthday}
+                          </span>
+                        )}
                         {e.left_on && (
                           <span className="cell-hint cell-hint--block num">
                             離職 {e.left_on}
@@ -406,7 +586,15 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                         )}
                         {e.note && <span className="cell-hint cell-hint--block">{e.note}</span>}
                       </td>
-                      <td className="align-right">
+                      <td className="align-right cell-nowrap">
+                        {canIssueLogin && !e.has_login && e.status !== 'left' && (
+                          <button
+                            className="btn btn--compact btn--secondary"
+                            onClick={() => openLogin(e)}
+                          >
+                            核發帳號
+                          </button>
+                        )}
                         <button className="btn btn--compact btn--secondary" onClick={() => openEdit(e)}>
                           編輯
                         </button>
@@ -430,13 +618,99 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
         </>
       )}
 
+      {loginFor && (
+        <div className="overlay overlay--center">
+          <div className="modal">
+            <div className="drawer__head">
+              <div>
+                <div className="drawer__title">
+                  {issued ? '初始密碼' : `為 ${loginFor.name} 核發登入帳號`}
+                </div>
+                <div className="drawer__subtitle">
+                  {issued
+                    ? `${loginFor.emp_no} ${loginFor.name} · ${issued.username}`
+                    : '角色為一般職員，可以打卡、請假與請款。其他角色請洽系統管理員。'}
+                </div>
+              </div>
+            </div>
+
+            <div className="drawer__body">
+              {issued ? (
+                issued.password ? (
+                  <>
+                    <code className="secret-card__value secret-card__value--lead num">
+                      {issued.password}
+                    </code>
+                    <p className="form-warn">
+                      關掉這個視窗後無法再查看，請立即交付{loginFor.name}本人。
+                    </p>
+                  </>
+                ) : (
+                  <p className="section-note">
+                    本帳號改用外部登入，沒有密碼。請{loginFor.name}以{' '}
+                    <span className="num">{issued.username}</span> 登入。
+                  </p>
+                )
+              ) : (
+                <label className="field field--full">
+                  電子郵件
+                  <input
+                    className="input"
+                    type="text"
+                    autoComplete="off"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                  />
+                  <span className="field__hint">這個地址就是登入名稱，建立後不可變更。</span>
+                </label>
+              )}
+            </div>
+
+            <div className="drawer__foot">
+              {issued ? (
+                <>
+                  {issued.password && (
+                    <button
+                      className="btn btn--secondary"
+                      onClick={() => void copyPassword(issued.password ?? '')}
+                    >
+                      複製密碼
+                    </button>
+                  )}
+                  <span className="spacer" />
+                  <button className="btn" onClick={() => setLoginFor(null)}>
+                    我已交付
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button className="btn btn--secondary" onClick={() => setLoginFor(null)}>
+                    取消
+                  </button>
+                  <span className="spacer" />
+                  <button
+                    className={`btn${issuing ? ' btn--off' : ''}`}
+                    disabled={issuing || !loginEmail.trim()}
+                    onClick={() => void issueLogin()}
+                  >
+                    {issuing ? '建立中…' : '建立帳號'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {drawer && (
         <div className="overlay" onClick={() => setDrawer(null)}>
           <aside className="drawer" onClick={(e) => e.stopPropagation()}>
             <div className="drawer__head">
               <div>
                 <div className="drawer__title">{drawer === 'edit' ? `編輯 ${form.emp_no}` : '新增員工'}</div>
-                <div className="drawer__subtitle">登入帳號另在「帳號管理」建立</div>
+                <div className="drawer__subtitle">
+                  {canIssueLogin ? '登入帳號在名冊上核發' : '登入帳號由系統管理員建立'}
+                </div>
               </div>
               <button className="btn btn--close" onClick={() => setDrawer(null)} aria-label="關閉">
                 ×
@@ -538,6 +812,15 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                 </label>
 
                 <label className="field">
+                  生日
+                  <DateField
+                    className="input"
+                    value={form.birthday}
+                    onChange={(v) => setField('birthday', v)}
+                  />
+                  <span className="field__hint">勞保申報與扣繳憑單要用；還沒收到可以留空。</span>
+                </label>
+                <label className="field">
                   到職日
                   <DateField
                     className="input"
@@ -599,8 +882,11 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                     placeholder={
                       drawer === 'edit' ? '尚未設定' : form.pay_basis === 'hourly' ? '200' : '38000'
                     }
-                    onChange={(e) => setField('base_salary', e.target.value)}
+                    onChange={(e) => setBaseSalary(e.target.value)}
                   />
+                  {data && insuredFrom(form.base_salary, form.pay_basis) && (
+                    <span className="field__hint">{data.insured_suggestion.note}</span>
+                  )}
                 </label>
                 <label className="field">
                   勞保投保薪資
@@ -688,6 +974,71 @@ export function Employees({ onToast, reloadKey, onChanged }: Props) {
                       </button>
                     </div>
                   ))}
+                </>
+              )}
+
+              {drawer === 'edit' && canReadDocuments && (
+                <>
+                  <div className="toolbar">
+                    <h3 className="section-title">附件</h3>
+                    <span className="spacer" />
+                    {canUploadDocument && files && (
+                      <>
+                        <select
+                          className="input"
+                          value={kind}
+                          onChange={(e) => setKind(e.target.value)}
+                        >
+                          {files.kinds.map((k) => (
+                            <option key={k.kind} value={k.kind}>
+                              {k.label}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          ref={picker}
+                          type="file"
+                          className="visually-hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) void upload(f);
+                          }}
+                        />
+                        <button
+                          className="btn btn--compact"
+                          disabled={uploading !== null}
+                          onClick={() => picker.current?.click()}
+                        >
+                          {uploading ? '上傳中…' : '＋ 上傳附件'}
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  {filesError && <p className="state-note state-note--error">{filesError}</p>}
+                  {!files && !filesError && <p className="section-note">讀取中…</p>}
+                  {files && files.documents.length === 0 && (
+                    <p className="section-note">尚無附件。</p>
+                  )}
+                  {files &&
+                    files.documents.map((d) => (
+                      <div className="entry-row" key={d.doc_no}>
+                        <button
+                          className="link-cell"
+                          disabled={fetching === d.doc_no}
+                          onClick={() => void download(d)}
+                        >
+                          {d.file_name}
+                        </button>
+                        <span className="cell-hint cell-hint--block">
+                          <span className="num">{d.doc_no}</span> · {d.kind_label} ·{' '}
+                          <span className="num">{d.size_label}</span> · {d.uploaded_by} ·{' '}
+                          <span className="num">{businessTime(d.uploaded_at)}</span>
+                          {d.versions > 1 && ` · 共 ${d.versions} 版`}
+                          {fetching === d.doc_no && ' · 取回中…'}
+                        </span>
+                      </div>
+                    ))}
                 </>
               )}
 

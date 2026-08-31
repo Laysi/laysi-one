@@ -918,10 +918,10 @@ Token 還能不能用，一個只是提醒該換了。撤銷與過期的原因�
 
 ## 資料庫 schema（PostgreSQL 18）
 
-Schema 是**一個檔案**：`backend/migrations/0001_initial.sql`，以 `sqlx::migrate!()`
-在啟動時執行。上線前的 migration 已經三度合併進去，因為當時還沒有任何一個安裝需要
-沿用，而新裝的人讀一份 SQL 比讀一串差異合理。合併只在還沒有安裝要沿用時做得了；
-有了第一個正式安裝，這條路就關上。
+Schema 的起點是**一個檔案**：`backend/migrations/0001_initial.sql`，以
+`sqlx::migrate!()` 在啟動時執行。上線前的 migration 已經三度合併進去，因為當時還沒有
+任何一個安裝需要沿用，而新裝的人讀一份 SQL 比讀一串差異合理。合併只在還沒有安裝要
+沿用時做得了；有了第一個正式安裝，這條路就關上，之後每一次變更都是新的一份檔案。
 
 **本文不寫 migration 編號。** 合併過三輪之後，同一個四位數指過三份不同的 migration，
 而指出去的檔案一份都不存在。會影響跨層契約的結論寫在本文，不靠那些檔案保存；單一
@@ -935,9 +935,12 @@ Schema 是**一個檔案**：`backend/migrations/0001_initial.sql`，以 `sqlx::
 `migration 3 was previously applied but has been modified`。修法是補跑漏掉的那段、
 再把 `_sqlx_migrations.checksum`（檔案的 SHA-384）對齊現在的檔案，不是改檔案。
 
-**種子資料的最終狀態就是 0001 的 INSERT**：`laysi-ops` 三個比對測試以 `include_str!`
-讀這一份檔案（`SCHEMA`），算出 permission 與 mcp_tool_grant 的名稱集合再與 Registry
-對照，並比對每一列 grant 的風險分級。分級也要比，因為 `scripts/mcp-role-matrix.ts` 的
+**種子資料的最終狀態是每一份 migration 的 INSERT 疊起來**：`laysi-ops` 三個比對測試
+以 `include_str!` 讀這些檔案（`SCHEMA` 是它們的串接），算出 permission 與
+mcp_tool_grant 的名稱集合再與 Registry 對照，並比對每一列 grant 的風險分級。後面的
+檔案要接在前面的後面，因為測試把後出現的資料列當成勝出的那一列，與資料庫裡後一道
+敘述蓋掉前一道相同；動到 `permission.op_names` 的 migration 因此整列重寫
+（`ON CONFLICT (code) DO UPDATE`），不用 `array_append`——字串比對讀不出後者。分級也要比，因為 `scripts/mcp-role-matrix.ts` 的
 INV1 讀的是這一欄：寫低了就會放過它本來要抓的那個工具。**下一份 migration 若改動
 permission 或 mcp_tool_grant，要把它接到 `SCHEMA` 後面**：那三個測試把 migration 當
 文字讀、只看得見 INSERT，所以改動要重寫整列而不是附加一個名字，而新增的操作少了種子
@@ -1280,8 +1283,8 @@ impl Registry {
 |---|---|---|
 | `create_account` | NeedsConfirm | `report_group` 與 `cash_flow_section` 都必填；損益科目明確送 `null`。`normal_side` 依 kind 採慣例值，但可覆寫 |
 | `update_account` | NeedsConfirm | 完整更新或以 `is_active = false` 停用；不提供刪除，既有分錄仍保留 |
-| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 一次收整份清單；`pay_basis`（`monthly`／`hourly`）與 `insured_as`（`employee`／`owner`）不帶時取前者；不建立登入帳號 |
-| `update_employee` | NeedsConfirm | 除四個金額外完整更新；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 不帶＝不動、給清單＝整份取代；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
+| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 一次收整份清單；`pay_basis`（`monthly`／`hourly`）與 `insured_as`（`employee`／`owner`）不帶時取前者；`birthday` 必須早於到職日；不建立登入帳號（另有 `create_employee_login`） |
+| `update_employee` | NeedsConfirm | 除四個金額外完整更新（`birthday` 也是，不帶＝清空）；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 不帶＝不動、給清單＝整份取代；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
 | `create_bank_account` | NeedsConfirm | `gl_code` 必須指向啟用中的可入帳資產科目 |
 | `create_dimension_value` | NeedsConfirm | 只在既有 `dimension` 下新增項目；不建立分類。`code` 留空時取 `label` |
 | `update_dimension_value` | NeedsConfirm | 依 `(dimension_code, code)` 改名或切換 `active`；兩個欄位都不帶就回「沒有變更」。改名只在 `code` 仍等於舊 `label` 時一起改寫 `code`——CSV 匯入以 `code` 比對且會把可用的代碼列給使用者看，另外指定過的 `code` 是別人的鍵，不動 |
@@ -1451,7 +1454,11 @@ column，因此不可能與上面的區間不一致。
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦與人資／財務銜接狀態 |
-| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉；**不含系統角色**；MCP 通道另行遮蔽（見下） |
+| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
+| `list_employee_documents` | ReadOnly | `{ emp_no }` | 該員工的附件清單與可用類型；內容要另外取回 |
+| `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
+| `get_employee_document` | ReadOnly | `{ emp_no, doc_no, version?, include_content? }` | 重算雜湊比對；不屬於這位員工的編號回查無此附件 |
+| `create_employee_login` | NeedsConfirm | `{ emp_no, email }` | 角色固定一般職員；`{ username, role_name, temporary_password }` |
 | `list_leave_requests` | ReadOnly | `{ include_done?, limit? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度 |
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
@@ -1560,6 +1567,37 @@ ruleset 的上限比較。
 時因此把四個金額與銀行帳戶整個拿掉，身分證字號改回遮罩過的形狀——遮罩而不是刪掉，
 是為了名冊仍答得出某人有沒有登錄字號。這條分流不需要新的模型或新的操作：`Channel`
 本來就是「同一個能力，人與 AI 兩種答案」的分界。
+
+**員工附件走三個自己的操作，不是把 `manage_documents` 給人資**：證件掃描檔、簽好的
+合約與人事文件用的是同兩張表、同一個桶子與同一次 BLAKE3 比對，差別只在入口。
+`manage_documents` 一併打開全公司的收據、供應商帳單與銀行文件，那不是人資該持有的
+集合；而一個操作只能屬於一條 permission，所以「同樣三個操作、換一組權限」這條路不
+存在。`list_employee_documents`／`upload_employee_document`／`get_employee_document`
+因此一律收員工編號、不收自由的文件編號，並在讀取時比對 `link_type = 'employee'` 與
+`link_ref`——**別人的附件編號回的是查無此附件，不是拒絕**，拒絕會確認那個編號存在
+而且說出它屬於誰。同一條檢查也擋住用 `doc_no` 往別人的附件加一版。
+
+**人資核發得了帳號，但只發一般職員**：新人要打卡、請假、報帳就得有登入，而
+`create_user_account` 是 `AdminOnly`，於是每收一個人都要等系統管理員。放寬的方式不是
+把那個操作交出去——它收 `role_code`，交出去等於人資自己指派得了任何角色。
+`create_employee_login` 把角色寫死成 `staff`、只認名冊上既有的員工編號、已經有帳號的
+人一律拒絕，其餘每一項檢查（地址格式、登入名稱有沒有被佔用、密碼登入停用時的例外、
+免密碼帳號的三個前提）與 `create_user_account` 共用 `check_new_login`／`write_login`，
+所以兩條路不會長出兩套規則。檢查與寫入分成兩個函式，是因為 `create_user_account` 在
+兩者之間還要建員工主檔，先寫再被拒會留下一筆沒人要的名冊資料。
+**要不要密碼由伺服器判斷**：外部登入開著、設為自動建帳號、地址落在允許的網域內——三個
+條件齊了就發免密碼帳號，否則給臨時密碼。人資不必知道這條規則，也不該替它做決定。
+`has_login` 因此進了名冊的回應：畫面靠它決定畫不畫那顆按鈕，而 `list_user_accounts`
+是 `AdminOnly`，人資問不到。
+
+**投保級距是建議值，不是分級表**：抽屜在填入本薪時把三個投保欄位一起帶上，帶的是
+`minimum_wage.monthly` 與 `labor_insurance.max_insured_salary` 夾出來的本薪——那是規則庫
+現在僅有的兩個界線。**沒有把整份投保薪資分級表搬進來**：那是三份逐年更動的表格
+（勞保投保薪資、健保投保金額、勞退月提繳工資），抄一份進來就是抄一份沒人看得出錯在哪
+的數字，而抄錯的代價要到申報那天才出現。所以 `list_employees` 回的是
+`insured_suggestion`（`floor`／`labor_ceiling` 加一句說明），畫面照實說「尚未對照分級表，
+請依申報值調整」。**時薪制不帶入**：時薪換算成月投保薪資要知道約定工時，而系統沒有記錄
+它。帶入只覆寫空的欄位、或還停在上一次建議值的欄位，人資改過的數字不會被下一次輸入蓋掉。
 
 ### 公告與規章
 

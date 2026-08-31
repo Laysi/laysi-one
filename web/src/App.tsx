@@ -524,7 +524,14 @@ function Workspace() {
 
               {screen === 'hrdash' && <HrDashboard onGo={go} reloadKey={reloadKey} />}
               {screen === 'hr' && (
-                <Employees onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
+                <Employees
+                  onToast={showToast}
+                  reloadKey={reloadKey}
+                  onChanged={reload}
+                  canIssueLogin={permissions.includes('create_employee_login')}
+                  canUploadDocument={permissions.includes('upload_employee_document')}
+                  canReadDocuments={permissions.includes('list_employee_documents')}
+                />
               )}
               {screen === 'att' && (
                 <Attendance onToast={showToast} reloadKey={reloadKey} onChanged={reload} />

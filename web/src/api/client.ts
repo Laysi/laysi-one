@@ -1512,9 +1512,11 @@ export const employeeRow = z.object({
   pay_basis_label: z.string(),
   insured_as: z.string(),
   insured_as_label: z.string(),
+  birthday: z.string().nullable(),
   hired_on: z.string(),
   left_on: z.string().nullable(),
   status: z.string(),
+  has_login: z.boolean(),
   status_label: z.string(),
   service_months: z.number(),
   service_label: z.string(),
@@ -1541,9 +1543,50 @@ export const employeeList = z.object({
   avg_service_months: z.number(),
   avg_service_label: z.string(),
   annual_leave_ruleset: rulesetRef,
+  insured_suggestion: z.object({
+    floor: z.string(),
+    labor_ceiling: z.string(),
+    note: z.string(),
+  }),
   salary_note: z.string(),
 });
 export type EmployeeList = z.infer<typeof employeeList>;
+
+export const employeeDocumentList = z.object({
+  emp_no: z.string(),
+  employee_name: z.string(),
+  documents: z.array(documentRow),
+  kinds: z.array(z.object({ kind: z.string(), label: z.string() })),
+  max_object_bytes: z.number(),
+});
+export type EmployeeDocumentList = z.infer<typeof employeeDocumentList>;
+
+export const uploadedEmployeeDocument = z.object({
+  emp_no: z.string(),
+  document: documentRow,
+  new_version: z.boolean(),
+});
+export type UploadedEmployeeDocument = z.infer<typeof uploadedEmployeeDocument>;
+
+export const fetchedEmployeeDocument = z.object({
+  emp_no: z.string(),
+  document: documentRow,
+  verified: z.boolean(),
+  checksum_recomputed: z.string(),
+  byte_size_actual: z.number(),
+  content_base64: z.string().nullable(),
+});
+export type FetchedEmployeeDocument = z.infer<typeof fetchedEmployeeDocument>;
+
+export const issuedEmployeeLogin = z.object({
+  employee_no: z.string(),
+  employee_name: z.string(),
+  username: z.string(),
+  role_name: z.string(),
+  temporary_password: z.string().nullable(),
+  must_change_password: z.boolean(),
+});
+export type IssuedEmployeeLogin = z.infer<typeof issuedEmployeeLogin>;
 
 export const closedAccess = z.object({
   logins: z.array(z.string()),

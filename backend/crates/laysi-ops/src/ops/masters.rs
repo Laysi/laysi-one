@@ -20,9 +20,12 @@
 //! Full national ID numbers are never stored, only masked values. The three
 //! insured brackets are facts filed with the authorities and are kept as
 //! entered, never validated or corrected against a ruleset. Creating an
-//! employee does not create a `user_account`; logins stay with `laysi-admin`.
+//! employee does not create a `user_account`; `create_employee_login` does,
+//! and only for the ordinary staff role: choosing anyone's role is a system
+//! control and stays with the administrator.
 
 use crate::ops::employees::{BASIS_HOURLY, BASIS_MONTHLY, INSURED_EMPLOYEE, INSURED_OWNER};
+use crate::ops::settings::{check_new_login, external_login_resolves, write_login, NewLogin};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -43,6 +46,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(UpdateAccount),
         Box::new(CreateEmployee),
         Box::new(UpdateEmployee),
+        Box::new(CreateEmployeeLogin),
         Box::new(CreateBankAccount),
         Box::new(CreateDimensionValue),
         Box::new(UpdateDimensionValue),
@@ -342,6 +346,9 @@ pub struct EmployeeInput {
     /// full and has no pension contributed for them.
     #[serde(default = "default_insured_employee")]
     pub insured_as: String,
+    /// Date of birth. Overwritten on every save; omit it to clear it.
+    #[serde(default)]
+    pub birthday: Option<NaiveDate>,
     /// Hire date.
     pub hired_on: NaiveDate,
     /// Planned or actual leaving date. Required when status is leaving or left.
@@ -483,6 +490,12 @@ fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
     {
         return Err(OpError::BadInput("離職日必須在到職日當天或之後".into()));
     }
+    if input
+        .birthday
+        .is_some_and(|birthday| birthday >= input.hired_on)
+    {
+        return Err(OpError::BadInput("生日必須早於到職日".into()));
+    }
     // Zero means the amount has not been agreed yet. Payroll refuses such an
     // employee rather than paying nothing, so the roster does not have to hold
     // a number before there is one.
@@ -573,6 +586,7 @@ fn employee_write<'a>(
         employment_type: input.employment_type.as_str(),
         pay_basis: input.pay_basis.as_str(),
         insured_as: input.insured_as.as_str(),
+        birthday: input.birthday,
         hired_on: input.hired_on,
         left_on: input.left_on,
         status: input.status.as_str(),
@@ -599,7 +613,7 @@ impl Operation for CreateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "建立員工主檔。員工編號留空會自動配號；身分證字號會驗檢查碼，勞保申報與扣繳憑單都要用到；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號由系統管理員另行建立。"
+        "建立員工主檔。員工編號留空會自動配號；身分證字號會驗檢查碼，勞保申報與扣繳憑單都要用到；三個投保級距是向主管機關申報的事實，照輸入保存。登入帳號另行核發。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -627,7 +641,7 @@ impl Operation for CreateEmployee {
             json!({
                 "employee": employee,
                 "login_account_created": false,
-                "login_note": "登入帳號由系統管理員另行建立。",
+                "login_note": "登入帳號請在名冊上核發。",
             }),
             summary,
         ))
@@ -685,6 +699,89 @@ impl Operation for UpdateEmployee {
                 // What ending the employment shut off, so the screen can say it
                 // rather than only reporting a saved record.
                 "closed_access": closed,
+            }),
+            summary,
+        ))
+    }
+}
+
+struct CreateEmployeeLogin;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateEmployeeLoginInput {
+    /// Employee number from the roster. The person must already be on it.
+    pub emp_no: String,
+    /// Work address. It is also the login name.
+    pub email: String,
+}
+
+#[async_trait]
+impl Operation for CreateEmployeeLogin {
+    fn name(&self) -> &'static str {
+        "create_employee_login"
+    }
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+    fn summary(&self) -> &'static str {
+        "為名冊上的人核發一般職員登入帳號，用來打卡、請假與請款。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；地址落在外部登入的網域內時改為免密碼。角色固定為一般職員，其餘角色請由系統管理員在「帳號管理」建立。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<CreateEmployeeLoginInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: CreateEmployeeLoginInput = parse(input)?;
+        let employee = ctx.store.employee(i.emp_no.trim()).await?;
+        if employee.status == "left" {
+            return Err(OpError::BadInput(format!(
+                "{} {} 已離職，不核發登入帳號",
+                employee.emp_no, employee.name
+            )));
+        }
+        // `has_login` is the same field the roster draws this button from, so
+        // the screen and the refusal cannot disagree.
+        if employee.has_login {
+            return Err(OpError::BadInput(format!(
+                "{} {} 已經有登入帳號，要改地址或停用請洽系統管理員",
+                employee.emp_no, employee.name
+            )));
+        }
+
+        let email = i.email.trim().to_ascii_lowercase();
+        // Which way in this account gets is not HR's decision: with the
+        // provider set up and the address inside its domain, a password would
+        // be a second credential nobody uses.
+        let login = NewLogin {
+            email: &email,
+            display_name: employee.name.trim(),
+            role_code: crate::ROLE_STAFF,
+            employee_id: employee.id,
+            external_login_only: external_login_resolves(ctx, &email).await?,
+        };
+        let role_name = check_new_login(ctx, &login).await?;
+        let issued = write_login(ctx, &login, role_name).await?;
+
+        let summary = format!(
+            "核發登入帳號 · {} {}（{}）{}",
+            employee.emp_no,
+            employee.name,
+            issued.user.username,
+            if issued.temporary_password.is_some() {
+                "，臨時密碼僅顯示一次"
+            } else {
+                "，外部登入"
+            }
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "employee_no": employee.emp_no,
+                "employee_name": employee.name,
+                "username": issued.user.username,
+                "role_name": issued.role_name,
+                // Shown once and never retrievable: only the hash is stored.
+                "temporary_password": issued.temporary_password,
+                "must_change_password": issued.temporary_password.is_some(),
             }),
             summary,
         ))
@@ -1027,6 +1124,7 @@ mod tests {
             employment_type: "full_time".into(),
             pay_basis: BASIS_MONTHLY.into(),
             insured_as: INSURED_EMPLOYEE.into(),
+            birthday: None,
             hired_on: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
             left_on: None,
             status: "active".into(),

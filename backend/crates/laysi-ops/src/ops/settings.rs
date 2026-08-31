@@ -772,6 +772,7 @@ async fn link_employee(
             employment_type: "full_time",
             pay_basis: BASIS_MONTHLY,
             insured_as: INSURED_EMPLOYEE,
+            birthday: None,
             hired_on: ctx.today,
             left_on: None,
             status: "active",
@@ -807,6 +808,150 @@ fn valid_login_email(value: &str) -> bool {
         return false;
     };
     !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+}
+
+/// What one new login needs, once the caller has settled who it belongs to.
+pub(crate) struct NewLogin<'a> {
+    /// Already trimmed and lowercased; it is also the login name.
+    pub email: &'a str,
+    pub display_name: &'a str,
+    pub role_code: &'a str,
+    pub employee_id: i32,
+    /// No password at all, reachable only through the identity provider.
+    pub external_login_only: bool,
+}
+
+/// The account as it was created, with the one-time password when there is one.
+pub(crate) struct IssuedLogin {
+    pub user: laysi_store::UserAccount,
+    pub role_name: String,
+    pub temporary_password: Option<String>,
+}
+
+/// Whether a first sign-in from the provider would resolve onto this address
+/// rather than build a second account.
+///
+/// The three conditions are what makes a passwordless account reachable, so
+/// the caller that offers one and the caller that guards against one ask the
+/// same question.
+pub(crate) async fn external_login_resolves(ctx: &OpCtx, email: &str) -> Result<bool, OpError> {
+    let oidc = ctx.store.oidc_setting().await?;
+    let domain = oidc.allowed_domain.trim().to_ascii_lowercase();
+    Ok(oidc.enabled
+        && !oidc.provision_role.trim().is_empty()
+        && !domain.is_empty()
+        && email.ends_with(&format!("@{domain}")))
+}
+
+/// Everything an entry point owes before it writes anything: the address is
+/// one somebody can be reached at, the role exists, the name is free, and the
+/// account will have a way in once it exists.
+///
+/// Separate from [`write_login`] because a caller may have to create a roster
+/// entry in between, and a refusal after that would leave an employee record
+/// nobody asked for.
+pub(crate) async fn check_new_login(ctx: &OpCtx, req: &NewLogin<'_>) -> Result<String, OpError> {
+    if !valid_login_email(req.email) {
+        return Err(OpError::BadInput("電子郵件格式不正確".into()));
+    }
+    if req.display_name.is_empty() {
+        return Err(OpError::BadInput("顯示名稱為必填".into()));
+    }
+    if req.display_name.chars().count() > DISPLAY_NAME_MAX_CHARS {
+        return Err(OpError::BadInput("顯示名稱不可超過 64 個字元".into()));
+    }
+
+    let roles = ctx.store.roles().await?;
+    let Some(role) = roles.iter().find(|r| r.code == req.role_code) else {
+        let known: Vec<&str> = roles.iter().map(|r| r.code.as_str()).collect();
+        return Err(OpError::BadInput(format!(
+            "查無角色「{}」；可用的角色是 {}",
+            req.role_code,
+            known.join("、")
+        )));
+    };
+
+    if ctx.store.user_by_username(req.email).await?.is_some() {
+        return Err(OpError::BadInput(format!(
+            "「{}」已經是登入帳號",
+            req.email
+        )));
+    }
+
+    // Refused before anything is written: an account with no password that the
+    // provider cannot resolve onto is an account nobody can ever open, and no
+    // operation here can give it one afterwards.
+    if req.external_login_only {
+        let oidc = ctx.store.oidc_setting().await?;
+        if !oidc.enabled {
+            return Err(OpError::BadInput(
+                "請先設定外部登入，才能建立免密碼帳號".into(),
+            ));
+        }
+        if oidc.provision_role.trim().is_empty() {
+            return Err(OpError::BadInput(
+                "外部登入目前設為不自動建立帳號，請改設一個角色".into(),
+            ));
+        }
+        let domain = oidc.allowed_domain.trim().to_ascii_lowercase();
+        if domain.is_empty() || !req.email.ends_with(&format!("@{domain}")) {
+            return Err(OpError::BadInput(format!(
+                "外部登入只接受 @{domain} 的地址，這個帳號要設定密碼"
+            )));
+        }
+    } else if req.role_code != crate::ROLE_ADMIN {
+        // The mirror image: with password sign-in turned off, a password is the
+        // one thing this account will never be able to use. Only the system
+        // administrator role is still let in that way.
+        let oidc = ctx.store.oidc_setting().await?;
+        if oidc.password_login_disabled {
+            return Err(OpError::BadInput(format!(
+                "本站已停用帳號密碼登入，請改用 @{} 的地址建立外部登入帳號",
+                oidc.allowed_domain
+            )));
+        }
+    }
+
+    Ok(role.name.clone())
+}
+
+/// Write the account [`check_new_login`] has already cleared.
+pub(crate) async fn write_login(
+    ctx: &OpCtx,
+    req: &NewLogin<'_>,
+    role_name: String,
+) -> Result<IssuedLogin, OpError> {
+    // The creator never sets a lasting password. A generated one is returned
+    // once and must be changed at first login.
+    let temporary = (!req.external_login_only).then(laysi_store::password::temporary_password);
+    let password_hash = match &temporary {
+        Some(value) => Some(
+            laysi_store::password::hash_password(value)
+                .map_err(|e| OpError::BadInput(format!("無法建立密碼雜湊：{e}")))?,
+        ),
+        None => None,
+    };
+
+    let user = ctx
+        .store
+        .create_user(laysi_store::CreateUser {
+            username: req.email,
+            display_name: req.display_name,
+            email: req.email,
+            password_hash: password_hash.as_deref(),
+            role_code: req.role_code,
+            employee_id: Some(req.employee_id),
+            status: "active",
+            must_change_password: temporary.is_some(),
+            created_by: &ctx.actor,
+        })
+        .await?;
+
+    Ok(IssuedLogin {
+        user,
+        role_name,
+        temporary_password: temporary,
+    })
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -853,101 +998,27 @@ impl Operation for CreateUserAccount {
         let i: CreateUserAccountInput = parse(input)?;
 
         let email = i.email.trim().to_ascii_lowercase();
-        if !valid_login_email(&email) {
-            return Err(OpError::BadInput("電子郵件格式不正確".into()));
-        }
-        let username = email.as_str();
-
-        let display_name = i.display_name.trim();
-        if display_name.is_empty() {
-            return Err(OpError::BadInput("顯示名稱為必填".into()));
-        }
-        if display_name.chars().count() > DISPLAY_NAME_MAX_CHARS {
-            return Err(OpError::BadInput("顯示名稱不可超過 64 個字元".into()));
-        }
-
-        let role_code = i.role_code.trim();
-        let roles = ctx.store.roles().await?;
-        let Some(role) = roles.iter().find(|r| r.code == role_code) else {
-            let known: Vec<&str> = roles.iter().map(|r| r.code.as_str()).collect();
-            return Err(OpError::BadInput(format!(
-                "查無角色「{role_code}」；可用的角色是 {}",
-                known.join("、")
-            )));
+        let mut login = NewLogin {
+            email: &email,
+            display_name: i.display_name.trim(),
+            role_code: i.role_code.trim(),
+            employee_id: 0,
+            external_login_only: i.external_login_only,
         };
-
-        if ctx.store.user_by_username(username).await?.is_some() {
-            return Err(OpError::BadInput(format!("「{username}」已經是登入帳號")));
-        }
-
-        // Refused before anything is written: an account with no password that
-        // the provider cannot resolve onto is an account nobody can ever open,
-        // and no operation here can give it one afterwards.
-        if i.external_login_only {
-            let oidc = ctx.store.oidc_setting().await?;
-            if !oidc.enabled {
-                return Err(OpError::BadInput(
-                    "請先設定外部登入，才能建立免密碼帳號".into(),
-                ));
-            }
-            if oidc.provision_role.trim().is_empty() {
-                return Err(OpError::BadInput(
-                    "外部登入目前設為不自動建立帳號，請改設一個角色".into(),
-                ));
-            }
-            let domain = oidc.allowed_domain.trim().to_ascii_lowercase();
-            if domain.is_empty() || !email.ends_with(&format!("@{domain}")) {
-                return Err(OpError::BadInput(format!(
-                    "外部登入只接受 @{domain} 的地址，這個帳號要設定密碼"
-                )));
-            }
-        } else if role_code != crate::ROLE_ADMIN {
-            // The mirror image: with password sign-in turned off, a password is
-            // the one thing this account will never be able to use. Only the
-            // system administrator role is still let in that way.
-            let oidc = ctx.store.oidc_setting().await?;
-            if oidc.password_login_disabled {
-                return Err(OpError::BadInput(format!(
-                    "本站已停用帳號密碼登入，請改用 @{} 的地址建立外部登入帳號",
-                    oidc.allowed_domain
-                )));
-            }
-        }
-
-        let employee = link_employee(ctx, i.employee_no.trim(), display_name).await?;
-
-        // The administrator never sets a lasting password. A generated one is
-        // returned once and must be changed at first login, so the person who
-        // creates the account cannot keep using it.
-        let temporary = (!i.external_login_only).then(laysi_store::password::temporary_password);
-        let password_hash = match &temporary {
-            Some(value) => Some(
-                laysi_store::password::hash_password(value)
-                    .map_err(|e| OpError::BadInput(format!("無法建立密碼雜湊：{e}")))?,
-            ),
-            None => None,
-        };
-
-        let user = ctx
-            .store
-            .create_user(laysi_store::CreateUser {
-                username,
-                display_name,
-                email: &email,
-                password_hash: password_hash.as_deref(),
-                role_code,
-                employee_id: Some(employee.id),
-                status: "active",
-                must_change_password: temporary.is_some(),
-                created_by: &ctx.actor,
-            })
-            .await?;
+        // Checked before the roster entry: a refusal afterwards would leave an
+        // employee nobody asked for.
+        let role_name = check_new_login(ctx, &login).await?;
+        let employee = link_employee(ctx, i.employee_no.trim(), login.display_name).await?;
+        login.employee_id = employee.id;
+        let issued = write_login(ctx, &login, role_name).await?;
+        let user = issued.user;
+        let temporary = issued.temporary_password;
 
         let summary = format!(
             "建立帳號 · {}（{}）角色{}，連結員工 {}{}",
             user.username,
             user.display_name,
-            role.name,
+            issued.role_name,
             employee.emp_no,
             if temporary.is_some() {
                 ""
@@ -963,7 +1034,7 @@ impl Operation for CreateUserAccount {
                     "display_name": user.display_name,
                     "email": user.email,
                     "role_code": user.role_code,
-                    "role_name": role.name,
+                    "role_name": issued.role_name,
                     "employee_no": employee.emp_no,
                     "employee_name": employee.name,
                 },

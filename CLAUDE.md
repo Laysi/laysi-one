@@ -64,11 +64,15 @@ scripts/dev stop       # 停掉兩個容器
 `laysi-store/build.rs` 會 `rerun-if-changed=../../migrations`——**沒有它，新增一個
 migration 檔不會觸發重編**，伺服器會帶著舊的 migration 集合啟動且不報錯。
 
-**`migrations/` 底下只有 `0001_initial.sql` 一個檔**：上線前的每一份 migration 都
-合併進去了，前後三輪，來龍去脈在 git 歷史裡
-（`git log --diff-filter=D -- backend/migrations`）。
+**上線前的每一份 migration 都合併進 `0001_initial.sql` 了**，前後三輪，來龍去脈在
+git 歷史裡（`git log --diff-filter=D -- backend/migrations`）。
 合併只有在還沒有安裝要沿用時做得了；**0001 一旦被套用過就不再更動**——改一個位元組，
-現有的資料庫就會拒絕啟動；schema 要變就新增 0002。
+現有的資料庫就會拒絕啟動；schema 要變就新增下一個編號的檔案，那也是 0001 之後每一份
+migration 的寫法。
+
+**後續 migration 也種 `permission` 與 `mcp_tool_grant` 時要整列重寫**（`ON CONFLICT
+DO UPDATE`），並把檔案接到 `laysi-ops` 測試的 `SCHEMA` 常數後面：那三個測試把種子資料
+當字串讀，後面的列蓋掉前面的，與資料庫裡後一道敘述蓋掉前一道是同一件事。
 
 **文件不寫 migration 編號**：合併過三輪之後同一個四位數指過三份不同的 migration，
 而指出去的檔案一份都不存在。要追某個決定的來由，用 `git log -S` 找那段程式或那個
@@ -282,7 +286,7 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
-RustFS 物件儲存，以及 **37 個畫面、126 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、130 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -357,6 +361,29 @@ RustFS 物件儲存，以及 **37 個畫面、126 個操作**，分成三個分�
 （初始化頁的「登入名稱 admin」、帳號管理的「登入信箱」），因為那是憑證的一半，寫成
 散句瀏覽器與密碼管理程式都收不到。`readonly` 不用 `disabled`——`disabled` 的欄位不會
 隨表單送出，密碼管理程式就只存得到密碼、下次登入頁自動填不出帳號。
+
+**員工附件不走 `manage_documents`**：`list_employee_documents`／
+`upload_employee_document`／`get_employee_document` 用同兩張表、同一個桶子與同一次
+BLAKE3 比對，但**一律收員工編號、不收自由的文件編號**，並比對 `link_type = 'employee'`
+與 `link_ref`——別人的編號回**查無此附件**（拒絕會確認編號存在並說出屬於誰），同一條
+檢查也擋住用 `doc_no` 往別人的附件加一版。`manage_documents` 一併打開全公司的收據與
+銀行文件，而一個操作只能屬於一條 permission，所以「同樣三個操作換一組權限」不存在。
+
+**人資核發得了帳號，但只發一般職員**：`create_employee_login` 角色寫死 `staff`、
+只認名冊上既有的員工編號、已有帳號的人一律拒絕；其餘檢查與 `create_user_account`
+共用 `check_new_login`／`write_login`，兩條路不會長出兩套規則。**檢查與寫入分兩個
+函式**，因為 `create_user_account` 在兩者之間要建員工主檔，先寫再被拒會留下一筆沒人要
+的名冊資料。要不要密碼由伺服器判斷（外部登入開著＋自動建帳號＋地址在網域內三者齊備就
+免密碼），人資不必知道這條規則。`list_employees` 因此回 `has_login`——畫面靠它決定畫不畫
+按鈕，而 `list_user_accounts` 是 `AdminOnly`。放寬的方式不是把 `create_user_account`
+交出去：它收 `role_code`。
+
+**投保級距是建議值，不是分級表**：抽屜填本薪時帶入三個投保欄位，帶的是
+`minimum_wage.monthly` 與 `labor_insurance.max_insured_salary` 夾出來的本薪，由
+`list_employees` 的 `insured_suggestion` 給畫面，**前端不得自帶**。**不搬整份分級表
+進來**：那是三份逐年更動的表格，抄錯要到申報那天才出現，所以畫面照實說尚未對照分級表。
+時薪制不帶入（換算月投保薪資要約定工時，系統沒有記錄它）；帶入只覆寫空的、或還停在
+上一次建議值的欄位。
 
 **變更角色是獨立操作**：`change_user_role` 拒絕呼叫者自己的帳號（那是唯一
 會多出權限的方向；建帳號時本來就指定得了任何角色）、拒絕清空最後一個啟用中的系統

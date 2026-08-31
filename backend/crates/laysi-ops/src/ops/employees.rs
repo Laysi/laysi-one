@@ -18,10 +18,16 @@
 //! number, reconciliation result), the ones that are not state what is
 //! missing.
 
+use crate::ops::documents::{
+    document_json, human_size, kind_label, short_checksum, EMPLOYEE_KINDS, EMPLOYEE_LINK_TYPE,
+};
 use crate::{money, parse, schema_of, Channel, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::{Datelike, NaiveDate};
 use laysi_domain::Money;
+use laysi_store::storage::{self, MAX_OBJECT_BYTES};
+use laysi_store::ReserveDocument;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -58,6 +64,7 @@ fn redact_for_ai(row: &mut Value) {
         "health_insured_salary",
         "pension_wage",
         "bank_accounts",
+        "birthday",
     ] {
         fields.remove(key);
     }
@@ -77,7 +84,13 @@ fn voucher_status_label(status: Option<&str>) -> &'static str {
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(GetHrDashboard), Box::new(ListEmployees)]
+    vec![
+        Box::new(GetHrDashboard),
+        Box::new(ListEmployees),
+        Box::new(ListEmployeeDocuments),
+        Box::new(UploadEmployeeDocument),
+        Box::new(GetEmployeeDocument),
+    ]
 }
 
 /// Completed months of service up to a date. Calendar arithmetic, not
@@ -332,6 +345,8 @@ impl Operation for ListEmployees {
         let i: ListEmployeesInput = parse(input)?;
         let staff = ctx.store.employees(i.include_left, i.q.as_deref()).await?;
         let rs = laysi_regulation::resolve("annual_leave", ctx.today)?;
+        let labor = laysi_regulation::resolve("labor_insurance", ctx.today)?;
+        let wage = laysi_regulation::resolve("minimum_wage", ctx.today)?;
         let taken = ctx.store.annual_leave_taken(ctx.today.year()).await?;
         // The roster's own department picker. Reading it from list_dimensions
         // would put the roster behind a second permission, and that permission
@@ -381,8 +396,12 @@ impl Operation for ListEmployees {
                 "pay_basis_label": pay_basis_label(&e.pay_basis),
                 "insured_as": e.insured_as,
                 "insured_as_label": insured_as_label(&e.insured_as),
+                "birthday": e.birthday,
                 "hired_on": e.hired_on,
                 "left_on": e.left_on,
+                // The roster draws the button that issues a login, and the
+                // account list is administrator only.
+                "has_login": e.has_login,
                 "status": e.status,
                 "status_label": status_label(&e.status),
                 "service_months": months,
@@ -444,9 +463,300 @@ impl Operation for ListEmployees {
                 "avg_service_months": avg_months,
                 "avg_service_label": service_label(avg_months),
                 "annual_leave_ruleset": crate::ops::insurance::ruleset_json(rs),
+                // What the drawer fills the three filed brackets with once a
+                // monthly salary is typed. The two bounds are the only ones the
+                // rules carry, so the suggestion is a starting point HR edits,
+                // not the grade table itself; an hourly rate gets none, because
+                // the month it maps to is not on file.
+                "insured_suggestion": {
+                    "floor": wage.decimal("monthly")?.to_string(),
+                    "labor_ceiling": labor.decimal("max_insured_salary")?.to_string(),
+                    "note": "帶入的數字尚未對照投保薪資分級表，請依申報值調整。",
+                },
                 // A blank column reads as "no data" more easily than a sentence
                 // explaining where the figure lives.
                 "salary_note": "個人薪資明細見「薪資作業」，限負責人檢視；投保級距見「勞健保與勞退」，該數字為向勞保局申報值，供會計核對繳款單。",
+            }),
+            summary,
+        ))
+    }
+}
+
+// Personnel attachments
+//
+// Scans of an identity card, a signed contract, a licence. They use the same
+// two tables, the same bucket and the same BLAKE3 check as every other file;
+// what is different is the way in. `manage_documents` opens every receipt and
+// bank statement in the company, which is not a set the HR role holds, so
+// these three operations take an employee number and never a free document
+// number, and refuse anything not linked to an employee.
+
+fn employee_document_kind(kind: Option<&str>) -> Result<&str, OpError> {
+    let kind = kind.unwrap_or(EMPLOYEE_KINDS[0]);
+    if !EMPLOYEE_KINDS.contains(&kind) {
+        return Err(OpError::BadInput(format!(
+            "未支援「{kind}」附件類型，可用類型：{}",
+            EMPLOYEE_KINDS.map(kind_label).join("、")
+        )));
+    }
+    Ok(kind)
+}
+
+struct ListEmployeeDocuments;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EmployeeDocumentsInput {
+    /// Employee number from the roster.
+    pub emp_no: String,
+}
+
+#[async_trait]
+impl Operation for ListEmployeeDocuments {
+    fn name(&self) -> &'static str {
+        "list_employee_documents"
+    }
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+    fn summary(&self) -> &'static str {
+        "讀某位員工的附件清單：檔名、類型、版次、大小與內容雜湊。內容要另外取回。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<EmployeeDocumentsInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: EmployeeDocumentsInput = parse(input)?;
+        let employee = ctx.store.employee(i.emp_no.trim()).await?;
+        let docs = ctx
+            .store
+            .documents_linked_to(EMPLOYEE_LINK_TYPE, &employee.emp_no)
+            .await?;
+        let bytes: i64 = docs.iter().map(|d| d.byte_size).sum();
+
+        let summary = format!(
+            "讀 {} {} 的附件 · {} 份／{}",
+            employee.emp_no,
+            employee.name,
+            docs.len(),
+            human_size(bytes)
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "emp_no": employee.emp_no,
+                "employee_name": employee.name,
+                "documents": docs.iter().map(document_json).collect::<Vec<_>>(),
+                "kinds": EMPLOYEE_KINDS.iter()
+                    .map(|k| json!({ "kind": k, "label": kind_label(k) }))
+                    .collect::<Vec<_>>(),
+                "max_object_bytes": MAX_OBJECT_BYTES,
+            }),
+            summary,
+        ))
+    }
+}
+
+struct UploadEmployeeDocument;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UploadEmployeeDocumentInput {
+    /// Employee number from the roster.
+    pub emp_no: String,
+    /// File name. Non-ASCII names are kept; the object key is transliterated.
+    pub file_name: String,
+    /// File contents, base64.
+    pub content_base64: String,
+    /// Display name. Defaults to the file name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One of `id_document`, `contract`, `personnel`. Defaults to
+    /// `id_document`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// When set, adds a revision to an attachment this employee already has.
+    #[serde(default)]
+    pub doc_no: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[async_trait]
+impl Operation for UploadEmployeeDocument {
+    fn name(&self) -> &'static str {
+        "upload_employee_document"
+    }
+    fn risk(&self) -> Risk {
+        // Writes to object storage, and what lands there is never deleted.
+        Risk::NeedsConfirm
+    }
+    fn summary(&self) -> &'static str {
+        "為名冊上的人上傳一份附件，例如證件掃描檔或已簽署的合約。內容以 base64 傳入，存進物件儲存並記下內容雜湊。同一個附件編號再上傳一次會存成新版本。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<UploadEmployeeDocumentInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: UploadEmployeeDocumentInput = parse(input)?;
+        let objects = ctx.objects()?;
+        let employee = ctx.store.employee(i.emp_no.trim()).await?;
+        let kind = employee_document_kind(i.kind.as_deref())?;
+
+        let file_name = i.file_name.trim();
+        if file_name.is_empty() {
+            return Err(OpError::BadInput("檔名要填寫".into()));
+        }
+        let body = base64::engine::general_purpose::STANDARD
+            .decode(i.content_base64.trim())
+            .map_err(|e| OpError::BadInput(format!("檔案內容不是合法的 base64：{e}")))?;
+        if body.is_empty() {
+            return Err(OpError::BadInput("檔案是空的".into()));
+        }
+        if body.len() > MAX_OBJECT_BYTES {
+            return Err(OpError::BadInput(format!(
+                "檔案 {} 位元組，超過單檔上限 {} 位元組",
+                body.len(),
+                MAX_OBJECT_BYTES
+            )));
+        }
+
+        // A revision may only be added to this employee's own attachment;
+        // otherwise the number is a way to write into any document at all.
+        if let Some(doc_no) = i.doc_no.as_deref() {
+            let existing = ctx.store.document_version(doc_no.trim(), None).await?;
+            if existing.link_type != EMPLOYEE_LINK_TYPE || existing.link_ref != employee.emp_no {
+                return Err(OpError::BadInput(format!(
+                    "{doc_no} 不是 {} {} 的附件",
+                    employee.emp_no, employee.name
+                )));
+            }
+        }
+
+        // Same two steps as every other upload: the number and revision build
+        // the object key, and the row is written only once the file lands.
+        let slot = ctx
+            .store
+            .reserve_document_slot(ReserveDocument {
+                doc_no: i.doc_no.as_deref().map(str::trim),
+                name: i.name.as_deref().unwrap_or(file_name),
+                kind,
+                link_type: EMPLOYEE_LINK_TYPE,
+                link_ref: &employee.emp_no,
+                note: i.note.as_deref().unwrap_or(""),
+                today: ctx.today,
+                actor: &ctx.actor,
+            })
+            .await?;
+
+        let key = storage::object_key(
+            &ctx.today.format("%y%m").to_string(),
+            &slot.doc_no,
+            slot.version_no,
+            file_name,
+        );
+        let content_type = storage::guess_content_type(file_name);
+        let stored = objects.put(&key, &body, content_type, file_name).await?;
+
+        let doc = match ctx
+            .store
+            .record_document_version(&slot, &stored, file_name, &ctx.actor)
+            .await
+        {
+            Ok(doc) => doc,
+            Err(e) => {
+                objects.discard(&stored.key).await;
+                return Err(e.into());
+            }
+        };
+
+        let summary = format!(
+            "上傳 {} · {} v{} {} · 指紋 {} · 掛在 {} {}",
+            doc.file_name,
+            doc.doc_no,
+            doc.version_no,
+            human_size(doc.byte_size),
+            short_checksum(&doc.checksum),
+            employee.emp_no,
+            employee.name
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "emp_no": employee.emp_no,
+                "document": document_json(&doc),
+                "new_version": doc.version_no > 1,
+            }),
+            summary,
+        ))
+    }
+}
+
+struct GetEmployeeDocument;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetEmployeeDocumentInput {
+    /// Employee number the attachment belongs to.
+    pub emp_no: String,
+    /// Attachment number, e.g. `D2608-004`.
+    pub doc_no: String,
+    /// Revision. Defaults to the latest.
+    #[serde(default)]
+    pub version: Option<i32>,
+    /// Whether to return the content as base64. Off by default, which only
+    /// verifies the hash.
+    #[serde(default)]
+    pub include_content: bool,
+}
+
+#[async_trait]
+impl Operation for GetEmployeeDocument {
+    fn name(&self) -> &'static str {
+        "get_employee_document"
+    }
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+    fn summary(&self) -> &'static str {
+        "取回一份員工附件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容。雜湊不符會回報錯誤，不回傳內容。附件不屬於這位員工時一律查無此附件。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<GetEmployeeDocumentInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: GetEmployeeDocumentInput = parse(input)?;
+        let objects = ctx.objects()?;
+        let employee = ctx.store.employee(i.emp_no.trim()).await?;
+        let doc = ctx
+            .store
+            .document_version(i.doc_no.trim(), i.version)
+            .await?;
+        // Not a refusal: a refusal would confirm that the number exists and
+        // says whose it is.
+        if doc.link_type != EMPLOYEE_LINK_TYPE || doc.link_ref != employee.emp_no {
+            return Err(OpError::BadInput(format!("查無附件 {}", i.doc_no.trim())));
+        }
+
+        let body = objects.get(&doc.object_key, &doc.checksum).await?;
+        let recomputed = storage::checksum(&body);
+        let content = i
+            .include_content
+            .then(|| base64::engine::general_purpose::STANDARD.encode(&body));
+
+        let summary = format!(
+            "取回 {} v{} {} · 雜湊比對相符（{}）",
+            doc.doc_no,
+            doc.version_no,
+            doc.file_name,
+            short_checksum(&recomputed)
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "emp_no": employee.emp_no,
+                "document": document_json(&doc),
+                "verified": recomputed == doc.checksum,
+                "checksum_recomputed": recomputed,
+                "byte_size_actual": body.len(),
+                "content_base64": content,
             }),
             summary,
         ))
@@ -563,6 +873,7 @@ mod tests {
             "health_insured_salary": "45800",
             "pension_wage": "45800",
             "bank_accounts": [{ "bank_name": "第一銀行", "account_no": "12345678901" }],
+            "birthday": "1990-05-02",
         });
         redact_for_ai(&mut row);
 
@@ -573,6 +884,7 @@ mod tests {
             "health_insured_salary",
             "pension_wage",
             "bank_accounts",
+            "birthday",
         ] {
             assert!(row.get(gone).is_none(), "{gone} 不該留在 AI 讀到的名冊上");
         }
