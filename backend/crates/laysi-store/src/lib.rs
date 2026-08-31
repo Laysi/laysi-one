@@ -5528,10 +5528,10 @@ impl Store {
         let employee_id: i32 = sqlx::query(
             "INSERT INTO employee
                 (emp_no, name, dept_id, title, employment_type, pay_basis, insured_as,
-                 hired_on, left_on, status, base_salary, labor_insured_salary,
+                 birthday, hired_on, left_on, status, base_salary, labor_insured_salary,
                  health_insured_salary, pension_wage, id_no,
                  note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
              RETURNING id",
         )
         .bind(req.emp_no)
@@ -5541,6 +5541,7 @@ impl Store {
         .bind(req.employment_type)
         .bind(req.pay_basis)
         .bind(req.insured_as)
+        .bind(req.birthday)
         .bind(req.hired_on)
         .bind(req.left_on)
         .bind(req.status)
@@ -5595,13 +5596,13 @@ impl Store {
             "UPDATE employee
                 SET name = $2, dept_id = $3, title = $4,
                     employment_type = $5, pay_basis = $6, insured_as = $7,
-                    hired_on = $8, left_on = $9,
-                    status = $10,
-                    base_salary = COALESCE($11::numeric, base_salary),
-                    labor_insured_salary = COALESCE($12::numeric, labor_insured_salary),
-                    health_insured_salary = COALESCE($13::numeric, health_insured_salary),
-                    pension_wage = COALESCE($14::numeric, pension_wage),
-                    id_no = $15, note = $16
+                    birthday = $8, hired_on = $9, left_on = $10,
+                    status = $11,
+                    base_salary = COALESCE($12::numeric, base_salary),
+                    labor_insured_salary = COALESCE($13::numeric, labor_insured_salary),
+                    health_insured_salary = COALESCE($14::numeric, health_insured_salary),
+                    pension_wage = COALESCE($15::numeric, pension_wage),
+                    id_no = $16, note = $17
               WHERE emp_no = $1",
         )
         .bind(req.emp_no)
@@ -5611,6 +5612,7 @@ impl Store {
         .bind(req.employment_type)
         .bind(req.pay_basis)
         .bind(req.insured_as)
+        .bind(req.birthday)
         .bind(req.hired_on)
         .bind(req.left_on)
         .bind(req.status)
@@ -5642,9 +5644,10 @@ impl Store {
         let mut staff: Vec<Employee> = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
                     e.title, e.employment_type, e.pay_basis, e.insured_as,
-                    e.hired_on, e.left_on, e.status, e.base_salary,
+                    e.birthday, e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
-                    e.id_no, e.note
+                    e.id_no, e.note,
+                    EXISTS (SELECT 1 FROM user_account u WHERE u.employee_id = e.id) AS has_login
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
               WHERE ($1 OR e.status <> 'left')
@@ -5702,9 +5705,10 @@ impl Store {
         let mut found = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
                     e.title, e.employment_type, e.pay_basis, e.insured_as,
-                    e.hired_on, e.left_on, e.status, e.base_salary,
+                    e.birthday, e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
-                    e.id_no, e.note
+                    e.id_no, e.note,
+                    EXISTS (SELECT 1 FROM user_account u WHERE u.employee_id = e.id) AS has_login
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
               WHERE e.emp_no = $1",
@@ -5728,9 +5732,10 @@ impl Store {
         let mut found = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
                     e.title, e.employment_type, e.pay_basis, e.insured_as,
-                    e.hired_on, e.left_on, e.status, e.base_salary,
+                    e.birthday, e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
-                    e.id_no, e.note
+                    e.id_no, e.note,
+                    EXISTS (SELECT 1 FROM user_account u WHERE u.employee_id = e.id) AS has_login
                FROM employee e
                LEFT JOIN dimension_value d ON d.id = e.dept_id
               WHERE e.id = $1",
@@ -8296,9 +8301,15 @@ pub struct Employee {
     pub pay_basis: String,
     /// `employee` or `owner`. Which set of insurance shares applies.
     pub insured_as: String,
+    /// Date of birth. Filed with labour insurance and on the withholding
+    /// statement; `None` while it has not been collected.
+    pub birthday: Option<NaiveDate>,
     pub hired_on: NaiveDate,
     pub left_on: Option<NaiveDate>,
     pub status: String,
+    /// Whether any login account points at this person. The roster draws the
+    /// button that issues one, and `list_user_accounts` is administrator only.
+    pub has_login: bool,
     /// Monthly salary, or the hourly rate when `pay_basis` is `hourly`.
     pub base_salary: Money,
     /// Insured salary filed with the labour insurance bureau. A fact, not a
@@ -8344,6 +8355,8 @@ pub struct WriteEmployee<'a> {
     pub employment_type: &'a str,
     pub pay_basis: &'a str,
     pub insured_as: &'a str,
+    /// Overwritten like every other column; `None` clears it.
+    pub birthday: Option<NaiveDate>,
     pub hired_on: NaiveDate,
     pub left_on: Option<NaiveDate>,
     pub status: &'a str,
@@ -9184,9 +9197,11 @@ fn row_to_employee(r: &PgRow) -> Employee {
         employment_type: r.get("employment_type"),
         pay_basis: r.get("pay_basis"),
         insured_as: r.get("insured_as"),
+        birthday: r.get("birthday"),
         hired_on: r.get("hired_on"),
         left_on: r.get("left_on"),
         status: r.get("status"),
+        has_login: r.get("has_login"),
         base_salary: r.get("base_salary"),
         labor_insured_salary: r.get("labor_insured_salary"),
         health_insured_salary: r.get("health_insured_salary"),
@@ -10265,6 +10280,7 @@ mod tests {
                 employment_type: "full_time",
                 pay_basis: "monthly",
                 insured_as: "employee",
+                birthday: None,
                 hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                 left_on: None,
                 status: "active",
@@ -10364,6 +10380,7 @@ mod tests {
                 employment_type: "full_time",
                 pay_basis: "monthly",
                 insured_as: "employee",
+                birthday: None,
                 hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                 left_on: None,
                 status: "active",
