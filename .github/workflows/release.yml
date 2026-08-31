@@ -44,16 +44,16 @@ jobs:
             file: ./backup/Dockerfile
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Only the runtime stages are emulated. backend/Dockerfile and
       # web/Dockerfile build on the runner's own architecture and cross-compile;
       # backup is an apk install with nothing to compile.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -62,14 +62,14 @@ jobs:
       # Lowercases the owner (ghcr.io rejects uppercase) and emits the
       # org.opencontainers.image.* labels that link the package back here.
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}-${{ matrix.name }}
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The attached copy pins LAYSI_VERSION to this tag. The copy in the
       # repository keeps `latest`, which is what a git clone should follow.
