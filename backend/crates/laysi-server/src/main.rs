@@ -589,10 +589,23 @@ async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
         "actor_role": identity.actor_role,
         "employee_id": identity.employee_id,
         "oauth": oidc::describe(&s).await,
-        "version": env!("CARGO_PKG_VERSION"),
-        "licence": "BSL",
+        "brand": auth::brand_json(&s).await,
+        "version": build_version(),
+        "licence": "商業授權",
     }))
     .into_response()
+}
+
+/// What this build calls itself.
+///
+/// The release workflow passes the tag it is building as `LAYSI_BUILD`; a
+/// build from a working tree has only the crate version to report. Docker
+/// exports an unset build argument as an empty string, which is not a version.
+fn build_version() -> &'static str {
+    match option_env!("LAYSI_BUILD") {
+        Some(build) if !build.is_empty() => build,
+        _ => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 fn company_setup_required(company_name: &str) -> bool {

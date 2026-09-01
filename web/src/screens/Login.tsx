@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from 'react';
 import { BrandMark } from '../components/BrandMark';
+import { CompanyBrand } from '../components/CompanyBrand';
 import { AuthFailed, NO_USER_ACCOUNT, oauthStartUrl, useAuth } from '../auth';
 
 export function Login() {
-  const { user, oauth, signIn, changePassword } = useAuth();
+  const { user, oauth, brand, signIn, changePassword } = useAuth();
   const mustChange = user?.must_change_password ?? false;
 
   const [username, setUsername] = useState('');
@@ -56,8 +57,7 @@ export function Login() {
     <div className="login">
       <div className="card login__panel">
         <div className="login__brand">
-
-          <BrandMark height={20} />
+          <CompanyBrand brand={brand} place="panel" />
         </div>
 
         {mustChange ? (
@@ -183,6 +183,11 @@ export function Login() {
             )}
           </>
         )}
+
+      </div>
+
+      <div className="login__mark">
+        <BrandMark size="sm" />
       </div>
     </div>
   );

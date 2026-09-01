@@ -31,6 +31,7 @@
 use crate::ops::employees::{BASIS_MONTHLY, INSURED_EMPLOYEE};
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
+use base64::Engine;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -242,8 +243,52 @@ fn setting_options(code: &str) -> Vec<&'static str> {
     match code {
         "punch_correction_policy" => crate::ops::attendance::CORRECTION_POLICIES.to_vec(),
         "fiscal_year" => FISCAL_MONTHS.to_vec(),
+        BRAND_DISPLAY_SETTING => BRAND_DISPLAYS.to_vec(),
         _ => Vec::new(),
     }
+}
+
+/// The company's own logo, and where the two places that show a company
+/// identity render it.
+pub const BRAND_LOGO_SETTING: &str = "brand_logo";
+pub const BRAND_DISPLAY_SETTING: &str = "brand_display";
+
+/// What the sign-in screen and the sidebar show. With no logo uploaded only
+/// the first is reachable, so the reader of this value has to fall back to it
+/// rather than draw an empty box.
+pub const BRAND_DISPLAYS: [&str; 3] = ["名稱", "標誌", "標誌與名稱"];
+
+/// The largest logo that may be stored. It travels inside `/v1/auth/me` and
+/// `/v1/meta` on every load, so its size is page weight rather than a file
+/// sitting in a bucket.
+pub const MAX_BRAND_LOGO_BYTES: usize = 512 * 1024;
+
+const BRAND_LOGO_TYPES: [&str; 4] = ["png", "jpeg", "webp", "svg+xml"];
+
+/// `data:image/<type>;base64,<payload>` and nothing else.
+///
+/// The stored string goes straight into an `<img src>` on a page served to
+/// signed-out visitors, so the prefix is checked here rather than trusted from
+/// whatever produced it.
+fn validate_brand_logo(value: &str) -> Result<(), OpError> {
+    let bad = || OpError::BadInput("標誌要是 PNG、JPEG、WebP 或 SVG 圖檔".into());
+    let (mime, payload) = value
+        .strip_prefix("data:image/")
+        .and_then(|rest| rest.split_once(";base64,"))
+        .ok_or_else(bad)?;
+    if !BRAND_LOGO_TYPES.contains(&mime) {
+        return Err(bad());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|_| bad())?;
+    if bytes.len() > MAX_BRAND_LOGO_BYTES {
+        return Err(OpError::BadInput(format!(
+            "標誌檔案要小於 {} KB",
+            MAX_BRAND_LOGO_BYTES / 1024
+        )));
+    }
+    Ok(())
 }
 
 /// Settings for which no value is itself an answer.
@@ -252,7 +297,10 @@ fn setting_options(code: &str) -> Vec<&'static str> {
 /// where `None` means nobody has said when work starts, which is different
 /// from nobody being late. A company that has not decided has to be able to
 /// say so, and to take it back after having set one.
-const CLEARABLE_SETTINGS: [&str; 7] = [
+const CLEARABLE_SETTINGS: [&str; 8] = [
+    // Cleared means the company has no logo of its own, which is where every
+    // installation starts and where one that drops its logo returns.
+    BRAND_LOGO_SETTING,
     "work_start",
     "work_end",
     "break_start",
@@ -294,6 +342,13 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
         crate::AUDIT_KEEP_SETTING if !matches!(value.parse::<i64>(), Ok(1..)) => Err(
             OpError::BadInput(format!("「{value}」不是大於 0 的天數，永久保存就留空")),
         ),
+        BRAND_LOGO_SETTING => validate_brand_logo(value),
+        BRAND_DISPLAY_SETTING if !BRAND_DISPLAYS.contains(&value) => {
+            Err(OpError::BadInput(format!(
+                "公司識別顯示方式填「{}」、「{}」或「{}」，收到「{value}」",
+                BRAND_DISPLAYS[0], BRAND_DISPLAYS[1], BRAND_DISPLAYS[2]
+            )))
+        }
         "punch_correction_policy"
             if !crate::ops::attendance::CORRECTION_POLICIES.contains(&value) =>
         {
@@ -359,9 +414,13 @@ impl Operation for UpdateCompanySetting {
         ) {
             crate::load_policy_settings(&ctx.store).await;
         }
-        let summary = match s.value.is_empty() {
-            true => format!("改設定 · {} 清為尚未設定", s.label),
-            false => format!("改設定 · {} 改成「{}」", s.label, s.value),
+        // The logo is hundreds of kilobytes of base64. `redact_for_audit`
+        // only reaches the input, so the summary has to name it instead of
+        // repeating it.
+        let summary = match (s.value.is_empty(), s.code.as_str()) {
+            (true, _) => format!("改設定 · {} 清為尚未設定", s.label),
+            (false, BRAND_LOGO_SETTING) => format!("改設定 · {} 已更換", s.label),
+            (false, _) => format!("改設定 · {} 改成「{}」", s.label, s.value),
         };
         Ok(OpOutcome::new(json!({ "setting": s }), summary))
     }
@@ -2051,6 +2110,7 @@ mod tests {
         assert_eq!(
             CLEARABLE_SETTINGS,
             [
+                "brand_logo",
                 "work_start",
                 "work_end",
                 "break_start",
@@ -2064,6 +2124,44 @@ mod tests {
         for code in ["company_name", "tax_id", "fiscal_year", "currency"] {
             assert!(!CLEARABLE_SETTINGS.contains(&code), "{code} 不該可以清空");
         }
+    }
+
+    /// The stored string is put into an `<img src>` on the signed-out
+    /// sign-in screen, so anything that is not an image data URI has to be
+    /// refused at the point it is written.
+    #[test]
+    fn a_logo_is_an_image_data_uri_within_the_size_cap() {
+        let png = base64::engine::general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G']);
+        assert!(
+            validate_setting(BRAND_LOGO_SETTING, &format!("data:image/png;base64,{png}")).is_ok()
+        );
+        assert!(validate_setting(
+            BRAND_LOGO_SETTING,
+            "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="
+        )
+        .is_ok());
+        for bad in [
+            "https://example.test/logo.png",
+            "data:text/html;base64,PHNjcmlwdD48L3NjcmlwdD4=",
+            "data:image/gif;base64,R0lGODlh",
+            "data:image/png;base64,not base64",
+            "<svg></svg>",
+        ] {
+            assert!(
+                validate_setting(BRAND_LOGO_SETTING, bad).is_err(),
+                "{bad} 不該通過"
+            );
+        }
+        let huge =
+            base64::engine::general_purpose::STANDARD.encode(vec![0u8; MAX_BRAND_LOGO_BYTES + 1]);
+        assert!(
+            validate_setting(BRAND_LOGO_SETTING, &format!("data:image/png;base64,{huge}")).is_err()
+        );
+
+        for good in BRAND_DISPLAYS {
+            assert!(validate_setting(BRAND_DISPLAY_SETTING, good).is_ok());
+        }
+        assert!(validate_setting(BRAND_DISPLAY_SETTING, "兩個都要").is_err());
     }
 
     #[test]

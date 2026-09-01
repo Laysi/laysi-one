@@ -1,0 +1,22 @@
+Laysi One
+Copyright (c) 2026 Laysi Co., Ltd. All rights reserved.
+
+專有軟體，不是開源軟體。原始碼、編譯結果、資料庫結構與隨附文件的著作權
+均屬著作權人所有。
+
+使用權來自與著作權人、或與其授權的代理商、經銷商簽訂的授權合約。沒有該份
+合約，不得使用、重製、修改、還原工程、散布，也不得提供為服務。
+
+授權範圍、期間與費用以該份合約為準。本檔案不構成授權，也不擴張任何合約
+未給予的權利。
+
+Proprietary software, not open source. Copyright in the source code, the
+compiled artefacts, the database schema and the accompanying documentation
+belongs to the copyright holder.
+
+The right to use it comes from a licence agreement with the copyright holder
+or with an authorised agent or reseller. Without that agreement you may not
+use, copy, modify, reverse engineer, distribute or offer it as a service.
+
+Scope, term and fees are governed by that agreement. This file is not a
+licence and grants nothing.

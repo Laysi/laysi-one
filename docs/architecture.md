@@ -13,7 +13,7 @@ Laysi One 是面向台灣中小企業的財務＋人資正式產品。安裝時�
 1. **法規更新空間** — 勞保級距、健保費率、勞退、營業稅、基本工資每年會變，
    一律不得寫死在程式碼裡。
 2. **所有操作支援 MCP** — MCP 不是外掛，而是操作層本身。
-3. **BSL 防盜賣** — 授權聲明寫在字標 SVG 與原始碼註解裡。
+3. **專有授權防盜賣** — 授權聲明寫在 `LICENSE.txt` 與圖示 SVG 裡。
 4. **Docker Compose 自架**。
 
 ### 不做加值中心
@@ -2074,8 +2074,19 @@ axum 對每個 `Json`／`Bytes` 擷取器有自己的 2 MB 預設，對登入太
   "period": "2026 / 07", "period_state": "未結帳",
   "actor": "目前使用者", "actor_role": "acct", "employee_id": 1,
   "oauth": { "enabled": true, "provider": "https://accounts.example.com" },
-  "version": "0.1.0", "licence": "BSL" }
+  "brand": { "name": "", "display": "名稱", "logo": "" },
+  "version": "v0.1.0", "licence": "商業授權" }
 ```
+
+`version` 是 `LAYSI_BUILD`，由 `release.yml` 把正在建的 tag 當 build arg 傳進
+`backend/Dockerfile`，沒有它就退回 crate 版本（工作樹裡建出來的就是這一種）。
+`crates/laysi-server/build.rs` 只有一行 `rerun-if-env-changed`：`option_env!` 自己
+不登記相依，而發行映像把 cargo 的 target 放在 cache mount 上，少了它下一個 tag 會沿用
+上一個 tag 編進去的那份目的檔。畫面在「安全與營運」的「系統健康」第一列。
+
+`brand` 也在 `/v1/auth/me` 上，未登入同樣讀得到：登入頁是畫它的兩個地方之一。
+`logo` 是 `brand_logo` 的 data URI，顯示方式不用標誌時回空字串；沒有標誌時
+`display` 降回「名稱」。
 
 `setup_required` 只看 `company_setting.company_name`：空字串（包含只有空白）代表
 首次設定尚未完成，回 `true`；填入公司名後回 `false`。這只是帶前端進設定精靈的
@@ -2226,8 +2237,11 @@ Vite + React + TypeScript。設計語彙來自 **Classical** 設計系統：
 色階、字體、`--space-*`、`--radius-*`、`--shadow-*` 定義成 CSS 變數，元件
 **只能引用變數**，不得寫死 hex／字體名／px。
 
-Logo 是 `web/public/mark.svg` 與 `web/public/monogram.svg` 兩個靜態檔，一律
-`<img src="/mark.svg">`，**不得以文字重繪品牌名**。
+產品字標「Laysi One」是 `components/BrandMark` 排出來的文字，字體走
+`--font-sans`（Inter）；`mark.svg` 與 `monogram.svg` 已刪除，`favicon.svg` 留著。
+公司自己的標誌由 `components/CompanyBrand` 畫在登入面板與側邊欄左上角，來源是
+`company_setting` 的 `brand_logo`（data URI）與 `brand_display`（名稱／標誌／
+標誌與名稱），經 `/v1/auth/me` 與 `/v1/meta` 的 `brand` 送到畫面。
 
 **前端同樣不得自帶任何法規數字。** 稅率、級距、耐用年數一律由後端從 ruleset
 帶下來。畫面上要即時試算稅額時，用後端

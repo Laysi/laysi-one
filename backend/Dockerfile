@@ -1,5 +1,5 @@
 # The build context is the repository root rather than backend/: the workspace
-# manifest points license-file at ../LICENSE-BSL.txt, so the licence has to be
+# manifest points license-file at ../LICENSE.txt, so the licence has to be
 # reachable inside the context.
 
 # The build stage stays on the build machine's own architecture and cross-links
@@ -33,7 +33,7 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 
 # The licence is a manifest input.
-COPY LICENSE-BSL.txt ./LICENSE-BSL.txt
+COPY LICENSE.txt ./LICENSE.txt
 COPY backend ./backend
 
 WORKDIR /src/backend
@@ -51,6 +51,13 @@ WORKDIR /src/backend
 # `target` is keyed by architecture: a multi-platform build runs the two
 # platforms concurrently, and a shared cache mount would make one cargo wait on
 # the other's lock for the whole build.
+
+# What the running system reports as its version. release.yml passes the tag
+# being built; a plain `docker build` leaves it empty and the binary falls back
+# to the crate version. Declared here rather than at the top of the stage so it
+# invalidates nothing above it.
+ARG LAYSI_BUILD
+
 RUN --mount=type=cache,id=laysi-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=laysi-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=laysi-target-release-$TARGETARCH,target=/src/backend/target \

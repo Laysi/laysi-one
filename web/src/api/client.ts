@@ -35,12 +35,22 @@ export const oauthState = z.object({
 });
 export type OauthState = z.infer<typeof oauthState>;
 
+export const brand = z.object({
+  name: z.string(),
+  display: z.string(),
+  logo: z.string(),
+});
+export type Brand = z.infer<typeof brand>;
+
+export const NO_BRAND: Brand = { name: '', display: '名稱', logo: '' };
+
 export const authEnvelope = z.object({
   ok: z.boolean().optional(),
   error: apiError.optional(),
   user: sessionUser.optional(),
   oauth: oauthState.partial().optional(),
   setup: setupState.optional(),
+  brand: brand.optional(),
 });
 export type AuthEnvelope = z.infer<typeof authEnvelope>;
 
@@ -120,17 +130,24 @@ export async function callOp(
 }
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const MAX_BRAND_LOGO_BYTES = 512 * 1024;
+export const BRAND_LOGO_SETTING = 'brand_logo';
+export const BRAND_DISPLAY_SETTING = 'brand_display';
+export const BRAND_LOGO_ACCEPT = 'image/png,image/jpeg,image/webp,image/svg+xml';
 
-export function readFileBase64(file: File): Promise<string> {
+export function readFileDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error(`${file.name} 讀取失敗`));
-    reader.onload = () => {
-      const text = String(reader.result);
-      const comma = text.indexOf(',');
-      resolve(comma >= 0 ? text.slice(comma + 1) : text);
-    };
+    reader.onload = () => resolve(String(reader.result));
     reader.readAsDataURL(file);
+  });
+}
+
+export function readFileBase64(file: File): Promise<string> {
+  return readFileDataUrl(file).then((text) => {
+    const comma = text.indexOf(',');
+    return comma >= 0 ? text.slice(comma + 1) : text;
   });
 }
 
@@ -164,6 +181,7 @@ export const meta = z.object({
     creates_accounts: z.boolean().optional(),
   }),
   utc_offset: z.string(),
+  brand,
   version: z.string(),
   licence: z.string(),
 });

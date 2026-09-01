@@ -32,10 +32,14 @@ jobs:
       matrix:
         include:
           # The build context is the repository root: the workspace manifest
-          # points license-file at ../LICENSE-BSL.txt.
+          # points license-file at ../LICENSE.txt.
           - name: api
             context: .
             file: backend/Dockerfile
+            # Compiled into the binary and reported by /v1/meta, so 「安全與
+            # 營運」 names the build it is actually running. The other two
+            # images have nothing to stamp.
+            build-args: LAYSI_BUILD=${{ github.ref_name }}
           - name: web
             context: ./web
             file: ./web/Dockerfile
@@ -74,6 +78,7 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
+          build-args: ${{ matrix.build-args }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

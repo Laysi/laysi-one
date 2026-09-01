@@ -132,6 +132,15 @@
   --login-width: 380px;
   --punch-width: 460px;
 
+  --brand-icon-xs: 13px;
+  --brand-icon-sm: 16px;
+  --brand-icon-md: 18px;
+  --brand-icon-lg: 26px;
+
+  --brand-logo-rail: 32px;
+  --brand-logo-panel: 44px;
+  --brand-logo-preview: 64px;
+
   --tap-target: 40px;
 
   --text-field-touch: 16px;
@@ -519,11 +528,44 @@ textarea {
   padding: var(--space-6xl) var(--space-5xl) var(--space-3xl);
 }
 
-.sidebar__company {
+.sidebar__brand:empty {
+  display: none;
+}
+
+.sidebar__mark {
+  padding: 0 var(--space-5xl) var(--space-2xl);
+}
+
+.company-brand {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  margin-top: var(--space-md);
+}
+
+.company-brand__logo {
+  display: block;
+  width: auto;
+  max-width: 100%;
+}
+
+.company-brand__name {
   font-family: var(--font-display);
   font-size: var(--display-2xs-plus);
   color: var(--color-ink);
-  margin-top: var(--space-md);
+}
+
+.company-brand--rail {
+  min-height: var(--brand-logo-rail);
+}
+
+.company-brand--rail .company-brand__logo {
+  max-height: var(--brand-logo-rail);
+}
+
+.company-brand--panel .company-brand__logo {
+  max-height: var(--brand-logo-panel);
 }
 
 .sidebar__tabs {
@@ -618,7 +660,7 @@ textarea {
 }
 
 .sidebar__who {
-  padding: var(--space-2xl) var(--space-5xl) var(--space-4xl);
+  padding: var(--space-2xl) var(--space-5xl) var(--space-2xl);
   border-top: var(--rule-width) solid var(--rule);
   font-size: var(--text-sm);
   color: var(--color-ink-muted);
@@ -761,19 +803,37 @@ textarea {
 }
 
 .brand-mark {
-  display: block;
+  --brand-icon: var(--brand-icon-md);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-lg);
+  font-family: var(--font-sans);
+  font-weight: var(--weight-regular);
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
   color: var(--color-ink);
 }
 
-.brand-mark__missing {
-  display: flex;
-  align-items: center;
-  border: var(--rule-width) dashed var(--rule-strong);
-  border-radius: var(--radius-md);
-  padding: var(--space-sm) var(--space-lg);
-  font-size: var(--text-2xs);
-  color: var(--color-neutral-500);
-  line-height: var(--leading-tight);
+.brand-mark__icon {
+  display: block;
+  flex: none;
+  width: var(--brand-icon);
+  height: var(--brand-icon);
+}
+
+.brand-mark--sm {
+  --brand-icon: var(--brand-icon-sm);
+  font-size: var(--text-base);
+}
+
+.brand-mark--md {
+  font-size: var(--text-lg);
+}
+
+.brand-mark--lg {
+  --brand-icon: var(--brand-icon-lg);
+  font-size: var(--display-sm);
 }
 
 .dash-columns {
@@ -1400,6 +1460,33 @@ textarea {
 .form-line__amount {
   font-family: var(--font-display);
   font-size: var(--display-sm);
+}
+
+.brand-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xl);
+  padding: var(--space-3xl) var(--space-5xl);
+}
+
+.brand-card__logo {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: var(--brand-logo-preview);
+}
+
+.brand-card__empty {
+  font-size: var(--text-sm-plus);
+  color: var(--color-ink-muted);
+  line-height: var(--leading-normal);
+  margin: 0;
+}
+
+.brand-card .fact {
+  align-self: stretch;
+  padding-bottom: 0;
 }
 
 .file-input {
@@ -2155,6 +2242,24 @@ textarea {
   margin-bottom: var(--space-7xl);
 }
 
+.login__brand:empty {
+  display: none;
+}
+
+.login__mark {
+  display: flex;
+  justify-content: center;
+}
+
+.sidebar__mark .brand-mark,
+.login__mark .brand-mark {
+  --brand-icon: var(--brand-icon-xs);
+  gap: var(--space-md);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-neutral-500);
+}
+
 .login__title {
   font-family: var(--font-display);
   font-weight: var(--weight-regular);
@@ -2781,8 +2886,8 @@ textarea {
     box-shadow: var(--shadow-overlay);
   }
 
-  .sidebar__who {
-    padding-bottom: calc(var(--space-4xl) + env(safe-area-inset-bottom));
+  .sidebar__mark {
+    padding-bottom: calc(var(--space-2xl) + env(safe-area-inset-bottom));
   }
 
   .scrim {

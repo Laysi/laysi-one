@@ -118,7 +118,7 @@ services:
   api:
     build:
       # The build context is the repository root: the workspace manifest
-      # points license-file at ../LICENSE-BSL.txt, so it has to be inside it.
+      # points license-file at ../LICENSE.txt, so it has to be inside it.
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped

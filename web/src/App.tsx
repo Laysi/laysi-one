@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrandMark } from './components/BrandMark';
+import { CompanyBrand } from './components/CompanyBrand';
 import { EntryDrawer } from './components/EntryDrawer';
 import { SetupWizard } from './components/SetupWizard';
 import { Accounts } from './screens/Accounts';
@@ -63,6 +64,7 @@ import {
   getMeta,
   myNoticeList,
   myPunchList,
+  NO_BRAND,
   OpFailed,
   punchResult,
   voucherList,
@@ -136,7 +138,7 @@ export function App() {
         <div className="login">
           <div className="card login__panel">
             <div className="login__brand">
-              <BrandMark height={20} />
+              <CompanyBrand brand={auth.brand} place="panel" />
             </div>
             <p className="state-note state-note--error login__alert">
               {auth.problem?.message ?? '無法連線到伺服器，請確認伺服器已啟動。'}
@@ -146,6 +148,10 @@ export function App() {
                 重新載入
               </button>
             </div>
+          </div>
+
+          <div className="login__mark">
+            <BrandMark size="sm" />
           </div>
         </div>
       ) : signedIn && !auth.user?.must_change_password && consentRequested() ? (
@@ -325,9 +331,7 @@ function Workspace() {
 
       <aside id="laysi-nav" className={`sidebar${navOpen ? ' sidebar--open' : ''}`}>
         <div className="sidebar__brand">
-
-          <BrandMark height={14} />
-          <div className="sidebar__company">{meta?.company ?? '　'}</div>
+          <CompanyBrand brand={meta?.brand ?? NO_BRAND} place="rail" />
 
           {tabs.length > 1 && (
             <div className="sidebar__tabs">
@@ -398,6 +402,10 @@ function Workspace() {
             </button>
           </div>
         </div>
+
+        <div className="sidebar__mark">
+          <BrandMark size="sm" />
+        </div>
       </aside>
 
       <main className="main">
@@ -413,7 +421,7 @@ function Workspace() {
             ☰
           </button>
           <span className="header__brand">
-            <BrandMark height={12} />
+            <BrandMark size="sm" />
           </span>
 
           <div className="header__section">{SECTION_LABEL[section]}</div>
@@ -516,7 +524,7 @@ function Workspace() {
                 <Imports onToast={showToast} reloadKey={reloadKey} onChanged={reload} />
               )}
               {screen === 'setup' && (
-                <Setup onGo={go} onToast={showToast} reloadKey={reloadKey} />
+                <Setup onGo={go} onToast={showToast} onChanged={reload} reloadKey={reloadKey} />
               )}
               {screen === 'acc' && (
                 <Accounts onGo={go} onToast={showToast} reloadKey={reloadKey} />

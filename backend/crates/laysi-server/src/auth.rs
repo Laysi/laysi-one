@@ -560,6 +560,7 @@ pub async fn me(State(state): State<Shared>, headers: HeaderMap) -> Response {
             "user": user_json_with_role(&state, &verified.session.user).await,
             "oauth": crate::oidc::describe(&state).await,
             "setup": setup_json(&state, true).await,
+            "brand": brand_json(&state).await,
         }))
         .into_response(),
         // `oauth` and `setup` are returned even when signed out. The signed-out
@@ -577,11 +578,49 @@ pub async fn me(State(state): State<Shared>, headers: HeaderMap) -> Response {
                 "error": { "code": "unauthorized", "message": "請先登入再繼續" },
                 "oauth": crate::oidc::describe(&state).await,
                 "setup": setup_json(&state, false).await,
+                "brand": brand_json(&state).await,
             })),
         )
             .into_response(),
         Err(error) => error.into_response(),
     }
+}
+
+/// The company identity the sign-in screen and the sidebar draw.
+///
+/// Answered without a session because the sign-in screen is one of the two
+/// places that show it, and what it carries is what the company chose to put
+/// on that page. The logo is left out when the display mode does not use it:
+/// it is hundreds of kilobytes travelling with every load, and an unused one
+/// would be paid for on every install that never uploaded a logo.
+pub async fn brand_json(state: &Shared) -> Value {
+    let settings = match state.store.company_settings().await {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::error!(%error, "reading the company brand failed");
+            Vec::new()
+        }
+    };
+    let value = |code: &str| {
+        settings
+            .iter()
+            .find(|setting| setting.code == code)
+            .map(|setting| setting.value.clone())
+            .unwrap_or_default()
+    };
+    let logo = value(laysi_ops::ops::settings::BRAND_LOGO_SETTING);
+    let mut display = value(laysi_ops::ops::settings::BRAND_DISPLAY_SETTING);
+    // With no logo there is nothing for the other two modes to draw, and an
+    // empty box is worse than the name.
+    if logo.is_empty() || !laysi_ops::ops::settings::BRAND_DISPLAYS.contains(&display.as_str()) {
+        display = laysi_ops::ops::settings::BRAND_DISPLAYS[0].to_string();
+    }
+    let shows_logo = display != laysi_ops::ops::settings::BRAND_DISPLAYS[0];
+    json!({
+        "name": value("company_name"),
+        "display": display,
+        "logo": if shows_logo { logo } else { String::new() },
+    })
 }
 
 /// Whether the browser may still initialise this installation.

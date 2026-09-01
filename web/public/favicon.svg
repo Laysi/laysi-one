@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Laysi One">
 <!--
-  Laysi One — 分頁與應用程式圖示。授權 / Licence: Business Source License 1.1
-  （見 repo 根目錄 LICENSE-BSL.txt）。移除、改寫或以其他標記替換，違反授權條款。
+  Laysi One — 分頁與應用程式圖示。專有素材，著作權人所有（見 repo 根目錄
+  LICENSE.txt）。移除、改寫或以其他標記替換，違反授權合約。
 
   兩道等長的粗弧繞成一個環，互為 180 度旋轉，中間留兩道缺口：一筆分錄的借方與
-  貸方等量，而兩邊不相接。終端切平（與字標「ONE」的 butt 終端同一套），但不沿
+  貸方等量，而兩邊不相接。終端切平（butt），但不沿
   半徑切，內緣比外緣退後 16 度，兩道缺口因此是同向的斜槽而不是兩條輻線。
 
   金取 f0b429 而不是畫面上的 accent b68235：色相幾乎沒動（36 度到 42 度），

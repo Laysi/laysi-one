@@ -320,7 +320,7 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": {
                     "name": "laysi-one",
-                    "version": env!("CARGO_PKG_VERSION"),
+                    "version": crate::build_version(),
                 },
                 "instructions":
                     "Laysi One 是台灣中小企業的財務與人資系統。本連線已綁定一位使用者，\

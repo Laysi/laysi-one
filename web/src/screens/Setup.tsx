@@ -3,12 +3,18 @@ import { useCurrentUser } from '../auth';
 import { TimeField } from '../components/TimeField';
 import {
   accountList,
+  BRAND_DISPLAY_SETTING,
+  BRAND_LOGO_ACCEPT,
+  BRAND_LOGO_SETTING,
   callOp,
   chartOfAccounts,
   companySettings,
   dimensionList,
+  fileSizeLabel,
+  MAX_BRAND_LOGO_BYTES,
   money,
   OpFailed,
+  readFileDataUrl,
   userAccountList,
   type Account,
   type ChartAccount,
@@ -22,6 +28,7 @@ import type { ScreenId } from '../nav';
 interface Props {
   onGo: (screen: ScreenId) => void;
   onToast: (msg: string) => void;
+  onChanged: () => void;
   reloadKey: number;
 }
 
@@ -137,7 +144,7 @@ function emptyAccountForm(): AccountForm {
   };
 }
 
-export function Setup({ onGo, onToast, reloadKey }: Props) {
+export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
   const me = useCurrentUser();
   const canEditSettings = me.permissions.includes('update_company_setting');
   const canSetTimezone = me.permissions.includes('set_company_timezone');
@@ -152,6 +159,7 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
   const [draft, setDraft] = useState('');
   const [onlyUsed, setOnlyUsed] = useState(false);
   const [ownerMissing, setOwnerMissing] = useState(false);
+  const [savingBrand, setSavingBrand] = useState(false);
 
   const load = useCallback(() => {
     setError(null);
@@ -209,6 +217,37 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
       load();
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
+    }
+  }
+
+  const brandLogo = settings?.find((s) => s.code === BRAND_LOGO_SETTING)?.value ?? '';
+  const brandDisplay = settings?.find((s) => s.code === BRAND_DISPLAY_SETTING);
+
+  async function saveBrand(code: string, value: string, done: string) {
+    setSavingBrand(true);
+    try {
+      await callOp<unknown>('update_company_setting', { code, value });
+      onToast(done);
+      load();
+      onChanged();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setSavingBrand(false);
+    }
+  }
+
+  async function uploadLogo(file: File | undefined) {
+    if (!file) return;
+    if (file.size > MAX_BRAND_LOGO_BYTES) {
+      onToast(`${file.name} 是 ${fileSizeLabel(file.size)}，標誌要小於 ${MAX_BRAND_LOGO_BYTES / 1024} KB`);
+      return;
+    }
+    try {
+      const dataUrl = await readFileDataUrl(file);
+      await saveBrand(BRAND_LOGO_SETTING, dataUrl, '公司標誌已更新');
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -432,7 +471,9 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
             <section>
               <h3 className="section-title">公司與帳務</h3>
               <div className="card fact-card">
-                {settings.map((s) => (
+                {settings
+                  .filter((s) => s.code !== BRAND_LOGO_SETTING && s.code !== BRAND_DISPLAY_SETTING)
+                  .map((s) => (
                   <div className="fact" key={s.code}>
                     <span className="fact__key">{s.label}</span>
                     {editing === s.code ? (
@@ -517,6 +558,67 @@ export function Setup({ onGo, onToast, reloadKey }: Props) {
               {!canEditSettings && (
                 <p className="hint">公司設定由系統管理員維護。</p>
               )}
+
+              <h3 className="section-title section-title--spaced">公司識別</h3>
+              <div className="card brand-card">
+                {brandLogo ? (
+                  <img className="brand-card__logo" src={brandLogo} alt="公司標誌" />
+                ) : (
+                  <p className="brand-card__empty">上傳標誌後，登入頁與側邊欄可選擇顯示標誌或公司名稱。</p>
+                )}
+                {canEditSettings && (
+                  <>
+                    <input
+                      className="file-input"
+                      type="file"
+                      accept={BRAND_LOGO_ACCEPT}
+                      disabled={savingBrand}
+                      onChange={(e) => {
+                        void uploadLogo(e.target.files?.[0]);
+                        e.target.value = '';
+                      }}
+                    />
+                    {brandLogo && (
+                      <button
+                        className="btn btn--compact"
+                        disabled={savingBrand}
+                        onClick={() => void saveBrand(BRAND_LOGO_SETTING, '', '已移除公司標誌')}
+                      >
+                        移除標誌
+                      </button>
+                    )}
+                  </>
+                )}
+                {brandLogo && brandDisplay && (
+                  <div className="fact">
+                    <span className="fact__key">{brandDisplay.label}</span>
+                    <span className="fact__value">
+                      {canEditSettings ? (
+                        <select
+                          className="entry-input"
+                          value={brandDisplay.value}
+                          disabled={savingBrand}
+                          onChange={(e) =>
+                            void saveBrand(
+                              BRAND_DISPLAY_SETTING,
+                              e.target.value,
+                              `公司識別改為顯示${e.target.value}`,
+                            )
+                          }
+                        >
+                          {brandDisplay.options?.map((o) => (
+                            <option key={o} value={o}>
+                              {o}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        brandDisplay.value
+                      )}
+                    </span>
+                  </div>
+                )}
+              </div>
 
               {dims.dimensions.map((d) => (
                 <div key={d.code}>

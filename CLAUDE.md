@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Laysi One 是台灣中小企業的財務＋人資正式產品。
 評估用的示範資料只能由 `laysi-admin seed-demo` 手動種入（見 `docs/architecture.md`）。
 Rust（axum + sqlx）＋ React（Vite + TS）＋ PostgreSQL 18 ＋ RustFS ＋ Docker Compose。
-授權為 **BSL 1.1**（見 `LICENSE-BSL.txt`），不是開源授權。
+授權為**專有商業授權**（見 `LICENSE.txt`），由代理商與經銷商販售，不是開源授權。
 
 產品規格的權威來源是 Claude Design 專案「台灣中小企業財務系統原型」的
 `財務系統原型.dc.html`（30 個畫面、3 種身分視角）。跨層契約寫在
@@ -136,27 +136,33 @@ FNV-1a，讀取端從來不取它。
 編得動（欄位名與排序共用 `ops/regulations.rs` 的 `FIELDS`，識別字不進畫面）；
 改結構走 `save_regulation` 本身，它收整份 `payload`。
 
-### 4. 品牌資產是 `web/public/` 底下的靜態 SVG
+### 4. 產品字標是文字，公司標誌是設定
 
-`mark.svg`（字標「LAYSI ONE」）、`monogram.svg`（方形的 L，給窄版面）、
-`favicon.svg`（分頁與應用程式圖示）三個檔，由 Caddy 與 vite 當一般靜態檔案送出，
-後端沒有任何品牌路由。三個檔各自帶著 BSL 1.1 的授權聲明。
-**不得用文字重繪品牌名稱**。
+「Laysi One」由 `components/BrandMark` 以 Inter 排出來（`--font-sans` 已經是
+Inter），三個尺寸 `sm`／`md`／`lg` 對應 header、側邊欄與登入面板。原本的
+`mark.svg`（字標）與 `monogram.svg`（方形的 L）連同 `BrandMark` 的載入失敗分支一起
+刪掉；`favicon.svg` 留著，它是圖示不是字標，用文字排不出來。
 
 字標原本由 Rust 即時組出來，並在啟動時驗 BLAKE3 與 Ed25519 簽章、不過就
 `exit(78)`。那套機制連同 `laysi-brand` crate、`backend/brand/` 的金鑰、
 `/v1/brand/*.svg` 兩條路由、`/healthz` 的 `brand`、`/v1/meta` 的 `brand_build`
 與安全營運頁的「品牌完整性」卡片一起移除。
 
-`mark.svg` 的「LAYSI」是 laysi.io 的原始向量外框，以 `fill` 描繪；「ONE」原圖沒有，
-依原圖量出的線寬 `11.09` 與圓角半徑 `23.18` 補畫，存成中線由 `stroke` 描出。兩者
-共用同一個座標空間，不互相縮放，`viewBox` 就是含住兩者的框。`monogram.svg` 取同一個
-「L」單獨置中，四邊內縮 12。兩者的 `fill` 是 `currentColor`，但它們掛在 `<img>` 上，
-SVG 是獨立文件、繼承不到外面的 `color`——`.brand-mark` 那條 `color` 規則是留著的裝飾，
-要真的跟著主題走得改成 inline SVG。
+**公司自己的標誌是兩列 `company_setting`**：`brand_logo` 存
+`data:image/…;base64` 的圖檔內容，`brand_display` 是「名稱」／「標誌」／
+「標誌與名稱」。畫在兩個地方——登入面板與側邊欄左上角，共用
+`components/CompanyBrand`；`sidebar__company` 那一段換成它。
+**圖檔進 `company_setting` 而不是進桶子**：登入頁沒有 session，而
+`company_setting` 已經是那個瀏覽器唯二讀得到的兩個端點讀的東西，放進桶子就要為它
+再開一條公開路由。代價是它跟著 `/v1/auth/me` 與 `/v1/meta` 每次載入走一遍，所以
+`MAX_BRAND_LOGO_BYTES` 是 512 KB，而顯示方式不用標誌時後端回空字串。
+`validate_setting` 只收 PNG、JPEG、WebP 與 SVG 的 data URI——那個字串會直接進
+簽入頁的 `<img src>`。沒有標誌時後端把顯示方式降回「名稱」，畫面也不畫那個下拉。
+`update_company_setting` 的稽核摘要對 `brand_logo` 寫「已更換」不寫值：
+`redact_for_audit` 只碰輸入，摘要是自己寫的。
 
 `favicon.svg` 畫的是兩道等長的粗弧繞成一個環，互為 180 度旋轉，中間留兩道缺口：一筆分錄的借方與
-貸方等量，而兩邊不相接。終端切平（與字標「ONE」的 butt 終端同一套）但不沿半徑切，
+貸方等量，而兩邊不相接。終端切平（butt）但不沿半徑切，
 內緣比外緣退後 16 度，所以兩道缺口是同向的斜槽而不是兩條輻線。**沒有底板**，
 `manifest.json` 指同一個檔。原本畫的是一個圓被一道 S 分成兩塊等面積的深藍與金，
 但藍配黃再加一道 S 就是 Python 的標記；缺口取代 S，兩塊之間不再有那條交扣的曲線。

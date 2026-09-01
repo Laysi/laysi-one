@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from 'react';
 import { BrandMark } from '../components/BrandMark';
+import { CompanyBrand } from '../components/CompanyBrand';
 import { AuthFailed, useAuth } from '../auth';
 
 export function Init() {
-  const { setup, bootstrap } = useAuth();
+  const { setup, brand, bootstrap } = useAuth();
 
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -40,7 +41,7 @@ export function Init() {
     <div className="login">
       <div className="card login__panel">
         <div className="login__brand">
-          <BrandMark height={20} />
+          <CompanyBrand brand={brand} place="panel" />
         </div>
 
         <h1 className="login__title">設定系統管理員密碼</h1>
@@ -109,6 +110,10 @@ export function Init() {
           </div>
         </form>
 
+      </div>
+
+      <div className="login__mark">
+        <BrandMark size="sm" />
       </div>
     </div>
   );

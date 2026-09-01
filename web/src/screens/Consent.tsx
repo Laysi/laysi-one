@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { BrandMark } from '../components/BrandMark';
+import { CompanyBrand } from '../components/CompanyBrand';
 import { useAuth } from '../auth';
 import {
   decideAuthorize,
@@ -17,7 +18,7 @@ function origin(uri: string): string {
 }
 
 export function Consent() {
-  const { user } = useAuth();
+  const { user, brand } = useAuth();
   const search = window.location.search;
   const [view, setView] = useState<AuthorizeView | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -48,7 +49,7 @@ export function Consent() {
     <div className="login">
       <div className="card login__panel">
         <div className="login__brand">
-          <BrandMark height={20} />
+          <CompanyBrand brand={brand} place="panel" />
         </div>
 
         {problem ? (
@@ -97,6 +98,11 @@ export function Consent() {
             </div>
           </>
         )}
+
+      </div>
+
+      <div className="login__mark">
+        <BrandMark size="sm" />
       </div>
     </div>
   );

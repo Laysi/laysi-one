@@ -3,7 +3,7 @@
 面向台灣中小企業的財務＋人資系統。Rust（axum + sqlx）＋ React（Vite + TS）＋
 PostgreSQL 18 ＋ RustFS，以 Docker Compose 自架。
 
-**授權：Business Source License 1.1** · **狀態：0.1.0，開發中**
+**授權：專有商業授權** · **狀態：0.1.0，開發中**
 
 新安裝只有基礎科目、權限、流程與法規設定，公司資料登入後自行建立。
 
@@ -188,7 +188,7 @@ docker compose up -d --build
 
 ## 授權
 
-Business Source License 1.1，見 [LICENSE-BSL.txt](LICENSE-BSL.txt)。原始碼公開
-可讀、可自架自用，但不得提供為競爭性的商業服務；Change Date 之後轉為 Apache 2.0。
+專有軟體，不是開源軟體，見 [LICENSE.txt](LICENSE.txt)。使用權來自與著作權人
+或其授權代理商、經銷商簽訂的授權合約。
 
-品牌字標是 `web/public/` 底下的靜態 SVG，檔案本身帶著 BSL 1.1 的授權聲明。
+`web/public/favicon.svg` 是專有素材，檔案本身帶著著作權聲明。

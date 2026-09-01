@@ -1,29 +1,12 @@
-import { useState } from 'react';
-
 interface Props {
-  height?: number;
-  variant?: 'wordmark' | 'monogram';
+  size?: 'sm' | 'md' | 'lg';
 }
 
-export function BrandMark({ height = 28, variant = 'wordmark' }: Props) {
-  const [failed, setFailed] = useState(false);
-  const path = variant === 'monogram' ? 'monogram.svg' : 'mark.svg';
-
-  if (failed) {
-    return (
-      <div className="brand-mark__missing" style={{ height }} role="img" aria-label="Laysi One">
-        字標載入失敗
-      </div>
-    );
-  }
-
+export function BrandMark({ size = 'md' }: Props) {
   return (
-    <img
-      className="brand-mark"
-      src={`/${path}`}
-      height={height}
-      alt="Laysi One"
-      onError={() => setFailed(true)}
-    />
+    <span className={`brand-mark brand-mark--${size}`}>
+      <img className="brand-mark__icon" src="/favicon.svg" alt="" />
+      Laysi One
+    </span>
   );
 }

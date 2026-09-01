@@ -9,6 +9,7 @@ import {
   downloadFile,
   fileSizeLabel,
   getHealthz,
+  getMeta,
   issuedApiToken,
   oidcSetting,
   OpFailed,
@@ -18,6 +19,7 @@ import {
   type ApiTokenList,
   type BackupSetting,
   type Healthz,
+  type Meta,
   type OidcSetting,
   type SystemHealth,
 } from '../api/client';
@@ -93,6 +95,7 @@ export function Security({ onToast, reloadKey }: Props) {
   const [backupForm, setBackupForm] = useState<BackupForm | null>(null);
   const [savingBackup, setSavingBackup] = useState(false);
   const [resettingKey, setResettingKey] = useState(false);
+  const [info, setInfo] = useState<Meta | null>(null);
   const [oidcForm, setOidcForm] = useState<OidcForm | null>(null);
   const [savingOidc, setSavingOidc] = useState(false);
 
@@ -116,6 +119,7 @@ export function Security({ onToast, reloadKey }: Props) {
       .catch((e: Error) => setError(e.message));
 
     getHealthz().then(setHz).catch(() => setHz(null));
+    getMeta().then(setInfo).catch(() => setInfo(null));
 
     if (canReadOidc) {
       callOp('get_oidc_setting', {}, undefined, oidcSetting)
@@ -328,6 +332,10 @@ export function Security({ onToast, reloadKey }: Props) {
           <section>
             <h3 className="section-title">系統健康</h3>
             <div className="card fact-card">
+              <div className="fact">
+                <span className="fact__key">版本</span>
+                <span className="fact__value num">{info?.version ?? '讀取中…'}</span>
+              </div>
               <div className="fact">
                 <span className="fact__key">PostgreSQL</span>
                 <span className="fact__value">

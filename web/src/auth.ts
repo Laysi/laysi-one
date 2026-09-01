@@ -1,18 +1,20 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
   authEnvelope,
+  NO_BRAND,
   noteServerTime,
   setUnauthorizedHandler,
   SHAPE_MISMATCH,
   type ApiError,
   type AuthEnvelope,
+  type Brand,
   type OauthState,
   type SessionUser,
   type SetupState,
 } from './api/client';
 import { consentRequested } from './nav';
 
-export type { OauthState, SessionUser, SetupState };
+export type { Brand, OauthState, SessionUser, SetupState };
 
 export class AuthFailed extends Error {
   constructor(public readonly error: ApiError) {
@@ -51,6 +53,7 @@ export interface AuthValue {
   user: SessionUser | null;
   oauth: OauthState;
   setup: SetupState;
+  brand: Brand;
   signIn: (username: string, password: string) => Promise<SessionUser>;
   signOut: () => Promise<void>;
   changePassword: (newPassword: string) => Promise<SessionUser>;
@@ -105,15 +108,17 @@ async function fetchMe(): Promise<{
   user: SessionUser | null;
   oauth: OauthState;
   setup: SetupState;
+  brand: Brand;
 }> {
   const res = await fetch('/v1/auth/me', { headers: JSON_HEADERS });
   noteServerTime(res);
   const envelope = await readEnvelope(res);
   const oauth: OauthState = { ...OAUTH_OFF, ...envelope.oauth };
   const setup = envelope.setup ?? CLOSED_SETUP;
-  if (res.status === 401) return { user: null, oauth, setup };
+  const brand = envelope.brand ?? NO_BRAND;
+  if (res.status === 401) return { user: null, oauth, setup, brand };
   if (!res.ok || !envelope.user) throw failure(res, envelope);
-  return { user: envelope.user, oauth, setup };
+  return { user: envelope.user, oauth, setup, brand };
 }
 
 export function useAuthSession(): AuthValue {
@@ -122,6 +127,7 @@ export function useAuthSession(): AuthValue {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [oauth, setOauth] = useState<OauthState>(OAUTH_OFF);
   const [setup, setSetup] = useState<SetupState>(CLOSED_SETUP);
+  const [brand, setBrand] = useState<Brand>(NO_BRAND);
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
@@ -138,6 +144,7 @@ export function useAuthSession(): AuthValue {
         if (!live) return;
         setOauth(session.oauth);
         setSetup(session.setup);
+        setBrand(session.brand);
         setUser(session.user);
         setStatus(session.user ? 'signed-in' : 'signed-out');
       })
@@ -203,5 +210,16 @@ export function useAuthSession(): AuthValue {
     return envelope.user;
   }, []);
 
-  return { status, problem, user, oauth, setup, signIn, signOut, changePassword, bootstrap };
+  return {
+    status,
+    problem,
+    user,
+    oauth,
+    setup,
+    brand,
+    signIn,
+    signOut,
+    changePassword,
+    bootstrap,
+  };
 }
