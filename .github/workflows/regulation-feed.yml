@@ -1,0 +1,45 @@
+# Publish amended rates to the feed `refresh_regulations` reads.
+#
+# A rate the legislature changed is data, not a schema change, so it must not
+# cost an image: an installation fetches it from the feed instead. The rule
+# files here stay the source; this only republishes them as one JSON document.
+#
+# The feed repository is public and holds nothing but manifest.json, served by
+# GitHub Pages from its default branch. REGULATION_FEED_TOKEN needs contents
+# write on that repository and nothing else.
+
+name: regulation-feed
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/regulation/**'
+      - 'scripts/regulation-manifest.ts'
+      - '.github/workflows/regulation-feed.yml'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun scripts/regulation-manifest.ts manifest.json
+
+      - name: Push to the feed
+        env:
+          TOKEN: ${{ secrets.REGULATION_FEED_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Laysi/regulation-feed.git" feed
+          cp manifest.json feed/manifest.json
+          cd feed
+          git config user.name 'laysi-one'
+          git config user.email 'noreply@laysi.io'
+          git add manifest.json
+          # Nothing to publish is the ordinary outcome: a push that touched
+          # the rule files without changing a payload lands here too.
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: republish regulation manifest from ${GITHUB_SHA::7}"
+          git push

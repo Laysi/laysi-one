@@ -890,6 +890,7 @@ mod tests {
     const SCHEMA: &str = concat!(
         include_str!("../../../migrations/0001_initial.sql"),
         include_str!("../../../migrations/0002_employee_records.sql"),
+        include_str!("../../../migrations/0005_regulation_feed.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the
@@ -1108,6 +1109,7 @@ mod tests {
                 "get_oidc_setting",
                 "issue_api_token",
                 "list_user_accounts",
+                "refresh_regulations",
                 "reset_backup_key",
                 "reset_user_password",
                 "save_regulation",

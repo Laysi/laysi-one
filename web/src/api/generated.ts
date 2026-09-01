@@ -121,6 +121,7 @@ export type OpName =
   | 'list_regulations'
   | 'save_regulation'
   | 'delete_regulation'
+  | 'refresh_regulations'
   | 'list_work_calendar'
   | 'set_work_calendar_day'
   | 'refresh_work_calendar'
@@ -264,6 +265,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'list_regulations', risk: 'read_only', riskLabel: '唯讀', summary: "讀法規版本：勞健保費率、勞退提繳、營業稅、最低工資等每一版的內容、法源與生效日" },
   { name: 'save_regulation', risk: 'admin_only', riskLabel: '限系統管理員', summary: "存法規版本：新增或改寫一個領域某一版的費率、級距與上限，存檔後立即適用" },
   { name: 'delete_regulation', risk: 'admin_only', riskLabel: '限系統管理員', summary: "刪除法規版本：移除一個領域的某一版，該領域至少要留下一版" },
+  { name: 'refresh_regulations', risk: 'admin_only', riskLabel: '限系統管理員', summary: "檢查法規更新：向廠商取修法後的費率與級距並寫入，已有或曾刪除的版本不動" },
   { name: 'list_work_calendar', risk: 'read_only', riskLabel: '唯讀', summary: "讀工作日曆：一年逐日的工作日、休息日、例假、國定假日與天災停班，含節日名稱與來源" },
   { name: 'set_work_calendar_day', risk: 'needs_confirm', riskLabel: '需人確認', summary: "改工作日曆一天：指定該日的日別，颱風停班亦由此登記；留空則回到星期決定的日別" },
   { name: 'refresh_work_calendar', risk: 'needs_confirm', riskLabel: '需人確認', summary: "更新工作日曆：向政府資料開放平臺取該年度的辦公日曆表並寫入，自行設定過的日期保留不動" },
@@ -398,6 +400,7 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'list_regulations': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"Query as of a date. Needed by the regulation and balance operations.","properties":{"as_of":{"default":null,"description":"Cut-off date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"AsOfInput","type":"object"},
   'save_regulation': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"domain":{"description":"Regulation domain, one of the codes `list_regulations` returns.","type":"string"},"effective_from":{"description":"First date this version applies to.","format":"date","type":"string"},"effective_to":{"default":null,"description":"Last date it applies to. Leave empty while it is still in force.","format":"date","type":["string","null"]},"payload":{"description":"The rules themselves. Every number is a string."},"source_note":{"description":"The article or schedule this comes from.","type":"string"},"version":{"description":"Version label, unique within the domain. Saving an existing one\nreplaces it.","type":"string"}},"required":["domain","version","effective_from","source_note","payload"],"title":"SaveRegulationInput","type":"object"},
   'delete_regulation': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"domain":{"description":"Regulation domain.","type":"string"},"version":{"description":"Version to remove.","type":"string"}},"required":["domain","version"],"title":"DeleteRegulationInput","type":"object"},
+  'refresh_regulations': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_work_calendar': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"year":{"default":null,"description":"Calendar year (西元). Defaults to this year.","format":"int32","type":["integer","null"]}},"title":"YearInput","type":"object"},
   'set_work_calendar_day': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"kind":{"description":"`workday`, `rest_day`, `regular_leave`, `holiday` or\n`natural_disaster`. Empty puts the date back to what the day of the\nweek says.","type":"string"},"name":{"default":null,"description":"What the day is called, for example 「中秋節」.","type":["string","null"]},"on_date":{"description":"The date to state (YYYY-MM-DD).","format":"date","type":"string"}},"required":["on_date","kind"],"title":"SetWorkCalendarDayInput","type":"object"},
   'refresh_work_calendar': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"year":{"default":null,"description":"Calendar year (西元) to fetch. Defaults to this year.","format":"int32","type":["integer","null"]}},"title":"RefreshInput","type":"object"},

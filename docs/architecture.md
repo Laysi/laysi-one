@@ -279,9 +279,9 @@ effective_from, source_note }`。
 同一份 `FIELDS` 表**：`jsonb` 的鍵是字典序回來的，照原樣印會把「員工負擔比率」排在
 它所適用的「投保薪資上限」前面；識別字（`max_insured_salary`）也不得進畫面。
 
-`save_regulation`／`delete_regulation` 是 `AdminOnly`，`list_regulations` 移到新的
-`manage_regulations` 權限（系統管理員、負責人、會計），畫面掛在系統分頁。讀費率與
-改費率是兩件事：申報的人要查得到，改的人是裝機的人。
+`save_regulation`／`delete_regulation`／`refresh_regulations` 是 `AdminOnly`，
+`list_regulations` 移到新的 `manage_regulations` 權限（系統管理員、負責人、會計），
+畫面掛在系統分頁。讀費率與改費率是兩件事：申報的人要查得到，改的人是裝機的人。
 
 寫入前先跑 `probe()`——用該領域自己的計算子算一次。少一個欄位的 payload 在存檔當下
 就被擋下，而不是等到發薪那天。`delete_regulation` 拒絕刪掉一個領域的最後一版：
@@ -1224,6 +1224,7 @@ impl Registry {
 | `list_regulations` | ReadOnly | `{ as_of?: date }` | `{ as_of, domains: [{domain, label, applicable, version, versions: [{version, effective_from, effective_to, source_note, in_force, payload, fields}]}] }` |
 | `save_regulation` | AdminOnly | `{ domain, version, effective_from, effective_to?, source_note, payload }` | `{ domain, label, version, effective_from, rulesets }` |
 | `delete_regulation` | AdminOnly | `{ domain, version }` | `{ domain, label, version, rulesets }` |
+| `refresh_regulations` | AdminOnly | `{}` | `{ read, applied: [{domain, label, version, effective_from}], rulesets }` |
 | `draft_voucher` | NeedsConfirm | `{ date, memo, lines: LineInput[] }` | `{ voucher }` 狀態 `draft` |
 | `post_voucher` | HighRisk | `{ no: string }` | `{ voucher }` 狀態 `posted` |
 | `void_voucher` | HighRisk | `{ no, reason }` | `{ voucher }` 狀態 `void`；分錄不動，理由進稽核摘要 |
@@ -2577,9 +2578,14 @@ offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），�
 **管理員自己建**：「法規版本」畫面的 `save_regulation`，存檔前跑 `probe()`。修法當天
 就能上線，不必等發版。
 
-**廠商隨版本送**：`backend/regulation-updates/*.sql`，由 `Store::REGULATION_UPDATES`
-逐檔 `include_str!`，啟動時經 `apply_regulation_updates` 套用，套用過的檔名記在
-`reg_update`。
+**向廠商取**：「法規版本」的 `refresh_regulations`（`AdminOnly`）向
+`https://laysi.github.io/regulation-feed/manifest.json` 取修法後的版本，套用過的識別字
+記在 `reg_update`。**修法不必換映像**：費率是資料，換一版映像只為了改一個數字，等於
+把上線時程綁在發版時程上。
+
+**送的是 payload，不是 SQL**。發布端供應值，寫入的敘述由伺服器自己組，所以那個網址
+拿不到 `reg_ruleset` 以外的任何一張表。每一份 payload 進資料庫前都走
+`probe()`，與手打進去的那一份同一道檢查——形狀不對就擋在寫入當下，不是等到發薪那天。
 
 **它不放在 `migrations/`**：費率是資料不是 schema。0001 把六十三份 migration 合併成
 一份，下一次合併時一則費率修正會擋在路上，而合併保不住「這個安裝已經收過那一版並且
@@ -2587,16 +2593,21 @@ offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），�
 
 三個約束：
 
-- **一個檔一條敘述**。`sqlx::query` 走 extended protocol 只收一條；`raw_sql` 收得下
-  多條，但會讓 `laysi-ops` 那邊的 async trait 邊界證不出 `Send`。兩個領域就兩個檔。
 - **`ON CONFLICT (domain, version) DO NOTHING`**。管理員搶先自己建過同一版就不動它。
-- **一個資料庫只套用一次**。記錄列與檔案內容同一個交易，先寫記錄再跑檔案，所以兩台
-  伺服器同時啟動時第二台會擋在主鍵上、然後看到零列。刪掉的版本不會在下次啟動回來——
+- **一個資料庫只套用一次**。記錄列與 ruleset 同一個交易，先寫記錄再寫版本，所以兩台
+  伺服器同時更新時第二台會擋在主鍵上、然後看到零列。刪掉的版本不會在下一次更新回來——
   這正是 `seed_regulations()` 的「只在表空時寫」要守的性質，改用一次性的記錄之後不必
-  再要求整張表是空的。
+  再要求整張表是空的。**唯一的缺口是出廠版本**：記住的是修法，而出廠那一批由
+  `seed_regulations()` 寫入時不留記錄，所以在第一次更新之前刪掉的出廠版本會回來一次。
+- **`file` 一旦發布就不能改**。它是 `reg_update` 的鍵；換一個名字等於要每個安裝再套用
+  一次，包括刻意把那一版刪掉的那些。它帶著 `.sql` 尾綴，那是更新走 `include_str!` 那
+  幾版留下的檔名，留著才不會對已經收過的安裝再送一次。
 
-檔案由 `scripts/regulation-sql.ts` 從出廠 TOML 產出，不要手抄 payload：TOML 是人編輯
-的來源，也是 `laysi-regulation` 測試與 `probe()` 唯一涵蓋得到的形式。
+`manifest.json` 由 `scripts/regulation-manifest.ts` 從 `backend/regulation/**/*.toml`
+產出，`.github/workflows/regulation-feed.yml` 在那些檔案有變動時推到發布用的公開
+儲存庫。**只有 TOML 一份來源**：它是人編輯的地方，也是 `laysi-regulation` 測試與
+`probe()` 唯一涵蓋得到的形式。同一份 TOML 對新安裝是出廠預設值，對既有安裝是更新，
+兩條路寫進去的是同一組數字。
 
 `reg_ruleset` 沒有 `checksum` 欄位。它曾經是寫入時算的 FNV-1a，而 `regulations()` 的
 SELECT 不取它、`resolve()` 也看不到它，一個沒人讀的 `NOT NULL` 欄位正好擋著手寫的

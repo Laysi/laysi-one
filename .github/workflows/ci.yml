@@ -111,3 +111,7 @@ jobs:
       - run: bun scripts/format-test.ts
 
       - run: bun scripts/nav-test.ts
+
+      # A rule file the generator cannot read would publish a feed that is
+      # missing a rate, and the failure would land on the installation.
+      - run: bun scripts/regulation-manifest.ts /dev/null

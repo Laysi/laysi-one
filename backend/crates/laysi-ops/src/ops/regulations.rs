@@ -5,6 +5,11 @@
 //! what an amendment costs: no release, no restart. The embedded rule files
 //! are only the factory set for a fresh install (see `laysi_regulation::seed`).
 //!
+//! Amendments arrive the same way rather than in a new image: `refresh_regulations`
+//! fetches what the vendor published and writes the versions this database has
+//! not seen. It carries payloads, not statements, so the feed supplies values
+//! and cannot reach past `reg_ruleset`.
+//!
 //! Two things guard the money paths. A saved payload is run through
 //! [`probe`] before it is written, so a version missing a field the
 //! calculator needs is refused at the point someone can still fix it rather
@@ -30,6 +35,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListRegulations),
         Box::new(SaveRegulation),
         Box::new(DeleteRegulation),
+        Box::new(RefreshRegulations),
     ]
 }
 
@@ -466,6 +472,117 @@ impl Operation for DeleteRegulation {
     }
 }
 
+/// Where amended rates are published.
+///
+/// An amendment is a number the legislature changed, so it must not cost a
+/// new image: this is where an installation goes to get one. The address is a
+/// constant rather than a setting because the publisher is the vendor, not
+/// the company, and a wrong value here would be a rate nobody can trace.
+const FEED_URL: &str = "https://laysi.github.io/regulation-feed/manifest.json";
+
+const FEED_SOURCE: &str = "法規更新來源";
+
+/// The feed, as it is published.
+///
+/// It carries payloads, not statements: the server does its own insert, so
+/// whoever publishes supplies values and cannot reach past the table they
+/// belong in. Every payload still goes through [`probe`] before it is
+/// written, the same check a hand-typed one gets.
+#[derive(serde::Deserialize)]
+struct Feed {
+    #[serde(default)]
+    updates: Vec<Update>,
+}
+
+/// One published amendment. `file` is what `reg_update` remembers, so it must
+/// stay stable once published: change it and every installation applies the
+/// amendment a second time, including the ones that deleted it on purpose.
+#[derive(serde::Deserialize)]
+struct Update {
+    file: String,
+    domain: String,
+    version: String,
+    effective_from: NaiveDate,
+    #[serde(default)]
+    effective_to: Option<NaiveDate>,
+    source_note: String,
+    payload: Value,
+}
+
+struct RefreshRegulations;
+
+#[async_trait]
+impl Operation for RefreshRegulations {
+    fn name(&self) -> &'static str {
+        "refresh_regulations"
+    }
+    fn risk(&self) -> Risk {
+        Risk::AdminOnly
+    }
+    fn summary(&self) -> &'static str {
+        "檢查法規更新：向廠商取修法後的費率與級距並寫入，已有或曾刪除的版本不動"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<crate::Empty>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
+        let body = super::fetch_text(FEED_URL, FEED_SOURCE).await?;
+        let feed: Feed = serde_json::from_str(&body)
+            .map_err(|_| OpError::BadInput(format!("{FEED_SOURCE}的內容無法解讀，請稍後再試。")))?;
+
+        let mut applied = Vec::new();
+        for u in &feed.updates {
+            if !laysi_regulation::DOMAINS.contains(&u.domain.as_str()) {
+                return Err(OpError::BadInput(format!(
+                    "{FEED_SOURCE}提供了本版本不認得的法規領域「{}」，請先更新系統。",
+                    u.domain
+                )));
+            }
+            let candidate = Ruleset {
+                domain: u.domain.clone(),
+                version: u.version.clone(),
+                effective_from: u.effective_from,
+                effective_to: u.effective_to,
+                source_note: u.source_note.clone(),
+                payload: u.payload.clone(),
+            };
+            probe(&candidate)?;
+            if ctx
+                .store
+                .apply_regulation_update(&u.file, &candidate)
+                .await?
+            {
+                applied.push(json!({
+                    "domain": u.domain,
+                    "label": domain_label(&u.domain),
+                    "version": u.version,
+                    "effective_from": u.effective_from,
+                }));
+            }
+        }
+
+        let n = ctx.store.reload_regulations().await?;
+        let summary = if applied.is_empty() {
+            format!("檢查法規更新 · 讀取 {} 版 · 沒有新版本", feed.updates.len())
+        } else {
+            format!(
+                "檢查法規更新 · 讀取 {} 版 · 新增 {} 版",
+                feed.updates.len(),
+                applied.len()
+            )
+        };
+        Ok(OpOutcome::new(
+            json!({
+                "read": feed.updates.len(),
+                "applied": applied,
+                "rulesets": n,
+            }),
+            summary,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,6 +644,51 @@ mod tests {
         for key in keys {
             assert_ne!(field_label(&key), "其他", "欄位「{key}」沒有顯示名稱");
         }
+    }
+
+    /// The feed's shape, held against what the generator writes. A rename on
+    /// either side would otherwise surface as a refresh that reads zero
+    /// versions and reports success.
+    #[test]
+    fn the_feed_parses_into_rulesets_the_probe_accepts() {
+        let vat = factory("vat");
+        let body = json!({
+            "updates": [{
+                "file": "2026-01-01_vat.sql",
+                "domain": vat.domain,
+                "version": vat.version,
+                "effective_from": vat.effective_from,
+                "effective_to": null,
+                "source_note": vat.source_note,
+                "payload": vat.payload,
+            }]
+        })
+        .to_string();
+
+        let feed: Feed = serde_json::from_str(&body).expect("發布格式應解得開");
+        let u = feed.updates.first().expect("應有一版");
+        assert_eq!(u.file, "2026-01-01_vat.sql");
+        probe(&Ruleset {
+            domain: u.domain.clone(),
+            version: u.version.clone(),
+            effective_from: u.effective_from,
+            effective_to: u.effective_to,
+            source_note: u.source_note.clone(),
+            payload: u.payload.clone(),
+        })
+        .expect("發布的版本應通得過寫入前的檢查");
+    }
+
+    /// A field the feed omits must not fail the whole refresh: only
+    /// `effective_to` is optional, and it means still in force.
+    #[test]
+    fn an_open_ended_version_needs_no_end_date() {
+        let feed: Feed = serde_json::from_str(
+            r#"{"updates":[{"file":"f","domain":"vat","version":"v",
+                 "effective_from":"2026-01-01","source_note":"s","payload":{}}]}"#,
+        )
+        .expect("沒有終止日的版本應解得開");
+        assert_eq!(feed.updates[0].effective_to, None);
     }
 
     #[test]

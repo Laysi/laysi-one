@@ -80,8 +80,7 @@ backend/crates/
   laysi-store       sqlx repository、RustFS 存取
   laysi-ops         Operation trait + 註冊表 + 各業務模組
   laysi-server      axum：/v1 REST、/mcp、/healthz
-backend/regulation/ 法規規則檔出廠預設值（依年度分目錄）
-backend/regulation-updates/ 隨版本送出的法規新版，與 migrations 各記各的
+backend/regulation/ 法規規則檔：新安裝的出廠預設值，也是更新來源的內容
 backend/migrations/ SQL migration，啟動時自動套用
 backup/             異地備份容器：pg_dump、age、S3
 setup/              首次啟動寫入的初始化代碼，建立帳號後可刪
