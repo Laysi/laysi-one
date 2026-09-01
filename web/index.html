@@ -6,9 +6,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!--
-      Noto Sans TC 必須一起載入。Inter 沒有中文字符，
-      少了它，全站中文會落到通用字體（Windows 上是新細明體），筆畫在 14px 以下
-      糊成一團。Google Fonts 以 unicode-range 切成子集，只會下載實際用到的那幾段。
+      Noto Sans TC has to load alongside Inter, which carries no CJK glyphs.
+      Without it every Chinese string falls back to the generic family (新細明體
+      on Windows), whose strokes blur together below 14px. Google Fonts splits
+      the face by unicode-range, so only the subsets actually used are fetched.
     -->
     <link
       rel="stylesheet"
@@ -17,17 +18,19 @@
     <meta name="theme-color" content="#f3f2f2" />
     <link rel="manifest" href="/manifest.json" />
     <!--
-      唯一的例外是 favicon.svg：分頁圖示在應用程式載入之前就要畫出來，走 /v1 等於把它
-      綁在後端與代理上，而瀏覽器又把 favicon 快取得特別久。該檔帶著 BSL 1.1 的授權聲明。
+      The icons are the one brand asset served as a plain static file rather
+      than through /v1: the tab icon is drawn before the app loads, so routing
+      it through the server would tie it to the backend and the proxy, and
+      browsers cache favicons for a very long time. favicon.svg carries the
+      BSL 1.1 licence notice.
+
+      favicon.ico is that same file rasterized, for consumers that cannot read
+      SVG. Icon fetchers request /favicon.ico and nothing else; with no such
+      file the SPA fallback answers with index.html and they drop to the parent
+      domain, which is why the connector icon for one.laysi.io was the laysi.io
+      mark. Browsers that understand SVG still take the first line.
     -->
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <!--
-      favicon.ico is favicon.svg rasterized, for consumers that cannot read
-      SVG. Icon fetchers try /favicon.ico only; without the file the SPA
-      fallback answers with index.html and they drop to the parent domain, so
-      the connector icon for one.laysi.io became the laysi.io mark. Browsers
-      that understand SVG still take the line above.
-    -->
     <link rel="icon" href="/favicon.ico" sizes="48x48 32x32 16x16" />
     <title>Laysi One</title>
   </head>

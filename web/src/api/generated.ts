@@ -277,7 +277,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'reset_backup_key', risk: 'admin_only', riskLabel: '限系統管理員', summary: "重設還原金鑰：下一次備份會產生一組新的並顯示一次。既有的備份檔仍然只能以原金鑰開啟。" },
 ] as const;
 
-/** 每個操作的輸入 JSON Schema，可供表單產生或執行期驗證使用。 */
+/** Input JSON Schema per operation, for form generation or runtime validation. */
 export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'get_dashboard': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'get_trial_balance': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"Query as of a date. Needed by the regulation and balance operations.","properties":{"as_of":{"default":null,"description":"Cut-off date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"AsOfInput","type":"object"},

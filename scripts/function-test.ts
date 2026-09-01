@@ -613,7 +613,8 @@ async function main() {
       expect(check, "檢核表沒有負責人那一項");
       expectEq(check.checked, true, "名冊上有負責人，該項要真的檢查");
       expectEq(check.passed, false, "投保金額低於受僱員工最高者，卻通過了");
-      // 勞保與勞退留白是投保事實，不是漏填，所以不進「尚未設定投保級距」。
+      // Blank labour insurance and pension for an owner is an enrolment fact,
+      // not a missing field, so it stays out of the unfiled-bracket check.
       const unfiled = (low.checks ?? []).find((c: any) => c.name.includes("投保級距"));
       expect(
         !(unfiled.failures ?? []).some((f: any) => f.emp_no === empNo),

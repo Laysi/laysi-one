@@ -55,7 +55,9 @@ fn main() -> std::io::Result<()> {
     }
     ts.push_str("] as const;\n\n");
 
-    ts.push_str("/** 每個操作的輸入 JSON Schema，可供表單產生或執行期驗證使用。 */\n");
+    ts.push_str(
+        "/** Input JSON Schema per operation, for form generation or runtime validation. */\n",
+    );
     ts.push_str("export const INPUT_SCHEMAS: Record<OpName, unknown> = {\n");
     for op in registry.iter() {
         ts.push_str(&format!(
