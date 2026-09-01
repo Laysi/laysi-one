@@ -598,13 +598,14 @@ async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
 
 /// What this build calls itself.
 ///
-/// The release workflow passes the tag it is building as `LAYSI_BUILD`; a
-/// build from a working tree has only the crate version to report. Docker
+/// The release workflow passes the tag it is building as `LAYSI_BUILD`, which
+/// already carries the `v`; a build from a working tree has only the crate
+/// version, which does not, and the two have to read the same way. Docker
 /// exports an unset build argument as an empty string, which is not a version.
 fn build_version() -> &'static str {
     match option_env!("LAYSI_BUILD") {
         Some(build) if !build.is_empty() => build,
-        _ => env!("CARGO_PKG_VERSION"),
+        _ => concat!("v", env!("CARGO_PKG_VERSION")),
     }
 }
 
