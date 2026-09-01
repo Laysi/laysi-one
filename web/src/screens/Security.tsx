@@ -29,11 +29,30 @@ interface Props {
   reloadKey: number;
 }
 
-const GOOGLE_ISSUER = 'https://accounts.google.com';
+const ISSUER_PRESETS: { key: string; name: string; issuer: string; match: string }[] = [
+  {
+    key: 'google',
+    name: 'Google Workspace／Cloud Identity',
+    issuer: 'https://accounts.google.com',
+    match: 'accounts.google.com',
+  },
+  {
+    key: 'entra',
+    name: 'Microsoft Entra ID',
+    issuer: 'https://login.microsoftonline.com/租戶 ID/v2.0',
+    match: 'login.microsoftonline.com',
+  },
+  { key: 'okta', name: 'Okta', issuer: 'https://網域.okta.com', match: '.okta.com' },
+  { key: 'auth0', name: 'Auth0', issuer: 'https://網域.auth0.com/', match: '.auth0.com' },
+  { key: 'keycloak', name: 'Keycloak', issuer: 'https://主機/realms/領域', match: '/realms/' },
+];
+
+function presetKey(issuer: string): string {
+  return ISSUER_PRESETS.find((p) => issuer.includes(p.match))?.key ?? 'other';
+}
 const CALLBACK_PATH = '/v1/auth/oauth/callback';
 
 interface OidcForm {
-  provider: string;
   issuer: string;
   client_id: string;
   client_secret: string;
@@ -45,10 +64,8 @@ interface OidcForm {
 }
 
 function formFrom(setting: OidcSetting): OidcForm {
-  const google = setting.issuer === '' || setting.issuer === GOOGLE_ISSUER;
   return {
-    provider: google ? 'google' : 'other',
-    issuer: setting.issuer || GOOGLE_ISSUER,
+    issuer: setting.issuer,
     client_id: setting.client_id,
     client_secret: '',
     redirect_url: setting.redirect_url || `${window.location.origin}${CALLBACK_PATH}`,
@@ -182,7 +199,7 @@ export function Security({ onToast, reloadKey }: Props) {
 
   async function saveOidc() {
     if (!oidc || !oidcForm) return;
-    const issuer = oidcForm.provider === 'google' ? GOOGLE_ISSUER : oidcForm.issuer.trim();
+    const issuer = oidcForm.issuer.trim();
     const input: Record<string, string | boolean> = {};
     if (issuer !== oidc.issuer) input.issuer = issuer;
     if (oidcForm.client_id.trim() !== oidc.client_id) input.client_id = oidcForm.client_id.trim();
@@ -404,28 +421,29 @@ export function Security({ onToast, reloadKey }: Props) {
                         供應商
                         <select
                           className="input"
-                          value={oidcForm.provider}
-                          onChange={(e) => setOidcField('provider', e.target.value)}
+                          value={presetKey(oidcForm.issuer)}
+                          onChange={(e) => {
+                            const p = ISSUER_PRESETS.find((x) => x.key === e.target.value);
+                            setOidcField('issuer', p ? p.issuer : '');
+                          }}
                         >
-                          <option value="google">Google Workspace／Cloud Identity</option>
+                          {ISSUER_PRESETS.map((p) => (
+                            <option key={p.key} value={p.key}>
+                              {p.name}
+                            </option>
+                          ))}
                           <option value="other">其他</option>
                         </select>
-                        <span className="field__hint">
-                          在 Google Cloud console 建立「網頁應用程式」類型的用戶端，
-                          同意畫面選 Internal。
-                        </span>
                       </label>
-                      {oidcForm.provider === 'other' && (
-                        <label className="field">
-                          供應商網址
-                          <input
-                            className="input"
-                            value={oidcForm.issuer}
-                            placeholder="https://login.example.com"
-                            onChange={(e) => setOidcField('issuer', e.target.value)}
-                          />
-                        </label>
-                      )}
+                      <label className="field">
+                        供應商網址
+                        <input
+                          className="input"
+                          value={oidcForm.issuer}
+                          placeholder="https://login.example.com"
+                          onChange={(e) => setOidcField('issuer', e.target.value)}
+                        />
+                      </label>
                       <label className="field field--full">
                         用戶端 ID
                         <input
