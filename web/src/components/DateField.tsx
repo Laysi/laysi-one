@@ -1,4 +1,4 @@
-const MIN = '2000-01-01';
+const MIN = '1900-01-01';
 const MAX = '2099-12-31';
 
 interface Props {
