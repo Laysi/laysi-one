@@ -4,9 +4,11 @@
 # cost an image: an installation fetches it from the feed instead. The rule
 # files here stay the source; this only republishes them as one JSON document.
 #
-# The feed repository is public and holds nothing but manifest.json, served by
-# GitHub Pages from its default branch. REGULATION_FEED_TOKEN needs contents
-# write on that repository and nothing else.
+# The feed repository is public and holds nothing but manifest.json, which
+# installations read straight off raw.githubusercontent.com — no Pages build
+# to wait on. REGULATION_FEED_KEY is a deploy key on that repository rather
+# than a personal token: it reaches one repository, it does not expire, and it
+# does not stop working when whoever created it leaves.
 
 name: regulation-feed
 
@@ -29,10 +31,14 @@ jobs:
 
       - name: Push to the feed
         env:
-          TOKEN: ${{ secrets.REGULATION_FEED_TOKEN }}
+          KEY: ${{ secrets.REGULATION_FEED_KEY }}
         run: |
           set -euo pipefail
-          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Laysi/regulation-feed.git" feed
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git clone --depth 1 git@github.com:Laysi/regulation-feed.git feed
           cp manifest.json feed/manifest.json
           cd feed
           git config user.name 'laysi-one'

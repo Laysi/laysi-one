@@ -116,7 +116,7 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 **廠商送新版走 `refresh_regulations`，不走 `migrations/` 也不換映像**：費率是資料不是
 schema，而 0001 已經合併過三輪 migration，下一次合併時一則費率修正會擋在路上；換一版
 映像只為了改一個數字，等於把上線時程綁在發版時程上。那個操作（`AdminOnly`，畫面在
-「法規版本」）向 `https://laysi.github.io/regulation-feed/manifest.json` 取，套用過的
+「法規版本」）向 `https://raw.githubusercontent.com/Laysi/regulation-feed/main/manifest.json` 取，套用過的
 識別字記在 `reg_update`，**一個資料庫只套用一次**——所以管理員刪掉的版本不會在下一次
 更新回來，而這正是 `seed_regulations()` 那條「只在表空時寫」要守的性質；缺口只有出廠
 那一批（`seed_regulations()` 不留記錄），在第一次更新之前刪掉會回來一次。

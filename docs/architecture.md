@@ -2591,7 +2591,7 @@ offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），�
 就能上線，不必等發版。
 
 **向廠商取**：「法規版本」的 `refresh_regulations`（`AdminOnly`）向
-`https://laysi.github.io/regulation-feed/manifest.json` 取修法後的版本，套用過的識別字
+`https://raw.githubusercontent.com/Laysi/regulation-feed/main/manifest.json` 取修法後的版本，套用過的識別字
 記在 `reg_update`。**修法不必換映像**：費率是資料，換一版映像只為了改一個數字，等於
 把上線時程綁在發版時程上。
 
