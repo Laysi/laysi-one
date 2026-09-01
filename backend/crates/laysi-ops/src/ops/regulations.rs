@@ -478,7 +478,7 @@ impl Operation for DeleteRegulation {
 /// new image: this is where an installation goes to get one. The address is a
 /// constant rather than a setting because the publisher is the vendor, not
 /// the company, and a wrong value here would be a rate nobody can trace.
-const FEED_URL: &str = "https://laysi.github.io/regulation-feed/manifest.json";
+const FEED_URL: &str = "https://raw.githubusercontent.com/Laysi/regulation-feed/main/manifest.json";
 
 const FEED_SOURCE: &str = "法規更新來源";
 
