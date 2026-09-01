@@ -169,7 +169,7 @@ impl Operation for GetHrDashboard {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀人資總覽：在職人數、本月到離職、待簽核的休假單，以及人資與財務各條銜接的接上狀態"
+        "讀人資總覽：在職人數、本月到離職、待簽核的休假單、加班單與補登申請，以及人資與財務各條銜接的接上狀態"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -180,6 +180,8 @@ impl Operation for GetHrDashboard {
         let month = ctx.today.format("%Y-%m").to_string();
         let staff = ctx.store.employees(true, None).await?;
         let leaves = ctx.store.leave_requests(false, 200).await?;
+        let overtime = ctx.store.overtime_requests(false, None, None).await?;
+        let fixes = ctx.store.punch_corrections(false, None).await?;
         let runs = ctx.store.payroll_runs(24).await?;
 
         let active = staff.iter().filter(|e| e.status != "left").count();
@@ -219,6 +221,22 @@ impl Operation for GetHrDashboard {
                 "count": leaves.len().to_string(),
                 "label": "張休假單等簽核",
                 "due": leaves.first().map(|l| l.from_on.to_string()).unwrap_or_default(),
+                "screen": "hr_att",
+            }));
+        }
+        if !overtime.is_empty() {
+            todos.push(json!({
+                "count": overtime.len().to_string(),
+                "label": "張加班單等簽核",
+                "due": overtime.first().map(|o| o.worked_on.to_string()).unwrap_or_default(),
+                "screen": "hr_att",
+            }));
+        }
+        if !fixes.is_empty() {
+            todos.push(json!({
+                "count": fixes.len().to_string(),
+                "label": "張補登申請等審核",
+                "due": fixes.first().map(|c| c.punched_on.to_string()).unwrap_or_default(),
                 "screen": "hr_att",
             }));
         }
@@ -289,8 +307,10 @@ impl Operation for GetHrDashboard {
         ]);
 
         let summary = format!(
-            "讀人資總覽 · 在職 {active} 人 · 本月 +{joined}/-{departed} · {} 張休假單待簽",
-            leaves.len()
+            "讀人資總覽 · 在職 {active} 人 · 本月 +{joined}/-{departed} · 待簽核 {} 張休假單、{} 張加班單、{} 張補登申請",
+            leaves.len(),
+            overtime.len(),
+            fixes.len()
         );
         Ok(OpOutcome::new(
             json!({

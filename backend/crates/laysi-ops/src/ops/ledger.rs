@@ -62,6 +62,7 @@ impl Operation for GetDashboard {
 
         let pending = s.search_vouchers(Some("pending"), None, 500).await?.len();
         let drafts = s.search_vouchers(Some("draft"), None, 500).await?.len();
+        let claims = s.expense_claims(false, 500).await?.len();
         let bars = s.cash_history(ctx.today, 6).await?;
         let audit = s.recent_audit(3, None, None).await?;
         // Every figure above is drawn from posted vouchers only, so with none of
@@ -79,6 +80,12 @@ impl Operation for GetDashboard {
             todos.push(json!({
                 "count": drafts.to_string(), "label": "張 AI 草稿待確認會計科目",
                 "due": "確認後才入帳", "screen": "gl"
+            }));
+        }
+        if claims > 0 {
+            todos.push(json!({
+                "count": claims.to_string(), "label": "張費用報支等簽核",
+                "due": "最後一關產生傳票", "screen": "exp"
             }));
         }
 

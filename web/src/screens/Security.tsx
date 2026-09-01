@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { CopyButton } from '../components/CopyButton';
 import {
   apiTokenList,
   backupSetting,
@@ -341,6 +342,7 @@ export function Security({ onToast, reloadKey }: Props) {
           <p className="form-note">
             請立即複製保存，遺失時只能重新核發。
           </p>
+          <CopyButton value={issued.secret} label="複製 Token" />
         </div>
       )}
 

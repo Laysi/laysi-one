@@ -202,7 +202,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'create_dimension_value', risk: 'needs_confirm', riskLabel: '需人確認', summary: "在既有分類下新增一個項目。部門分類的項目可用於員工與分錄的部門欄位。" },
   { name: 'update_dimension_value', risk: 'needs_confirm', riskLabel: '需人確認', summary: "改分類項目的名稱，或停用項目。停用後不再出現在選單，已經記在單據與員工上的不受影響。" },
   { name: 'set_approval_rule', risk: 'boss_only', riskLabel: '限負責人', summary: "新增、覆寫或刪除一關費用簽核規則；相同關卡編號會覆蓋，未設金額門檻代表一律需要。金額門檻可隨時調整；整套流程至少保留一關。" },
-  { name: 'get_hr_dashboard', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資總覽：在職人數、本月到離職、待簽核的休假單，以及人資與財務各條銜接的接上狀態" },
+  { name: 'get_hr_dashboard', risk: 'read_only', riskLabel: '唯讀', summary: "讀人資總覽：在職人數、本月到離職、待簽核的休假單、加班單與補登申請，以及人資與財務各條銜接的接上狀態" },
   { name: 'list_employees', risk: 'read_only', riskLabel: '唯讀', summary: "讀員工名冊：部門、職稱、到職日、年資、特休額度（額度依年資由特休規則計算），以及約定的底薪與三個投保級距。逐月薪資單另有操作，且限負責人。" },
   { name: 'list_employee_documents', risk: 'read_only', riskLabel: '唯讀', summary: "讀某位員工的附件清單：檔名、類型、版次、大小與內容雜湊。內容要另外取回。" },
   { name: 'upload_employee_document', risk: 'needs_confirm', riskLabel: '需人確認', summary: "為名冊上的人上傳一份附件，例如證件掃描檔或已簽署的合約。內容以 base64 傳入，存進物件儲存並記下內容雜湊。同一個附件編號再上傳一次會存成新版本。" },

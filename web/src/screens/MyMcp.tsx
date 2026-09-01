@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { OPS } from '../api/generated';
+import { CopyButton } from '../components/CopyButton';
 import {
   businessTime,
   callOp,
@@ -38,15 +39,6 @@ export function MyMcp({ onToast, reloadKey }: Props) {
   }, []);
 
   useEffect(load, [load, reloadKey]);
-
-  async function copyEndpoint(url: string) {
-    try {
-      await navigator.clipboard.writeText(url);
-      onToast('已複製連線位址');
-    } catch {
-      onToast('這個瀏覽器不允許代為複製，請手動選取位址');
-    }
-  }
 
   async function issue() {
     setBusy('issue');
@@ -131,6 +123,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
           </div>
           <code className="secret-card__value num">{issued.secret}</code>
           <p className="form-note">請立即複製保存，遺失時只能重新核發。</p>
+          <CopyButton value={issued.secret} label="複製 Token" />
         </div>
       )}
 
@@ -185,12 +178,7 @@ export function MyMcp({ onToast, reloadKey }: Props) {
               <span className="fact__key">位址</span>
               <span className="fact__value">
                 <span className="num">{mcpUrl}</span>
-                <button
-                  className="btn btn--compact btn--secondary"
-                  onClick={() => void copyEndpoint(mcpUrl)}
-                >
-                  複製
-                </button>
+                <CopyButton value={mcpUrl} />
               </span>
             </div>
             <div className="fact">

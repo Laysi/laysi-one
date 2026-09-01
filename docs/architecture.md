@@ -1136,6 +1136,9 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 欄，於是政策只有兩個答案，畫面卻要人把其中一個逐字打對，打錯了就靜靜當成「人資
 審核」。清單放在後端，是因為判斷這個值合不合法的也是後端。
 
+公司地址與電話（`company_address`／`company_phone`）與公司名稱同一族：**不在
+`CLEARABLE_SETTINGS` 裡**，空字串的意思是還沒填，不是這家公司沒有地址。
+
 **留空是答案，不是缺欄位。** `CLEARABLE_SETTINGS`（`work_start`、`work_end`、
 `late_grace_minutes`、`flex_window_minutes`）收得下空字串，其餘仍回「設定值為必填」。
 理由在 `attendance::late()` 回的是 `Option<bool>`：`None` 代表沒有人說過幾點上班，
@@ -1389,6 +1392,11 @@ impl Registry {
 ——原因其實是螢幕底部一閃即逝的浮動訊息。規則只有一份（`may_decide` 與
 `decide_leave_request` 本身），畫面讀的是它的結論。
 
+**核准與駁回不是同一個問題**。`list_punch_corrections` 另回 `can_approve` 與
+`approve_blocked_reason`：一張下班補登，當天沒有上班卡時核准不了——寫入端
+（`punch_in_tx`）拒絕沒有上班卡的下班卡，而人資原本要按下去才知道。駁回仍然開著，
+那張單很可能正是該退的一張，所以擋的是核准鈕而不是整列。
+
 **申請人不得核准本人送出的單據，休假與報支同一條規則**。休假原本沒有這道限制，
 於是同一套「職責分離」在兩條流程上給出相反的答案。休假比對的是
 `leave_request.employee_id` 與 `ctx.employee_id`（`decided_by` 是顯示名稱，會同名，
@@ -1454,7 +1462,7 @@ column，因此不可能與上面的區間不一致。
 
 | name | risk | input | output 重點 |
 |---|---|---|---|
-| `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦與人資／財務銜接狀態 |
+| `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）與人資／財務銜接狀態 |
 | `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_employee_documents` | ReadOnly | `{ emp_no }` | 該員工的附件清單與可用類型；內容要另外取回 |
 | `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
@@ -1694,7 +1702,7 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 | `correct_punch` | NeedsConfirm | `{ emp_no, punched_on, kind, at, note? }` | 補登，`source = manual`；同一交易在 `punch_correction` 留一列已核准的紀錄 |
 | `submit_my_punch_correction` | NeedsConfirm | `{ punched_on, kind, at, reason? }` | 本人送出補登申請；公司設定為自動通過時同一交易寫入打卡 |
 | `list_my_punch_corrections` | ReadOnly | `{}` | 本人送出過的補登申請與狀態 |
-| `list_punch_corrections` | ReadOnly | `{ include_done? }` | 全公司補登紀錄，逐列回 `can_decide`、`replaced_at` 與 `hr_entered` |
+| `list_punch_corrections` | ReadOnly | `{ include_done? }` | 全公司補登紀錄，逐列回 `can_decide`、`can_approve`、`replaced_at` 與 `hr_entered` |
 | `decide_punch_correction` | NeedsConfirm | `{ id, approve, note? }` | 核准即在同一交易寫入打卡 |
 
 `attendance` 一直有欄位放月統計，卻沒有任何東西產生它——打卡補上了被彙總的那個
@@ -2016,6 +2024,10 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
   形狀 `{ kicker, value, note }`，`value` 為金額字串。
 - `todos`：`{ count, label, due, screen }`，`screen` 是前端路由 key。
   **數量為零的項目不出現**：待辦清單上的 0 沒有可做的事。
+  待簽核的費用報支也算一項——它是財務這一側唯一等人動作的單據，漏掉它，
+  總覽會在還有人等著簽的時候宣告沒有待處理事項。畫面**逐項比對
+  `/v1/auth/me` 的 `permissions`**（`screenOp(screen)`）才畫得動，
+  開不了那個畫面的角色看得到數字、按不下去，與人資總覽同一套做法。
 - `cash_bars`：近 6 個月現金餘額 `{ month, value }`。
 - `ai_recent`：`ai_audit_log` 最近 3 筆 `{ what, time, who }`。
 - `ledger_started`：有沒有任何一張已過帳傳票。四個 `stats` 全部只計已過帳，
