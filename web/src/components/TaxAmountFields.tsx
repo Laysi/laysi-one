@@ -80,6 +80,7 @@ export function TaxAmountFields({
         <input
           className="input num"
           inputMode="decimal"
+          onFocus={(e) => e.currentTarget.select()}
           value={value.total}
           onChange={(e) => change('total', e.target.value)}
         />
@@ -90,6 +91,7 @@ export function TaxAmountFields({
         <input
           className="input num"
           inputMode="decimal"
+          onFocus={(e) => e.currentTarget.select()}
           value={value.net}
           onChange={(e) => change('net', e.target.value)}
         />
@@ -99,6 +101,7 @@ export function TaxAmountFields({
         <input
           className="input num"
           inputMode="decimal"
+          onFocus={(e) => e.currentTarget.select()}
           value={value.tax}
           onChange={(e) => change('tax', e.target.value)}
         />

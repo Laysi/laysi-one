@@ -1266,6 +1266,15 @@ pub(crate) fn punch_correction_json(c: &PunchCorrection, offset: FixedOffset) ->
     })
 }
 
+/// Why a correction cannot be approved, or `None` when it can.
+///
+/// `punch_in_tx` refuses a departure on a day with no arrival, so the screen
+/// has to know before it draws the button. Rejecting stays open either way:
+/// a request that cannot be written may well be the one that should go.
+fn approve_blocked(kind: &str, day_has_in: bool) -> Option<&'static str> {
+    (kind == "out" && !day_has_in).then_some("當天沒有上班卡，請先核准或補登同一天的上班卡。")
+}
+
 /// The two answers to `punch_correction_policy`, in the words the screen
 /// prints. Company policy, so the choice is a `company_setting` row and never
 /// a constant in a calculation; the values live here so the setting can only
@@ -1596,6 +1605,9 @@ impl Operation for ListPunchCorrections {
                     "這張申請由本人送出，要由另一個帳號決定。目前沒有其他可決定的帳號，請系統管理員在「帳號管理」建立。"
                         .to_string()
                 }));
+                let blocked = approve_blocked(&c.kind, c.day_has_in);
+                row["can_approve"] = json!(blocked.is_none());
+                row["approve_blocked_reason"] = json!(blocked);
                 row
             })
             .collect::<Vec<_>>();
@@ -2065,6 +2077,15 @@ mod tests {
 
     /// Lateness is a question the system refuses to answer until the company
     /// has said when the day starts. `None` is not `false`.
+    #[test]
+    fn a_departure_cannot_be_approved_onto_a_day_with_no_arrival() {
+        assert!(approve_blocked("out", false).is_some());
+        assert_eq!(approve_blocked("out", true), None);
+        // An arrival stands on its own, whichever way the day looks.
+        assert_eq!(approve_blocked("in", false), None);
+        assert_eq!(approve_blocked("in", true), None);
+    }
+
     #[test]
     fn lateness_is_unanswered_rather_than_false_without_a_start_time() {
         let arrived = business_time(punch("2026-08-06", "in", "10:30", "self").punched_at, tz());

@@ -537,14 +537,21 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                                   setFixNoteById((n) => ({ ...n, [c.id]: e.target.value }))
                                 }
                               />
+                              {c.can_approve === false && (
+                                <span className="cell-hint cell-hint--block">
+                                  {c.approve_blocked_reason}
+                                </span>
+                              )}
                               <div className="cell-actions">
-                                <button
-                                  className="btn btn--compact"
-                                  disabled={busy === `fix-${c.id}`}
-                                  onClick={() => void decideFix(c.id, true)}
-                                >
-                                  核准
-                                </button>
+                                {c.can_approve !== false && (
+                                  <button
+                                    className="btn btn--compact"
+                                    disabled={busy === `fix-${c.id}`}
+                                    onClick={() => void decideFix(c.id, true)}
+                                  >
+                                    核准
+                                  </button>
+                                )}
                                 <button
                                   className="btn btn--compact btn--secondary"
                                   disabled={busy === `fix-${c.id}`}

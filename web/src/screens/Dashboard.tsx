@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { callOp, dashboard, type Dashboard as DashboardData } from '../api/client';
-import type { ScreenId } from '../nav';
+import { useCurrentUser } from '../auth';
+import { screenOp, type ScreenId } from '../nav';
 
 function scaleOf(peak: number): { div: number; unit: string; digits: number } {
   if (peak >= 100_000_000) {
@@ -20,8 +21,15 @@ interface Props {
 }
 
 export function Dashboard({ onGo, reloadKey }: Props) {
+  const { permissions } = useCurrentUser();
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const destination = (key: string): ScreenId | null => {
+    const id = key as ScreenId;
+    const op = screenOp(id);
+    return op && permissions.includes(op) ? id : null;
+  };
 
   useEffect(() => {
     let live = true;
@@ -76,13 +84,16 @@ export function Dashboard({ onGo, reloadKey }: Props) {
             <p className="section-note">沒有待處理事項。</p>
           ) : (
             <div className="todo-list">
-              {data.todos.map((t) => (
-                <button className="todo" key={t.label} onClick={() => onGo(t.screen as ScreenId)}>
-                  <span className="todo__count num">{t.count}</span>
-                  <span className="todo__label">{t.label}</span>
-                  <span className="todo__due">{t.due}</span>
-                </button>
-              ))}
+              {data.todos.map((t) => {
+                const to = destination(t.screen);
+                return (
+                  <button className="todo" key={t.label} disabled={!to} onClick={() => to && onGo(to)}>
+                    <span className="todo__count num">{t.count}</span>
+                    <span className="todo__label">{t.label}</span>
+                    <span className="todo__due">{t.due}</span>
+                  </button>
+                );
+              })}
             </div>
           )}
 

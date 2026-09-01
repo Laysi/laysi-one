@@ -2463,6 +2463,8 @@ export const punchCorrection = z.object({
   created_at: z.string(),
   can_decide: z.boolean().optional(),
   decide_blocked_reason: z.string().nullable().optional(),
+  can_approve: z.boolean().optional(),
+  approve_blocked_reason: z.string().nullable().optional(),
 });
 export type PunchCorrection = z.infer<typeof punchCorrection>;
 

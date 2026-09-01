@@ -6317,7 +6317,11 @@ impl Store {
                     c.decided_by,
                     COALESCE(r.name, c.decided_role) AS decided_role,
                     c.decided_at, c.decision_note, c.replaced_at,
-                    c.created_at, c.created_by
+                    c.created_at, c.created_by,
+                    EXISTS (SELECT 1 FROM attendance_punch p
+                             WHERE p.employee_id = c.employee_id
+                               AND p.punched_on = c.punched_on
+                               AND p.kind = 'in') AS day_has_in
                FROM punch_correction c
                JOIN employee e             ON e.id = c.employee_id
                LEFT JOIN dimension_value d ON d.id = e.dept_id
@@ -8572,6 +8576,10 @@ pub struct PunchCorrection {
     pub replaced_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
+    /// Whether the day already holds an arrival punch. A departure may not be
+    /// written without one, so a caller that draws an approve button needs to
+    /// know before the transaction refuses it.
+    pub day_has_in: bool,
 }
 
 /// A correction request to be written. `employee_id` and `actor` are
@@ -9625,6 +9633,7 @@ fn row_to_punch_correction(r: &PgRow) -> PunchCorrection {
         replaced_at: r.get("replaced_at"),
         created_at: r.get("created_at"),
         created_by: r.get("created_by"),
+        day_has_in: r.get("day_has_in"),
     }
 }
 

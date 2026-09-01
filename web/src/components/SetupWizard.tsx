@@ -45,6 +45,8 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
   const [settings, setSettings] = useState<CompanySettingRow[] | null>(null);
   const [companyName, setCompanyName] = useState('');
   const [taxId, setTaxId] = useState('');
+  const [address, setAddress] = useState('');
+  const [phone, setPhone] = useState('');
   const [fiscalMonth, setFiscalMonth] = useState('1');
   const [savingCompany, setSavingCompany] = useState(false);
 
@@ -54,6 +56,8 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
         setSettings(d.settings);
         setCompanyName(d.settings.find((s) => s.code === 'company_name')?.value ?? '');
         setTaxId(d.settings.find((s) => s.code === 'tax_id')?.value ?? '');
+        setAddress(d.settings.find((s) => s.code === 'company_address')?.value ?? '');
+        setPhone(d.settings.find((s) => s.code === 'company_phone')?.value ?? '');
         setFiscalMonth(d.settings.find((s) => s.code === 'fiscal_year')?.value || '1');
         const stored = {
           work_start: d.settings.find((s) => s.code === 'work_start')?.value ?? '',
@@ -90,6 +94,18 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
       });
       if (taxId.trim()) {
         await callOp<unknown>('update_company_setting', { code: 'tax_id', value: taxId.trim() });
+      }
+      if (address.trim()) {
+        await callOp<unknown>('update_company_setting', {
+          code: 'company_address',
+          value: address.trim(),
+        });
+      }
+      if (phone.trim()) {
+        await callOp<unknown>('update_company_setting', {
+          code: 'company_phone',
+          value: phone.trim(),
+        });
       }
       await callOp<unknown>('update_company_setting', {
         code: 'fiscal_year',
@@ -380,6 +396,25 @@ export function SetupWizard({ onToast, onProgress, onExit }: Props) {
                   value={taxId}
                   placeholder="12345675"
                   onChange={(e) => setTaxId(e.target.value)}
+                />
+              </label>
+
+              <label className="field field--full">
+                公司地址
+                <input
+                  className="input"
+                  value={address}
+                  placeholder="臺北市中正區重慶南路一段 122 號"
+                  onChange={(e) => setAddress(e.target.value)}
+                />
+              </label>
+              <label className="field field--full">
+                公司電話
+                <input
+                  className="input num"
+                  value={phone}
+                  placeholder="02-2311-0000"
+                  onChange={(e) => setPhone(e.target.value)}
                 />
               </label>
 
