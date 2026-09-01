@@ -7,6 +7,7 @@ import { Attendance } from './screens/Attendance';
 import { Banking } from './screens/Banking';
 import { Budget } from './screens/Budget';
 import { Clock } from './screens/Clock';
+import { Consent } from './screens/Consent';
 import { Documents } from './screens/Documents';
 import { Employees } from './screens/Employees';
 import { ExpenseRequest } from './screens/ExpenseRequest';
@@ -42,6 +43,7 @@ import { Setup } from './screens/Setup';
 import { Tax } from './screens/Tax';
 import { Withholding } from './screens/Withholding';
 import {
+  CONSENT_PATH,
   FINANCE_NAV,
   firstScreen,
   HR_NAV,
@@ -120,6 +122,10 @@ function screenAllowed(
   return op !== null && permissions.includes(op);
 }
 
+function consentRequested(): boolean {
+  return window.location.pathname.replace(/\/+$/, '') === CONSENT_PATH;
+}
+
 export function App() {
   const auth = useAuthSession();
   const signedIn = auth.status === 'signed-in' && auth.user !== null;
@@ -146,6 +152,8 @@ export function App() {
             </div>
           </div>
         </div>
+      ) : signedIn && !auth.user?.must_change_password && consentRequested() ? (
+        <Consent />
       ) : signedIn && !auth.user?.must_change_password ? (
         <Workspace />
       ) : !signedIn && auth.setup.bootstrap_available ? (

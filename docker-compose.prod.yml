@@ -106,9 +106,6 @@ services:
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-laysi}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
       RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
-      # Only the Vite dev server needs CORS; here the frontend is same-origin
-      # behind web. Left empty in production rather than pointing at localhost.
-      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-}
       SETUP_ALLOW_WEB: ${SETUP_ALLOW_WEB:-true}
       SETUP_TOKEN_FILE: /secrets/setup_token
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}

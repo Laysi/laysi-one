@@ -194,7 +194,7 @@ async fn authenticate_mcp(
     })
 }
 
-fn auth_error(error: McpAuthError) -> Response {
+fn auth_error(error: McpAuthError, headers: &HeaderMap) -> Response {
     let (status, message) = match error {
         McpAuthError::Unauthorized => (
             StatusCode::UNAUTHORIZED,
@@ -208,14 +208,25 @@ fn auth_error(error: McpAuthError) -> Response {
             )
         }
     };
-    (
+    let mut response = (
         status,
         Json(json!({
             "jsonrpc": "2.0", "id": Value::Null,
             "error": { "code": code::INVALID_REQUEST, "message": message }
         })),
     )
-        .into_response()
+        .into_response();
+    // Without this a client holding no token has nothing to go on and
+    // reports the endpoint as unreachable rather than as needing a sign-in.
+    // Only on 401: a lookup failure is not something re-authenticating fixes.
+    if status == StatusCode::UNAUTHORIZED {
+        if let Ok(value) = header::HeaderValue::from_str(&crate::oauth::challenge(headers)) {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, value);
+        }
+    }
+    response
 }
 
 fn rate_limited_error() -> Response {
@@ -249,7 +260,7 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
     // credentials cannot obtain a different status from a different body.
     let auth = match authenticate_mcp(&s.store, &headers).await {
         Ok(auth) => auth,
-        Err(error) => return auth_error(error),
+        Err(error) => return auth_error(error, &headers),
     };
 
     // Per-token rate limiting: a leaked token cannot be used without bound,
@@ -447,10 +458,14 @@ mod tests {
             authenticate_mcp(&lazy_store(), &headers).await,
             Err(McpAuthError::Unauthorized)
         ));
-        assert_eq!(
-            auth_error(McpAuthError::Unauthorized).status(),
-            StatusCode::UNAUTHORIZED
-        );
+        let refused = auth_error(McpAuthError::Unauthorized, &headers);
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        // A client holding no token finds the authorization server through
+        // this header alone; without it the endpoint reads as unreachable.
+        assert!(refused
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .is_some_and(|v| v.to_str().unwrap().contains("resource_metadata=")));
     }
 
     /// Run with:

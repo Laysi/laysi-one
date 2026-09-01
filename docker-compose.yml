@@ -134,9 +134,7 @@ services:
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-laysi-object-store}
       RUSTFS_BUCKET: ${RUSTFS_BUCKET:-laysi-documents}
       # Session timeouts are settings on 「基礎設定」; the Secure flag on the
-      # cookie follows X-Forwarded-Proto. Only the dev server needs CORS: in
-      # this deployment the frontend is same-origin behind the web container.
-      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:5173}
+      # cookie follows X-Forwarded-Proto.
       # Whether the first account may be created from the browser. Only the api
       # service needs these: mcp mounts no /v1 routes at all.
       SETUP_ALLOW_WEB: ${SETUP_ALLOW_WEB:-true}

@@ -3228,6 +3228,20 @@ impl Store {
         .as_ref()
         .map(row_to_user_account))
     }
+    pub async fn user_by_id(&self, id: i32) -> Result<Option<UserAccount>> {
+        Ok(sqlx::query(
+            "SELECT id, username, display_name, email, password_hash, role_code,
+                    employee_id, status, must_change_password, created_at, created_by,
+                    last_login_at
+               FROM user_account
+              WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(row_to_user_account))
+    }
     /// Look up an account by the IdP's stable subject; email is never used to
     /// match a login.
     pub async fn user_by_identity(
@@ -4238,6 +4252,86 @@ impl Store {
             return Err(StoreError::TokenAlreadyRevoked { name: token.name });
         }
         Ok(token)
+    }
+    // OAuth authorization server
+
+    /// Register a public client (RFC 7591). The caller supplies the
+    /// identifier so that the plaintext never has to be read back.
+    pub async fn register_oauth_client(
+        &self,
+        client_id: &str,
+        client_name: &str,
+        redirect_uris: &[String],
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO oauth_client (client_id, client_name, redirect_uris)
+             VALUES ($1,$2,$3)",
+        )
+        .bind(client_id)
+        .bind(client_name)
+        .bind(redirect_uris)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn oauth_client(&self, client_id: &str) -> Result<Option<OauthClient>> {
+        Ok(sqlx::query(
+            "SELECT client_id, client_name, redirect_uris FROM oauth_client WHERE client_id = $1",
+        )
+        .bind(client_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| OauthClient {
+            client_id: r.get("client_id"),
+            client_name: r.get("client_name"),
+            redirect_uris: r.get("redirect_uris"),
+        }))
+    }
+
+    /// Store an authorization code. Expired rows from earlier grants are
+    /// removed in the same statement: they are unusable and nothing else
+    /// visits this table.
+    pub async fn create_oauth_code(&self, code: NewOauthCode<'_>) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM oauth_code WHERE expires_at < now()")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO oauth_code
+                 (code_hash, client_id, user_id, redirect_uri, code_challenge, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(code.code_hash)
+        .bind(code.client_id)
+        .bind(code.user_id)
+        .bind(code.redirect_uri)
+        .bind(code.code_challenge)
+        .bind(code.expires_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Redeem a code, deleting it in the same statement. A second exchange of
+    /// the same code finds nothing, which is what makes it single use even
+    /// when two requests arrive together.
+    pub async fn take_oauth_code(&self, code_hash: &str) -> Result<Option<OauthCode>> {
+        Ok(sqlx::query(
+            "DELETE FROM oauth_code WHERE code_hash = $1
+             RETURNING client_id, user_id, redirect_uri, code_challenge, expires_at",
+        )
+        .bind(code_hash)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| OauthCode {
+            client_id: r.get("client_id"),
+            user_id: r.get("user_id"),
+            redirect_uri: r.get("redirect_uri"),
+            code_challenge: r.get("code_challenge"),
+            expires_at: r.get("expires_at"),
+        }))
     }
     // Department dimension
     /// Department list: the `dimension_value` rows with
@@ -7920,6 +8014,30 @@ pub struct IssueApiToken<'a> {
 pub struct IssuedApiToken {
     pub token: ApiToken,
     pub secret: String,
+}
+
+/// A connector that registered itself through dynamic client registration.
+pub struct OauthClient {
+    pub client_id: String,
+    pub client_name: String,
+    pub redirect_uris: Vec<String>,
+}
+
+pub struct NewOauthCode<'a> {
+    pub code_hash: &'a str,
+    pub client_id: &'a str,
+    pub user_id: i32,
+    pub redirect_uri: &'a str,
+    pub code_challenge: &'a str,
+    pub expires_at: DateTime<Utc>,
+}
+
+pub struct OauthCode {
+    pub client_id: String,
+    pub user_id: i32,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// Current grant status of one MCP tool.

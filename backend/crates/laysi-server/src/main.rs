@@ -17,7 +17,7 @@
 //! the registry.
 
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 mod auth;
 mod mcp;
+mod oauth;
 mod oidc;
 mod ratelimit;
 mod setup;
@@ -130,6 +131,11 @@ pub struct AppState {
     pub setup_rate_limiter: ratelimit::RateLimiter,
     /// Attempt limit for `/v1/auth/login`, bucketed by login name.
     pub login_rate_limiter: ratelimit::RateLimiter,
+    /// Attempt limit for `/v1/oauth/register`, bucketed by source address.
+    /// Client registration is open so that a connector can arrive without an
+    /// administrator preparing anything, which makes a rate the only bound
+    /// on it.
+    pub oauth_register_rate_limiter: ratelimit::RateLimiter,
     /// Allowed `Origin` values for `/mcp`, guarding against DNS rebinding. A
     /// request that carries an Origin must match this list; one that does not
     /// (as most AI connectors do not) is allowed. Empty by default.
@@ -199,10 +205,6 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("RUSTFS_ENDPOINT").unwrap_or_else(|_| "http://rustfs:9000".into());
     let auth = auth::AuthConfig::from_env()?;
     let setup = setup::SetupConfig::from_env()?;
-    let cors_origin =
-        std::env::var("CORS_ALLOWED_ORIGIN").unwrap_or_else(|_| "http://localhost:5173".into());
-    let cors_origin = HeaderValue::from_str(&cors_origin)
-        .map_err(|e| anyhow::anyhow!("CORS_ALLOWED_ORIGIN 不是有效的 HTTP origin：{e}"))?;
     // MCP Origin allow list, comma separated, empty by default. That accepts
     // only clients that send no Origin (normal AI connectors do not send it),
     // while a browser sending one must appear in the list.
@@ -332,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         setup_rate_limiter: ratelimit::RateLimiter::new(setup::ATTEMPTS_PER_MINUTE),
         login_rate_limiter: ratelimit::RateLimiter::new(auth::LOGIN_ATTEMPTS_PER_MINUTE),
+        oauth_register_rate_limiter: ratelimit::RateLimiter::new(oauth::REGISTRATIONS_PER_MINUTE),
         mcp_allowed_origins,
     });
 
@@ -358,6 +361,31 @@ async fn main() -> anyhow::Result<()> {
                     .route("/v1/auth/bootstrap", post(setup::bootstrap))
                     .route("/v1/auth/oauth/start", get(oidc::start))
                     .route("/v1/auth/oauth/callback", get(oidc::callback))
+                    // The authorization server that fronts /mcp. Distinct
+                    // from /v1/auth/oauth/* above, which is this site signing
+                    // in to somebody else's IdP; here it is the site being
+                    // signed in to.
+                    .route(
+                        "/.well-known/oauth-protected-resource",
+                        get(oauth::protected_resource),
+                    )
+                    // RFC 9728 also allows the path of the resource to be
+                    // appended, and a client that builds the URL that way
+                    // never reads the challenge header. Both spellings answer.
+                    .route(
+                        "/.well-known/oauth-protected-resource/mcp",
+                        get(oauth::protected_resource),
+                    )
+                    .route(
+                        "/.well-known/oauth-authorization-server",
+                        get(oauth::authorization_server),
+                    )
+                    .route("/v1/oauth/register", post(oauth::register))
+                    .route(
+                        "/v1/oauth/authorize",
+                        get(oauth::authorize_view).post(oauth::authorize_decide),
+                    )
+                    .route("/v1/oauth/token", post(oauth::token))
                     .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
             )
             .route("/v1/meta", get(meta))
@@ -378,14 +406,11 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // No CORS layer: the browser never sees a cross origin request. In
+    // development Vite proxies /v1, /mcp and /healthz to this process; in a
+    // compose deployment Caddy serves the frontend and proxies the same
+    // paths. The session cookie is SameSite=Strict either way.
     let app = app
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(cors_origin)
-                .allow_credentials(true)
-                .allow_methods([Method::GET, Method::POST])
-                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
-        )
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 

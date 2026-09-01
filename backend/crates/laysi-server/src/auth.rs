@@ -809,6 +809,9 @@ mod tests {
             oidc: tokio::sync::RwLock::new(crate::oidc::OidcCache::default()),
             mcp_rate_limiter: crate::ratelimit::RateLimiter::new(60),
             login_rate_limiter: crate::ratelimit::RateLimiter::new(LOGIN_ATTEMPTS_PER_MINUTE),
+            oauth_register_rate_limiter: crate::ratelimit::RateLimiter::new(
+                crate::oauth::REGISTRATIONS_PER_MINUTE,
+            ),
             setup_rate_limiter: crate::ratelimit::RateLimiter::new(
                 crate::setup::ATTEMPTS_PER_MINUTE,
             ),

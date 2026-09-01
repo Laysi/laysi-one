@@ -162,6 +162,8 @@ export function firstScreen(entries: NavEntry[], permissions: string[]): ScreenI
   return item ? item.id : null;
 }
 
+export const CONSENT_PATH = '/oauth/authorize';
+
 export const SCREEN_PATH: Record<ScreenId, string> = {
   meclock: '/me/clock',
   me: '/me',

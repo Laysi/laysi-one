@@ -596,7 +596,22 @@ OIDC 四項設定齊全時採 discovery + Authorization Code + PKCE，登入的�
 時數、MCP 每分鐘呼叫上限）。沒有 `Store` 可用的路徑要照 `business_offset` 那條路：啟動
 時讀進行程內的 atomic，`update_company_setting` 寫完重新發布，不必重啟。
 **session cookie 的 `Secure` 由 `X-Forwarded-Proto` 推導，不是設定**；
-`CORS_ALLOWED_ORIGIN` 與 `MCP_ALLOWED_ORIGINS` 留在環境變數，它們不是設定。
+`MCP_ALLOWED_ORIGINS` 留在環境變數，它不是設定。**伺服器不掛 CORS 層**：開發時
+Vite 代理、compose 部署下 Caddy 代理，瀏覽器兩邊都看不到跨源請求。
+
+**遠端連接器走 OAuth，取得的 access token 就是一列 `api_token`**（`oauth.rs`）：
+Claude 這類雲端連接器只收得下一個網址，沒有貼 Token 的欄位，所以 `/mcp` 的 401 要帶
+`WWW-Authenticate: Bearer resource_metadata="…"`，兩份 `/.well-known/oauth-*` 指出
+註冊、授權與換發三個端點。**沒有第二套 Token 儲存**，因此沒有 refresh token 也不回
+`expires_in`——生死由「安全與營運」那一頁回答，`mcp.rs` 的認證一行不用改。用戶端是
+public client，改以 PKCE S256 證明持有請求；**`code_verifier` 的格式要先驗再用**，
+`from_code_verifier_sha256` 對 43–128 字元是 `assert!` 不是回傳錯誤，沒檢查就 panic
+掉工作執行緒。授權碼贖回時同一道敘述刪掉該列，`redirect_uri` 兩端逐字相符，身分只來自
+瀏覽器 session，角色在鑄造當下重讀。**絕對網址由請求推導**（`public_base`），與 cookie
+的 `Secure` 同一條理由。同意畫面是 SPA 的 `/oauth/authorize`，`App.tsx` 在 `Workspace`
+之前攔下——`Workspace` 掛載時會 `replaceState`，查詢字串在那一步整段消失。
+**`/.well-known/oauth-*` 在 Caddy 要自己一條 route**：落到 SPA fallback 就是 200＋
+首頁 HTML，而連接器報的是「這個網址不是 MCP 伺服器」。
 
 **異地備份的目的地在畫面上**：`backup_setting` 單列表，`AdminOnly` 的三個操作
 在「安全與營運」。金鑰非對稱，**私鑰由 `backup` 容器產生**（持有 `age` 的那一方），

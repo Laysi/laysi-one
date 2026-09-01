@@ -33,6 +33,16 @@
 		reverse_proxy api:8080
 	}
 
+	# OAuth discovery. An AI connector reads these before it can reach /mcp,
+	# and without this route the SPA fallback below answers 200 with the index
+	# page: the connector then reports the address as not being an MCP server
+	# at all. They target `api`, which is where the authorization endpoints
+	# live; /oauth/authorize itself is the consent screen and falls through to
+	# the SPA.
+	handle /.well-known/oauth-* {
+		reverse_proxy api:8080
+	}
+
 	# MCP streamable HTTP. AI clients hold long connections, so responses are
 	# flushed immediately rather than buffered.
 	#

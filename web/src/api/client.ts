@@ -179,6 +179,43 @@ export async function getMeta(): Promise<Meta> {
   return info;
 }
 
+export const authorizeView = z.object({
+  client_name: z.string(),
+  redirect_uri: z.string(),
+  actor: z.string(),
+});
+export type AuthorizeView = z.infer<typeof authorizeView>;
+
+export const authorizeDecision = z.object({ redirect_to: z.string() });
+
+async function authorizeEnvelope<S extends z.ZodType>(res: Response, schema: S): Promise<z.infer<S>> {
+  noteServerTime(res);
+  if (res.status === 401) throw sessionExpired();
+  const body: unknown = await res.json().catch(() => null);
+  if (body && typeof body === 'object' && 'ok' in body) {
+    const envelope = body as { ok: boolean; data?: unknown; error?: ApiError };
+    if (envelope.ok && envelope.data !== undefined) return parsed(schema, envelope.data);
+    if (envelope.error) throw new OpFailed(envelope.error);
+  }
+  throw new OpFailed({ code: 'network', message: `伺服器回應異常（HTTP ${res.status}）` });
+}
+
+export async function getAuthorizeView(search: string): Promise<AuthorizeView> {
+  const res = await fetch(`/v1/oauth/authorize${search}`, { headers: headers() });
+  return authorizeEnvelope(res, authorizeView);
+}
+
+export async function decideAuthorize(search: string, approve: boolean): Promise<string> {
+  const request = Object.fromEntries(new URLSearchParams(search).entries());
+  const res = await fetch('/v1/oauth/authorize', {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ ...request, approve }),
+  });
+  const decision = await authorizeEnvelope(res, authorizeDecision);
+  return decision.redirect_to;
+}
+
 export const stat = z.object({
   kicker: z.string(),
   value: z.string(),

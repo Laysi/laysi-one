@@ -2238,6 +2238,36 @@ textarea {
   color: var(--color-ink-muted);
 }
 
+.consent__list {
+  margin: 0 0 var(--space-4xl);
+}
+
+.consent__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  padding: var(--space-lg) 0;
+  border-bottom: var(--rule-width) solid var(--rule);
+}
+
+.consent__row dt {
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-ink-muted);
+}
+
+.consent__row dd {
+  margin: 0;
+  text-align: right;
+}
+
+.consent__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-lg);
+}
+
 .sidebar__setup {
   margin: 0 var(--space-5xl) var(--space-3xl);
   padding: var(--space-xl) var(--space-2xl);

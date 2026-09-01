@@ -18,10 +18,15 @@ export default defineConfig({
     // /v1 (REST), /mcp (MCP streamable HTTP) and /healthz are all proxied to
     // the backend. /healthz is the only place the security screen can read
     // the RustFS state.
+    //
+    // /.well-known/ carries the OAuth discovery documents an AI connector
+    // reads before it can reach /mcp. /oauth/authorize is deliberately absent:
+    // that one is the consent screen, and it belongs to this dev server.
     proxy: {
       '/v1': { target: API_TARGET, changeOrigin: true },
       '/mcp': { target: MCP_TARGET, changeOrigin: true },
       '/healthz': { target: API_TARGET, changeOrigin: true },
+      '/.well-known/': { target: API_TARGET, changeOrigin: true },
     },
   },
   build: { outDir: 'dist', sourcemap: false },

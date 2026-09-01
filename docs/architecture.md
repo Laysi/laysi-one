@@ -2042,6 +2042,12 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | GET | `/v1/ops` | registry 清單：`[{name, risk, summary, enabled, input_schema}]` |
 | POST | `/v1/ops/{name}` | body 是 `{ input, prompt }`（兩者皆可省略）；回 `{ ok: true, data }` 或 `{ ok: false, error: {code, message} }` |
 | POST | `/mcp` | MCP streamable HTTP，Bearer token |
+| GET | `/.well-known/oauth-protected-resource` | 指出 `/mcp` 由哪個授權伺服器守著（RFC 9728）；`/mcp` 後綴的寫法回同一份 |
+| GET | `/.well-known/oauth-authorization-server` | 授權伺服器 metadata（RFC 8414） |
+| POST | `/v1/oauth/register` | 連接器自行註冊（RFC 7591），回 `client_id`，無密鑰 |
+| GET | `/v1/oauth/authorize` | 同意畫面要顯示的連接器名稱、回傳位址與代表身分；需要 session |
+| POST | `/v1/oauth/authorize` | 同意或拒絕，回一個瀏覽器要前往的網址；需要 session |
+| POST | `/v1/oauth/token` | form-encoded，授權碼換 MCP Token |
 
 **`/healthz` 分兩層回答**：這條路徑未登入就打得到（compose 的自檢在有帳號之前
 就要跑，Caddy 也直接放行），所以匿名的回答只有各部分起來了沒有。物件儲存的
@@ -2104,6 +2110,61 @@ JSON-RPC body 解析，未通過一律回 401（撤銷與過期不對外分辨�
   以位址分桶等於讓一個攻擊者把全公司鎖在門外）
   控制的固定視窗計數器，行程內用 `HashMap` 記，**不依賴 redis**，這個容器本來就是
   單機部署。被擋下時回自訂的 JSON-RPC 錯誤碼並寫稽核。
+
+### 遠端連接器的 OAuth（`crates/laysi-server/src/oauth.rs`）
+
+Claude 這類雲端連接器只收得下一個網址，沒有貼 Token 的欄位。加入連接器的人在
+別人的網頁上，所以取得憑證的路只有一條：連接器自己找到這裡、把人送過來登入、
+再拿授權碼換一組 Token。少了這一段，`one.laysi.io/mcp` 對它就是「連不上」——
+不是「要登入」，因為 401 沒有附上任何指路的東西。
+
+**access token 就是 `api_token`**，`kind = 'mcp'`。`mcp.rs` 的認證一行不用改，
+「安全與營運」照樣列得出、撤銷得掉；第二套 Token 儲存等於第二個要撤銷的地方，
+而其中一個一定會被漏掉。因此沒有 refresh token 也不回 `expires_in`：這組 Token
+的生死由那一頁回答，在這裡再宣告一次就是同一個問題有兩個答案。
+
+發現這條路的順序：
+
+1. `/mcp` 對沒帶憑證的呼叫回 401，並附
+   `WWW-Authenticate: Bearer resource_metadata="…"`。
+2. 連接器讀那份 metadata，得到授權伺服器的位置。
+3. 讀 `/.well-known/oauth-authorization-server`，得到三個端點。
+4. `POST /v1/oauth/register` 自行註冊，拿到 `client_id`。
+5. 瀏覽器前往 `/oauth/authorize`（同意畫面），登入後按下同意。
+6. `POST /v1/oauth/token` 用授權碼換 Token。
+
+**絕對網址由請求本身推導**（`public_base`），與 session cookie 的 `Secure` 同一條
+理由：要人記得在搬站時更新的設定值，就是會指向舊網址的設定值。`X-Forwarded-Host`
+與 `Host` 各自先過一次字元檢查，壞掉的那個往下落而不是兩個一起丟掉。主機名是呼叫端
+說了算，但偽造的值只改變它自己收到的回答，換不到任何東西。
+
+**用戶端是 public client，沒有密鑰**：跑在別人雲端的連接器保管不了密鑰，改以
+PKCE S256 證明持有請求，`plain` 一律拒絕。四件事守住這條流程：授權碼換發時同一
+道敘述把該列刪掉，所以只用得掉一次；`redirect_uri` 在核發與換發兩端都要與註冊清單
+逐字相符（前綴比對會讓授權碼被帶到同一個網域下的任何路徑）；身分只來自瀏覽器
+session，請求裡沒有任何欄位說得出代表誰；角色在鑄造 Token 的當下重讀，不由授權碼
+帶著走。
+
+**`code_verifier` 的格式先驗再用**：`from_code_verifier_sha256` 對 43–128 字元的
+長度是 `assert!` 而不是回傳錯誤，交給它一個沒檢查過的值會讓工作執行緒 panic，
+呼叫端收到的是空回應。這道檢查排在贖回授權碼之前，格式錯的請求因此不會燒掉一張
+還能用的授權碼。
+
+**註冊是開放的**，那正是連接器不必先請管理員準備任何東西的原因，所以它的界線是
+速率（每個來源位址每分鐘 5 次）而不是憑證。`redirect_uri` 只收 HTTPS，或桌面
+用戶端會監聽的 loopback；帶片段的一律拒絕，那會把授權碼移出用戶端讀的那一段。
+
+**同意畫面是 SPA 的 `/oauth/authorize`**，這個模組只回它要顯示的內容。在 Rust
+裡另外描出一頁 HTML，等於把整套視覺語彙再抄一份，而那一份不會跟著 CSS 變數走。
+`App.tsx` 在 `Workspace` 之前就攔下這個路徑——`Workspace` 掛載時會把網址
+`replaceState` 成當前畫面的路徑，查詢字串會在那一步整段消失。還沒登入時照常畫
+登入頁，網址不動，登入成功後這一頁自己就出現了。
+
+**`/.well-known/oauth-*` 在 Caddy 要自己一條 route**：SPA 的 fallback 會用 200 與
+首頁 HTML 回答它，而連接器解不出 JSON 之後報的是「這個網址不是 MCP 伺服器」，
+不是「discovery 失敗」。授權端點與 `/oauth/authorize` 相反，它就是要落到 SPA。
+**直接對外發布 `mcp` 服務的埠會繞過這條 route**，那條路上沒有 discovery，連接器
+一樣連不上；要讓外部 AI 連進來就走 `web` 這個容器。
 
 ### 部署角色：`LAYSI_SERVE`
 
@@ -2605,6 +2666,12 @@ Caddyfile 因此加上 `trusted_proxies static private_ranges`：這個容器只
 這一行的話它會用自己的協定覆蓋掉前面那層 TLS proxy 送來的標頭。限制在私有網段，所以
 從公網來的標頭決定不了任何事。
 
-**兩項留在環境變數，因為它們不是設定**：`CORS_ALLOWED_ORIGIN` 只對 Vite 開發伺服器有
-意義（compose 部署下前端與 API 同源，不產生 CORS 標頭）；`MCP_ALLOWED_ORIGINS` 守的是
-部署者自己決定要發布的那個埠，與埠號同一層。
+**`MCP_ALLOWED_ORIGINS` 留在環境變數，因為它不是設定**：它守的是部署者自己決定要發布
+的那個埠，與埠號同一層。
+
+**伺服器不掛 CORS 層**：兩種部署下瀏覽器都看不到跨源請求——開發時 Vite 把 `/v1`、
+`/mcp`、`/healthz` 代理到本機伺服器，compose 部署下 Caddy 送前端並代理同樣的路徑，
+而 session cookie 兩邊都是 `SameSite=Strict`。原本的 `CORS_ALLOWED_ORIGIN` 預設
+`http://localhost:5173` 又寫在程式與 compose 兩處，於是正式站每一個回應都帶著
+`access-control-allow-origin: http://localhost:5173` 與 `allow-credentials: true`，
+指著一個不存在的來源，而畫面上沒有地方改得動它。整層與那個環境變數一起移除。
