@@ -113,15 +113,21 @@ MCP（`tools/list` / `tools/call`）、TypeScript 型別三個介面都由它生
 - 法規更新 = 新增一版 `effective_from` 較晚的規則，不改程式、不發版、不重啟。
   `save_regulation` 寫完就重讀重裝。
 
-**廠商送新版走 `backend/regulation-updates/`，不走 `migrations/`**：費率是資料不是
-schema，而 0001 已經合併過三輪 migration，下一次合併時一則費率修正會擋在路上。
-`Store::REGULATION_UPDATES` 逐檔 `include_str!`，套用過的檔名記在 `reg_update`，
-**一個資料庫只跑一次**——所以管理員刪掉的版本不會在下次啟動回來，而這正是
-`seed_regulations()` 那條「只在表空時寫」要守的性質。一個檔一條敘述（`sqlx::query`
-只收一條；`raw_sql` 會讓 `laysi-ops` 的 async trait 邊界證不出 `Send`），一律
-`ON CONFLICT (domain, version) DO NOTHING`，檔案由 `scripts/regulation-sql.ts` 從
-出廠 TOML 產出，不要手抄 payload。`reg_ruleset` 沒有 `checksum` 欄位：寫入時算的
-FNV-1a，讀取端從來不取它。
+**廠商送新版走 `refresh_regulations`，不走 `migrations/` 也不換映像**：費率是資料不是
+schema，而 0001 已經合併過三輪 migration，下一次合併時一則費率修正會擋在路上；換一版
+映像只為了改一個數字，等於把上線時程綁在發版時程上。那個操作（`AdminOnly`，畫面在
+「法規版本」）向 `https://laysi.github.io/regulation-feed/manifest.json` 取，套用過的
+識別字記在 `reg_update`，**一個資料庫只套用一次**——所以管理員刪掉的版本不會在下一次
+更新回來，而這正是 `seed_regulations()` 那條「只在表空時寫」要守的性質；缺口只有出廠
+那一批（`seed_regulations()` 不留記錄），在第一次更新之前刪掉會回來一次。
+**送的是 payload 不是 SQL**：發布端供應值，敘述由伺服器自己組，所以那個網址碰不到
+`reg_ruleset` 以外的表；每一份 payload 寫入前都走 `probe()`，與手打進去的同一道檢查。
+一律 `ON CONFLICT (domain, version) DO NOTHING`。**`file` 是 `reg_update` 的鍵，發布
+之後不能改**——換名字等於要每個安裝再套用一次，包括刻意刪掉那一版的那些。
+`manifest.json` 由 `scripts/regulation-manifest.ts` 從 `backend/regulation/**/*.toml`
+產出（`.github/workflows/regulation-feed.yml` 推到發布用的公開儲存庫），不要手抄
+payload：同一份 TOML 對新安裝是出廠預設值，對既有安裝是更新。`reg_ruleset` 沒有
+`checksum` 欄位：寫入時算的 FNV-1a，讀取端從來不取它。
 
 **`laysi-regulation` 仍然不碰 SQL**：伺服器啟動時把整張表交給 `install()`，
 `resolve()` 回 `&'static Ruleset`，計算子維持同步純函式，`cargo test` 不需要資料庫。
@@ -292,7 +298,7 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
-RustFS 物件儲存，以及 **37 個畫面、130 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、131 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、

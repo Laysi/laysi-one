@@ -4,7 +4,34 @@
 //! module means one `pub mod` line here and one line in `all()`; nothing else
 //! in the shared files needs to change.
 
-use crate::Operation;
+use crate::{OpError, Operation};
+
+/// Fetch one published file over HTTPS.
+///
+/// `source` names the publisher, because someone reading a failure has to
+/// know which side to chase. Used by the two operations that go out for data
+/// the product cannot ship: the office calendar and amended rates.
+pub(crate) async fn fetch_text(url: &str, source: &str) -> Result<String, OpError> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| OpError::BadInput(format!("連線設定失敗：{e}")))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| OpError::BadInput(format!("連不上{source}，請確認對外連線後再試。")))?;
+    if !response.status().is_success() {
+        return Err(OpError::BadInput(format!(
+            "{source}回應 {}，請稍後再試。",
+            response.status().as_u16()
+        )));
+    }
+    response
+        .text()
+        .await
+        .map_err(|_| OpError::BadInput(format!("{source}的回應讀不完整。")))
+}
 
 pub mod assets;
 pub mod attendance;

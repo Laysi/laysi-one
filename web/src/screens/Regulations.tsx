@@ -6,6 +6,7 @@ import {
   callOp,
   OpFailed,
   regulationList,
+  regulationRefresh,
   type RegulationField,
   type RegulationList,
   type RegulationVersion,
@@ -90,6 +91,7 @@ export function Regulations({ onToast, reloadKey }: Props) {
   const me = useCurrentUser();
   const canEdit = me.permissions.includes('save_regulation');
   const canDelete = me.permissions.includes('delete_regulation');
+  const canRefresh = me.permissions.includes('refresh_regulations');
 
   const [data, setData] = useState<RegulationList | null>(null);
   const [domain, setDomain] = useState<string | null>(null);
@@ -143,6 +145,23 @@ export function Regulations({ onToast, reloadKey }: Props) {
     }
   };
 
+  const refresh = async () => {
+    setBusy(true);
+    try {
+      const r = await callOp('refresh_regulations', {}, undefined, regulationRefresh);
+      onToast(
+        r.applied.length === 0
+          ? '沒有新版本'
+          : `新增 ${r.applied.map((a) => `${a.label} ${a.version}`).join('、')}`,
+      );
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async (version: string) => {
     setBusy(true);
     try {
@@ -159,6 +178,14 @@ export function Regulations({ onToast, reloadKey }: Props) {
   return (
     <div>
       <h1 className="page-title">法規版本</h1>
+      {canRefresh && (
+        <div className="toolbar toolbar--spaced">
+          <span className="spacer" />
+          <button className="btn btn--secondary" disabled={busy} onClick={() => void refresh()}>
+            檢查法規更新
+          </button>
+        </div>
+      )}
       {!data && <p className="state-note">讀取中…</p>}
 
       {data && (

@@ -325,24 +325,7 @@ fn choose(files: &[Distribution], roc: i32) -> Option<&Distribution> {
 }
 
 async fn get(url: &str) -> Result<String, OpError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| OpError::BadInput(format!("連線設定失敗：{e}")))?;
-    let response =
-        client.get(url).send().await.map_err(|_| {
-            OpError::BadInput("連不上政府資料開放平臺，請確認對外連線後再試。".into())
-        })?;
-    if !response.status().is_success() {
-        return Err(OpError::BadInput(format!(
-            "政府資料開放平臺回應 {}，請稍後再試。",
-            response.status().as_u16()
-        )));
-    }
-    response
-        .text()
-        .await
-        .map_err(|_| OpError::BadInput("政府資料開放平臺的回應讀不完整。".into()))
+    super::fetch_text(url, "政府資料開放平臺").await
 }
 
 #[async_trait]

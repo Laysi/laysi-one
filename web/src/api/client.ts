@@ -800,6 +800,20 @@ export const regulationList = z.object({
 });
 export type RegulationList = z.infer<typeof regulationList>;
 
+export const regulationRefresh = z.object({
+  read: z.number(),
+  applied: z.array(
+    z.object({
+      domain: z.string(),
+      label: z.string(),
+      version: z.string(),
+      effective_from: z.string(),
+    }),
+  ),
+  rulesets: z.number(),
+});
+export type RegulationRefresh = z.infer<typeof regulationRefresh>;
+
 export const companySettingRow = z.object({
   code: z.string(),
   label: z.string(),

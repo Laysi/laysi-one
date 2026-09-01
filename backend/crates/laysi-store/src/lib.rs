@@ -532,61 +532,64 @@ impl Store {
         .collect())
     }
 
-    /// Regulation versions shipped after the installation was created.
+    /// Apply one published amendment, unless this database already saw it.
     ///
-    /// A new file here is a rate the legislature changed, not a schema
-    /// change, so it does not go in `migrations/`: those get squashed, and a
-    /// squash cannot preserve which amendments an installation already saw.
-    /// A file listed here is applied at most once per database, so a version
-    /// the administrator deleted on 「法規版本」 stays deleted.
+    /// An amended rate is data, not a schema change, so it does not go in
+    /// `migrations/`: those get squashed, and a squash cannot preserve which
+    /// amendments an installation already saw. The bookkeeping row goes in
+    /// before the ruleset and both share one transaction, so two servers
+    /// refreshing together cannot both apply it: the second blocks on the key
+    /// and then sees zero rows inserted.
     ///
-    /// Each file writes `ON CONFLICT (domain, version) DO NOTHING`, so an
-    /// installation that entered the amendment by hand first keeps its own.
-    /// Generate them from the factory TOML with `scripts/regulation-sql.ts`
-    /// rather than writing the payload twice.
-    const REGULATION_UPDATES: &[(&str, &str)] = &[(
-        "2026-01-01_owner_insurance.sql",
-        include_str!("../../../regulation-updates/2026-01-01_owner_insurance.sql"),
-    )];
-
-    /// Apply every regulation update this build ships and has not applied.
+    /// What is remembered is the amendment, not the row it wrote, so a
+    /// version the administrator deleted on 「法規版本」 stays deleted. The
+    /// insert leaves an existing (domain, version) alone, so an installation
+    /// that entered the amendment by hand first keeps its own.
     ///
-    /// The bookkeeping row goes in before the file runs and both share one
-    /// transaction, so two servers starting together cannot both apply it:
-    /// the second blocks on the key and then sees zero rows inserted.
-    async fn apply_regulation_updates(
+    /// Returns whether a version was actually added, which is not the same as
+    /// whether the amendment was new to this database: an install whose
+    /// factory seed already carried it records the amendment and writes
+    /// nothing. That seed is the one gap in "deleted stays deleted" — a
+    /// factory version deleted before the first refresh comes back once,
+    /// because only amendments are remembered by name.
+    pub async fn apply_regulation_update(
         &self,
-        files: &[(&'static str, &'static str)],
-    ) -> Result<u64> {
-        let mut applied = 0;
-        for &(file_name, sql) in files {
-            let mut tx = self.pool.begin().await?;
-            let claimed = sqlx::query(
-                "INSERT INTO reg_update (file_name) VALUES ($1) ON CONFLICT DO NOTHING",
+        file_name: &str,
+        rs: &laysi_regulation::Ruleset,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let claimed =
+            sqlx::query("INSERT INTO reg_update (file_name) VALUES ($1) ON CONFLICT DO NOTHING")
+                .bind(file_name)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        let mut written = 0;
+        if claimed == 1 {
+            written = sqlx::query(
+                "INSERT INTO reg_ruleset (domain, version, effective_from, effective_to,
+                                          source_note, payload)
+                 VALUES ($1,$2,$3,$4,$5,$6)
+                 ON CONFLICT (domain, version) DO NOTHING",
             )
-            .bind(file_name)
+            .bind(&rs.domain)
+            .bind(&rs.version)
+            .bind(rs.effective_from)
+            .bind(rs.effective_to)
+            .bind(&rs.source_note)
+            .bind(&rs.payload)
             .execute(&mut *tx)
             .await?
             .rows_affected();
-            if claimed == 1 {
-                // One statement per file. `raw_sql` would take several, but
-                // it makes this future fail to prove itself `Send` at the
-                // async-trait boundary in laysi-ops, and two amendments are
-                // two files anyway.
-                sqlx::query(sql).execute(&mut *tx).await?;
-                applied += 1;
-            }
-            tx.commit().await?;
         }
-        Ok(applied)
+        tx.commit().await?;
+        Ok(written == 1)
     }
 
     /// Seed, read back and install. The table is the authority, so every
     /// path that changes it ends here.
     pub async fn reload_regulations(&self) -> Result<usize> {
         self.seed_regulations().await?;
-        self.apply_regulation_updates(Self::REGULATION_UPDATES)
-            .await?;
         let rulesets = self.regulations().await?;
         let n = rulesets.len();
         laysi_regulation::install(rulesets);
@@ -10154,17 +10157,19 @@ mod tests {
     /// counting rows the other is still writing.
     static REGULATION_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// A shipped amendment applies once and never again, so a version the
+    /// A published amendment applies once and never again, so a version the
     /// administrator deleted on 「法規版本」 does not come back on the next
-    /// start. This is the whole reason the channel has its own table instead
-    /// of running the files every boot.
+    /// refresh. This is the whole reason the channel has its own table
+    /// instead of writing whatever the feed currently lists.
     ///
     /// Run with:
     /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
-    /// a_shipped_amendment_applies_once -- --ignored`
+    /// a_published_amendment_applies_once -- --ignored`
     #[tokio::test]
     #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
-    async fn a_shipped_amendment_applies_once() {
+    async fn a_published_amendment_applies_once() {
+        use chrono::NaiveDate;
+
         let _serial = REGULATION_TESTS.lock().await;
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
@@ -10174,27 +10179,32 @@ mod tests {
         store.migrate().await.expect("測試資料庫 migrations 應成功");
         store.reload_regulations().await.expect("應載入法規");
 
-        let file = [(
-            "0000-00-00_test_only.sql",
-            "INSERT INTO reg_ruleset (domain, version, effective_from, source_note, payload)
-             VALUES ('vat', '測試版', '2099-01-01', '測試', '{\"rate\":\"0.05\"}'::jsonb)
-             ON CONFLICT (domain, version) DO NOTHING",
-        )];
+        let file = "0000-00-00_test_only.sql";
+        let rs = laysi_regulation::Ruleset {
+            domain: "vat".into(),
+            version: "測試版".into(),
+            effective_from: NaiveDate::from_ymd_opt(2099, 1, 1).unwrap(),
+            effective_to: None,
+            source_note: "測試".into(),
+            payload: serde_json::json!({ "rate": "0.05" }),
+        };
 
-        assert_eq!(
-            store.apply_regulation_updates(&file).await.expect("應套用"),
-            1
+        assert!(
+            store
+                .apply_regulation_update(file, &rs)
+                .await
+                .expect("應套用"),
+            "沒見過的更新應寫入"
         );
         store
             .delete_regulation("vat", "測試版")
             .await
             .expect("應刪得掉");
-        assert_eq!(
-            store
-                .apply_regulation_updates(&file)
+        assert!(
+            !store
+                .apply_regulation_update(file, &rs)
                 .await
                 .expect("應可重跑"),
-            0,
             "已套用過的更新不得再寫一次，否則刪掉的版本會回來"
         );
         assert!(
@@ -10208,7 +10218,7 @@ mod tests {
         );
 
         sqlx::query("DELETE FROM reg_update WHERE file_name = $1")
-            .bind(file[0].0)
+            .bind(file)
             .execute(&store.pool)
             .await
             .expect("應清得掉測試紀錄");
