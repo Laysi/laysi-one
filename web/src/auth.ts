@@ -10,6 +10,7 @@ import {
   type SessionUser,
   type SetupState,
 } from './api/client';
+import { consentRequested } from './nav';
 
 export type { OauthState, SessionUser, SetupState };
 
@@ -56,7 +57,12 @@ export interface AuthValue {
   bootstrap: (input: BootstrapInput) => Promise<SessionUser>;
 }
 
-export const OAUTH_START_URL = '/v1/auth/oauth/start';
+export function oauthStartUrl(): string {
+  const base = '/v1/auth/oauth/start';
+  if (!consentRequested()) return base;
+  const here = window.location.pathname + window.location.search;
+  return `${base}?return_to=${encodeURIComponent(here)}`;
+}
 
 const AuthContext = createContext<AuthValue | null>(null);
 
@@ -75,7 +81,7 @@ export function useCurrentUser(): SessionUser {
 }
 
 function landOnStart(): void {
-  if (window.location.pathname !== '/') {
+  if (window.location.pathname !== '/' && !consentRequested()) {
     window.history.replaceState({}, '', '/');
   }
 }

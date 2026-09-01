@@ -2036,8 +2036,8 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | GET | `/v1/auth/me` | 目前登入帳號；未登入回 401 |
 | POST | `/v1/auth/change-password` | 更新 Argon2id 雜湊並清除 `must_change_password`；`current_password` 只在強制變更以外的呼叫才驗 |
 | POST | `/v1/auth/bootstrap` | 安裝完全沒有帳號時建立第一個帳號（角色固定 `admin`）並直接簽發 session |
-| GET | `/v1/auth/oauth/start` | 啟用時建立 PKCE 流程並以 302 前往 discovery 的 authorization endpoint |
-| GET | `/v1/auth/oauth/callback` | 後端交換授權碼、驗證 id_token、建立 session，再以 302 回 `/` |
+| GET | `/v1/auth/oauth/start` | 啟用時建立 PKCE 流程並以 302 前往 discovery 的 authorization endpoint；`return_to` 只收同意畫面的網址 |
+| GET | `/v1/auth/oauth/callback` | 後端交換授權碼、驗證 id_token、建立 session，再以 302 回 `return_to` 或 `/` |
 | GET | `/v1/meta` | 公司、會計期間、身分、版本、授權 |
 | GET | `/v1/ops` | registry 清單：`[{name, risk, summary, enabled, input_schema}]` |
 | POST | `/v1/ops/{name}` | body 是 `{ input, prompt }`（兩者皆可省略）；回 `{ ok: true, data }` 或 `{ ok: false, error: {code, message} }` |
@@ -2159,6 +2159,16 @@ session，請求裡沒有任何欄位說得出代表誰；角色在鑄造 Token 
 `App.tsx` 在 `Workspace` 之前就攔下這個路徑——`Workspace` 掛載時會把網址
 `replaceState` 成當前畫面的路徑，查詢字串會在那一步整段消失。還沒登入時照常畫
 登入頁，網址不動，登入成功後這一頁自己就出現了。
+
+**還沒登入就按下連接器時，登入完要回到同意畫面**：整份授權請求只存在於同意畫面的
+查詢字串裡，登入之後落在首頁就是把連接器等著的那份請求丟掉了，而畫面上沒有任何跡象。
+兩條登入路各自會丟掉它：帳號密碼登入的 `landOnStart()` 把網址 `replaceState` 成 `/`，
+外部登入則是 `oidc::callback` 直接 302 回 `/`。前者加一個條件，後者由 `start` 收
+`return_to`、與 PKCE 一起存在**伺服器端**的待決流程裡，回來時才讀出來——放在 callback
+的查詢參數上，離開與回來之間就換得掉。`return_target()` 只認 `/oauth/authorize?` 開頭
+的字串，所以這不是開放轉址：目標路徑是固定的，開頭必定是單一個斜線（`//evil.example`
+是另一個站）。**沒有查詢字串的 `/oauth/authorize` 也不收**，那裡沒有可以續下去的授權
+請求，只是有人借用了前綴。
 
 **`/.well-known/oauth-*` 在 Caddy 要自己一條 route**：SPA 的 fallback 會用 200 與
 首頁 HTML 回答它，而連接器解不出 JSON 之後報的是「這個網址不是 MCP 伺服器」，

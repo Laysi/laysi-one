@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { BrandMark } from '../components/BrandMark';
-import { AuthFailed, NO_USER_ACCOUNT, OAUTH_START_URL, useAuth } from '../auth';
+import { AuthFailed, NO_USER_ACCOUNT, oauthStartUrl, useAuth } from '../auth';
 
 export function Login() {
   const { user, oauth, signIn, changePassword } = useAuth();
@@ -153,7 +153,7 @@ export function Login() {
             {oauth.enabled && (
               <div className="login__alt">
                 {showPasswordForm && <span className="login__alt-rule">或</span>}
-                <a className="btn btn--secondary login__oauth" href={OAUTH_START_URL}>
+                <a className="btn btn--secondary login__oauth" href={oauthStartUrl()}>
                   使用 {oauth.label} 登入
                 </a>
                 <p className="login__note">

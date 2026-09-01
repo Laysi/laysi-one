@@ -164,6 +164,10 @@ export function firstScreen(entries: NavEntry[], permissions: string[]): ScreenI
 
 export const CONSENT_PATH = '/oauth/authorize';
 
+export function consentRequested(): boolean {
+  return window.location.pathname.replace(/\/+$/, '') === CONSENT_PATH;
+}
+
 export const SCREEN_PATH: Record<ScreenId, string> = {
   meclock: '/me/clock',
   me: '/me',

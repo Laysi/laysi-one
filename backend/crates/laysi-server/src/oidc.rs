@@ -103,6 +103,25 @@ struct PendingFlow {
     verifier: PkceCodeVerifier,
     nonce: Nonce,
     created_at: Instant,
+    /// Where to land after the round trip, when it is not the front page.
+    /// Held here rather than in a query parameter on the callback so that the
+    /// target cannot be swapped between leaving and coming back.
+    return_to: Option<String>,
+}
+
+/// The one address a sign-in is allowed to come back to other than `/`.
+///
+/// The consent screen keeps the whole authorization request in its query
+/// string, so a sign-in that lands on the front page has destroyed the
+/// request the connector was waiting on. Accepting any address instead would
+/// make this an open redirect; the prefix is fixed and starts with a single
+/// slash, so the target is always this site's consent screen.
+fn return_target(asked: Option<&str>) -> Option<String> {
+    let asked = asked?.trim();
+    (asked.starts_with("/oauth/authorize?")
+        && asked.len() <= 2048
+        && !asked.contains(|c: char| c.is_control()))
+    .then(|| asked.to_string())
 }
 
 /// The role a first sign-in creates its account with, resolved at startup so
@@ -227,7 +246,13 @@ impl OidcState {
         self.password_login_disabled
     }
 
-    fn insert_pending(&self, state: &CsrfToken, verifier: PkceCodeVerifier, nonce: Nonce) {
+    fn insert_pending(
+        &self,
+        state: &CsrfToken,
+        verifier: PkceCodeVerifier,
+        nonce: Nonce,
+        return_to: Option<String>,
+    ) {
         let mut pending = self
             .pending
             .lock()
@@ -239,6 +264,7 @@ impl OidcState {
                 verifier,
                 nonce,
                 created_at: Instant::now(),
+                return_to,
             },
         );
     }
@@ -429,12 +455,20 @@ fn disabled() -> Response {
     )
 }
 
+#[derive(Deserialize)]
+pub struct StartQuery {
+    /// Where to come back to, when the sign-in began somewhere the front page
+    /// would throw away. Checked by [`return_target`], not taken as given.
+    return_to: Option<String>,
+}
+
 /// Generate state, nonce and PKCE, store the private verifier server side and
 /// redirect to the IdP with a 302.
-pub async fn start(State(state): State<Shared>) -> Response {
+pub async fn start(State(state): State<Shared>, Query(query): Query<StartQuery>) -> Response {
     let Some(oidc) = current(&state).await else {
         return disabled();
     };
+    let return_to = return_target(query.return_to.as_deref());
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let mut request = oidc
         .client
@@ -455,7 +489,7 @@ pub async fn start(State(state): State<Shared>) -> Response {
         request = request.add_extra_param("hd", domain);
     }
     let (url, csrf, nonce) = request.url();
-    oidc.insert_pending(&csrf, verifier, nonce);
+    oidc.insert_pending(&csrf, verifier, nonce, return_to);
     redirect(url.as_str())
 }
 
@@ -797,7 +831,7 @@ pub async fn callback(
         Ok(secret) => secret,
         Err(response) => return response,
     };
-    let mut response = redirect("/");
+    let mut response = redirect(pending.return_to.as_deref().unwrap_or("/"));
     auth::attach_session_cookie(&mut response, &secret, &headers);
     response
 }
@@ -805,6 +839,26 @@ pub async fn callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The target survives a round trip through the IdP, so anything it
+    /// accepts is somewhere an attacker can land a signed-in browser.
+    #[test]
+    fn only_the_consent_screen_is_a_return_target() {
+        assert_eq!(
+            return_target(Some("/oauth/authorize?client_id=lys_c_1&state=x")).as_deref(),
+            Some("/oauth/authorize?client_id=lys_c_1&state=x")
+        );
+        assert_eq!(return_target(None), None);
+        assert_eq!(return_target(Some("/")), None);
+        // A protocol-relative address is another site, and an absolute one
+        // says so outright.
+        assert_eq!(return_target(Some("//evil.example/")), None);
+        assert_eq!(return_target(Some("https://evil.example/")), None);
+        // Without the query there is no authorization request to resume, so
+        // this is only the prefix being borrowed.
+        assert_eq!(return_target(Some("/oauth/authorize")), None);
+        assert_eq!(return_target(Some("/oauth/authorize?a=1\r\nX: y")), None);
+    }
 
     #[test]
     fn provider_key_is_the_discovered_issuer_not_email() {

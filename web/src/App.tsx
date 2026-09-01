@@ -43,7 +43,7 @@ import { Setup } from './screens/Setup';
 import { Tax } from './screens/Tax';
 import { Withholding } from './screens/Withholding';
 import {
-  CONSENT_PATH,
+  consentRequested,
   FINANCE_NAV,
   firstScreen,
   HR_NAV,
@@ -120,10 +120,6 @@ function screenAllowed(
   if (sectionOf(id) === 'me' && employeeId == null) return false;
   const op = screenOp(id);
   return op !== null && permissions.includes(op);
-}
-
-function consentRequested(): boolean {
-  return window.location.pathname.replace(/\/+$/, '') === CONSENT_PATH;
 }
 
 export function App() {

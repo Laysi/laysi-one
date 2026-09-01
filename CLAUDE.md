@@ -612,6 +612,11 @@ public client，改以 PKCE S256 證明持有請求；**`code_verifier` 的格�
 之前攔下——`Workspace` 掛載時會 `replaceState`，查詢字串在那一步整段消失。
 **`/.well-known/oauth-*` 在 Caddy 要自己一條 route**：落到 SPA fallback 就是 200＋
 首頁 HTML，而連接器報的是「這個網址不是 MCP 伺服器」。
+**還沒登入就按下連接器時，登入完要回得了同意畫面**：整份授權請求只活在那一頁的查詢
+字串裡。兩條登入路各自會丟掉它——`landOnStart()` 把網址 `replaceState` 成 `/`（加一個
+`consentRequested()` 條件），`oidc::callback` 302 回 `/`（`start` 收 `return_to`，與
+PKCE 一起存在**伺服器端**的待決流程裡，放在 callback 的查詢參數上就換得掉）。
+`return_target()` 只認 `/oauth/authorize?` 開頭，所以不是開放轉址。
 
 **異地備份的目的地在畫面上**：`backup_setting` 單列表，`AdminOnly` 的三個操作
 在「安全與營運」。金鑰非對稱，**私鑰由 `backup` 容器產生**（持有 `age` 的那一方），
