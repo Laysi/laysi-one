@@ -21,6 +21,14 @@
       綁在後端與代理上，而瀏覽器又把 favicon 快取得特別久。該檔帶著 BSL 1.1 的授權聲明。
     -->
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!--
+      favicon.ico is favicon.svg rasterized, for consumers that cannot read
+      SVG. Icon fetchers try /favicon.ico only; without the file the SPA
+      fallback answers with index.html and they drop to the parent domain, so
+      the connector icon for one.laysi.io became the laysi.io mark. Browsers
+      that understand SVG still take the line above.
+    -->
+    <link rel="icon" href="/favicon.ico" sizes="48x48 32x32 16x16" />
     <title>Laysi One</title>
   </head>
   <body>
