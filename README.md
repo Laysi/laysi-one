@@ -25,9 +25,15 @@ open http://localhost:8090
 ## 開發
 
 ```bash
+bun scripts/dev.ts                           # podman 起一個 5433 的資料庫，接著 cargo watch
+bun scripts/dev.ts stop                      # 停資料庫，資料留著
+bun scripts/dev.ts reset                     # 清空資料庫，下次啟動重建
 cargo test                                   # 不需要資料庫
-DATABASE_URL=postgres://… LICENSE_SIGNING_KEY=$(openssl rand -hex 32) cargo run
 ```
+
+第一次啟動會產生 `.dev/license_signing_key`（開發專用，與 `secrets/` 的正式金鑰無關），
+並建立後台帳號 `dev@laysi.one`，密碼印在畫面上也寫進 `.dev/vendor.txt`。整個 `.dev/`
+都是拋棄式的，刪掉再跑就是一組新的。
 
 ## 部署
 

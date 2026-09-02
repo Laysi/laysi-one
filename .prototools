@@ -1,0 +1,4 @@
+# The dev server runs the Rust toolchain and one bun script; pin both so a
+# checkout on another machine builds what this one builds.
+rust = "1.97.1"
+bun = "1.4"

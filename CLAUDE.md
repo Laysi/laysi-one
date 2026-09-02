@@ -12,6 +12,7 @@ Laysi 授權伺服器：經銷商／代理商開立 Laysi One 的啟動金鑰，
 ## 常用指令
 
 ```bash
+bun scripts/dev.ts               # 開發用：podman 資料庫 + cargo watch（stop／reset）
 cargo test                       # 不需要資料庫
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
