@@ -139,7 +139,9 @@ pub fn normalise_key(raw: &str) -> String {
 
 /// What is stored instead of the key itself.
 pub fn key_hash(raw: &str) -> String {
-    blake3::hash(normalise_key(raw).as_bytes()).to_hex().to_string()
+    blake3::hash(normalise_key(raw).as_bytes())
+        .to_hex()
+        .to_string()
 }
 
 /// The part of a key that goes on a screen, so a person can tell two rows
@@ -206,11 +208,17 @@ mod tests {
             serde_json::from_slice(&B64.decode(body).unwrap()).unwrap();
         edited.not_after = NaiveDate::from_ymd_opt(2099, 1, 1).unwrap();
         let forged = format!("{}.{sig}", B64.encode(serde_json::to_vec(&edited).unwrap()));
-        assert!(verify(&key.verifying_key(), &forged).is_err(), "改過的內容不得驗過");
+        assert!(
+            verify(&key.verifying_key(), &forged).is_err(),
+            "改過的內容不得驗過"
+        );
 
         // Nor may another key's signature pass.
         let other = SigningKey::from_bytes(&[9u8; 32]);
-        assert!(verify(&other.verifying_key(), &token).is_err(), "別的金鑰不得驗過");
+        assert!(
+            verify(&other.verifying_key(), &token).is_err(),
+            "別的金鑰不得驗過"
+        );
     }
 
     #[test]
@@ -224,9 +232,16 @@ mod tests {
         }
 
         let typed = key.to_lowercase().replace('-', " ");
-        assert_eq!(key_hash(&typed), key_hash(&key), "大小寫與分隔符不該影響比對");
+        assert_eq!(
+            key_hash(&typed),
+            key_hash(&key),
+            "大小寫與分隔符不該影響比對"
+        );
         assert_ne!(key_hash(&key), key_hash(&new_activation_key()));
         assert_eq!(key_prefix(&key).len(), 10);
-        assert!(!key_hash(&key).contains(&normalise_key(&key)), "雜湊不得含有金鑰本身");
+        assert!(
+            !key_hash(&key).contains(&normalise_key(&key)),
+            "雜湊不得含有金鑰本身"
+        );
     }
 }

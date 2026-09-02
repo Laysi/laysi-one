@@ -31,7 +31,8 @@ pub fn hash_password(plain: &str) -> Result<String> {
     // happens to turn that feature on.
     let mut raw = [0u8; 16];
     getrandom::fill(&mut raw).context("drawing a password salt")?;
-    let salt = SaltString::encode_b64(&raw).map_err(|e| anyhow::anyhow!("encoding the salt: {e}"))?;
+    let salt =
+        SaltString::encode_b64(&raw).map_err(|e| anyhow::anyhow!("encoding the salt: {e}"))?;
     Ok(engine()
         .hash_password(plain.as_bytes(), &salt)
         .map_err(|e| anyhow::anyhow!("hashing the password: {e}"))?
@@ -148,7 +149,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "cookie",
-            format!("theme=dark; {COOKIE}=abc123; other=1").parse().unwrap(),
+            format!("theme=dark; {COOKIE}=abc123; other=1")
+                .parse()
+                .unwrap(),
         );
         assert_eq!(cookie(&headers).as_deref(), Some("abc123"));
 

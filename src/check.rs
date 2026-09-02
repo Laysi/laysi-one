@@ -177,8 +177,9 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
     // invalidates the other. Counted and shown, never blocked: a restore from
     // yesterday's backup is indistinguishable from a clone, and locking a
     // customer out of their own books on a heuristic is the worse mistake.
-    let continuity_broken =
-        bound.is_some() && stored_nonce.is_some() && req.nonce.as_deref() != stored_nonce.as_deref();
+    let continuity_broken = bound.is_some()
+        && stored_nonce.is_some()
+        && req.nonce.as_deref() != stored_nonce.as_deref();
     if continuity_broken {
         sqlx::query(
             "UPDATE license SET conflicts = conflicts + 1, last_conflict_at = now() WHERE id = $1",

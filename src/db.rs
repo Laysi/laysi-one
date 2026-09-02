@@ -149,7 +149,10 @@ pub async fn licenses(pool: &PgPool, actor: &Actor, search: &str) -> Result<Vec<
          ORDER BY l.issued_at DESC LIMIT 300",
         actor.scope_sql()
     );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(search).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(search)
+        .fetch_all(pool)
+        .await?;
     Ok(rows.iter().map(license_row).collect())
 }
 
@@ -158,7 +161,10 @@ pub async fn license(pool: &PgPool, actor: &Actor, no: &str) -> Result<Option<Li
         "{LICENSE_SELECT} WHERE {} AND l.license_no = $1",
         actor.scope_sql()
     );
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(no).fetch_optional(pool).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(no)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.as_ref().map(license_row))
 }
 
@@ -270,7 +276,9 @@ pub async fn billing(pool: &PgPool, actor: &Actor) -> Result<Vec<BillingRow>> {
           WHERE {scope}
           GROUP BY 1, 2, 3 ORDER BY 1 DESC, 3"
     );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(pool).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .fetch_all(pool)
+        .await?;
     Ok(rows
         .iter()
         .map(|r| BillingRow {

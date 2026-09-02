@@ -81,8 +81,7 @@ fn signing_key() -> Result<SigningKey> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -143,10 +142,7 @@ async fn main() -> Result<()> {
         .route("/", get(console::home))
         .route("/login", get(console::login_form).post(console::login))
         .route("/logout", post(console::logout))
-        .route(
-            "/licenses",
-            get(console::licenses).post(console::issue),
-        )
+        .route("/licenses", get(console::licenses).post(console::issue))
         .route("/licenses/{no}", get(console::detail))
         .route("/licenses/{no}/renew", post(console::renew))
         .route("/licenses/{no}/unbind", post(console::unbind))
@@ -212,7 +208,9 @@ async fn create_vendor(pool: &PgPool, email: &str) -> Result<String> {
     Ok(password)
 }
 
-async fn healthz(axum::extract::State(s): axum::extract::State<Shared>) -> axum::response::Response {
+async fn healthz(
+    axum::extract::State(s): axum::extract::State<Shared>,
+) -> axum::response::Response {
     use axum::response::IntoResponse;
     let ok = sqlx::query("SELECT 1").fetch_one(&s.pool).await.is_ok();
     let code = if ok {

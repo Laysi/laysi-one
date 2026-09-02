@@ -134,7 +134,11 @@ fn instant(t: Option<chrono::DateTime<Utc>>) -> String {
 /// Licence status as the console says it, with the contract date folded in:
 /// a licence still marked active whose year ended is expired, and saying
 /// "啟用中" next to a date in the past is the screen contradicting itself.
-fn status_label(status: &str, expires_on: NaiveDate, today: NaiveDate) -> (&'static str, &'static str) {
+fn status_label(
+    status: &str,
+    expires_on: NaiveDate,
+    today: NaiveDate,
+) -> (&'static str, &'static str) {
     match status {
         "revoked" => ("已註銷", "off"),
         "suspended" => ("已暫停", "off"),
@@ -225,7 +229,11 @@ fn fail(error: anyhow::Error) -> Response {
     tracing::error!(%error, "console request failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        page("錯誤", None, r#"<h1>暫時無法處理</h1><p class="lede">請稍後再試。</p>"#),
+        page(
+            "錯誤",
+            None,
+            r#"<h1>暫時無法處理</h1><p class="lede">請稍後再試。</p>"#,
+        ),
     )
         .into_response()
 }
@@ -293,10 +301,16 @@ pub async fn licenses(
             // nobody sees is the same as not refusing.
             let mut flag = String::new();
             if r.conflicts > 0 {
-                flag.push_str(&format!(r#" <span class="tag off">重複安裝 {}</span>"#, r.conflicts));
+                flag.push_str(&format!(
+                    r#" <span class="tag off">重複安裝 {}</span>"#,
+                    r.conflicts
+                ));
             }
             if r.denials > 0 {
-                flag.push_str(&format!(r#" <span class="tag off">被拒 {} 次</span>"#, r.denials));
+                flag.push_str(&format!(
+                    r#" <span class="tag off">被拒 {} 次</span>"#,
+                    r.denials
+                ));
             }
             format!(
                 r#"<tr><td><a href="/licenses/{no}">{no}</a></td>
@@ -443,10 +457,16 @@ pub async fn detail(
         Err(error) => return fail(error),
     };
     let Some(r) = found else {
-        return (StatusCode::NOT_FOUND, page("查無授權", Some(&a), r#"<h1>查無此授權編號</h1>"#))
+        return (
+            StatusCode::NOT_FOUND,
+            page("查無授權", Some(&a), r#"<h1>查無此授權編號</h1>"#),
+        )
             .into_response();
     };
-    let (terms, denials) = match (db::terms(&s.pool, &no).await, db::denials(&s.pool, &no).await) {
+    let (terms, denials) = match (
+        db::terms(&s.pool, &no).await,
+        db::denials(&s.pool, &no).await,
+    ) {
         (Ok(t), Ok(d)) => (t, d),
         (Err(e), _) | (_, Err(e)) => return fail(e),
     };
@@ -514,15 +534,16 @@ pub async fn detail(
 
     let offline = query.get("offline").cloned().unwrap_or_default();
     let offline_block = if offline.is_empty() {
-        format!(
-            r#"<h2>離線授權檔</h2>
+        // A plain string: the pattern below contains `{64}`, which `format!`
+        // would read as a placeholder.
+        r#"<h2>離線授權檔</h2>
             <p class="lede">客戶主機不對外連線時使用。請客戶在啟用畫面上讀出主機識別碼，貼在這裡產生授權檔。</p>
             <form class="card" method="post" action="offline">
-              <label>主機識別碼<input name="fingerprint" required pattern="[0-9a-f]{{64}}" placeholder="64 碼十六進位"></label>
+              <label>主機識別碼<input name="fingerprint" required pattern="[0-9a-f]{64}" placeholder="64 碼十六進位"></label>
               <div class="actions"><button class="plain">產生離線授權檔</button>
                 <span class="note">效期至到期日當天，期間不需回報。</span></div>
             </form>"#
-        )
+        .to_string()
     } else {
         format!(
             r#"<h2>離線授權檔</h2>
@@ -656,7 +677,11 @@ pub async fn unbind(
           WHERE p.id = l.partner_id AND l.license_no = $1 AND {}",
         a.scope_sql()
     );
-    match sqlx::query(sqlx::AssertSqlSafe(sql)).bind(&no).execute(&s.pool).await {
+    match sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(&no)
+        .execute(&s.pool)
+        .await
+    {
         Ok(_) => Redirect::to(&format!("/licenses/{}", urlencode(&no))).into_response(),
         Err(error) => fail(error.into()),
     }
@@ -791,7 +816,11 @@ pub async fn billing(State(s): State<Shared>, headers: HeaderMap) -> Response {
 
 // Partners (vendor only)
 
-pub async fn partners(State(s): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+pub async fn partners(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     let a = signed_in!(s, headers);
     if !a.is_vendor {
         return Redirect::to("/licenses").into_response();
@@ -815,14 +844,24 @@ pub async fn partners(State(s): State<Shared>, headers: HeaderMap, Query(q): Que
                 r.licenses,
                 r.users,
                 if r.status == "active" { "on" } else { "off" },
-                if r.status == "active" { "使用中" } else { "已停用" },
+                if r.status == "active" {
+                    "使用中"
+                } else {
+                    "已停用"
+                },
             )
         })
         .collect();
 
     let options: String = rows
         .iter()
-        .map(|r| format!(r#"<option value="{}">{}</option>"#, esc(&r.partner_no), esc(&r.name)))
+        .map(|r| {
+            format!(
+                r#"<option value="{}">{}</option>"#,
+                esc(&r.partner_no),
+                esc(&r.name)
+            )
+        })
         .collect();
 
     let created = match (q.get("email"), q.get("password")) {
