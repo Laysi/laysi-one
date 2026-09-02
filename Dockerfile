@@ -12,7 +12,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin laysi
-COPY --from=build /src/target/release/laysi-license /usr/local/bin/laysi-license
+COPY --from=build /src/target/release/laysi-one-license /usr/local/bin/laysi-one-license
 USER 10001
 EXPOSE 8090
-ENTRYPOINT ["/usr/local/bin/laysi-license"]
+ENTRYPOINT ["/usr/local/bin/laysi-one-license"]

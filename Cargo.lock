@@ -949,7 +949,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "laysi-license"
+name = "laysi-one-license"
 version = "0.1.0"
 dependencies = [
  "anyhow",

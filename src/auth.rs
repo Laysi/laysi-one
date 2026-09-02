@@ -12,7 +12,7 @@ use axum::http::HeaderMap;
 use sqlx::{PgPool, Row};
 
 /// Name of the session cookie.
-pub const COOKIE: &str = "laysi_license_session";
+pub const COOKIE: &str = "laysi_one_license_session";
 
 /// How long a console session lasts without being renewed.
 const SESSION_HOURS: i64 = 12;

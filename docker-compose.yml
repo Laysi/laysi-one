@@ -1,14 +1,20 @@
 # Laysi 授權伺服器
 #
 #   docker compose up -d --build
-#   docker compose exec app laysi-license create-vendor you@example.com
-#   docker compose exec app laysi-license public-key      # 編進產品的公鑰
+#   docker compose exec app laysi-one-license create-vendor you@example.com
+#   docker compose exec app laysi-one-license public-key      # 編進產品的公鑰
 #   open http://localhost:8090
 #
 # Nothing here asks for a value. Compose interpolates before any container
 # runs, so a secret it interpolates could only come from a file somebody wrote
 # by hand; the one-shot `secrets` service writes them into a volume instead and
 # every consumer reads the file. Same arrangement the product uses.
+
+# The project name, and so the prefix on every volume, is pinned here rather
+# than taken from the directory name: a renamed checkout that silently starts
+# from an empty secrets volume would generate a new signing key, and a new
+# signing key invalidates every licence already in the field.
+name: laysi-one-license
 
 services:
   # Generates what must differ between installations, once, into a volume.
@@ -34,7 +40,7 @@ services:
             "$${POSTGRES_USER:-laysi}" "$$(cat /secrets/pg_password)" "$${POSTGRES_DB:-license}" \
             > /secrets/database_url
         chmod 0444 /secrets/*
-        echo "簽章金鑰已就緒。取公鑰：docker compose exec app laysi-license public-key"
+        echo "簽章金鑰已就緒。取公鑰：docker compose exec app laysi-one-license public-key"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-laysi}
       POSTGRES_DB: ${POSTGRES_DB:-license}
@@ -80,7 +86,7 @@ services:
       # internet on its own. Override LICENSE_BIND to publish it wider.
       - "${LICENSE_BIND:-127.0.0.1:8090}:8090"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/laysi-license", "healthcheck"]
+      test: ["CMD", "/usr/local/bin/laysi-one-license", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    tracing::info!(%bind, "laysi-license listening");
+    tracing::info!(%bind, "laysi-one-license listening");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

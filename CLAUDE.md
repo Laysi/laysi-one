@@ -17,8 +17,8 @@ cargo test                       # 不需要資料庫
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 docker compose up -d --build
-docker compose exec app laysi-license create-vendor <email>   # 第一個後台帳號
-docker compose exec app laysi-license public-key              # 編進產品的公鑰
+docker compose exec app laysi-one-license create-vendor <email>   # 第一個後台帳號
+docker compose exec app laysi-one-license public-key              # 編進產品的公鑰
 ```
 
 ## 慣例

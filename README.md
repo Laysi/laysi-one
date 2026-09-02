@@ -4,8 +4,8 @@
 
 ```bash
 docker compose up -d --build
-docker compose exec app laysi-license create-vendor you@example.com   # 第一個帳號
-docker compose exec app laysi-license public-key                      # 編進產品的公鑰
+docker compose exec app laysi-one-license create-vendor you@example.com   # 第一個帳號
+docker compose exec app laysi-one-license public-key                      # 編進產品的公鑰
 open http://localhost:8090
 ```
 
@@ -43,16 +43,20 @@ session cookie 的 `Secure`、讀 `X-Forwarded-For` 記錄來源位址，所以�
 帶進來。
 
 ```bash
-git clone <repo> ~/laysi-license && cd ~/laysi-license
+git clone <repo> ~/laysi-one-license && cd ~/laysi-one-license
 # 把備份的簽章私鑰先放進資料卷，不要讓 secrets 服務自己抽一把新的：
 #   換一把金鑰＝現場每一個安裝的授權檔全部作廢
-docker volume create laysi-license_secrets
-docker run --rm -v laysi-license_secrets:/s -v "$PWD:/in" alpine \
+docker volume create laysi-one-license_secrets
+docker run --rm -v laysi-one-license_secrets:/s -v "$PWD:/in" alpine \
   sh -c 'cp /in/license_signing_key /s/ && chmod 0444 /s/license_signing_key'
 
 docker compose up -d --build
-docker compose exec app laysi-license create-vendor you@example.com
+docker compose exec app laysi-one-license create-vendor you@example.com
 ```
+
+已經用舊名 `laysi-license` 跑過的主機：compose 專案名現在寫死在檔案裡，volume 前綴
+跟著換成 `laysi-one-license_*`。升級前先把舊 volume 的 `license_signing_key` 取出來，
+照上面那段放進新的 volume——直接 `up` 等於抽一把新金鑰。
 
 產品端的 `ops/license.rs` 把 `license.laysi.one` 寫成常數，公鑰也編在裡面——**換網址或
 換金鑰都是發一版新映像**，不是改設定。
