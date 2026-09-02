@@ -46,6 +46,7 @@ pub mod hr_compliance;
 pub mod imports;
 pub mod insurance;
 pub mod ledger;
+pub mod license;
 pub mod masters;
 pub mod notices;
 pub mod payables;
@@ -62,6 +63,7 @@ pub mod tax;
 pub fn all() -> Vec<Box<dyn Operation>> {
     let mut out = Vec::new();
     out.extend(ledger::ops());
+    out.extend(license::ops());
     out.extend(receivables::ops());
     out.extend(payables::ops());
     out.extend(banking::ops());

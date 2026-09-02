@@ -23,6 +23,7 @@ export type SessionUser = z.infer<typeof sessionUser>;
 export const setupState = z.object({
   bootstrap_available: z.boolean(),
   token_required: z.boolean(),
+  fingerprint: z.string().default(''),
 });
 export type SetupState = z.infer<typeof setupState>;
 
@@ -165,6 +166,26 @@ export function downloadFile(name: string, data: BlobPart, type: string) {
   URL.revokeObjectURL(url);
 }
 
+export const licenseState = z.object({
+  standing: z.string(),
+  writes_allowed: z.boolean(),
+  note: z.string(),
+  reason: z.string(),
+  fingerprint: z.string(),
+  last_check_at: z.string().nullable(),
+  last_error: z.string(),
+  has_activation_key: z.boolean(),
+  grace_until: z.string().nullable(),
+  license_no: z.string().optional(),
+  licensee: z.string().optional(),
+  licensee_tax_id: z.string().optional(),
+  partner: z.string().optional(),
+  partner_no: z.string().optional(),
+  expires_on: z.string().optional(),
+  not_after: z.string().optional(),
+});
+export type LicenseState = z.infer<typeof licenseState>;
+
 export const meta = z.object({
   company: z.string(),
   tax_id: z.string(),
@@ -183,7 +204,14 @@ export const meta = z.object({
   utc_offset: z.string(),
   brand,
   version: z.string(),
-  licence: z.string(),
+  licence: z.object({
+    standing: z.string(),
+    writes_allowed: z.boolean(),
+    note: z.string(),
+    licensee: z.string().optional(),
+    partner: z.string().optional(),
+    expires_on: z.string().optional(),
+  }),
 });
 export type Meta = z.infer<typeof meta>;
 

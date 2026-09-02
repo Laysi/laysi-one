@@ -41,6 +41,20 @@ const SERVER_BIN = new URL("../backend/target/debug/laysi-server", import.meta.u
 const TODAY =
   process.env.TEST_TODAY ?? new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 const ADMIN_PASSWORD = "Function-Test-2026";
+// Initialisation activates before it creates the account, so this script needs
+// a licence the way a real installation does: an activation key checked against
+// a licence server, or a licence file that server minted for this machine.
+// LICENSE_SERVER_URL points the server at whichever one is running.
+const ACTIVATION_KEY = process.env.LAYSI_ACTIVATION_KEY ?? "";
+const LICENSE_TOKEN = process.env.LAYSI_LICENSE_TOKEN ?? "";
+const LICENCE = { activation_key: ACTIVATION_KEY, license_token: LICENSE_TOKEN };
+if (!ACTIVATION_KEY && !LICENSE_TOKEN) {
+  console.error(
+    "需要 LAYSI_ACTIVATION_KEY（搭配 LICENSE_SERVER_URL）或 LAYSI_LICENSE_TOKEN。\n" +
+      "授權伺服器在 ~/projects/laysi-license，開立後把金鑰放進環境變數。",
+  );
+  process.exit(1);
+}
 const BOSS_PASSWORD = "Function-Boss-2026";
 
 async function psql(db: string, sql: string): Promise<string> {
@@ -174,7 +188,7 @@ async function main() {
       const res = await fetch(`${BASE}/v1/auth/bootstrap`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ password: ADMIN_PASSWORD }),
+        body: JSON.stringify({ password: ADMIN_PASSWORD, ...LICENCE }),
       });
       const body = await res.json();
       expect(body.ok, JSON.stringify(body));
@@ -190,7 +204,7 @@ async function main() {
       const res = await fetch(`${BASE}/v1/auth/bootstrap`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ password: "another-one" }),
+        body: JSON.stringify({ password: "another-one", ...LICENCE }),
       });
       expect(res.status !== 200, `HTTP ${res.status}`);
       const count = await psql(TEST_DB, "SELECT count(*) FROM user_account");

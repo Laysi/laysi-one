@@ -41,6 +41,9 @@ base64 = "0.23"
 axum = "0.8"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# Already in the tree through openidconnect, so verifying a licence token
+# costs no new crate. The signing half lives only on the licence server.
+ed25519-dalek = "2"
 hex = "0.4"
 openidconnect = "4.0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

@@ -33,7 +33,7 @@ use crate::auth::{
     attach_session_cookie, env_bool, error_response, issue_session, user_json_with_role,
     MIN_PASSWORD_CHARS,
 };
-use crate::Shared;
+use crate::{today, Shared};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -113,12 +113,24 @@ pub struct BootstrapInput {
     password: String,
     #[serde(default)]
     setup_token: String,
+    /// The activation key the reseller supplied. Checked, and bound to this
+    /// machine, before the account exists: an installation that turns out not
+    /// to be licensed should leave nothing behind to clean up, and the person
+    /// holding the key is the person standing at this screen.
+    #[serde(default)]
+    activation_key: String,
+    /// A signed licence file, for an installation with no way out to the
+    /// internet. One of the two is required.
+    #[serde(default)]
+    license_token: String,
 }
 
 /// A validated account request. Building one is the only way to reach the
 /// store, so no field can skip its check.
 struct FirstAccount {
     password: String,
+    activation_key: String,
+    license_token: String,
 }
 
 fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
@@ -129,9 +141,45 @@ fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
         return Err("密碼至少需要 8 個字元");
     }
 
+    let activation_key = input.activation_key.trim().to_string();
+    let license_token = input.license_token.trim().to_string();
+    if activation_key.is_empty() && license_token.is_empty() {
+        return Err("請輸入經銷商提供的啟動金鑰");
+    }
+
     Ok(FirstAccount {
         password: input.password,
+        activation_key,
+        license_token,
     })
+}
+
+/// Activate before the account is created.
+///
+/// Deliberately the last thing that can fail: a refused key leaves an
+/// installation with no accounts, which is the state it was already in, and
+/// the person can try again with the right key.
+/// Returns the response to send instead of continuing, or `None` when the
+/// licence is good. Not a `Result`: an `axum::Response` is a large value to
+/// carry in an error variant, and there is nothing here to propagate.
+async fn activation_refusal(state: &Shared, account: &FirstAccount) -> Option<Response> {
+    let result = if account.license_token.is_empty() {
+        laysi_ops::ops::license::check_now(&state.store, &account.activation_key).await
+    } else {
+        laysi_ops::ops::license::activate_offline(&state.store, &account.license_token, today())
+            .await
+    };
+    match result {
+        Ok(licence) => {
+            tracing::info!(standing = licence.label(), "licence activated at setup");
+            None
+        }
+        Err(error) => Some(error_response(
+            StatusCode::BAD_REQUEST,
+            "license_rejected",
+            &error.to_string(),
+        )),
+    }
 }
 
 fn user_agent(headers: &HeaderMap) -> String {
@@ -175,7 +223,7 @@ pub async fn bootstrap(
     // Validation comes before the rate limit so that correcting a typo does
     // not spend the allowance; only attempts that reach the token check and
     // Argon2id do.
-    let FirstAccount { password } = match validate(input) {
+    let account = match validate(input) {
         Ok(account) => account,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_input", message),
     };
@@ -200,6 +248,11 @@ pub async fn bootstrap(
             "初始化代碼不正確",
         );
     }
+
+    if let Some(response) = activation_refusal(&state, &account).await {
+        return response;
+    }
+    let FirstAccount { password, .. } = account;
 
     let password_hash =
         match tokio::task::spawn_blocking(move || password::hash_password(&password)).await {
@@ -329,6 +382,8 @@ mod tests {
         BootstrapInput {
             password: password.into(),
             setup_token: String::new(),
+            activation_key: "LAYSI-AAAAA-AAAAA-AAAAA-AAAAA".into(),
+            license_token: String::new(),
         }
     }
 
@@ -338,6 +393,25 @@ mod tests {
     fn a_well_formed_request_is_accepted() {
         let account = validate(input(GOOD_PASSWORD)).expect("合法輸入應通過驗證");
         assert_eq!(account.password, GOOD_PASSWORD);
+    }
+
+    /// Initialisation asks for the key before it creates the account, so a
+    /// request without one has nothing to activate and must not get as far as
+    /// writing an administrator.
+    #[test]
+    fn a_request_without_a_licence_is_refused() {
+        let mut without = input(GOOD_PASSWORD);
+        without.activation_key = "  ".into();
+        assert_eq!(validate(without).err(), Some("請輸入經銷商提供的啟動金鑰"));
+
+        // The offline path is the other half of the same requirement.
+        let mut offline = input(GOOD_PASSWORD);
+        offline.activation_key = String::new();
+        offline.license_token = "abc.def".into();
+        assert_eq!(
+            validate(offline).expect("離線授權檔也算").license_token,
+            "abc.def"
+        );
     }
 
     /// The caller supplies a password and nothing else. Everything that

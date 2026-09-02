@@ -17,6 +17,8 @@ async-trait.workspace = true
 # module docs.
 base64.workspace = true
 chrono.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
 # The work calendar is fetched from the government open-data platform; see
 # the ops/calendar.rs module docs.
 reqwest.workspace = true

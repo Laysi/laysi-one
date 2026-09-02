@@ -69,6 +69,12 @@ impl Operation for GetBackupSetting {
     fn risk(&self) -> Risk {
         Risk::AdminOnly
     }
+    /// Reads only. Carries the identity floor above, which is a question
+    /// about who may call it rather than about what it changes, so the
+    /// licence floor has to be told separately.
+    fn writes(&self) -> bool {
+        false
+    }
     fn summary(&self) -> &'static str {
         "讀異地備份設定：儲存位置、bucket、路徑、保留天數與上次備份結果。存取金鑰不在回應內，設定後也無法取回。"
     }

@@ -1712,6 +1712,12 @@ impl Operation for ListUserAccounts {
         // on the same floor. The roster carries no amount and no payslip.
         Risk::AdminOnly
     }
+    /// Reads only. Carries the identity floor above, which is a question
+    /// about who may call it rather than about what it changes, so the
+    /// licence floor has to be told separately.
+    fn writes(&self) -> bool {
+        false
+    }
     fn summary(&self) -> &'static str {
         "讀登入帳號清單：登入名稱、角色、連結的員工、外部帳號、狀態與最後登入時間。密碼與密碼雜湊不在回應內，也無法取回。"
     }
@@ -1741,6 +1747,12 @@ impl Operation for GetOidcSetting {
     }
     fn risk(&self) -> Risk {
         Risk::AdminOnly
+    }
+    /// Reads only. Carries the identity floor above, which is a question
+    /// about who may call it rather than about what it changes, so the
+    /// licence floor has to be told separately.
+    fn writes(&self) -> bool {
+        false
     }
     fn summary(&self) -> &'static str {
         "讀外部登入設定：供應商、用戶端 ID、公司電子郵件網域、自動建立帳號的角色、是否停用帳號密碼登入與上次驗證結果。用戶端密鑰不在回應內，設定後也無法取回。"

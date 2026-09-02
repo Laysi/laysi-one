@@ -12,6 +12,7 @@ import {
   getHealthz,
   getMeta,
   issuedApiToken,
+  licenseState,
   oidcSetting,
   OpFailed,
   systemHealth,
@@ -20,6 +21,7 @@ import {
   type ApiTokenList,
   type BackupSetting,
   type Healthz,
+  type LicenseState,
   type Meta,
   type OidcSetting,
   type SystemHealth,
@@ -116,6 +118,11 @@ export function Security({ onToast, reloadKey }: Props) {
   const [info, setInfo] = useState<Meta | null>(null);
   const [oidcForm, setOidcForm] = useState<OidcForm | null>(null);
   const [savingOidc, setSavingOidc] = useState(false);
+  const [licence, setLicence] = useState<LicenseState | null>(null);
+  const [activationKey, setActivationKey] = useState('');
+  const [licenceToken, setLicenceToken] = useState('');
+  const [licenceOffline, setLicenceOffline] = useState(false);
+  const [checkingLicence, setCheckingLicence] = useState(false);
 
   const me = useCurrentUser();
   const canReadOidc = me.permissions.includes('get_oidc_setting');
@@ -123,6 +130,8 @@ export function Security({ onToast, reloadKey }: Props) {
   const canReadBackup = me.permissions.includes('get_backup_setting');
   const canEditBackup = me.permissions.includes('update_backup_setting');
   const canResetBackupKey = me.permissions.includes('reset_backup_key');
+  const canReadLicence = me.permissions.includes('get_license');
+  const canActivateLicence = me.permissions.includes('activate_license');
 
   const load = useCallback(() => {
     setError(null);
@@ -150,7 +159,13 @@ export function Security({ onToast, reloadKey }: Props) {
         .then(setBackup)
         .catch(() => setBackup(null));
     }
-  }, [canReadOidc, canReadBackup]);
+
+    if (canReadLicence) {
+      callOp('get_license', {}, undefined, licenseState)
+        .then(setLicence)
+        .catch(() => setLicence(null));
+    }
+  }, [canReadOidc, canReadBackup, canReadLicence]);
 
   useEffect(load, [load, reloadKey]);
 
@@ -300,6 +315,21 @@ export function Security({ onToast, reloadKey }: Props) {
     }
   }
 
+  async function checkLicence(input: Record<string, string>) {
+    setCheckingLicence(true);
+    try {
+      const next = await callOp('activate_license', input, undefined, licenseState);
+      setLicence(next);
+      setActivationKey('');
+      setLicenceToken('');
+      onToast(next.note || `授權${next.standing}`);
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setCheckingLicence(false);
+    }
+  }
+
   async function issue() {
     try {
       const d = await callOp(
@@ -344,6 +374,141 @@ export function Security({ onToast, reloadKey }: Props) {
           </p>
           <CopyButton value={issued.secret} label="複製 Token" />
         </div>
+      )}
+
+      {licence && (
+        <section className="licence-card">
+          <h3 className="section-title">授權</h3>
+          {licence.note && (
+            <p
+              className={
+                licence.writes_allowed ? 'state-note' : 'state-note state-note--error'
+              }
+            >
+              {licence.note}
+            </p>
+          )}
+          <div className="card fact-card">
+            <div className="fact">
+              <span className="fact__key">狀態</span>
+              <span className="fact__value">{licence.standing}</span>
+            </div>
+            {licence.licensee && (
+              <div className="fact">
+                <span className="fact__key">被授權單位</span>
+                <span className="fact__value">
+                  {licence.licensee}
+                  {licence.licensee_tax_id && (
+                    <span className="fact__note num">統一編號 {licence.licensee_tax_id}</span>
+                  )}
+                </span>
+              </div>
+            )}
+            {licence.partner && (
+              <div className="fact">
+                <span className="fact__key">授權經銷商</span>
+                <span className="fact__value">{licence.partner}</span>
+              </div>
+            )}
+            {licence.license_no && (
+              <div className="fact">
+                <span className="fact__key">授權編號</span>
+                <span className="fact__value num">{licence.license_no}</span>
+              </div>
+            )}
+            {licence.expires_on && (
+              <div className="fact">
+                <span className="fact__key">到期日</span>
+                <span className="fact__value num">{licence.expires_on}</span>
+              </div>
+            )}
+            <div className="fact">
+              <span className="fact__key">最後驗證</span>
+              <span className="fact__value">
+                {licence.last_check_at ? businessTime(licence.last_check_at) : '尚未驗證'}
+                {licence.last_error && <span className="fact__note">{licence.last_error}</span>}
+              </span>
+            </div>
+            <div className="fact">
+              <span className="fact__key">本機識別碼</span>
+              <span className="fact__value">
+                <span className="num">{licence.fingerprint}</span>
+                <span className="fact__note">
+                  每日回報：授權編號、本機識別碼、系統版本、在職人數。帳務與人事資料不外傳。
+                </span>
+              </span>
+            </div>
+          </div>
+
+          {canActivateLicence && (
+            <div className="card form-card">
+              {licenceOffline ? (
+                <>
+                  <label className="field field--full">
+                    離線授權檔
+                    <textarea
+                      className="input"
+                      rows={4}
+                      value={licenceToken}
+                      onChange={(e) => setLicenceToken(e.target.value)}
+                    />
+                    <span className="field__hint">
+                      把上方的本機識別碼交給經銷商，換取本機專用的授權檔。
+                    </span>
+                  </label>
+                  <div className="row-actions">
+                    <button
+                      className="btn"
+                      disabled={checkingLicence || !licenceToken.trim()}
+                      onClick={() => void checkLicence({ license_token: licenceToken })}
+                    >
+                      {checkingLicence ? '驗證中…' : '套用授權檔'}
+                    </button>
+                    <button className="btn btn--ghost" onClick={() => setLicenceOffline(false)}>
+                      改用啟動金鑰
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <label className="field field--full">
+                    啟動金鑰
+                    <input
+                      className="input num"
+                      value={activationKey}
+                      placeholder={
+                        licence.has_activation_key
+                          ? '已輸入，留空表示沿用'
+                          : 'LAYSI-XXXXX-XXXXX-XXXXX-XXXXX'
+                      }
+                      onChange={(e) => setActivationKey(e.target.value)}
+                    />
+                  </label>
+                  <div className="row-actions">
+                    <button
+                      className="btn"
+                      disabled={checkingLicence}
+                      onClick={() =>
+                        void checkLicence(
+                          activationKey.trim() ? { activation_key: activationKey.trim() } : {},
+                        )
+                      }
+                    >
+                      {checkingLicence
+                        ? '驗證中…'
+                        : activationKey.trim()
+                          ? '啟用授權'
+                          : '立即驗證'}
+                    </button>
+                    <button className="btn btn--ghost" onClick={() => setLicenceOffline(true)}>
+                      本機不對外連線
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </section>
       )}
 
       {tokens && health && (

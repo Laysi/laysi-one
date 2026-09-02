@@ -299,6 +299,9 @@ pub enum OpError {
     #[error("{role}未獲授權執行「{tool}」，請洽負責人於「角色與核准」開啟")]
     NotPermitted { tool: String, role: String },
 
+    #[error("{reason}系統目前為唯讀，「{tool}」無法執行；查詢、報表與匯出不受影響。")]
+    Unlicensed { tool: String, reason: String },
+
     /// The message stands alone. A 「參數不正確：」 prefix appears in front of
     /// sentences the user never typed a parameter for — an empty budget, a
     /// payroll run with nothing to run — where it names a cause that is not
@@ -325,6 +328,7 @@ impl OpError {
             OpError::NeedsBoss { .. } => "needs_boss",
             OpError::NeedsAdmin { .. } => "needs_admin",
             OpError::NotPermitted { .. } => "not_permitted",
+            OpError::Unlicensed { .. } => "unlicensed",
             OpError::BadInput(_) => "bad_input",
             OpError::Store(_) => "store_error",
             OpError::Storage(_) => "storage_error",
@@ -369,6 +373,21 @@ pub trait Operation: Send + Sync + 'static {
     fn summary(&self) -> &'static str;
     fn input_schema(&self) -> Value;
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError>;
+
+    /// Whether this operation changes stored state.
+    ///
+    /// A different question from `Risk::ReadOnly`, which is about who may
+    /// call it: a payslip listing carries the owner floor and still writes
+    /// nothing. Only the licence floor asks this one, because an
+    /// installation whose licence has lapsed has to stay readable — the
+    /// books, the payslips and the exports are the customer's.
+    ///
+    /// The default follows the risk tier, so the handful of reads that carry
+    /// an identity floor are the only overrides; `reads_are_not_writes`
+    /// fails if a new one forgets.
+    fn writes(&self) -> bool {
+        !matches!(self.risk(), Risk::ReadOnly)
+    }
 }
 
 pub(crate) fn schema_of<T: JsonSchema>() -> Value {
@@ -626,6 +645,25 @@ impl Registry {
             .get(name)
             .ok_or_else(|| OpError::UnknownTool(name.to_string()))?;
 
+        // 0. Licence floor: an installation whose licence has lapsed keeps
+        //    every read, so the books stay readable, printable and
+        //    exportable, and refuses everything that writes. Read from a
+        //    process atomic rather than a table, so the common case costs no
+        //    query; `ops::license::refresh` republishes it.
+        //
+        //    `activate_license` is the one write that has to stay reachable:
+        //    it is the way out of this state.
+        if op.writes() && name != "activate_license" && !ops::license::writes_allowed() {
+            let reason = ops::license::lapse_summary(ctx).await;
+            let label = op_label(op.summary()).to_string();
+            self.audit(ctx, op, &input, "被拒絕：授權已失效", "blocked")
+                .await;
+            return Err(OpError::Unlicensed {
+                tool: label,
+                reason,
+            });
+        }
+
         // 1. Tool grant: a disabled tool is invisible to AI, even for reading.
         //    MCP only; people on screen are unaffected (see [`Channel`]).
         if ctx.channel == Channel::Mcp && ctx.store.tool_enabled(name).await? != Some(true) {
@@ -842,6 +880,7 @@ mod tests {
         // the frontend when a screen finds nothing to call.
         let modules = [
             ops::ledger::ops(),
+            ops::license::ops(),
             ops::receivables::ops(),
             ops::payables::ops(),
             ops::banking::ops(),
@@ -891,6 +930,7 @@ mod tests {
         include_str!("../../../migrations/0001_initial.sql"),
         include_str!("../../../migrations/0002_employee_records.sql"),
         include_str!("../../../migrations/0006_regulation_feed.sql"),
+        include_str!("../../../migrations/0007_license.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the
@@ -1068,6 +1108,40 @@ mod tests {
         }
     }
 
+    /// The licence floor asks `writes()`, not `risk()`, and the default
+    /// derives one from the other. A read that carries an identity floor has
+    /// to say so, or a lapsed installation stops handing the customer their
+    /// own payslips; a write that names itself like a read would slip through
+    /// the floor entirely.
+    ///
+    /// Checked by the naming convention rather than by pinning seventy names:
+    /// the mistake this catches is a new operation added without the
+    /// override, and the name is what makes it recognisable.
+    #[test]
+    fn reads_are_not_writes_whatever_floor_they_carry() {
+        const READ_VERBS: [&str; 7] = [
+            "list_", "get_", "search_", "suggest_", "compute_", "match_", "preview_",
+        ];
+        // Named like a read, and does write: each one says why on its own
+        // definition, and adding to this list is a decision rather than an
+        // oversight.
+        const EXCEPTIONS: [&str; 2] = ["match_bank_transaction", "preview_import"];
+
+        for op in Registry::new().iter() {
+            let name = op.name();
+            let named_read = READ_VERBS.iter().any(|verb| name.starts_with(verb));
+            if EXCEPTIONS.contains(&name) {
+                assert!(op.writes(), "{name} 列在例外裡卻不寫入，該從清單移除");
+                continue;
+            }
+            assert_eq!(
+                op.writes(),
+                !named_read,
+                "{name} 的 writes() 與命名不符；讀取要覆寫 writes()，寫入要改名或列入例外"
+            );
+        }
+    }
+
     /// Running the system and owning the business are different jobs, so the
     /// two floors hold different operations. Moving anything across this line
     /// either hands the installer everyone's salary or hands the owner the
@@ -1100,12 +1174,14 @@ mod tests {
         assert_eq!(
             admin,
             BTreeSet::from([
+                "activate_license",
                 "change_user_role",
                 "confirm_backup_key",
                 "create_user_account",
                 "delete_regulation",
                 "delete_user_account",
                 "get_backup_setting",
+                "get_license",
                 "get_oidc_setting",
                 "issue_api_token",
                 "list_user_accounts",

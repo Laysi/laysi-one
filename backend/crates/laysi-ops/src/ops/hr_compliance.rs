@@ -562,6 +562,12 @@ impl Operation for ListWithholdingStatements {
         Risk::BossOnly
     }
 
+    /// Reads only. Carries the identity floor above, which is a question
+    /// about who may call it rather than about what it changes, so the
+    /// licence floor has to be told separately.
+    fn writes(&self) -> bool {
+        false
+    }
     fn summary(&self) -> &'static str {
         "讀某年度逐一給付對象的扣繳憑單：各所得格式的全年給付與扣繳稅額。限負責人；依扣繳率的項目自行算稅，依稅額表的項目只採來源帶入的金額，缺值不補算。"
     }

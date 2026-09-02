@@ -3200,3 +3200,15 @@ textarea {
     animation: none;
   }
 }
+
+.licence-banner {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3xl);
+}
+
+.licence-card {
+  margin-bottom: var(--space-7xl);
+}
