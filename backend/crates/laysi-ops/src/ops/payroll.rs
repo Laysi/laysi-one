@@ -499,6 +499,12 @@ impl Operation for ListPayslips {
         // the few rules here that genuinely stops a person.
         Risk::BossOnly
     }
+    /// Reads only. Carries the identity floor above, which is a question
+    /// about who may call it rather than about what it changes, so the
+    /// licence floor has to be told separately.
+    fn writes(&self) -> bool {
+        false
+    }
     fn summary(&self) -> &'static str {
         "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司負擔的勞健保與勞退。限負責人。以同一份規則重算一次，再與存下來的數字比對。"
     }

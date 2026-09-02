@@ -17,9 +17,11 @@ use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+pub mod license;
 pub mod password;
 pub mod storage;
 
+pub use license::LicenseState;
 pub use storage::{ObjectStore, StorageError};
 
 pub type Result<T> = std::result::Result<T, StoreError>;

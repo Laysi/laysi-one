@@ -9,6 +9,9 @@ export function Init() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [setupToken, setSetupToken] = useState('');
+  const [activationKey, setActivationKey] = useState('');
+  const [licenseToken, setLicenseToken] = useState('');
+  const [offline, setOffline] = useState(false);
   const [failure, setFailure] = useState<AuthFailed | null>(null);
   const [mismatch, setMismatch] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -25,7 +28,12 @@ export function Init() {
     setMismatch(false);
     setBusy(true);
     try {
-      await bootstrap({ password, setup_token: setupToken });
+      await bootstrap({
+        password,
+        setup_token: setupToken,
+        activation_key: offline ? '' : activationKey,
+        license_token: offline ? licenseToken : '',
+      });
     } catch (err) {
       setFailure(
         err instanceof AuthFailed ? err : new AuthFailed({ code: 'network', message: String(err) }),
@@ -44,9 +52,61 @@ export function Init() {
           <CompanyBrand brand={brand} place="panel" />
         </div>
 
-        <h1 className="login__title">設定系統管理員密碼</h1>
+        <h1 className="login__title">啟用授權並設定系統管理員密碼</h1>
 
         <form onSubmit={(e) => void submit(e)}>
+          {offline ? (
+            <>
+              <label className="login__field">
+                <span className="login__label">本機識別碼</span>
+                <input className="entry-input num" type="text" value={setup.fingerprint} readOnly />
+                <span className="login__hint">交給經銷商，用來產生本機專用的授權檔。</span>
+              </label>
+              <label className="login__field">
+                <span className="login__label">
+                  離線授權檔
+                  <button
+                    type="button"
+                    className="link-cell login__reveal"
+                    onClick={() => setOffline(false)}
+                  >
+                    改用啟動金鑰
+                  </button>
+                </span>
+                <textarea
+                  className="entry-input"
+                  rows={4}
+                  autoComplete="off"
+                  value={licenseToken}
+                  onChange={(e) => setLicenseToken(e.target.value)}
+                />
+              </label>
+            </>
+          ) : (
+            <label className="login__field">
+              <span className="login__label">
+                啟動金鑰
+                <button
+                  type="button"
+                  className="link-cell login__reveal"
+                  onClick={() => setOffline(true)}
+                >
+                  本機不對外連線
+                </button>
+              </span>
+              <input
+                className="entry-input num"
+                type="text"
+                autoComplete="off"
+                placeholder="LAYSI-XXXXX-XXXXX-XXXXX-XXXXX"
+                value={activationKey}
+                autoFocus
+                onChange={(e) => setActivationKey(e.target.value)}
+              />
+              <span className="login__hint">由經銷商提供，一組金鑰對應一台主機。</span>
+            </label>
+          )}
+
           <label className="login__field">
             <span className="login__label">登入名稱</span>
             <input className="entry-input" type="text" autoComplete="username" value="admin" readOnly />
@@ -67,7 +127,6 @@ export function Init() {
               type={showPassword ? 'text' : 'password'}
               autoComplete="new-password"
               value={password}
-              autoFocus
               onChange={(e) => setPassword(e.target.value)}
             />
           </label>

@@ -38,7 +38,7 @@ jobs:
           printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-          git clone --depth 1 git@github.com:Laysi/regulation-feed.git feed
+          git clone --depth 1 git@github.com:Laysi/laysi-one-regulation-feed.git feed
           cp manifest.json feed/manifest.json
           cd feed
           git config user.name 'laysi-one'

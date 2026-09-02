@@ -142,6 +142,15 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
       - secrets:/secrets:ro
+      # Half of what the licence is bound to, and it has to be mounted into
+      # every service that dispatches operations: the two would otherwise
+      # compute different fingerprints from the same database and one of them
+      # would consider itself unlicensed. Without it the fingerprint is the
+      # database identifier alone, and a copy of the volume onto another host
+      # would look like the same installation. Adding this mount to a running
+      # installation changes the fingerprint once, so the reseller has to
+      # unbind the licence before the next check succeeds.
+      - /etc/machine-id:/etc/machine-id:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -195,6 +204,15 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
       - secrets:/secrets:ro
+      # Half of what the licence is bound to, and it has to be mounted into
+      # every service that dispatches operations: the two would otherwise
+      # compute different fingerprints from the same database and one of them
+      # would consider itself unlicensed. Without it the fingerprint is the
+      # database identifier alone, and a copy of the volume onto another host
+      # would look like the same installation. Adding this mount to a running
+      # installation changes the fingerprint once, so the reseller has to
+      # unbind the licence before the next check succeeds.
+      - /etc/machine-id:/etc/machine-id:ro
     depends_on:
       postgres:
         condition: service_healthy

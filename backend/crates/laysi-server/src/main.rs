@@ -235,6 +235,55 @@ async fn main() -> anyhow::Result<()> {
     let n = store.reload_regulations().await?;
     tracing::info!(rulesets = n, "regulation rulesets loaded");
 
+    // The licence, before anything can be dispatched. `dispatch` reads a
+    // process atomic rather than the table, so this is what puts a lapsed
+    // installation into read-only, and it is awaited rather than spawned:
+    // starting up briefly writable would let a call through on every boot.
+    if let Some(licence) = laysi_ops::ops::license::refresh(&store, today()).await {
+        tracing::info!(
+            standing = licence.label(),
+            writes = licence.standing.writes_allowed(),
+            "licence"
+        );
+    }
+
+    // Check in once a day for as long as the server runs, and re-decide even
+    // when the check does not happen: the standing turns on today's date,
+    // which moves whether or not anything else does.
+    //
+    // Nothing is sent without a key to present, and a boot that already
+    // checked in today does not check again -- a container in a restart loop
+    // must not become a load generator against the licence server.
+    {
+        let store = store.clone();
+        tokio::spawn(async move {
+            loop {
+                let today = laysi_domain::business_today(laysi_ops::business_offset());
+                if let Ok(state) = store.license_state().await {
+                    let due = state
+                        .last_check_at
+                        .map(|at| (chrono::Utc::now() - at).num_hours() >= 20)
+                        .unwrap_or(true);
+                    if due && !state.activation_key.is_empty() {
+                        match laysi_ops::ops::license::check_now(&store, &state.activation_key)
+                            .await
+                        {
+                            Ok(licence) => {
+                                tracing::info!(standing = licence.label(), "licence check")
+                            }
+                            // Not an error worth waking anybody for: the lease
+                            // inside the stored token is what decides, and it
+                            // has weeks left.
+                            Err(error) => tracing::warn!(%error, "licence check failed"),
+                        }
+                    }
+                }
+                laysi_ops::ops::license::refresh(&store, today).await;
+                tokio::time::sleep(std::time::Duration::from_secs(43_200)).await;
+            }
+        });
+    }
+
     // The work calendar, once, on the first boot that finds it empty and can
     // reach the open-data platform. Spawned rather than awaited: a new
     // installation should not wait on a government website to start, and one
@@ -591,9 +640,33 @@ async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
         "oauth": oidc::describe(&s).await,
         "brand": auth::brand_json(&s).await,
         "version": build_version(),
-        "licence": "商業授權",
+        "licence": licence_json(&s).await,
     }))
     .into_response()
+}
+
+/// The licence, for every signed-in screen: who is licensed, who sold it, and
+/// whether writes are still possible.
+///
+/// Everything here comes out of the signed payload, so the sidebar cannot be
+/// made to show a company that did not buy the product by editing a row.
+async fn licence_json(s: &Shared) -> Value {
+    let Ok(state) = s.store.license_state().await else {
+        return json!({ "standing": "未知", "writes_allowed": true, "note": "" });
+    };
+    let fingerprint = laysi_store::license::fingerprint(state.install_id);
+    let licence = laysi_ops::ops::license::evaluate(&state, &fingerprint, today());
+    let mut out = json!({
+        "standing": licence.label(),
+        "writes_allowed": licence.standing.writes_allowed(),
+        "note": licence.note(),
+    });
+    if let Some(p) = &licence.payload {
+        out["licensee"] = json!(p.licensee);
+        out["partner"] = json!(p.partner);
+        out["expires_on"] = json!(p.expires_on);
+    }
+    out
 }
 
 /// What this build calls itself.

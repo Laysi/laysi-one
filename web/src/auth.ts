@@ -28,9 +28,15 @@ export const NO_USER_ACCOUNT = 'no_user_account';
 export interface BootstrapInput {
   password: string;
   setup_token: string;
+  activation_key: string;
+  license_token: string;
 }
 
-const CLOSED_SETUP: SetupState = { bootstrap_available: false, token_required: false };
+const CLOSED_SETUP: SetupState = {
+  bootstrap_available: false,
+  token_required: false,
+  fingerprint: '',
+};
 
 const OAUTH_OFF: OauthState = {
   enabled: false,

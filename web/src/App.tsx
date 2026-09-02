@@ -177,6 +177,9 @@ function Workspace() {
   const canWriteVouchers =
     permissions.includes('create_voucher') && permissions.includes('list_accounts');
   const canSetUp = permissions.includes('update_company_setting');
+  // The banner only offers the page to whoever can act on it; everyone else
+  // reads the sentence and knows who to ask.
+  const canOpenLicence = permissions.includes('get_license');
   const start = tabs[0] ?? sections[0];
   const landing = start?.screen ?? 'me';
   const [screen, setScreen] = useState<ScreenId>(() => {
@@ -464,6 +467,22 @@ function Workspace() {
         </header>
 
         <div className="content">
+          {meta?.licence.note && (
+            <p
+              className={
+                meta.licence.writes_allowed
+                  ? 'state-note licence-banner'
+                  : 'state-note state-note--error licence-banner'
+              }
+            >
+              {meta.licence.note}
+              {canOpenLicence && (
+                <button className="link-cell" onClick={() => go('sec')}>
+                  前往「安全與營運」
+                </button>
+              )}
+            </p>
+          )}
           {sections.length === 0 ? (
             <p className="state-note state-note--error">
               角色「{user?.role_name}」目前沒有任何操作權限。
