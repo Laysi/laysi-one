@@ -513,6 +513,9 @@ function Workspace() {
                   reloadKey={reloadKey}
                   onChanged={reload}
                   canDiscard={permissions.includes('discard_voucher')}
+                  canEdit={
+                    permissions.includes('update_voucher') && permissions.includes('list_accounts')
+                  }
                 />
               )}
               {screen === 'ar' && (

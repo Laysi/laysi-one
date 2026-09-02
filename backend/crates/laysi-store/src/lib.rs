@@ -169,10 +169,12 @@ pub enum StoreError {
     #[error("傳票 {no} 目前是「{status}」，只有已過帳傳票可以作廢")]
     NotVoidable { no: String, status: String },
 
-    #[error("傳票 {no} 已經過帳，不能刪除。不應存在的請作廢，記錯的請開立反向傳票。")]
+    #[error(
+        "傳票 {no} 目前是「{status}」，不能刪除。已過帳的不應存在請作廢，記錯的請開立反向傳票。"
+    )]
     NotDiscardable { no: String, status: String },
 
-    #[error("傳票 {no} 由{owner}產生，請到該頁處理，不要單獨刪除傳票。")]
+    #[error("傳票 {no} 由{owner}產生，請到該頁處理，不要單獨修改或刪除傳票。")]
     VoucherHasAnOwner { no: String, owner: String },
 
     #[error("傳票 {no} 目前是「{status}」，只有已過帳傳票可以沖銷")]
@@ -950,8 +952,11 @@ impl Store {
     async fn hydrate(&self, r: &PgRow) -> Result<Voucher> {
         let id: Uuid = r.get("id");
         let lines: Vec<VoucherLine> = sqlx::query(
-            "SELECT l.account_code, a.name AS account_name, l.debit, l.credit, l.memo
-               FROM voucher_line l JOIN account a ON a.code = l.account_code
+            "SELECT l.account_code, a.name AS account_name, l.debit, l.credit, l.memo,
+                    d.code AS dept_code
+               FROM voucher_line l
+               JOIN account a ON a.code = l.account_code
+               LEFT JOIN dimension_value d ON d.id = l.dept_id
               WHERE l.voucher_id = $1 ORDER BY l.line_no",
         )
         .bind(id)
@@ -964,6 +969,7 @@ impl Store {
             debit: l.get("debit"),
             credit: l.get("credit"),
             memo: l.get("memo"),
+            dept_code: l.get("dept_code"),
         })
         .collect();
 
@@ -1028,6 +1034,54 @@ impl Store {
         Ok(no)
     }
 
+    /// Rewrite an unposted voucher, replacing its lines with the ones given.
+    ///
+    /// The whole entry is replaced rather than diffed: a voucher is only
+    /// balanced as a set, and an edited line has no identity of its own that
+    /// anything else refers to. The same guard as deletion decides whether
+    /// this voucher may be touched at all.
+    pub async fn update_voucher(
+        &self,
+        no: &str,
+        date: NaiveDate,
+        memo: &str,
+        lines: &[LineInput],
+    ) -> Result<Voucher> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT id, status, source FROM voucher WHERE no = $1 FOR UPDATE")
+            .bind(no)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::VoucherNotFound { no: no.to_string() })?;
+        let id: Uuid = row.get("id");
+        let status: String = row.get("status");
+        let source: String = row.get("source");
+        ensure_unposted_and_unowned(no, &status, &source)?;
+
+        let period = date.format("%y%m").to_string();
+        let new_no = if keeps_number(no, &period) {
+            no.to_string()
+        } else {
+            let seq = next_doc_no(&mut tx, "V", &period).await?;
+            format!("V{period}-{seq:03}")
+        };
+
+        sqlx::query("DELETE FROM voucher_line WHERE voucher_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE voucher SET no = $2, voucher_date = $3, memo = $4 WHERE id = $1")
+            .bind(id)
+            .bind(&new_no)
+            .bind(date)
+            .bind(memo)
+            .execute(&mut *tx)
+            .await?;
+        write_lines(&mut tx, id, lines, &source).await?;
+        tx.commit().await?;
+        self.voucher_by_no(&new_no).await
+    }
+
     pub async fn post_voucher(&self, no: &str) -> Result<Voucher> {
         let status: String = sqlx::query("SELECT status FROM voucher WHERE no = $1")
             .bind(no)
@@ -1086,18 +1140,7 @@ impl Store {
             .ok_or_else(|| StoreError::VoucherNotFound { no: no.to_string() })?;
         let status: String = row.get("status");
         let source: String = row.get("source");
-        if status != "pending" {
-            return Err(StoreError::NotDiscardable {
-                no: no.to_string(),
-                status,
-            });
-        }
-        if source != "manual" && source != "ai_draft" {
-            return Err(StoreError::VoucherHasAnOwner {
-                no: no.to_string(),
-                owner: voucher_owner_label(&source).to_string(),
-            });
-        }
+        ensure_unposted_and_unowned(no, &status, &source)?;
         sqlx::query("DELETE FROM voucher WHERE no = $1")
             .bind(no)
             .execute(&mut *tx)
@@ -7191,6 +7234,8 @@ pub struct VoucherLine {
     #[serde(with = "rust_decimal::serde::str")]
     pub credit: Money,
     pub memo: Option<String>,
+    /// Department code on the line, so an edit can put back what it read.
+    pub dept_code: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -8831,6 +8876,35 @@ fn ensure_voidable(no: &str, status: &str) -> Result<()> {
     }
 }
 
+/// A voucher may be rewritten or deleted while it is still out of the
+/// statements, which covers both an AI draft awaiting confirmation and a
+/// confirmed but unposted entry. Once another page owns it, that page is
+/// where it is undone.
+fn ensure_unposted_and_unowned(no: &str, status: &str, source: &str) -> Result<()> {
+    if status != "draft" && status != "pending" {
+        return Err(StoreError::NotDiscardable {
+            no: no.to_string(),
+            status: voucher_status_label(status).to_string(),
+        });
+    }
+    if source != "manual" && source != "ai_draft" {
+        return Err(StoreError::VoucherHasAnOwner {
+            no: no.to_string(),
+            owner: voucher_owner_label(source).to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether a voucher keeps its number after its date changes.
+///
+/// The number states the period of the date it carries, so a date moved into
+/// another month earns a number out of that month's sequence. The number left
+/// behind stays unused, the same gap a deleted voucher leaves.
+fn keeps_number(no: &str, period: &str) -> bool {
+    no.starts_with(&format!("V{period}-"))
+}
+
 fn ensure_reversible(no: &str, status: &str) -> Result<()> {
     if status == "posted" {
         Ok(())
@@ -8935,7 +9009,7 @@ async fn resolve_department_id(tx: &mut Tx<'_>, dept_code: Option<&str>) -> Resu
 /// value and never reaches the reader.
 fn voucher_status_label(status: &str) -> &'static str {
     match status {
-        "draft" => "草稿",
+        "draft" => "待確認",
         "pending" => "待過帳",
         "posted" => "已過帳",
         "void" => "已作廢",
@@ -9129,6 +9203,43 @@ async fn insert_voucher(
     created_by: &str,
     audit_id: Option<i64>,
 ) -> Result<String> {
+    // Number format V{yy}{mm}-{nnn}, e.g. V2607-018.
+    let period = date.format("%y%m").to_string();
+    let seq = next_doc_no(tx, "V", &period).await?;
+    let no = format!("V{period}-{seq:03}");
+    let id = Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO voucher (id, no, voucher_date, memo, status, source, created_by, ai_audit_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+    )
+    .bind(id)
+    .bind(&no)
+    .bind(date)
+    .bind(memo)
+    .bind(status)
+    .bind(source)
+    .bind(created_by)
+    .bind(audit_id)
+    .execute(&mut **tx)
+    .await?;
+
+    write_lines(tx, id, lines, source).await?;
+
+    Ok(no)
+}
+
+/// Validate a set of journal lines and write them as the voucher's only lines.
+///
+/// Shared by the initial write and by a rewrite of an unposted voucher, so
+/// that an edited voucher passes the same account and balance checks as a new
+/// one. The caller has already removed any lines being replaced.
+async fn write_lines(
+    tx: &mut Tx<'_>,
+    voucher_id: Uuid,
+    lines: &[LineInput],
+    source: &str,
+) -> Result<()> {
     laysi_domain::validate_entry(lines)?;
 
     for l in lines {
@@ -9152,27 +9263,6 @@ async fn insert_voucher(
         }
     }
 
-    // Number format V{yy}{mm}-{nnn}, e.g. V2607-018.
-    let period = date.format("%y%m").to_string();
-    let seq = next_doc_no(tx, "V", &period).await?;
-    let no = format!("V{period}-{seq:03}");
-    let id = Uuid::new_v4();
-
-    sqlx::query(
-        "INSERT INTO voucher (id, no, voucher_date, memo, status, source, created_by, ai_audit_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-    )
-    .bind(id)
-    .bind(&no)
-    .bind(date)
-    .bind(memo)
-    .bind(status)
-    .bind(source)
-    .bind(created_by)
-    .bind(audit_id)
-    .execute(&mut **tx)
-    .await?;
-
     for (i, l) in lines.iter().enumerate() {
         let bank_account_id = match l.bank_account_id {
             Some(id) => Some(id),
@@ -9185,7 +9275,7 @@ async fn insert_voucher(
                 bank_account_id, dept_id)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
-        .bind(id)
+        .bind(voucher_id)
         .bind(i as i32 + 1)
         .bind(&l.account_code)
         .bind(l.debit)
@@ -9197,7 +9287,7 @@ async fn insert_voucher(
         .await?;
     }
 
-    Ok(no)
+    Ok(())
 }
 
 /// The one funding account this GL code stands for, if there is exactly one.
@@ -9977,6 +10067,146 @@ mod tests {
                 "錯誤訊息出現了狀態代碼"
             );
         }
+    }
+
+    #[test]
+    fn unposted_vouchers_can_be_rewritten_or_deleted_including_ai_drafts() {
+        for status in ["draft", "pending"] {
+            assert!(ensure_unposted_and_unowned("VTEST", status, "manual").is_ok());
+            assert!(ensure_unposted_and_unowned("VTEST", status, "ai_draft").is_ok());
+            let owned = ensure_unposted_and_unowned("VTEST", status, "payroll")
+                .expect_err("其他作業產生的傳票不得單獨刪除");
+            assert!(matches!(owned, StoreError::VoucherHasAnOwner { .. }));
+        }
+
+        for status in ["posted", "void"] {
+            let error = ensure_unposted_and_unowned("VTEST", status, "manual")
+                .expect_err("已入表的傳票不得刪除");
+            assert!(matches!(error, StoreError::NotDiscardable { .. }));
+            assert!(
+                error.to_string().contains(voucher_status_label(status)),
+                "錯誤訊息沒有指出目前狀態"
+            );
+            assert!(
+                !error.to_string().contains(status),
+                "錯誤訊息出現了狀態代碼"
+            );
+        }
+    }
+
+    #[test]
+    fn a_date_moved_into_another_month_earns_a_new_number() {
+        assert!(keeps_number("V2609-001", "2609"));
+        assert!(!keeps_number("V2609-001", "2608"));
+        assert!(!keeps_number("V2609-001", "2709"));
+    }
+
+    /// An unposted voucher is rewritten whole: the old lines go, the new ones
+    /// pass the same checks, and a date moved into another month takes a
+    /// number out of that month. The line rewrite and the renumbering are both
+    /// SQL, so this one needs the database.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// an_unposted_voucher_is_rewritten_whole -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn an_unposted_voucher_is_rewritten_whole() {
+        use chrono::NaiveDate;
+
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        fn entry(debit_code: &str, amount: i64) -> Vec<LineInput> {
+            let amount = Money::from(amount);
+            vec![
+                LineInput {
+                    account_code: debit_code.into(),
+                    debit: amount,
+                    credit: Money::ZERO,
+                    memo: None,
+                    bank_account_id: None,
+                    dept_code: None,
+                },
+                LineInput {
+                    account_code: "1102".into(),
+                    debit: Money::ZERO,
+                    credit: amount,
+                    memo: None,
+                    bank_account_id: None,
+                    dept_code: None,
+                },
+            ]
+        }
+
+        let march = NaiveDate::from_ymd_opt(2099, 3, 5).unwrap();
+        let april = NaiveDate::from_ymd_opt(2099, 4, 5).unwrap();
+        let drafted = store
+            .create_voucher(
+                march,
+                "AI 草稿",
+                &entry("6115", 100),
+                "draft",
+                "ai_draft",
+                "測試",
+                None,
+            )
+            .await
+            .expect("應建得了草稿");
+
+        // Same month: the number stays and the lines are replaced, not added to.
+        let fixed = store
+            .update_voucher(&drafted, march, "已確認科目", &entry("6111", 250))
+            .await
+            .expect("待確認傳票應改得動");
+        assert_eq!(fixed.no, drafted);
+        assert_eq!(fixed.memo, "已確認科目");
+        assert_eq!(fixed.lines.len(), 2);
+        assert_eq!(fixed.lines[0].account_code, "6111");
+        assert_eq!(fixed.amount, Money::from(250));
+
+        // Another month: a number out of that month's sequence, and the old
+        // number is left free.
+        let moved = store
+            .update_voucher(&drafted, april, "改到四月", &entry("6111", 250))
+            .await
+            .expect("跨月應改得動");
+        assert!(
+            moved.no.starts_with("V9904-"),
+            "應改用四月的號碼：{}",
+            moved.no
+        );
+        assert_eq!(moved.date, april);
+        assert!(
+            store.voucher_by_no(&drafted).await.is_err(),
+            "原號碼不應還指著這張傳票"
+        );
+
+        // A voucher that has left the unposted state is refused.
+        sqlx::query("UPDATE voucher SET status = 'void' WHERE no = $1")
+            .bind(&moved.no)
+            .execute(&store.pool)
+            .await
+            .expect("應改得了狀態");
+        let refused = store
+            .update_voucher(&moved.no, april, "不該改得動", &entry("6111", 250))
+            .await
+            .expect_err("已作廢不得修改");
+        assert!(matches!(refused, StoreError::NotDiscardable { .. }));
+        assert!(
+            !refused.to_string().contains("void"),
+            "錯誤訊息出現了狀態代碼"
+        );
+
+        sqlx::query("DELETE FROM voucher WHERE no = $1")
+            .bind(&moved.no)
+            .execute(&store.pool)
+            .await
+            .expect("應清得掉");
     }
 
     /// A payroll run comes undone whole while its voucher is unposted, and not

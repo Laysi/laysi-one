@@ -305,6 +305,7 @@ export const voucherLine = z.object({
   debit: z.string(),
   credit: z.string(),
   memo: z.string().nullable(),
+  dept_code: z.string().nullable(),
 });
 export type VoucherLine = z.infer<typeof voucherLine>;
 export const voucher = z.object({

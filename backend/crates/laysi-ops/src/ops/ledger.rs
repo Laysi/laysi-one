@@ -29,6 +29,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(CreateVoucher),
         Box::new(PostVoucher),
         Box::new(VoidVoucher),
+        Box::new(UpdateVoucher),
         Box::new(DiscardVoucher),
         Box::new(ReverseVoucher),
     ]
@@ -486,6 +487,60 @@ impl Operation for VoidVoucher {
         let summary = format!("{} 已作廢 · 理由：{reason}", voucher.no);
         let no = voucher.no.clone();
         Ok(OpOutcome::new(json!({ "voucher": voucher }), summary).with_voucher(no))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateVoucherInput {
+    /// Number of the unposted voucher to rewrite.
+    pub no: String,
+    /// Voucher date after the change.
+    pub date: NaiveDate,
+    /// Voucher memo after the change.
+    pub memo: String,
+    /// The complete set of journal lines, replacing the ones on file.
+    /// At least two, and debits must equal credits.
+    pub lines: Vec<LineInput>,
+}
+
+struct UpdateVoucher;
+
+#[async_trait]
+impl Operation for UpdateVoucher {
+    fn name(&self) -> &'static str {
+        "update_voucher"
+    }
+    fn risk(&self) -> Risk {
+        // The entry on file is replaced whole, and the one it replaces is
+        // gone. Nothing in the statements moves while it is unposted.
+        Risk::NeedsConfirm
+    }
+    fn summary(&self) -> &'static str {
+        "修改一張還沒過帳的傳票，整份分錄改為送出的內容。已過帳的不能修改：不應存在的請作廢，記錯的請開立反向傳票。由應收、應付、薪資、折舊、報支或匯入產生的傳票請到產生它的那一頁處理。日期改到別的月份時，傳票號碼會換成該月份的號碼。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<UpdateVoucherInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: UpdateVoucherInput = parse(input)?;
+        let v = ctx
+            .store
+            .update_voucher(&i.no, i.date, &i.memo, &i.lines)
+            .await?;
+        let renumbered = if v.no == i.no {
+            String::new()
+        } else {
+            format!("（原 {}）", i.no)
+        };
+        let summary = format!(
+            "{} 已修改{renumbered} · {} {}",
+            v.no,
+            v.accounts_label,
+            money(v.amount)
+        );
+        let no = v.no.clone();
+        Ok(OpOutcome::new(json!({ "voucher": v }), summary).with_voucher(no))
     }
 }
 

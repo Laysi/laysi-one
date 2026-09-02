@@ -1229,9 +1229,29 @@ impl Registry {
 | `delete_regulation` | AdminOnly | `{ domain, version }` | `{ domain, label, version, rulesets }` |
 | `refresh_regulations` | AdminOnly | `{}` | `{ read, applied: [{domain, label, version, effective_from}], rulesets }` |
 | `draft_voucher` | NeedsConfirm | `{ date, memo, lines: LineInput[] }` | `{ voucher }` 狀態 `draft` |
+| `update_voucher` | NeedsConfirm | `{ no, date, memo, lines: LineInput[] }` | `{ voucher }`；分錄整份取代，跨月時 `no` 換號 |
 | `post_voucher` | HighRisk | `{ no: string }` | `{ voucher }` 狀態 `posted` |
 | `void_voucher` | HighRisk | `{ no, reason }` | `{ voucher }` 狀態 `void`；分錄不動，理由進稽核摘要 |
 | `reverse_voucher` | HighRisk | `{ no, date }` | `{ voucher, original }`；新傳票狀態 `posted` |
+
+### 未過帳傳票的修改
+
+`update_voucher` 收整份分錄取代原有的，不做逐行比對：一張傳票只有整組才平衡，
+而一行分錄沒有自己的識別，也沒有任何東西指著它。守門條件與 `discard_voucher`
+共用 `ensure_unposted_and_unowned`——狀態是 `draft` 或 `pending`，且來源是 `manual`
+或 `ai_draft`。少了這個操作，「待確認」是條死路：AI 草擬的科目要嘛照原樣過帳，
+要嘛整張刪掉重打，而總覽上那句「N 張 AI 草稿待確認會計科目」正是要人去改它。
+
+分錄的寫入與檢查由 `write_lines` 與 `insert_voucher` 共用，所以改過的傳票與新開的
+一樣要通過 `validate_entry`、科目可入帳檢查與資料庫的遞延約束。`hydrate` 因此補回
+`dept_code`：不回這一欄，畫面帶著讀到的內容送回來就會把部門清成未指定。
+
+**日期改到別的月份就換號碼**：號碼的 `V{yy}{mm}` 段說的是它屬於哪一期，留著舊號碼
+等於讓一張八月的傳票掛著九月的號。換號取該月份 `doc_sequence` 的下一個，舊號碼空著
+不再使用，與刪掉一張傳票留下的缺號是同一件事。回應把新號碼帶回去，畫面照實說。
+
+MCP 這一項開著（`needs_confirm`）：草稿本來就是 AI 寫的，讓它接著把科目改對是同一段
+對話裡的事，而確認由用戶端那一關把關。
 
 ### 傳票更正
 

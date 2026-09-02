@@ -11,6 +11,7 @@ import {
   trimDecimal,
   voucherResult,
   type Account,
+  type Voucher,
 } from '../api/client';
 import { DateField } from './DateField';
 
@@ -52,15 +53,40 @@ interface Props {
   onClose: () => void;
   onToast: (msg: string) => void;
   onSaved: () => void;
+  edit?: Voucher | null;
 }
 
-export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
+function amountOf(v: string): string {
+  return isZero(v) ? '' : trimDecimal(v);
+}
+
+export function EntryDrawer({ open, onClose, onToast, onSaved, edit }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [depts, setDepts] = useState<{ code: string; label: string }[]>([]);
   const [date, setDate] = useState(businessToday);
   const [memo, setMemo] = useState('');
   const [rows, setRows] = useState<Row[]>(EMPTY);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    if (edit) {
+      setDate(edit.date);
+      setMemo(edit.memo);
+      setRows(
+        edit.lines.map((l) => ({
+          account_code: l.account_code,
+          debit: amountOf(l.debit),
+          credit: amountOf(l.credit),
+          dept_code: l.dept_code ?? '',
+        })),
+      );
+    } else {
+      setDate(businessToday());
+      setMemo('');
+      setRows(EMPTY);
+    }
+  }, [open, edit]);
 
   useEffect(() => {
     if (!open || accounts.length) return;
@@ -107,8 +133,9 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
     setSaving(true);
     try {
       const d = await callOp(
-                        'create_voucher',
-                        {
+        edit ? 'update_voucher' : 'create_voucher',
+        {
+          ...(edit ? { no: edit.no } : {}),
           date,
           memo: memo || '未填寫摘要',
           lines: rows.map((r) => ({
@@ -118,12 +145,18 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
             ...(r.dept_code ? { dept_code: r.dept_code } : {}),
           })),
         },
-                        undefined,
-                        voucherResult,
-                      );
-      onToast(`${d.voucher.no} 已儲存，狀態為待過帳`);
-      setRows(EMPTY);
-      setMemo('');
+        undefined,
+        voucherResult,
+      );
+      if (!edit) {
+        onToast(`${d.voucher.no} 已儲存，狀態為待過帳`);
+        setRows(EMPTY);
+        setMemo('');
+      } else if (d.voucher.no === edit.no) {
+        onToast(`${d.voucher.no} 已修改`);
+      } else {
+        onToast(`${edit.no} 已修改，日期換月，改號為 ${d.voucher.no}`);
+      }
       onSaved();
       onClose();
     } catch (e) {
@@ -140,8 +173,12 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
       <aside className="drawer" onClick={(e) => e.stopPropagation()}>
         <div className="drawer__head">
           <div>
-            <div className="drawer__title">建立傳票</div>
-            <div className="drawer__subtitle">儲存後狀態為待過帳，過帳後才列入報表</div>
+            <div className="drawer__title">{edit ? `修改 ${edit.no}` : '建立傳票'}</div>
+            <div className="drawer__subtitle">
+              {edit
+                ? '整份分錄改為本頁的內容。日期改到別的月份時，傳票號碼會換成該月份的號碼'
+                : '儲存後狀態為待過帳，過帳後才列入報表'}
+            </div>
           </div>
           <button className="btn btn--close" onClick={onClose} aria-label="關閉">
             ×
@@ -239,13 +276,15 @@ export function EntryDrawer({ open, onClose, onToast, onSaved }: Props) {
         </div>
 
         <div className="drawer__foot">
-          <span className="drawer__foot-note">存檔後可在「傳票 · 總帳」過帳</span>
+          <span className="drawer__foot-note">
+            {edit ? '過帳後不能再修改' : '存檔後可在「傳票 · 總帳」過帳'}
+          </span>
           <button
             className={`btn${balanced && !saving ? '' : ' btn--off'}`}
             disabled={!balanced || saving}
             onClick={() => void save()}
           >
-            {saving ? '存檔中…' : '儲存為待過帳'}
+            {saving ? '存檔中…' : edit ? '儲存修改' : '儲存為待過帳'}
           </button>
         </div>
       </aside>

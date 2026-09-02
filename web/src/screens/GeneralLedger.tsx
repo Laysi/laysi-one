@@ -10,6 +10,7 @@ import {
   type Voucher,
 } from '../api/client';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { EntryDrawer } from '../components/EntryDrawer';
 import { DateField } from '../components/DateField';
 
 type Filter = 'all' | 'draft' | 'pending' | 'posted';
@@ -26,6 +27,7 @@ interface Props {
   reloadKey: number;
   onChanged: () => void;
   canDiscard: boolean;
+  canEdit: boolean;
 }
 
 type CorrectionKind = 'void' | 'reverse';
@@ -35,13 +37,14 @@ interface Correction {
   kind: CorrectionKind | null;
 }
 
-export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Props) {
+export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard, canEdit }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [vouchers, setVouchers] = useState<Voucher[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [posting, setPosting] = useState<Voucher | null>(null);
   const [postBusy, setPostBusy] = useState(false);
+  const [editing, setEditing] = useState<Voucher | null>(null);
   const [discarding, setDiscarding] = useState<Voucher | null>(null);
   const [discardBusy, setDiscardBusy] = useState(false);
   const [correction, setCorrection] = useState<Correction | null>(null);
@@ -220,6 +223,14 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
                         <button className="btn btn--compact" onClick={() => setPosting(v)}>
                           過帳
                         </button>
+                        {canEdit && (v.source === 'manual' || v.source === 'ai_draft') && (
+                          <button
+                            className="btn btn--compact btn--secondary"
+                            onClick={() => setEditing(v)}
+                          >
+                            修改
+                          </button>
+                        )}
                         {canDiscard && (v.source === 'manual' || v.source === 'ai_draft') && (
                           <button
                             className="btn btn--compact btn--secondary"
@@ -250,6 +261,14 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard }: Pro
           </table>
         </div>
       )}
+
+      <EntryDrawer
+        open={editing !== null}
+        edit={editing}
+        onClose={() => setEditing(null)}
+        onToast={onToast}
+        onSaved={onChanged}
+      />
 
       {discarding && (
         <ConfirmModal
