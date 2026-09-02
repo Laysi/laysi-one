@@ -28,3 +28,25 @@ open http://localhost:8090
 cargo test                                   # 不需要資料庫
 DATABASE_URL=postgres://… LICENSE_SIGNING_KEY=$(openssl rand -hex 32) cargo run
 ```
+
+## 部署
+
+正式站是 `https://license.laysi.one`。容器只講純 HTTP、只綁 loopback，TLS 與公開名稱
+交給前面的通道（與 Laysi One 自己的部署同一套）。伺服器讀 `X-Forwarded-Proto` 決定
+session cookie 的 `Secure`、讀 `X-Forwarded-For` 記錄來源位址，所以通道要把兩個標頭
+帶進來。
+
+```bash
+git clone <repo> ~/laysi-license && cd ~/laysi-license
+# 把備份的簽章私鑰先放進資料卷，不要讓 secrets 服務自己抽一把新的：
+#   換一把金鑰＝現場每一個安裝的授權檔全部作廢
+docker volume create laysi-license_secrets
+docker run --rm -v laysi-license_secrets:/s -v "$PWD:/in" alpine \
+  sh -c 'cp /in/license_signing_key /s/ && chmod 0444 /s/license_signing_key'
+
+docker compose up -d --build
+docker compose exec app laysi-license create-vendor you@example.com
+```
+
+產品端的 `ops/license.rs` 把 `license.laysi.one` 寫成常數，公鑰也編在裡面——**換網址或
+換金鑰都是發一版新映像**，不是改設定。

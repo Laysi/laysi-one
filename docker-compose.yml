@@ -74,7 +74,11 @@ services:
     volumes:
       - secrets:/secrets:ro
     ports:
-      - "${LICENSE_PORT:-8090}:8090"
+      # Loopback only. TLS and the public name `license.laysi.one` belong to
+      # the tunnel in front of this stack, the same arrangement the product's
+      # own deployment uses; nothing here should be reachable from the
+      # internet on its own. Override LICENSE_BIND to publish it wider.
+      - "${LICENSE_BIND:-127.0.0.1:8090}:8090"
     healthcheck:
       test: ["CMD", "/usr/local/bin/laysi-license", "healthcheck"]
       interval: 30s

@@ -81,6 +81,8 @@ button.warn:hover{background:var(--warn);color:#fff}
 .fp{font-size:12px;color:var(--muted);word-break:break-all}
 .empty{color:var(--muted);padding:24px 0}
 textarea{font:13px/1.5 ui-monospace,monospace;width:100%;min-height:120px;padding:9px;border:1px solid var(--rule)}
+form.inline{display:inline-flex;gap:6px;align-items:center;margin:0}
+form.inline input{width:6.5em;text-align:right}
 @media (max-width:640px){.wide{display:none}}
 "#;
 
@@ -832,19 +834,34 @@ pub async fn partners(
     let body: String = rows
         .iter()
         .map(|r| {
+            // Price and status are the two things that move after a partner
+            // exists, so they are edited where they are read rather than on a
+            // page of their own.
+            let (next_status, next_label) = if r.status == "active" {
+                ("suspended", "停用")
+            } else {
+                ("active", "恢復")
+            };
             format!(
-                r#"<tr><td class="num">{}</td><td>{}<br><span class="fp">{}</span></td>
-                <td>{}</td><td class="num r">{}</td><td class="num r">{}</td>
-                <td class="num r">{}</td><td><span class="tag {}">{}</span></td></tr>"#,
-                esc(&r.partner_no),
-                esc(&r.name),
-                esc(&r.tax_id),
-                esc(r.parent_name.as_deref().unwrap_or("—")),
-                esc(&r.unit_price),
-                r.licenses,
-                r.users,
-                if r.status == "active" { "on" } else { "off" },
-                if r.status == "active" {
+                r#"<tr><td class="num">{no}</td><td>{name}<br><span class="fp">{tax}</span></td>
+                <td>{parent}</td>
+                <td class="r"><form method="post" action="/partners/{no}" class="inline">
+                  <input name="unit_price" class="num" inputmode="numeric" value="{price}">
+                  <button class="plain">存</button></form></td>
+                <td class="num r">{licenses}</td><td class="num r">{users}</td>
+                <td><span class="tag {tone}">{status}</span>
+                  <form method="post" action="/partners/{no}" class="inline">
+                    <input type="hidden" name="status" value="{next_status}">
+                    <button class="plain">{next_label}</button></form></td></tr>"#,
+                no = esc(&r.partner_no),
+                name = esc(&r.name),
+                tax = esc(&r.tax_id),
+                parent = esc(r.parent_name.as_deref().unwrap_or("—")),
+                price = esc(&r.unit_price),
+                licenses = r.licenses,
+                users = r.users,
+                tone = if r.status == "active" { "on" } else { "off" },
+                status = if r.status == "active" {
                     "使用中"
                 } else {
                     "已停用"
@@ -880,7 +897,8 @@ pub async fn partners(
         Some(&a),
         &format!(
             r#"<h1>經銷商</h1>
-            <p class="lede">代理商不填上層；經銷商填上層代理商後，該代理商看得到它開立的授權。</p>
+            <p class="lede">代理商不填上層；經銷商填上層代理商後，該代理商看得到它開立的授權。
+            年費一家一個價，開立與續約時複製到該筆授權上，改價不影響已經賣掉的。</p>
             {created}
             <form class="card" method="post" action="/partners">
               <div class="grid">
@@ -979,6 +997,62 @@ async fn create_partner_inner(s: &Shared, form: &PartnerForm) -> anyhow::Result<
     .await?;
     tx.commit().await?;
     Ok(password)
+}
+
+#[derive(Deserialize)]
+pub struct PartnerEditForm {
+    #[serde(default)]
+    unit_price: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// Change what moves after a partner exists: their price, or whether they are
+/// still trading.
+///
+/// The price is copied onto each term as it is sold, so a change here sets
+/// what the next licence-year costs and leaves every invoice already raised
+/// exactly as it was.
+pub async fn update_partner(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(no): Path<String>,
+    Form(form): Form<PartnerEditForm>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    if !a.is_vendor {
+        return Redirect::to("/licenses").into_response();
+    }
+    if let Some(raw) = form.unit_price.as_deref() {
+        // A price that is not a number is a typo. Storing zero for it would
+        // quietly make the next renewal free.
+        let Ok(price) = raw.trim().parse::<i64>() else {
+            return Redirect::to("/partners").into_response();
+        };
+        if let Err(error) =
+            sqlx::query("UPDATE partner SET unit_price = $2::numeric WHERE partner_no = $1")
+                .bind(&no)
+                .bind(price.max(0))
+                .execute(&s.pool)
+                .await
+        {
+            return fail(error.into());
+        }
+    }
+    if let Some(status) = form.status.as_deref() {
+        if !["active", "suspended"].contains(&status) {
+            return (StatusCode::BAD_REQUEST, "unknown status").into_response();
+        }
+        if let Err(error) = sqlx::query("UPDATE partner SET status = $2 WHERE partner_no = $1")
+            .bind(&no)
+            .bind(status)
+            .execute(&s.pool)
+            .await
+        {
+            return fail(error.into());
+        }
+    }
+    Redirect::to("/partners").into_response()
 }
 
 /// A password that survives being read out over the telephone: no `0`/`o`,
