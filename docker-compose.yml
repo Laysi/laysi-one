@@ -1,0 +1,86 @@
+# Laysi 授權伺服器
+#
+#   docker compose up -d --build
+#   docker compose exec app laysi-license create-vendor you@example.com
+#   docker compose exec app laysi-license public-key      # 編進產品的公鑰
+#   open http://localhost:8090
+#
+# Nothing here asks for a value. Compose interpolates before any container
+# runs, so a secret it interpolates could only come from a file somebody wrote
+# by hand; the one-shot `secrets` service writes them into a volume instead and
+# every consumer reads the file. Same arrangement the product uses.
+
+services:
+  # Generates what must differ between installations, once, into a volume.
+  # Never regenerates: a new signing key would invalidate every licence token
+  # already in the field, and a new database password against an existing
+  # pgdata leaves a database nobody can open.
+  secrets:
+    image: alpine:3.24
+    volumes:
+      - secrets:/secrets
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        umask 022
+        # Alphanumeric only: the password is interpolated into a connection
+        # string, where punctuation ends the string rather than joining it.
+        [ -s /secrets/pg_password ] || LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48 > /secrets/pg_password
+        # 32 bytes of hex: the Ed25519 seed every licence token is signed with.
+        [ -s /secrets/license_signing_key ] || od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > /secrets/license_signing_key
+        [ -s /secrets/database_url ] || printf 'postgres://%s:%s@postgres:5432/%s' \
+            "$${POSTGRES_USER:-laysi}" "$$(cat /secrets/pg_password)" "$${POSTGRES_DB:-license}" \
+            > /secrets/database_url
+        chmod 0444 /secrets/*
+        echo "簽章金鑰已就緒。取公鑰：docker compose exec app laysi-license public-key"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laysi}
+      POSTGRES_DB: ${POSTGRES_DB:-license}
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laysi}
+      POSTGRES_PASSWORD_FILE: /secrets/pg_password
+      POSTGRES_DB: ${POSTGRES_DB:-license}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=zh-TW --locale=C.UTF-8"
+    volumes:
+      # 18 moved PGDATA to /var/lib/postgresql/18/docker and declares the
+      # volume one level up, so the mount is the parent directory.
+      - pgdata:/var/lib/postgresql
+      - secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laysi} -d ${POSTGRES_DB:-license}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL_FILE: /secrets/database_url
+      LICENSE_SIGNING_KEY_FILE: /secrets/license_signing_key
+      BIND_ADDR: 0.0.0.0:8090
+    volumes:
+      - secrets:/secrets:ro
+    ports:
+      - "${LICENSE_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/laysi-license", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  secrets:

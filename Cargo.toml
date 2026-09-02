@@ -1,0 +1,37 @@
+[package]
+name = "laysi-license"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license-file = "LICENSE.txt"
+
+[dependencies]
+# Every crate here is already in Laysi One's dependency tree. A licence server
+# that holds the signing key is the wrong place to widen the supply chain.
+anyhow = "1"
+argon2 = "0.5"
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.23"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = "2"
+getrandom = "0.4"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "postgres",
+    "chrono",
+    "uuid",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
