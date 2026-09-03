@@ -431,12 +431,7 @@ export function Security({ onToast, reloadKey }: Props) {
             </div>
             <div className="fact">
               <span className="fact__key">本機識別碼</span>
-              <span className="fact__value">
-                <span className="num">{licence.fingerprint}</span>
-                <span className="fact__note">
-                  每日回報：授權編號、本機識別碼、系統版本、在職人數。帳務與人事資料不外傳。
-                </span>
-              </span>
+              <span className="fact__value num">{licence.fingerprint}</span>
             </div>
           </div>
 
