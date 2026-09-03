@@ -414,6 +414,24 @@ pub enum StoreError {
     Domain(#[from] laysi_domain::DomainError),
 }
 
+/// A voucher's documents are the ones attached to it directly plus the receipts
+/// still sitting on the expense claim whose approval created it. Approval makes
+/// the voucher and leaves the receipt where the claimant can still see it, so
+/// the file is counted in both places rather than copied into one. A macro
+/// rather than a `const` because sqlx takes only `&'static str`.
+macro_rules! voucher_docs {
+    () => {
+        "(SELECT COUNT(*) FROM document d
+                      WHERE NOT d.archived
+                        AND ((d.link_type = 'voucher' AND d.link_ref = v.no)
+                          OR (d.link_type = 'expense_claim' AND d.link_ref IN
+                               (SELECT c.claim_no FROM expense_claim c
+                                 WHERE c.voucher_no = v.no)))) AS docs,
+                    (SELECT c.claim_no FROM expense_claim c
+                      WHERE c.voucher_no = v.no ORDER BY c.id LIMIT 1) AS claim_no"
+    };
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
@@ -908,9 +926,12 @@ impl Store {
         q: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Voucher>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(concat!(
             "SELECT v.id, v.no, v.voucher_date, v.memo, v.status, v.source, v.created_by,
-                    original.no AS reverses, reversal.no AS reversed_by
+                    original.no AS reverses, reversal.no AS reversed_by,
+                    ",
+            voucher_docs!(),
+            "
                FROM voucher v
                LEFT JOIN voucher original ON original.id = v.reverses
                LEFT JOIN voucher reversal ON reversal.reverses = v.id
@@ -918,8 +939,8 @@ impl Store {
                 AND ($2::text IS NULL
                      OR v.memo ILIKE '%' || $2 || '%' OR v.no ILIKE '%' || $2 || '%')
               ORDER BY v.voucher_date DESC, v.no DESC
-              LIMIT $3",
-        )
+              LIMIT $3"
+        ))
         .bind(status)
         .bind(q)
         .bind(limit)
@@ -934,14 +955,17 @@ impl Store {
     }
 
     pub async fn voucher_by_no(&self, no: &str) -> Result<Voucher> {
-        let r = sqlx::query(
+        let r = sqlx::query(concat!(
             "SELECT v.id, v.no, v.voucher_date, v.memo, v.status, v.source, v.created_by,
-                    original.no AS reverses, reversal.no AS reversed_by
+                    original.no AS reverses, reversal.no AS reversed_by,
+                    ",
+            voucher_docs!(),
+            "
                FROM voucher v
                LEFT JOIN voucher original ON original.id = v.reverses
                LEFT JOIN voucher reversal ON reversal.reverses = v.id
-              WHERE v.no = $1",
-        )
+              WHERE v.no = $1"
+        ))
         .bind(no)
         .fetch_optional(&self.pool)
         .await?
@@ -1002,6 +1026,8 @@ impl Store {
             created_by: r.get("created_by"),
             reverses: r.get("reverses"),
             reversed_by: r.get("reversed_by"),
+            docs: r.get("docs"),
+            claim_no: r.get("claim_no"),
             amount,
             accounts_label,
             lines,
@@ -5283,7 +5309,11 @@ impl Store {
                (SELECT COUNT(*) FROM voucher v
                  WHERE v.status IN ('pending','posted')
                    AND NOT EXISTS (SELECT 1 FROM document d
-                                    WHERE d.link_type = 'voucher' AND d.link_ref = v.no))
+                                    WHERE NOT d.archived
+                                      AND ((d.link_type = 'voucher' AND d.link_ref = v.no)
+                                        OR (d.link_type = 'expense_claim' AND d.link_ref IN
+                                             (SELECT c.claim_no FROM expense_claim c
+                                               WHERE c.voucher_no = v.no)))))
                                                                                    AS vouchers_without_doc",
         )
         .fetch_one(&self.pool)
@@ -7250,6 +7280,11 @@ pub struct Voucher {
     pub reverses: Option<String>,
     /// Which reversing voucher has reversed this original.
     pub reversed_by: Option<String>,
+    /// Attached documents, e.g. the invoice copy stapled to the paper voucher.
+    pub docs: i64,
+    /// The expense claim whose approval created this voucher, if any. Its
+    /// receipts are part of `docs` and the screen lists them beside them.
+    pub claim_no: Option<String>,
     #[serde(with = "rust_decimal::serde::str")]
     pub amount: Money,
     pub accounts_label: String,

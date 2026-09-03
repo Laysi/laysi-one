@@ -5,6 +5,7 @@ import {
   documentList,
   downloadFile,
   OpFailed,
+  readAsBase64,
   uploadedDocument,
   verifiedDocument,
   type DocumentList,
@@ -14,19 +15,6 @@ import {
 interface Props {
   onToast: (msg: string) => void;
   reloadKey: number;
-}
-
-function readAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onerror = () => reject(new Error('無法讀取此檔案'));
-    r.onload = () => {
-      const s = String(r.result);
-      const comma = s.indexOf(',');
-      resolve(comma < 0 ? s : s.slice(comma + 1));
-    };
-    r.readAsDataURL(file);
-  });
 }
 
 export function Documents({ onToast, reloadKey }: Props) {

@@ -516,6 +516,7 @@ function Workspace() {
                   canEdit={
                     permissions.includes('update_voucher') && permissions.includes('list_accounts')
                   }
+                  canDocs={permissions.includes('list_documents')}
                 />
               )}
               {screen === 'ar' && (
@@ -537,6 +538,7 @@ function Workspace() {
                   reloadKey={reloadKey}
                   onChanged={reload}
                   canSubmit={permissions.includes('submit_expense_claim')}
+                  canDocs={permissions.includes('get_document')}
                 />
               )}
               {screen === 'budget' && <Budget onToast={showToast} reloadKey={reloadKey} />}

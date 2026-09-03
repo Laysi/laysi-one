@@ -1372,7 +1372,7 @@ MCP 這一項開著（`needs_confirm`）：草稿本來就是 AI 寫的，讓它
 
 | name | risk | input | output 重點 |
 |---|---|---|---|
-| `list_expense_claims` | ReadOnly | `{ include_done?, limit? }` | `claims[]`（含 `required_steps` 與每一關的 `reason`）、`flow[]`、`thresholds_source` |
+| `list_expense_claims` | ReadOnly | `{ include_done?, limit? }` | `claims[]`（含 `required_steps`、每一關的 `reason` 與 `receipts`）、`flow[]`、`thresholds_source` |
 | `submit_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, dept_code?, suggested_account_code?, … }` | `{ claim }` |
 | `approve_expense_claim` | HighRisk | `{ claim_no, account_code? }` | `{ claim, voucher, step_taken, finished }`；月底彙總匯款的單據同一交易寫一筆 `ap_bill`，帳單號碼即單號 |
 | `reject_expense_claim` | NeedsConfirm | `{ claim_no, note? }` | `{ claim }` |
@@ -2012,6 +2012,21 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 已經存在，畫面照實說明哪幾個檔案沒附上，並要求到「我的請款」重附，**不要重送
 整張單**；`accepts_receipt` 就是那顆按鈕出不出現的依據。
 
+**簽核的人要看得到那份收據。** `list_expense_claims` 因此逐單以
+`documents_linked_to('expense_claim', claim_no)` 回 `receipts`，形狀與
+`list_my_expense_claims` 的同一個 `receipt_json`。少了它，收據只有申請人自己
+看得到，而要用到它的是下一關——費用報支頁展開一列時列出收據，沒有收據就直接
+說沒有。取回檔案要 `get_document`，那屬於 `manage_documents`，而簽核屬於
+`approve_expense`：主管只有後者，所以檔名在有 `get_document` 的人手上是按鈕、
+在沒有的人手上是純文字。
+
+**核准產生的傳票不另存一份收據。** 最後一關開出傳票時，收據仍然掛在
+`expense_claim` 上——搬過去申請人就看不到自己的單據，複製一份則同一個檔案有兩個
+編號。傳票那一側改成問得到：`search_vouchers` 與 `voucher_by_no` 的 `docs` 同時
+數傳票自己的附件與該傳票所屬報支單的收據（共用 `voucher_docs!`，`document_stats`
+的「沒有附件的傳票」用同一個判準），並回 `claim_no`，憑證抽屜據以一併列出，
+每一列標明來自哪一張報支單。
+
 **檔案內容不進稽核紀錄。** `Registry::dispatch` 在寫 `ai_audit_log` 之前先過
 `redact_for_audit`，超過 512 位元組的字串改記長度。判準是值的長度而不是欄位
 名稱，所以之後任何帶位元組的操作都自動涵蓋。是哪一個檔案仍然查得到：
@@ -2036,6 +2051,17 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
   "lines": [ { "account_code": "6118", "account_name": "水電費",
                "debit": "8420.00", "credit": "0.00", "memo": null } ] }
 ```
+
+`docs` 是這張傳票的憑證影本份數，`claim_no` 是產生它的費用報支單號（沒有就是
+`null`）。份數同時數兩種：掛在傳票上的（`document.link_type = 'voucher'`、
+`link_ref` 為傳票號、未封存），以及掛在那張報支單上的收據——`search_vouchers`
+與 `voucher_by_no` 共用 `voucher_docs!` 這段子查詢。**紙本傳票夾發票影本，系統這一側要看得到有沒有夾**：傳票總帳的「憑證」
+欄印這個數字，按下去是 `components/VoucherDocs` 抽屜（`list_documents` 以傳票號
+查，有 `claim_no` 時另以報支單號查一次併入、每一列標明來源、`upload_document`
+帶 `link_type: 'voucher'` 附上、`get_document` 取回）。三個
+操作同屬 `manage_documents`，畫不畫按鈕看 `list_documents` 在不在 `permissions` 裡。
+附件一律先建傳票再附——`upload_document` 會確認那張傳票存在，所以記帳抽屜當下還沒有
+傳票號，附不了。文件管理頁那張「沒有附件的傳票」統計數的就是這一件事。
 
 `get_dashboard` 的欄位對應原型「總覽」畫面，全部由總帳推導：
 

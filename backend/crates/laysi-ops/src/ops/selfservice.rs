@@ -1000,7 +1000,7 @@ impl Operation for SubmitMyExpenseClaim {
 /// What an employee needs to recognise a file they attached. The object key
 /// and the bucket stay out: staff hold no document permission, and neither is
 /// needed to tell one receipt from another.
-fn receipt_json(d: &DocumentRow) -> Value {
+pub(crate) fn receipt_json(d: &DocumentRow) -> Value {
     json!({
         "doc_no": d.doc_no,
         "file_name": d.file_name,

@@ -267,10 +267,30 @@ impl Operation for ListExpenseClaims {
         // be drawn dead with the reason beside it instead of being live and
         // answering with a refusal.
         let role_label = crate::role_name(ctx).await;
+        // Receipts are what the approver is being asked to check. One query
+        // per claim, the same shape the claimant sees in `list_my_expense_claims`.
+        let mut receipts_by_claim: std::collections::BTreeMap<&str, Vec<Value>> =
+            std::collections::BTreeMap::new();
+        for c in &claims {
+            let receipts = ctx
+                .store
+                .documents_linked_to("expense_claim", &c.claim_no)
+                .await?;
+            receipts_by_claim.insert(
+                &c.claim_no,
+                receipts
+                    .iter()
+                    .map(crate::ops::selfservice::receipt_json)
+                    .collect(),
+            );
+        }
         let rows: Vec<Value> = claims
             .iter()
             .map(|c| {
                 let mut row = claim_json(c, &rules);
+                row["receipts"] = json!(receipts_by_claim
+                    .remove(c.claim_no.as_str())
+                    .unwrap_or_default());
                 let steps = required_steps(&rules, c.amount);
                 let next = next_step(c, &steps);
                 // A claim still in flight always has something to do, even

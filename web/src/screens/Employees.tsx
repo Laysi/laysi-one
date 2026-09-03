@@ -11,6 +11,7 @@ import {
   updatedEmployee,
   maskId,
   OpFailed,
+  readAsBase64,
   trimDecimal,
   uploadedEmployeeDocument,
   type DocumentRow,
@@ -28,19 +29,6 @@ interface Props {
   canIssueLogin: boolean;
   canUploadDocument: boolean;
   canReadDocuments: boolean;
-}
-
-function readAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onerror = () => reject(new Error('無法讀取此檔案'));
-    r.onload = () => {
-      const s = String(r.result);
-      const comma = s.indexOf(',');
-      resolve(comma < 0 ? s : s.slice(comma + 1));
-    };
-    r.readAsDataURL(file);
-  });
 }
 
 const EMPLOYMENT_TYPES: { value: string; label: string }[] = [

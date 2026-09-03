@@ -12,6 +12,7 @@ import {
 import { ConfirmModal } from '../components/ConfirmModal';
 import { EntryDrawer } from '../components/EntryDrawer';
 import { DateField } from '../components/DateField';
+import { VoucherDocs } from '../components/VoucherDocs';
 
 type Filter = 'all' | 'draft' | 'pending' | 'posted';
 
@@ -28,6 +29,7 @@ interface Props {
   onChanged: () => void;
   canDiscard: boolean;
   canEdit: boolean;
+  canDocs: boolean;
 }
 
 type CorrectionKind = 'void' | 'reverse';
@@ -37,7 +39,14 @@ interface Correction {
   kind: CorrectionKind | null;
 }
 
-export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard, canEdit }: Props) {
+export function GeneralLedger({
+  onToast,
+  reloadKey,
+  onChanged,
+  canDiscard,
+  canEdit,
+  canDocs,
+}: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [vouchers, setVouchers] = useState<Voucher[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +54,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard, canEd
   const [posting, setPosting] = useState<Voucher | null>(null);
   const [postBusy, setPostBusy] = useState(false);
   const [editing, setEditing] = useState<Voucher | null>(null);
+  const [docsOf, setDocsOf] = useState<Voucher | null>(null);
   const [discarding, setDiscarding] = useState<Voucher | null>(null);
   const [discardBusy, setDiscardBusy] = useState(false);
   const [correction, setCorrection] = useState<Correction | null>(null);
@@ -193,6 +203,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard, canEd
                 <th>日期</th>
                 <th>摘要</th>
                 <th>科目</th>
+                <th>憑證</th>
                 <th style={{ textAlign: 'right' }}>金額</th>
                 <th>狀態</th>
                 <th />
@@ -205,6 +216,17 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard, canEd
                   <td className="num cell-muted">{v.date.slice(5)}</td>
                   <td>{v.memo}</td>
                   <td className="cell-accounts">{v.accounts_label}</td>
+                  <td className="num">
+                    {canDocs ? (
+                      <button className="link-cell" onClick={() => setDocsOf(v)}>
+                        {v.docs > 0 ? v.docs : '附上'}
+                      </button>
+                    ) : v.docs > 0 ? (
+                      v.docs
+                    ) : (
+                      <span className="cell-muted">—</span>
+                    )}
+                  </td>
                   <td className="num" style={{ textAlign: 'right' }}>
                     {money(v.amount)}
                   </td>
@@ -252,7 +274,7 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard, canEd
               ))}
               {vouchers.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="cell-muted">
+                  <td colSpan={8} className="cell-muted">
                     目前篩選條件下沒有傳票。
                   </td>
                 </tr>
@@ -261,6 +283,13 @@ export function GeneralLedger({ onToast, reloadKey, onChanged, canDiscard, canEd
           </table>
         </div>
       )}
+
+      <VoucherDocs
+        voucher={docsOf}
+        onClose={() => setDocsOf(null)}
+        onToast={onToast}
+        onChanged={onChanged}
+      />
 
       <EntryDrawer
         open={editing !== null}

@@ -157,6 +157,19 @@ export function fileSizeLabel(bytes: number): string {
   return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
 }
 
+export function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(new Error('無法讀取此檔案'));
+    r.onload = () => {
+      const s = String(r.result);
+      const comma = s.indexOf(',');
+      resolve(comma < 0 ? s : s.slice(comma + 1));
+    };
+    r.readAsDataURL(file);
+  });
+}
+
 export function downloadFile(name: string, data: BlobPart, type: string) {
   const url = URL.createObjectURL(new Blob([data], { type }));
   const link = document.createElement('a');
@@ -317,6 +330,8 @@ export const voucher = z.object({
   created_by: z.string(),
   amount: z.string(),
   accounts_label: z.string(),
+  docs: z.number(),
+  claim_no: z.string().nullable(),
   lines: z.array(voucherLine),
 });
 export type Voucher = z.infer<typeof voucher>;
@@ -1298,6 +1313,17 @@ export const expenseHistory = z.object({
 });
 export type ExpenseHistory = z.infer<typeof expenseHistory>;
 
+export const expenseReceipt = z.object({
+  doc_no: z.string(),
+  file_name: z.string(),
+  byte_size: z.number(),
+  size_label: z.string(),
+  content_type: z.string(),
+  checksum_short: z.string(),
+  uploaded_at: z.string(),
+});
+export type ExpenseReceipt = z.infer<typeof expenseReceipt>;
+
 export const expenseClaim = z.object({
   claim_no: z.string(),
   title: z.string(),
@@ -1343,7 +1369,7 @@ export const expenseApproval = z.object({
 export type ExpenseApproval = z.infer<typeof expenseApproval>;
 
 export const expenseClaimList = z.object({
-  claims: z.array(expenseClaim),
+  claims: z.array(expenseClaim.extend({ receipts: z.array(expenseReceipt) })),
   waiting_total: z.string(),
   waiting_count: z.number(),
   flow: z.array(approvalStepState),
@@ -2380,17 +2406,6 @@ export const myLeaveResult = z.object({
   scope_note: z.string(),
 });
 export type MyLeaveResult = z.infer<typeof myLeaveResult>;
-
-export const expenseReceipt = z.object({
-  doc_no: z.string(),
-  file_name: z.string(),
-  byte_size: z.number(),
-  size_label: z.string(),
-  content_type: z.string(),
-  checksum_short: z.string(),
-  uploaded_at: z.string(),
-});
-export type ExpenseReceipt = z.infer<typeof expenseReceipt>;
 
 export const myExpenseClaim = expenseClaim.extend({
   receipts: z.array(expenseReceipt),

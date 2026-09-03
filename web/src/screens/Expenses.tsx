@@ -4,15 +4,18 @@ import {
   businessToday,
   callOp,
   dimensionList,
+  downloadFile,
   expenseApproval,
   expenseClaimList,
   expenseClaimResult,
   money,
   OpFailed,
+  verifiedDocument,
   type AccountList,
   type DimensionList,
   type ExpenseClaim,
   type ExpenseClaimList,
+  type ExpenseReceipt,
 } from '../api/client';
 import { DateField } from '../components/DateField';
 
@@ -21,6 +24,7 @@ interface Props {
   reloadKey: number;
   onChanged: () => void;
   canSubmit: boolean;
+  canDocs: boolean;
 }
 
 function statusTag(c: ExpenseClaim): string {
@@ -29,7 +33,7 @@ function statusTag(c: ExpenseClaim): string {
   return 'tag tag--warn tag--static';
 }
 
-export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
+export function Expenses({ onToast, reloadKey, onChanged, canSubmit, canDocs }: Props) {
   const [data, setData] = useState<ExpenseClaimList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -38,6 +42,7 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
   const [account, setAccount] = useState<Record<string, string>>({});
   const [accounts, setAccounts] = useState<AccountList | null>(null);
   const [depts, setDepts] = useState<DimensionList | null>(null);
+  const [fetching, setFetching] = useState<string | null>(null);
 
   const [drawer, setDrawer] = useState(false);
   const [title, setTitle] = useState('');
@@ -48,6 +53,31 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
   const [payMethod, setPayMethod] = useState('reimburse');
   const [memo, setMemo] = useState('');
   const [saving, setSaving] = useState(false);
+
+  async function openReceipt(r: ExpenseReceipt) {
+    setFetching(r.doc_no);
+    try {
+      const d = await callOp(
+        'get_document',
+        { doc_no: r.doc_no, include_content: true },
+        undefined,
+        verifiedDocument,
+      );
+      if (!d.content_base64) {
+        onToast('檔案儲存沒有回傳內容，請再試一次');
+        return;
+      }
+      downloadFile(
+        r.file_name,
+        Uint8Array.from(atob(d.content_base64), (c) => c.charCodeAt(0)),
+        r.content_type || 'application/octet-stream',
+      );
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setFetching(null);
+    }
+  }
 
   const load = useCallback(() => {
     setError(null);
@@ -229,6 +259,29 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit }: Props) {
                           {c.memo && <span className="step-chip">備註：{c.memo}</span>}
                         </span>
                       )}
+                      {open === c.claim_no &&
+                        (c.receipts.length > 0 ? (
+                          c.receipts.map((r) => (
+                            <span className="cell-hint cell-hint--block num" key={r.doc_no}>
+                              收據 {r.doc_no} · {r.size_label} ·{' '}
+                              {canDocs ? (
+                                <button
+                                  className="link-cell"
+                                  disabled={fetching !== null}
+                                  onClick={() => void openReceipt(r)}
+                                >
+                                  {fetching === r.doc_no ? '取回中…' : r.file_name}
+                                </button>
+                              ) : (
+                                r.file_name
+                              )}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="cell-hint cell-hint--block">
+                            未附收據，請向申請人索取。
+                          </span>
+                        ))}
                     </td>
                     <td className="cell-accounts">
                       {c.account_label ?? '—'}
