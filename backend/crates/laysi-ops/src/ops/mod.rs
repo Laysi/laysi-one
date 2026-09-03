@@ -16,11 +16,10 @@ pub(crate) async fn fetch_text(url: &str, source: &str) -> Result<String, OpErro
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| OpError::BadInput(format!("連線設定失敗：{e}")))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| OpError::BadInput(format!("連不上{source}，請確認對外連線後再試。")))?;
+    let response =
+        client.get(url).send().await.map_err(|_| {
+            OpError::BadInput(format!("無法連線到{source}，請確認對外連線後再試。"))
+        })?;
     if !response.status().is_success() {
         return Err(OpError::BadInput(format!(
             "{source}回應 {}，請稍後再試。",
@@ -30,7 +29,7 @@ pub(crate) async fn fetch_text(url: &str, source: &str) -> Result<String, OpErro
     response
         .text()
         .await
-        .map_err(|_| OpError::BadInput(format!("{source}的回應讀不完整。")))
+        .map_err(|_| OpError::BadInput(format!("無法完整讀取{source}的回應。")))
 }
 
 pub mod assets;

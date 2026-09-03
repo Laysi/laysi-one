@@ -268,7 +268,7 @@ fn lapse_reason(today: NaiveDate, expires_on: NaiveDate, partner: &str) -> Strin
     if expires_on <= today + chrono::Duration::days(WARN_DAYS) {
         format!("授權於 {expires_on} 到期，請洽{partner}續約。")
     } else {
-        format!("已有一段時間未能連上授權伺服器，請確認本機的對外連線，或洽{partner}。")
+        format!("已有一段時間無法連線到授權伺服器，請確認本機的對外連線，或洽{partner}。")
     }
 }
 
@@ -432,7 +432,9 @@ pub async fn check_now(store: &Store, key: &str) -> Result<Licence, OpError> {
         .body(body)
         .send()
         .await
-        .map_err(|_| OpError::BadInput("連不上授權伺服器，請確認本機的對外連線後再試。".into()))?;
+        .map_err(|_| {
+            OpError::BadInput("無法連線到授權伺服器，請確認本機的對外連線後再試。".into())
+        })?;
 
     let status = response.status();
     let text = response.text().await.unwrap_or_default();

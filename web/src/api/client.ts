@@ -233,7 +233,7 @@ export async function getMeta(): Promise<Meta> {
   const res = await fetch('/v1/meta', { headers: headers() });
   noteServerTime(res);
   if (res.status === 401) throw sessionExpired();
-  if (!res.ok) throw new Error(`讀不到系統資訊（HTTP ${res.status}）`);
+  if (!res.ok) throw new Error(`無法讀取系統資訊（HTTP ${res.status}）`);
   const info = parsed(meta, await res.json());
   setBusinessOffset(info.utc_offset);
   return info;
@@ -1276,7 +1276,7 @@ export type Healthz = z.infer<typeof healthz>;
 
 export async function getHealthz(): Promise<Healthz> {
   const res = await fetch('/healthz');
-  if (!res.ok && res.status !== 503) throw new Error(`讀不到系統健康（HTTP ${res.status}）`);
+  if (!res.ok && res.status !== 503) throw new Error(`無法讀取系統健康（HTTP ${res.status}）`);
   return parsed(healthz, await res.json());
 }
 
@@ -1295,7 +1295,7 @@ export async function getOps(): Promise<OpInfo[]> {
   const res = await fetch('/v1/ops', { headers: headers() });
   noteServerTime(res);
   if (res.status === 401) throw sessionExpired();
-  if (!res.ok) throw new Error(`讀不到操作清單（HTTP ${res.status}）`);
+  if (!res.ok) throw new Error(`無法讀取操作清單（HTTP ${res.status}）`);
   return parsed(opList, await res.json()).operations;
 }
 

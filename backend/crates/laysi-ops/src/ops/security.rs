@@ -169,7 +169,7 @@ impl Operation for IssueApiToken {
         }
         if i.name.trim().is_empty() {
             return Err(OpError::BadInput(
-                "Token 要有名稱，否則清單上分不出是哪一組".into(),
+                "Token 要有名稱，否則清單上無法分辨是哪一組".into(),
             ));
         }
         if let Some(d) = i.rotate_days {

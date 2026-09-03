@@ -496,7 +496,7 @@ function Workspace() {
             />
           ) : missingPath ? (
             <div className="placeholder">
-              <div className="placeholder__title">找不到頁面</div>
+              <div className="placeholder__title">查無此頁面</div>
               <p className="num">{missingPath}</p>
               <div className="placeholder__actions">
                 <button className="btn" onClick={() => go(landing)}>

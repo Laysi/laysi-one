@@ -358,7 +358,7 @@ impl Operation for ListMyPayslips {
     }
 
     fn summary(&self) -> &'static str {
-        "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由登入身分決定，查不到他人的薪資單。"
+        "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由登入身分決定，不會回傳他人的薪資單。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1458,7 +1458,7 @@ impl Operation for IssueMyApiToken {
         let i: IssueMyApiTokenInput = parse(input)?;
         if i.label.trim().is_empty() {
             return Err(OpError::BadInput(
-                "Token 要有名稱，否則清單上分不出是哪一組".into(),
+                "Token 要有名稱，否則清單上無法分辨是哪一組".into(),
             ));
         }
         if i.rotate_days.is_some_and(|d| d <= 0) {
@@ -1873,7 +1873,7 @@ impl Operation for MarkMyNoticesRead {
     }
 
     fn summary(&self) -> &'static str {
-        "把目前的公告與規章標為本人已看過。只記時刻，不記看了哪幾則，人資讀不到這一筆。"
+        "把目前的公告與規章標為本人已看過。只記時刻，不記看了哪幾則，人資無法讀取這一筆。"
     }
 
     fn input_schema(&self) -> Value {

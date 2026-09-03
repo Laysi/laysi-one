@@ -439,7 +439,7 @@ impl Operation for GetHrCompliance {
                 "failures": punch_failures,
                 "screen": SCREEN_ATTENDANCE,
                 "not_checked_reason": (!punch_checked)
-                    .then_some("上下班時間還沒填，打卡算不出加班時數，請系統管理員設定。"),
+                    .then_some("上下班時間還沒填，打卡無法計算加班時數，請系統管理員設定。"),
                 "scope_note": format!("{month} 的打卡紀錄，不論有沒有加班申請。"),
             }),
             json!({
@@ -472,7 +472,7 @@ impl Operation for GetHrCompliance {
                 "國定假日與例假出勤工資",
                 vec![ruleset_json(overtime_rs)],
                 Some("overtime"),
-                "規則庫沒有國定假日日曆，分不出某一天屬於哪一種，這兩種日子按日加倍的工資請自行核對。",
+                "規則庫沒有國定假日日曆，無法分辨某一天屬於哪一種，這兩種日子按日加倍的工資請自行核對。",
             ),
         ];
         checks.extend(unchecked);
@@ -616,7 +616,7 @@ impl Operation for ListWithholdingStatements {
                 ),
                 other => {
                     return Err(OpError::BadInput(format!(
-                        "{} 的扣繳基礎「{other}」算不出稅額，請改為 rate 或 table",
+                        "{} 的扣繳基礎「{other}」無法計算稅額，請改為 rate 或 table",
                         record.payee
                     )));
                 }

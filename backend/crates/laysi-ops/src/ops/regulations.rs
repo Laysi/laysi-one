@@ -454,7 +454,7 @@ impl Operation for DeleteRegulation {
             .count();
         if remaining <= 1 {
             return Err(OpError::BadInput(format!(
-                "{label}只剩這一版，刪掉之後薪資、申報與折舊都算不出來。請先新增下一版。"
+                "{label}只剩這一版，刪掉之後薪資、申報與折舊都無法計算。請先新增下一版。"
             )));
         }
         if ctx.store.delete_regulation(&i.domain, &i.version).await? == 0 {

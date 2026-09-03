@@ -160,7 +160,7 @@ pub enum StoreError {
     #[error("migration 失敗：{0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
 
-    #[error("找不到傳票 {no}")]
+    #[error("查無傳票 {no}")]
     VoucherNotFound { no: String },
 
     #[error("傳票 {no} 目前是「{status}」，不能過帳")]
@@ -186,10 +186,10 @@ pub enum StoreError {
     #[error("科目 {code} 不存在，或不是可入帳科目")]
     UnknownAccount { code: String },
 
-    #[error("找不到科目 {code}")]
+    #[error("查無科目 {code}")]
     AccountNotFound { code: String },
 
-    #[error("找不到父科目 {code}")]
+    #[error("查無父科目 {code}")]
     ParentAccountNotFound { code: String },
 
     #[error("科目 {code} 不能拿自己或自己的子科目當父科目")]
@@ -201,16 +201,16 @@ pub enum StoreError {
     #[error("科目 {code} 不是啟用中的可入帳資產科目，不能綁定銀行帳戶")]
     InvalidBankGlAccount { code: String },
 
-    #[error("找不到銀行帳戶 #{id}")]
+    #[error("查無銀行帳戶 #{id}")]
     BankAccountNotFound { id: i32 },
 
-    #[error("找不到發票 {no}")]
+    #[error("查無發票 {no}")]
     InvoiceNotFound { no: String },
 
-    #[error("找不到應付帳單 {no}")]
+    #[error("查無應付帳單 {no}")]
     BillNotFound { no: String },
 
-    #[error("找不到資產 {code}")]
+    #[error("查無資產 {code}")]
     FixedAssetNotFound { code: String },
 
     #[error("這則公告或規章已經不存在，請重新整理本頁。")]
@@ -238,7 +238,7 @@ pub enum StoreError {
     #[error("未勾選任何帳單，無法送出付款單")]
     NothingSelected,
 
-    #[error("找不到銀行交易 #{id}")]
+    #[error("查無銀行交易 #{id}")]
     BankTxnNotFound { id: i32 },
 
     #[error("銀行交易 #{id} 已核銷，不能重複核銷")]
@@ -262,7 +262,7 @@ pub enum StoreError {
     #[error("沒有「{code}」這個類別；只能在既有類別下新增項目")]
     DimensionNotFound { code: String },
 
-    #[error("找不到簽核流程第 {step_no} 關")]
+    #[error("查無簽核流程第 {step_no} 關")]
     ApprovalRuleNotFound { step_no: i32 },
 
     #[error("簽核流程至少保留一關，不能刪除最後一關")]
@@ -286,16 +286,16 @@ pub enum StoreError {
     #[error("沒有這個角色或權限：{role} / {permission}")]
     UnknownRoleOrPermission { role: String, permission: String },
 
-    #[error("找不到 Token #{id}")]
+    #[error("查無 Token #{id}")]
     TokenNotFound { id: i32 },
 
-    #[error("找不到使用者帳號 #{id}")]
+    #[error("查無使用者帳號 #{id}")]
     UserNotFound { id: i32 },
 
     #[error("使用者帳號 #{id} 不存在或目前不能登入")]
     UserNotActive { id: i32 },
 
-    #[error("找不到報支單 {no}")]
+    #[error("查無報支單 {no}")]
     ClaimNotFound { no: String },
 
     #[error("報支單 {no} 目前是「{status}」，這一關已經完成")]
@@ -310,7 +310,7 @@ pub enum StoreError {
     #[error("沒有「{code}」這個預算版本")]
     BudgetVersionNotFound { code: String },
 
-    #[error("找不到文件 {no}")]
+    #[error("查無文件 {no}")]
     DocumentNotFound { no: String },
 
     #[error("文件 {no} 沒有第 {version} 版")]
@@ -319,7 +319,7 @@ pub enum StoreError {
     #[error("沒有「{code}」這個匯入來源")]
     ImportSourceNotFound { code: String },
 
-    #[error("找不到匯入批次 {no}")]
+    #[error("查無匯入批次 {no}")]
     ImportBatchNotFound { no: String },
 
     #[error("匯入批次 {no} 目前是「{status}」，只有預覽中的批次可以確認匯入")]
@@ -346,7 +346,7 @@ pub enum StoreError {
     #[error("{name} 的登入帳號「{username}」是唯一啟用中的系統管理員，改為已離職將停用該帳號。請先在「帳號管理」建立另一個系統管理員帳號。")]
     LastAdministratorLeaving { name: String, username: String },
 
-    #[error("找不到休假單 {no}")]
+    #[error("查無休假單 {no}")]
     LeaveNotFound { no: String },
 
     #[error("所選時段與休假單 {no}（{from} 至 {to}）重疊，請改選其他時段")]
@@ -356,7 +356,7 @@ pub enum StoreError {
         to: String,
     },
 
-    #[error("找不到加班申請 {no}")]
+    #[error("查無加班申請 {no}")]
     OvertimeNotFound { no: String },
 
     #[error("所選時段與加班申請 {no}（{from} 至 {to}）重疊，請改選其他時段")]
@@ -385,7 +385,7 @@ pub enum StoreError {
     #[error("休假單 {no} 已為「{status}」，不能重複簽核")]
     LeaveAlreadyDecided { no: String, status: String },
 
-    #[error("找不到補登申請")]
+    #[error("查無補登申請")]
     PunchCorrectionNotFound,
 
     #[error("補登申請已為「{status}」，不能重複決定")]

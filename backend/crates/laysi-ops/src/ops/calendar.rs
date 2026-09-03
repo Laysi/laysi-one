@@ -224,12 +224,10 @@ fn parse_gov_calendar(text: &str) -> Result<Vec<GovRow>, OpError> {
             .ok_or_else(|| OpError::BadInput("檔案是空的。".into()))?,
     );
     let find = |names: &[&str]| header.iter().position(|h| names.contains(&h.as_str()));
-    let date_col = find(&["西元日期", "date", "Date"]).ok_or_else(|| {
-        OpError::BadInput("找不到日期欄位，請確認檔案是政府行事曆的 CSV。".into())
-    })?;
-    let off_col = find(&["是否放假", "isHoliday", "IsHoliday"]).ok_or_else(|| {
-        OpError::BadInput("找不到放假欄位，請確認檔案是政府行事曆的 CSV。".into())
-    })?;
+    let date_col = find(&["西元日期", "date", "Date"])
+        .ok_or_else(|| OpError::BadInput("查無日期欄位，請確認檔案是政府行事曆的 CSV。".into()))?;
+    let off_col = find(&["是否放假", "isHoliday", "IsHoliday"])
+        .ok_or_else(|| OpError::BadInput("查無放假欄位，請確認檔案是政府行事曆的 CSV。".into()))?;
     let note_col = find(&["備註", "description", "Description", "holidayCategory"]);
 
     let mut out = Vec::new();

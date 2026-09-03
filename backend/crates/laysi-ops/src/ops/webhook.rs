@@ -153,7 +153,7 @@ async fn deliver(url: &str, text: &str) -> Result<(), String> {
         .body(payload(url, &truncated(text)).to_string())
         .send()
         .await
-        .map_err(|_| "推送失敗：連不上推送網址，請確認基礎設定的網址與對外連線".to_string())?;
+        .map_err(|_| "推送失敗：無法連線到推送網址，請確認基礎設定的網址與對外連線".to_string())?;
     if !response.status().is_success() {
         return Err(format!(
             "推送失敗：聊天室回應 {}，請確認基礎設定的推送網址",

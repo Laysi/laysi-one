@@ -353,7 +353,7 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
                 s.store.tool_grants().await,
                 s.store.permitted_ops(&identity.actor_role).await,
             ) else {
-                return err(id, code::INTERNAL, "讀不到工具授權，請稍後再試");
+                return err(id, code::INTERNAL, "無法讀取工具授權，請稍後再試");
             };
             let tools: Vec<Value> = s
                 .registry

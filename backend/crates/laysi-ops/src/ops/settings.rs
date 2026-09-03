@@ -1066,7 +1066,7 @@ impl Operation for CreateUserAccount {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；改用外部登入時不產生密碼。員工編號找不到對應的人時會一併建立員工主檔，留空則自動配號。"
+        "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；改用外部登入時不產生密碼。員工編號查無對應的人時會一併建立員工主檔，留空則自動配號。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<CreateUserAccountInput>()
@@ -1157,7 +1157,7 @@ impl Operation for UpdateUserAccount {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "改一個登入帳號的顯示名稱、電子郵件、啟用狀態與連結的員工。員工編號找不到對應的人時會一併建立員工主檔。角色請用變更角色的操作，密碼只能由本人變更。"
+        "改一個登入帳號的顯示名稱、電子郵件、啟用狀態與連結的員工。員工編號查無對應的人時會一併建立員工主檔。角色請用變更角色的操作，密碼只能由本人變更。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UpdateUserAccountInput>()

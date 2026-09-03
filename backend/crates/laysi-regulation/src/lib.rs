@@ -124,7 +124,7 @@ pub struct Ruleset {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegulationError {
-    #[error("找不到「{domain}」在 {as_of} 適用的法規版本，請在法規版本新增涵蓋該日期的版本。")]
+    #[error("查無「{domain}」在 {as_of} 適用的法規版本，請在法規版本新增涵蓋該日期的版本。")]
     NotFound { domain: String, as_of: NaiveDate },
 
     #[error("法規 {domain}/{version} 缺少必要欄位「{key}」")]

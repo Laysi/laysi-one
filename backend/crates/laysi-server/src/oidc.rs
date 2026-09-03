@@ -195,7 +195,7 @@ impl OidcState {
             // rather than what the library returned; the detail goes to the
             // log for whoever is reading it.
             tracing::warn!(%error, "external login discovery failed");
-            anyhow!("讀不到這個供應商的登入設定，請確認供應商網址")
+            anyhow!("無法讀取這個供應商的登入設定，請確認供應商網址")
         })?;
         let provider = provider_key(metadata.issuer().as_str());
         let client = Client::from_provider_metadata(
