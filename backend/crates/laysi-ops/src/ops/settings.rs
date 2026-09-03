@@ -29,6 +29,7 @@
 //! build keeps it empty, which the migration coverage test enforces.
 
 use crate::ops::employees::{BASIS_MONTHLY, INSURED_EMPLOYEE};
+use crate::ops::webhook;
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::Engine;
@@ -193,6 +194,7 @@ impl Operation for GetCompanySettings {
             json!({
                 "settings": rows,
                 "editable_count": stored.iter().filter(|s| s.editable).count(),
+                "push_targets": webhook::targets(),
             }),
             summary,
         ))
@@ -297,7 +299,10 @@ fn validate_brand_logo(value: &str) -> Result<(), OpError> {
 /// where `None` means nobody has said when work starts, which is different
 /// from nobody being late. A company that has not decided has to be able to
 /// say so, and to take it back after having set one.
-const CLEARABLE_SETTINGS: [&str; 8] = [
+const CLEARABLE_SETTINGS: [&str; 9] = [
+    // Cleared means the board is not pushed anywhere, which is where every
+    // installation starts.
+    webhook::NOTICE_WEBHOOK_SETTING,
     // Cleared means the company has no logo of its own, which is where every
     // installation starts and where one that drops its logo returns.
     BRAND_LOGO_SETTING,
@@ -343,6 +348,7 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
             OpError::BadInput(format!("「{value}」不是大於 0 的天數，永久保存就留空")),
         ),
         BRAND_LOGO_SETTING => validate_brand_logo(value),
+        webhook::NOTICE_WEBHOOK_SETTING => webhook::validate_url(value),
         BRAND_DISPLAY_SETTING if !BRAND_DISPLAYS.contains(&value) => {
             Err(OpError::BadInput(format!(
                 "公司識別顯示方式填「{}」、「{}」或「{}」，收到「{value}」",
@@ -414,15 +420,28 @@ impl Operation for UpdateCompanySetting {
         ) {
             crate::load_policy_settings(&ctx.store).await;
         }
-        // The logo is hundreds of kilobytes of base64. `redact_for_audit`
-        // only reaches the input, so the summary has to name it instead of
-        // repeating it.
+        // An address nobody has posted to is an address nobody knows is
+        // wrong, and the next thing sent to it is a company announcement.
+        let push = if s.code == webhook::NOTICE_WEBHOOK_SETTING && !s.value.is_empty() {
+            webhook::push(ctx, "Laysi One 推送測試").await
+        } else {
+            None
+        };
+        // The logo is hundreds of kilobytes of base64 and the push address
+        // is what lets anyone post into the company chat room.
+        // `redact_for_audit` only reaches the input, so the summary has to
+        // name these instead of repeating them.
         let summary = match (s.value.is_empty(), s.code.as_str()) {
             (true, _) => format!("改設定 · {} 清為尚未設定", s.label),
-            (false, BRAND_LOGO_SETTING) => format!("改設定 · {} 已更換", s.label),
+            (false, BRAND_LOGO_SETTING | webhook::NOTICE_WEBHOOK_SETTING) => {
+                format!("改設定 · {} 已更換", s.label)
+            }
             (false, _) => format!("改設定 · {} 改成「{}」", s.label, s.value),
         };
-        Ok(OpOutcome::new(json!({ "setting": s }), summary))
+        Ok(OpOutcome::new(
+            json!({ "setting": s, "push": push }),
+            summary,
+        ))
     }
 }
 
@@ -2122,6 +2141,7 @@ mod tests {
         assert_eq!(
             CLEARABLE_SETTINGS,
             [
+                "notice_webhook_url",
                 "brand_logo",
                 "work_start",
                 "work_end",

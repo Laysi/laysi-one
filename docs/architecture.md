@@ -1633,8 +1633,8 @@ ruleset 的上限比較。
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `list_notices` | ReadOnly | `{ id?, kind?, include_ended? }` | 現行版本；帶 `id` 回該則的每一個版本 |
-| `create_notice` | NeedsConfirm | `{ kind, title, body, effective_on?, expires_on? }` | `{ notice }`，記為第 1 版 |
-| `update_notice` | NeedsConfirm | `{ id, title?, body?, effective_on?, expires_on? }` | `{ notice, revised }` |
+| `create_notice` | NeedsConfirm | `{ kind, title, body, effective_on?, expires_on? }` | `{ notice, push }`，記為第 1 版 |
+| `update_notice` | NeedsConfirm | `{ id, title?, body?, effective_on?, expires_on? }` | `{ notice, revised, push }` |
 | `list_my_notices` | ReadOnly | `{ id? }` | 生效中的內容＋`unread`；帶 `id` 回每一個版本 |
 | `mark_my_notices_read` | NeedsConfirm | `{}` | `{ read_at }` |
 
@@ -1679,6 +1679,46 @@ ruleset 的上限比較。
 **內容一律折疊。** 卡片預設只顯示標題、日期與版次，點標題展開；一頁十則規章全文攤開
 沒有人讀得下去。員工端把**還沒看過的**那幾則預設展開，因為提醒要看的東西就是要讓它
 看得到。
+
+### 佈告欄推送到聊天室
+
+| name | risk | input | output 重點 |
+|---|---|---|---|
+| `test_notice_push` | AdminOnly | `{}` | `{ push }`，網址沒填就回錯誤 |
+
+`company_setting` 的 `notice_webhook_url` 填了，`create_notice` 與改動內容的
+`update_notice` 就把該則的標題、日期與內文 POST 出去；留空不推送，那是每個安裝的起始
+狀態。**設定下架或廢止日不推**——那不是新的一版，收到的人也沒有新的東西可看。
+
+**訊息形狀由網址的主機決定，不另設一個「平台」欄位。** Slack、Google Chat 與退場中的
+Teams connector 讀 `text`，Discord 讀 `content`，Lark 與飛書讀 `msg_type` 底下的
+`content.text`，Teams 走 Power Automate 收的是 Adaptive Card。Discord 的 `content` 是
+字串而 Lark 的是物件，所以一份同時塞滿每個欄位的 payload 不存在。網址本來就說得出那是
+哪一套工具，多一個要與它保持一致的欄位只是多一個填錯的地方；認不得的主機送 `text`，
+中繼與自動化工具讀的也是那一個。
+
+**推送與呼叫同步進行，結果回報給發布的人，不排隊也不重試。** 佈告欄本身就是紀錄，沒送
+出去的訊息只值畫面上一句話，而排隊要一張表、一支背景工作與一組重試規則。內文超過 1800
+字截斷並說明——Discord 的 2000 字上限是這幾套工具裡最低的。
+
+**未生效的公告在發布當下就推**：系統裡沒有排程器，而訊息第一行就寫著生效日。排到生效日
+當天才推，要在 `notice_version` 多一個欄位與一支每日工作，等有人真的需要再說。
+
+**畫面是「基礎設定」底下自己一張卡，不是那一串設定裡的一列。** 網址是那一頁最長的
+值，擠在 `fact` 那一行讀不完也編不動；卡片給它整行的輸入框、一顆儲存、一顆測試推送與
+一顆清除。**「送往 Slack」由後端的清單決定**：`get_company_settings` 回
+`push_targets`（`generic` 加 `[{domain, label}]`），畫面拿它比對正在輸入的網址主機，
+所以說出來的那個名字與真的送出去的形狀是同一張表，不是 TypeScript 裡的一份抄本。
+
+**`test_notice_push` 是獨立操作，不是重存一次設定。** 重存沒有變更的值會留下一筆
+說「網址已更換」的稽核紀錄，而那句話是錯的；測試推送寫的是「測試公告推送 · 已推送到
+Slack」。它與 `update_company_setting` 同屬 `manage_access`，對 AI 預設關閉。
+上次推送的結果只活在畫面的 state 裡——存一欄要多一次寫入，而下一次按下去就會知道。
+
+網址只收 `https://`（`ops::webhook::validate_url`），而它本身是憑證——拿到的人就能往公司
+的聊天室貼文，所以稽核摘要與 `brand_logo` 一樣只寫「已更換」，不複製那個字串。存檔當下
+送一則測試訊息，成敗直接回在畫面上：沒有人按過的網址就是沒有人知道錯在哪的網址，而下一
+個送到那裡的是全公司的公告。
 
 ### 員工自助的 MCP
 

@@ -133,6 +133,7 @@ export async function callOp(
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const MAX_BRAND_LOGO_BYTES = 512 * 1024;
 export const BRAND_LOGO_SETTING = 'brand_logo';
+export const NOTICE_WEBHOOK_SETTING = 'notice_webhook_url';
 export const BRAND_DISPLAY_SETTING = 'brand_display';
 export const BRAND_LOGO_ACCEPT = 'image/png,image/jpeg,image/webp,image/svg+xml';
 
@@ -877,9 +878,16 @@ export const companySettingRow = z.object({
 });
 export type CompanySettingRow = z.infer<typeof companySettingRow>;
 
+export const pushTargets = z.object({
+  generic: z.string(),
+  domains: z.array(z.object({ domain: z.string(), label: z.string() })),
+});
+export type PushTargets = z.infer<typeof pushTargets>;
+
 export const companySettings = z.object({
   settings: z.array(companySettingRow),
   editable_count: z.number(),
+  push_targets: pushTargets,
 });
 export type CompanySettings = z.infer<typeof companySettings>;
 
@@ -2316,7 +2324,11 @@ export const noticeRow = z.object({
 });
 export type NoticeRow = z.infer<typeof noticeRow>;
 
-export const noticeRevision = z.object({ revised: z.boolean(), notice: noticeRow });
+export const noticeRevision = z.object({
+  revised: z.boolean(),
+  notice: noticeRow,
+  push: z.string().nullable(),
+});
 export type NoticeRevision = z.infer<typeof noticeRevision>;
 
 export const noticeVersionRow = z.object({

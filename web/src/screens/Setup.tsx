@@ -13,6 +13,7 @@ import {
   fileSizeLabel,
   MAX_BRAND_LOGO_BYTES,
   money,
+  NOTICE_WEBHOOK_SETTING,
   OpFailed,
   readFileDataUrl,
   userAccountList,
@@ -22,6 +23,7 @@ import {
   type CompanySettingRow,
   type DimensionList,
   type DimensionValue,
+  type PushTargets,
 } from '../api/client';
 import type { ScreenId } from '../nav';
 
@@ -149,6 +151,7 @@ export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
   const canEditSettings = me.permissions.includes('update_company_setting');
   const canSetTimezone = me.permissions.includes('set_company_timezone');
   const canAddDimension = me.permissions.includes('create_dimension_value');
+  const canTestPush = me.permissions.includes('test_notice_push');
   const canEditDimension = me.permissions.includes('update_dimension_value');
   const showBalances = me.permissions.includes('list_chart_of_accounts');
   const [settings, setSettings] = useState<CompanySettingRow[] | null>(null);
@@ -160,6 +163,10 @@ export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
   const [onlyUsed, setOnlyUsed] = useState(false);
   const [ownerMissing, setOwnerMissing] = useState(false);
   const [savingBrand, setSavingBrand] = useState(false);
+  const [pushTargets, setPushTargets] = useState<PushTargets | null>(null);
+  const [pushDraft, setPushDraft] = useState('');
+  const [pushNote, setPushNote] = useState<string | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
 
   const load = useCallback(() => {
     setError(null);
@@ -169,6 +176,8 @@ export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
     ])
       .then(([s, d]) => {
         setSettings(s.settings);
+        setPushTargets(s.push_targets);
+        setPushDraft(s.settings.find((r) => r.code === NOTICE_WEBHOOK_SETTING)?.value ?? '');
         setDims(d);
       })
       .catch((e: Error) => setError(e.message));
@@ -211,12 +220,63 @@ export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
         load();
         return;
       }
-      await callOp<unknown>('update_company_setting', { code, value: draft });
-      onToast(`已更新「${settings?.find((s) => s.code === code)?.label ?? code}」`);
+      const d = await callOp<{ push?: string | null }>('update_company_setting', {
+        code,
+        value: draft,
+      });
+      const label = settings?.find((s) => s.code === code)?.label ?? code;
+      onToast(d.push ?? `已更新「${label}」`);
       setEditing(null);
       load();
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
+    }
+  }
+
+  const pushSaved = settings?.find((s) => s.code === NOTICE_WEBHOOK_SETTING)?.value ?? '';
+  const pushChanged = pushDraft.trim() !== pushSaved;
+
+  function pushTargetLabel(url: string) {
+    if (!pushTargets) return '';
+    let host = '';
+    try {
+      host = new URL(url).hostname.toLowerCase();
+    } catch {
+      return '';
+    }
+    const hit = pushTargets.domains.find(
+      (t) => host === t.domain || host.endsWith(`.${t.domain}`),
+    );
+    return hit?.label ?? pushTargets.generic;
+  }
+
+  async function savePush(value: string, done: string) {
+    setPushBusy(true);
+    try {
+      const d = await callOp<{ push?: string | null }>('update_company_setting', {
+        code: NOTICE_WEBHOOK_SETTING,
+        value,
+      });
+      setPushNote(d.push ?? null);
+      onToast(d.push ?? done);
+      load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function testPush() {
+    setPushBusy(true);
+    try {
+      const d = await callOp<{ push: string }>('test_notice_push', {});
+      setPushNote(d.push);
+      onToast(d.push);
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setPushBusy(false);
     }
   }
 
@@ -467,12 +527,17 @@ export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
 
       {settings && dims && (
         <>
-          <div className="split-columns split-columns--wide-right">
+          <div className="split-columns">
             <section>
               <h3 className="section-title">公司與帳務</h3>
               <div className="card fact-card">
                 {settings
-                  .filter((s) => s.code !== BRAND_LOGO_SETTING && s.code !== BRAND_DISPLAY_SETTING)
+                  .filter(
+                    (s) =>
+                      s.code !== BRAND_LOGO_SETTING &&
+                      s.code !== BRAND_DISPLAY_SETTING &&
+                      s.code !== NOTICE_WEBHOOK_SETTING,
+                  )
                   .map((s) => (
                   <div className="fact" key={s.code}>
                     <span className="fact__key">{s.label}</span>
@@ -618,6 +683,57 @@ export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
                     </span>
                   </div>
                 )}
+              </div>
+
+              <h3 className="section-title section-title--spaced">公告推送</h3>
+              <div className="card push-card">
+                <label className="field">
+                  推送網址
+                  <input
+                    className="input"
+                    value={pushDraft}
+                    placeholder="https://hooks.slack.com/services/…"
+                    readOnly={!canEditSettings}
+                    onChange={(e) => setPushDraft(e.target.value)}
+                  />
+                </label>
+                {pushDraft.trim() && (
+                  <div className="fact">
+                    <span className="fact__key">送往</span>
+                    <span className="fact__value">{pushTargetLabel(pushDraft.trim())}</span>
+                  </div>
+                )}
+                <p className="hint">發布公告或規章時推送到聊天室，留空不推送。</p>
+                {canEditSettings && (
+                  <div className="toolbar">
+                    <button
+                      className="btn btn--compact"
+                      disabled={pushBusy || !pushChanged || !pushDraft.trim()}
+                      onClick={() => void savePush(pushDraft.trim(), '已儲存推送網址')}
+                    >
+                      儲存
+                    </button>
+                    {canTestPush && (
+                      <button
+                        className="btn btn--compact"
+                        disabled={pushBusy || pushChanged || !pushSaved}
+                        onClick={() => void testPush()}
+                      >
+                        測試推送
+                      </button>
+                    )}
+                    {pushSaved && (
+                      <button
+                        className="btn btn--compact btn--ghost"
+                        disabled={pushBusy}
+                        onClick={() => void savePush('', '已清除推送網址')}
+                      >
+                        清除
+                      </button>
+                    )}
+                  </div>
+                )}
+                {pushNote && <p className="hint">上次推送：{pushNote}</p>}
               </div>
 
               {dims.dimensions.map((d) => (

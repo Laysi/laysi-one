@@ -334,7 +334,7 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
-RustFS 物件儲存，以及 **37 個畫面、134 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、135 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -375,6 +375,19 @@ RustFS 物件儲存，以及 **37 個畫面、134 個操作**，分成三個分�
 
 **內容一律折疊**：卡片預設只顯示標題與日期，點標題展開。員工端把**還沒看過的**那幾則
 預設展開——提醒要看的東西就是要看得到的東西。
+
+**佈告欄推送到聊天室是 `company_setting` 的一列**：`notice_webhook_url` 填了才推，
+`create_notice` 與改動內容的 `update_notice` 會送，設定下架日不送（那不是新的一版）。
+**訊息形狀由網址的主機決定，不另設「平台」欄位**：Slack、Google Chat 與 Teams
+connector 讀 `text`，Discord 讀 `content`，Lark／飛書讀 `msg_type` 底下的
+`content.text`，Teams 走 Power Automate 收 Adaptive Card——Discord 的 `content` 是字串
+而 Lark 的是物件，一份塞滿每個欄位的 payload 不存在；認不得的主機送 `text`。同步送、
+結果回報給發布的人，不排隊不重試，超過 1800 字截斷（Discord 上限 2000）。網址只收
+`https://` 且**本身是憑證**，稽核摘要寫「已更換」不寫值；存檔當下送一則測試訊息，成敗
+回在畫面上。畫面在「基礎設定」自己一張卡（輸入框＋儲存／測試推送／清除），「送往 Slack」
+那一行比對後端 `get_company_settings` 回的 `push_targets`，**前端不得自帶那張對照表**；
+重測走 `test_notice_push`（`AdminOnly`），不是重存一次設定——重存沒有變更的值會留下一筆
+說「網址已更換」的稽核紀錄。
 
 **固定資產登記得進去**：`create_fixed_asset` 同一交易寫登記簿與取得傳票
 （借資產科目與 1284 進項稅額／貸付款科目）。成本填**未稅**金額——它同時是 1601 的

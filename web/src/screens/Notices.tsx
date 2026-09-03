@@ -101,10 +101,16 @@ export function Notices({ onToast, reloadKey, canManage }: Props) {
         if (form.body !== editing.body) input.body = form.body;
         if (form.effective_on !== editing.effective_on) input.effective_on = form.effective_on;
         if (form.expires_on !== (editing.expires_on ?? '')) input.expires_on = form.expires_on;
-        const d = await callOp('update_notice', input, `更新${editing.kind_label} ${editing.title}`, noticeRevision);
-        onToast(d.revised ? `已發布第 ${d.notice.version_no} 版` : '已更新');
+        const d = await callOp(
+          'update_notice',
+          input,
+          `更新${editing.kind_label} ${editing.title}`,
+          noticeRevision,
+        );
+        const done = d.revised ? `已發布第 ${d.notice.version_no} 版` : '已更新';
+        onToast([done, d.push].filter(Boolean).join(' · '));
       } else {
-        await callOp(
+        const d = await callOp<{ push: string | null }>(
           'create_notice',
           {
             kind: form.kind,
@@ -115,7 +121,7 @@ export function Notices({ onToast, reloadKey, canManage }: Props) {
           },
           `發布 ${form.title}`,
         );
-        onToast('已發布');
+        onToast(['已發布', d.push].filter(Boolean).join(' · '));
       }
       setForm(null);
       setEditing(null);

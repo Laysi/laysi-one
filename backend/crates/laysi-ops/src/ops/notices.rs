@@ -19,6 +19,7 @@
 //! which takes no employee field at all. `list_notices` here is the HR side:
 //! it also lists what is scheduled and what has already come down.
 
+use crate::ops::webhook;
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -116,6 +117,32 @@ pub(crate) async fn history_outcome(
         versions.len()
     );
     Ok(OpOutcome::new(data, summary))
+}
+
+/// The message a chat tool receives when a notice is published.
+///
+/// The date is the one the notice itself carries, so a rule published today
+/// to take effect next month says next month. Everything after the first two
+/// lines is the body as written; the push is a copy of the board, not a
+/// summary of it.
+pub(crate) fn push_text(n: &Notice, revised: bool) -> String {
+    let version = if revised {
+        format!(" · 第 {} 版", n.version_no)
+    } else {
+        String::new()
+    };
+    let date_label = if n.kind == "policy" {
+        "生效日"
+    } else {
+        "發布日"
+    };
+    format!(
+        "【{}】{}{version}\n{date_label} {}\n\n{}",
+        kind_label(&n.kind),
+        n.title,
+        n.effective_on,
+        n.body
+    )
 }
 
 pub(crate) fn checked_kind(kind: &str) -> Result<&str, OpError> {
@@ -267,9 +294,11 @@ impl Operation for CreateNotice {
             })
             .await?;
 
+        let push = webhook::push(ctx, &push_text(&notice, false)).await;
+
         let summary = format!("發布{} · {}", kind_label(kind), notice.title);
         Ok(OpOutcome::new(
-            json!({ "notice": notice_json(&notice, ctx.today) }),
+            json!({ "notice": notice_json(&notice, ctx.today), "push": push }),
             summary,
         ))
     }
@@ -358,6 +387,15 @@ impl Operation for UpdateNotice {
             })
             .await?;
 
+        // Setting an end date is not a new version, and a chat tool that is
+        // told about it has nothing to show anyone: the message would repeat
+        // text everyone already received.
+        let push = if revised {
+            webhook::push(ctx, &push_text(&notice, true)).await
+        } else {
+            None
+        };
+
         let summary = if revised {
             format!(
                 "更新{} · {} · 第 {} 版",
@@ -372,6 +410,7 @@ impl Operation for UpdateNotice {
             json!({
                 "notice": notice_json(&notice, ctx.today),
                 "revised": revised,
+                "push": push,
             }),
             summary,
         ))

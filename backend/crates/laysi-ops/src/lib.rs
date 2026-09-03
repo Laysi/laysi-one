@@ -904,6 +904,7 @@ mod tests {
             ops::calendar::ops(),
             ops::security::ops(),
             ops::backup::ops(),
+            ops::webhook::ops(),
         ];
         let mut declared = 0;
         for module in modules {
@@ -932,6 +933,7 @@ mod tests {
         include_str!("../../../migrations/0006_regulation_feed.sql"),
         include_str!("../../../migrations/0007_license.sql"),
         include_str!("../../../migrations/0008_update_voucher.sql"),
+        include_str!("../../../migrations/0010_notice_push_test.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the
@@ -1193,6 +1195,7 @@ mod tests {
                 "set_company_timezone",
                 "set_mcp_tool_grant",
                 "set_role_permission",
+                "test_notice_push",
                 "unlink_user_identity",
                 "update_backup_setting",
                 "update_company_setting",
