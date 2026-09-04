@@ -6,3 +6,11 @@ web/dist/
 # The vendor signing key never enters the image. The public key does, because
 # verification needs it.
 backend/brand/vendor.key
+
+# The licence server is a second deployable in this repository. Its build
+# context is the repository root too, so only the heavy and the secret parts
+# are excluded rather than the whole directory: target/ alone is 1.2 GB, and
+# secrets/ holds the licence signing key.
+license-server/target/
+license-server/secrets/
+license-server/.dev/

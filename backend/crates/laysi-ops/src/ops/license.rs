@@ -22,7 +22,7 @@ use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::NaiveDate;
 use ed25519_dalek::{Signature, VerifyingKey};
 use laysi_store::{LicenseState, Store};
 use schemars::JsonSchema;
@@ -76,24 +76,7 @@ pub fn writes_allowed() -> bool {
     WRITES_ALLOWED.load(Ordering::Relaxed)
 }
 
-/// What the licence server signed. Mirrors the server's own struct; the
-/// signature is over the encoded form, so an extra field there is ignored
-/// here rather than fatal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LicensePayload {
-    pub license_no: String,
-    pub fingerprint: String,
-    pub install_id: String,
-    pub licensee: String,
-    #[serde(default)]
-    pub licensee_tax_id: String,
-    pub partner: String,
-    #[serde(default)]
-    pub partner_no: String,
-    pub issued_at: DateTime<Utc>,
-    pub not_after: NaiveDate,
-    pub expires_on: NaiveDate,
-}
+pub use laysi_license_token::LicensePayload;
 
 /// Where this installation stands. Ordered from best to worst; only the last
 /// one stops writes.
@@ -577,6 +560,7 @@ impl Operation for ActivateLicense {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use ed25519_dalek::{Signer, SigningKey};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {

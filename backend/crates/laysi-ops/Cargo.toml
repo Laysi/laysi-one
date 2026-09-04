@@ -8,6 +8,7 @@ description = "Laysi One 操作註冊表：單一定義同時產生 REST、MCP �
 
 [dependencies]
 laysi-domain.workspace = true
+laysi-license-token.workspace = true
 laysi-regulation.workspace = true
 laysi-store.workspace = true
 

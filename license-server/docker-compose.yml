@@ -68,7 +68,9 @@ services:
       retries: 20
 
   app:
-    build: .
+    build:
+      context: ..
+      dockerfile: license-server/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:

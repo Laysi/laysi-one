@@ -1,0 +1,15 @@
+# Standalone on purpose: two cargo workspaces depend on this crate by path, so
+# inheriting version, edition or dependencies from either root would tie it to
+# one of them. The licence server's image build copies this directory without
+# backend/Cargo.toml, and would fail to find a workspace root.
+[package]
+name = "laysi-license-token"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "Laysi One 授權檔的簽章內容：產品與授權伺服器共用的唯一定義"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }

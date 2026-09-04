@@ -115,3 +115,29 @@ jobs:
       # A rule file the generator cannot read would publish a feed that is
       # missing a rate, and the failure would land on the installation.
       - run: bun scripts/regulation-manifest.ts /dev/null
+
+  # Its own workspace, so its own job: the licence server shares only the
+  # token payload with the product and needs neither a database nor a
+  # browser toolchain to check.
+  license-server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: license-server
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: license-server
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - run: cargo test

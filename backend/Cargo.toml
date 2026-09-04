@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/laysi-domain",
+    "crates/laysi-license-token",
     "crates/laysi-regulation",
     "crates/laysi-store",
     "crates/laysi-ops",
@@ -16,6 +17,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 laysi-domain = { path = "crates/laysi-domain" }
+laysi-license-token = { path = "crates/laysi-license-token" }
 laysi-regulation = { path = "crates/laysi-regulation" }
 laysi-ops = { path = "crates/laysi-ops" }
 laysi-store = { path = "crates/laysi-store" }

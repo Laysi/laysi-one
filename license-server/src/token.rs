@@ -20,9 +20,7 @@
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
-use chrono::{DateTime, NaiveDate, Utc};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use serde::{Deserialize, Serialize};
 
 /// How long one successful check is good for.
 ///
@@ -33,31 +31,7 @@ use serde::{Deserialize, Serialize};
 /// months without anybody visiting the site.
 pub const LEASE_DAYS: i64 = 45;
 
-/// What the installation is told, and what it can prove without us.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LicensePayload {
-    pub license_no: String,
-    /// The installation this token was minted for. Carried inside the
-    /// signature so that copying the token, or the whole database it sits in,
-    /// onto a second machine produces a token that machine can see is not
-    /// its own.
-    pub fingerprint: String,
-    pub install_id: String,
-    pub licensee: String,
-    pub licensee_tax_id: String,
-    /// Display name of the partner that sold the licence. The screen names
-    /// them because a customer with a problem should be able to read who to
-    /// call off the same page that reports the problem.
-    pub partner: String,
-    pub partner_no: String,
-    pub issued_at: DateTime<Utc>,
-    /// The date this token stops being believed. One date decides the whole
-    /// state machine on the installation side; `expires_on` below is shown to
-    /// a person and decides nothing.
-    pub not_after: NaiveDate,
-    /// End of the licence year the partner sold.
-    pub expires_on: NaiveDate,
-}
+pub use laysi_license_token::LicensePayload;
 
 /// Sign a payload into the token an installation stores.
 pub fn mint(key: &SigningKey, payload: &LicensePayload) -> Result<String> {
@@ -173,6 +147,7 @@ pub fn signing_key_from_hex(text: &str) -> Result<SigningKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{NaiveDate, Utc};
 
     fn sample(key: &SigningKey) -> (LicensePayload, String) {
         let payload = LicensePayload {

@@ -1827,6 +1827,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "laysi-license-token"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
 name = "laysi-ops"
 version = "0.1.0"
 dependencies = [
@@ -1837,6 +1845,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "laysi-domain",
+ "laysi-license-token",
  "laysi-regulation",
  "laysi-store",
  "reqwest",

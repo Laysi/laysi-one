@@ -3,11 +3,17 @@
 ## 專案
 
 Laysi 授權伺服器：經銷商／代理商開立 Laysi One 的啟動金鑰，安裝端定期報到。
-與 `Laysi/laysi-one` 是兩套系統、兩個資料庫——產品是單租戶，這裡是多租戶，
-把它們合在一起等於要為經銷商在每一張產品資料表上加一個欄位。
+與產品在同一個 repo，但**是兩套系統、兩個資料庫、兩個 cargo workspace**——產品是
+單租戶，這裡是多租戶，把它們合在一起等於要為經銷商在每一張產品資料表上加一個欄位。
+共用的只有 `../backend/crates/laysi-license-token`：授權檔 payload 的唯一定義，
+簽的一方與驗的一方都 `use` 它。
 
-單一 crate，Rust + axum + sqlx + PostgreSQL 18。相依套件一律取自 laysi-one
-既有的依賴樹，**不引入產品沒有的 crate**：這台機器持有簽章私鑰。
+單一 crate，Rust + axum + sqlx + PostgreSQL 18。相依套件一律取自產品既有的依賴樹，
+**不引入產品沒有的 crate**：這台機器持有簽章私鑰。
+
+**映像的 build context 是 repo 根目錄**（`docker-compose.yml` 寫 `context: ..`），
+因為那個共用 crate 在 `license-server/` 之外。改 `Dockerfile` 的 `COPY` 路徑時記得
+它們是相對於根目錄，不是相對於本目錄。
 
 ## 常用指令
 

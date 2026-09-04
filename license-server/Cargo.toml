@@ -14,6 +14,8 @@ axum = { version = "0.8", features = ["macros"] }
 base64 = "0.23"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# The payload both sides of a licence token have to agree on, defined once.
+laysi-license-token = { path = "../backend/crates/laysi-license-token" }
 ed25519-dalek = "2"
 getrandom = "0.4"
 hex = "0.4"

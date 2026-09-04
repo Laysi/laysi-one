@@ -949,6 +949,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "laysi-license-token"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
 name = "laysi-one-license"
 version = "0.1.0"
 dependencies = [
@@ -961,6 +969,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hex",
+ "laysi-license-token",
  "serde",
  "serde_json",
  "sqlx",

@@ -188,8 +188,11 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
 
 ### 5. 授權是簽章，不是資料庫裡的一列
 
-授權伺服器是另一個專案（`Laysi/laysi-one-license`），多租戶，經銷商與代理商在那裡開立
-啟動金鑰；本產品是單租戶，資料表不帶 `company_id`，兩者不能合併。
+授權伺服器在同一個 repo 的 `license-server/`，但**是另一個部署也是另一個 cargo
+workspace**：它多租戶、經銷商與代理商在那裡開立啟動金鑰，本產品單租戶、資料表不帶
+`company_id`，資料庫與程序都不合併。同一個 repo 的理由只有一個——授權檔的 payload
+（`laysi-license-token`）兩邊共用一份定義，欄位漂掉是編譯錯誤而不是客戶端解不出來。
+它跑得動 `cargo test` 也是因此才進得了 CI。
 
 `license_state` 單列表存三樣東西：本安裝抽出的 `install_id`、客戶輸入的啟動金鑰，以及
 授權伺服器用 Ed25519 簽回來的授權檔。**畫面上每一個授權欄位都從簽章 payload 讀出**

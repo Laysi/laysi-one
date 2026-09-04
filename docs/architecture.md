@@ -2713,10 +2713,23 @@ INSERT。
 
 ## 產品授權
 
-授權伺服器是另一個專案（`Laysi/laysi-one-license`）。經銷商與代理商在那裡開立啟動金鑰、
-續約、解除綁定與月結對帳；本產品是單租戶，資料表不帶 `company_id`，把多租戶的通路管理塞
-進來等於要為經銷商在每一張表上加一個欄位。兩邊只靠一個端點相接：
-`POST /v1/license/check`。
+授權伺服器在 `license-server/`：同一個 repo，另一個 cargo workspace，另一個資料庫，
+另一個部署（主機上 `docker compose up -d --build`，不走 GHCR 也不走 release 標籤）。
+經銷商與代理商在那裡開立啟動金鑰、續約、解除綁定與月結對帳；本產品是單租戶，資料表不帶
+`company_id`，把多租戶的通路管理塞進來等於要為經銷商在每一張表上加一個欄位。
+執行期兩邊只靠一個端點相接：`POST /v1/license/check`。
+
+**放同一個 repo 的理由是那份 payload**：`backend/crates/laysi-license-token` 定義
+`LicensePayload`，簽的一方與驗的一方都 `use` 它。兩個 repo 的時候它是兩份手抄的複本，
+改一個欄位名不會讓任何一邊的建置失敗——症狀是客戶端解不出授權檔，而畫面只說得出
+「授權檔無法驗證」。合併之後那是編譯錯誤。附帶的是授權伺服器從此有 CI（`ci.yml` 的
+`license-server` job），它自己那個 repo 一條 workflow 都沒有。
+
+**兩個 workspace 不是一個**：授權伺服器不需要 `aws-sdk-s3` 與 `openidconnect`，併成一個
+會讓每一次產品建置都拖著它們。它的映像 build context 因此是 repo 根目錄而不是
+`license-server/`（要拿得到那個共用 crate），`.dockerignore` 只排掉
+`license-server/target/`、`secrets/` 與 `.dev/`——**`secrets/` 裡是簽章私鑰，那個目錄
+一定要排掉**。
 
 **啟用與定期檢查是同一個呼叫**。第一次呼叫綁定主機並把授權推到使用中，之後每一次都是續
 租。沒有第二個端點，因為沒有第二個決定。
