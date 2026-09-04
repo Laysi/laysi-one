@@ -120,8 +120,6 @@ export function Security({ onToast, reloadKey }: Props) {
   const [savingOidc, setSavingOidc] = useState(false);
   const [licence, setLicence] = useState<LicenseState | null>(null);
   const [activationKey, setActivationKey] = useState('');
-  const [licenceToken, setLicenceToken] = useState('');
-  const [licenceOffline, setLicenceOffline] = useState(false);
   const [checkingLicence, setCheckingLicence] = useState(false);
 
   const me = useCurrentUser();
@@ -321,7 +319,6 @@ export function Security({ onToast, reloadKey }: Props) {
       const next = await callOp('activate_license', input, undefined, licenseState);
       setLicence(next);
       setActivationKey('');
-      setLicenceToken('');
       onToast(next.note || `授權${next.standing}`);
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
@@ -437,70 +434,36 @@ export function Security({ onToast, reloadKey }: Props) {
 
           {canActivateLicence && (
             <div className="card form-card">
-              {licenceOffline ? (
-                <>
-                  <label className="field field--full">
-                    離線授權檔
-                    <textarea
-                      className="input"
-                      rows={4}
-                      value={licenceToken}
-                      onChange={(e) => setLicenceToken(e.target.value)}
-                    />
-                    <span className="field__hint">
-                      把上方的本機識別碼交給經銷商，換取本機專用的授權檔。
-                    </span>
-                  </label>
-                  <div className="row-actions">
-                    <button
-                      className="btn"
-                      disabled={checkingLicence || !licenceToken.trim()}
-                      onClick={() => void checkLicence({ license_token: licenceToken })}
-                    >
-                      {checkingLicence ? '驗證中…' : '套用授權檔'}
-                    </button>
-                    <button className="btn btn--ghost" onClick={() => setLicenceOffline(false)}>
-                      改用啟動金鑰
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <label className="field field--full">
-                    啟動金鑰
-                    <input
-                      className="input num"
-                      value={activationKey}
-                      placeholder={
-                        licence.has_activation_key
-                          ? '已輸入，留空表示沿用'
-                          : 'LAYSI-XXXXX-XXXXX-XXXXX-XXXXX'
-                      }
-                      onChange={(e) => setActivationKey(e.target.value)}
-                    />
-                  </label>
-                  <div className="row-actions">
-                    <button
-                      className="btn"
-                      disabled={checkingLicence}
-                      onClick={() =>
-                        void checkLicence(
-                          activationKey.trim() ? { activation_key: activationKey.trim() } : {},
-                        )
-                      }
-                    >
-                      {checkingLicence
-                        ? '驗證中…'
-                        : activationKey.trim()
-                          ? '啟用授權'
-                          : '立即驗證'}
-                    </button>
-                    <button className="btn btn--ghost" onClick={() => setLicenceOffline(true)}>
-                      本機不對外連線
-                    </button>
-                  </div>
-                </>
-              )}
+            <label className="field field--full">
+              啟動金鑰
+              <input
+                className="input num"
+                value={activationKey}
+                placeholder={
+                  licence.has_activation_key
+                    ? '已輸入，留空表示沿用'
+                    : 'LAYSI-XXXXX-XXXXX-XXXXX-XXXXX'
+                }
+                onChange={(e) => setActivationKey(e.target.value)}
+              />
+            </label>
+            <div className="row-actions">
+              <button
+                className="btn"
+                disabled={checkingLicence}
+                onClick={() =>
+                  void checkLicence(
+                    activationKey.trim() ? { activation_key: activationKey.trim() } : {},
+                  )
+                }
+              >
+                {checkingLicence
+                  ? '驗證中…'
+                  : activationKey.trim()
+                    ? '啟用授權'
+                    : '立即驗證'}
+              </button>
+            </div>
             </div>
           )}
         </section>

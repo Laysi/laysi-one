@@ -59,7 +59,7 @@ const WARN_DAYS: i64 = 30;
 /// Days after the lease ends during which everything still works.
 ///
 /// Read together with the licence server's own lease window, this is how long
-/// an installation with no way out to the internet keeps writing: the lease,
+/// an installation that cannot reach the licence server keeps writing: the lease,
 /// then this. Long enough that a lapse is a conversation rather than an
 /// outage.
 const GRACE_DAYS: i64 = 30;
@@ -275,7 +275,7 @@ fn lapse_reason(today: NaiveDate, expires_on: NaiveDate, partner: &str) -> Strin
 /// No usable token: never activated, or one that no longer verifies.
 fn unlicensed(state: &LicenseState, today: NaiveDate, token: &str) -> Licence {
     let reason = if !token.is_empty() {
-        "授權檔無法驗證，請重新輸入啟動金鑰，或向經銷商索取新的離線授權檔。".to_string()
+        "授權檔無法驗證，請重新輸入經銷商提供的啟動金鑰。".to_string()
     } else {
         match state.grace_until {
             Some(until) => format!("本安裝尚未啟用授權，請於 {until} 前輸入啟動金鑰。"),
@@ -311,35 +311,6 @@ fn grace_standing(state: &LicenseState, today: NaiveDate) -> Standing {
         Some(until) if until >= today => Standing::Grace,
         _ => Standing::ReadOnly,
     }
-}
-
-/// Store a licence file minted for this machine.
-///
-/// Both checks happen before anything is written: a file that does not verify
-/// would otherwise replace a working licence with nothing, and one minted for
-/// another machine is not this installation's however good its signature.
-/// Shared with first-run initialisation, which activates before it creates
-/// the administrator account.
-pub async fn activate_offline(
-    store: &Store,
-    token: &str,
-    today: NaiveDate,
-) -> Result<Licence, OpError> {
-    let state = store.license_state().await?;
-    let fingerprint = laysi_store::license::fingerprint(state.install_id);
-    let key = product_key().ok_or_else(|| OpError::BadInput("本版本無法驗證授權檔。".into()))?;
-    let payload = verify_with(&key, token).ok_or_else(|| {
-        OpError::BadInput("授權檔無法驗證，請向經銷商確認取得的內容是否完整。".into())
-    })?;
-    if payload.fingerprint != fingerprint {
-        return Err(OpError::BadInput(
-            "本授權檔是發給另一台主機的，請將本頁的主機識別碼交給經銷商重新產生。".into(),
-        ));
-    }
-    store.save_offline_license(token).await?;
-    refresh(store, today)
-        .await
-        .ok_or_else(|| OpError::BadInput("授權已寫入，但目前讀不回來。".into()))
 }
 
 /// The cause a refusal opens with, read afresh so it can name the reseller
@@ -549,10 +520,6 @@ pub struct ActivateLicenseInput {
     /// key already stored, which is what the screen's 「立即驗證」 does.
     #[serde(default)]
     pub activation_key: Option<String>,
-    /// A signed licence file, for an installation with no way out to the
-    /// internet. Mutually exclusive with the key above.
-    #[serde(default)]
-    pub license_token: Option<String>,
 }
 
 struct ActivateLicense;
@@ -566,7 +533,7 @@ impl Operation for ActivateLicense {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "啟用或重新驗證授權：輸入啟動金鑰向授權伺服器取得授權，或貼上離線授權檔。"
+        "啟用或重新驗證授權：輸入經銷商提供的啟動金鑰，向授權伺服器取得授權。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ActivateLicenseInput>()
@@ -574,29 +541,20 @@ impl Operation for ActivateLicense {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: ActivateLicenseInput = parse(input)?;
-        let offline = i.license_token.unwrap_or_default();
-        let offline = offline.trim();
-
-        let licence = if !offline.is_empty() {
-            // Never reaches the network: the signature and the machine it was
-            // minted for are the whole check.
-            activate_offline(&ctx.store, offline, ctx.today).await?
+        let typed = i.activation_key.unwrap_or_default();
+        let typed = typed.trim();
+        let key = if typed.is_empty() {
+            let stored = ctx.store.license_state().await?.activation_key;
+            if stored.is_empty() {
+                return Err(OpError::BadInput(
+                    "尚未輸入啟動金鑰，請填入經銷商提供的金鑰。".into(),
+                ));
+            }
+            stored
         } else {
-            let typed = i.activation_key.unwrap_or_default();
-            let typed = typed.trim();
-            let key = if typed.is_empty() {
-                let stored = ctx.store.license_state().await?.activation_key;
-                if stored.is_empty() {
-                    return Err(OpError::BadInput(
-                        "尚未輸入啟動金鑰，請填入經銷商提供的金鑰。".into(),
-                    ));
-                }
-                stored
-            } else {
-                typed.to_string()
-            };
-            check_now(&ctx.store, &key).await?
+            typed.to_string()
         };
+        let licence = check_now(&ctx.store, &key).await?;
 
         let state = ctx.store.license_state().await?;
         let fingerprint = laysi_store::license::fingerprint(state.install_id);

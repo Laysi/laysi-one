@@ -52,8 +52,8 @@ pub struct LicenseState {
 /// This machine, as 64 hex characters.
 ///
 /// Not secret and not meant to be: the licence server only has to notice when
-/// it changes, and the customer reads it off their own screen when they need
-/// an offline licence file.
+/// it changes, and the customer reads it off their own screen when a partner
+/// has to unbind the machine.
 pub fn fingerprint(install_id: Uuid) -> String {
     let machine = MACHINE_ID_PATHS
         .iter()
@@ -125,21 +125,6 @@ impl Store {
             .bind(message.chars().take(300).collect::<String>())
             .execute(&self.pool)
             .await?;
-        Ok(())
-    }
-
-    /// Store a token that arrived without a check: the offline licence file a
-    /// partner minted for an installation that will never call in.
-    pub async fn save_offline_license(&self, token: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE license_state
-                SET token = $1, activation_key = '', nonce = '',
-                    last_check_at = now(), last_error = '', grace_until = NULL
-              WHERE id = 1",
-        )
-        .bind(token)
-        .execute(&self.pool)
-        .await?;
         Ok(())
     }
 

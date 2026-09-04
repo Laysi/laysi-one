@@ -639,27 +639,9 @@ async fn setup_json(state: &Shared, signed_in: bool) -> Value {
                 false
             }
         };
-    // The machine identifier goes out only while initialisation is still
-    // open, and only because the screen needs it: an installation with no way
-    // out to the internet reads it off this page and gives it to the reseller,
-    // who mints a licence file for that machine and nothing else. It is a hash
-    // of an identifier this installation drew for itself, so it names nothing
-    // and unlocks nothing.
-    let fingerprint = if available {
-        match state.store.license_state().await {
-            Ok(license) => laysi_store::license::fingerprint(license.install_id),
-            Err(error) => {
-                tracing::error!(%error, "reading the licence state for setup failed");
-                String::new()
-            }
-        }
-    } else {
-        String::new()
-    };
     json!({
         "bootstrap_available": available,
         "token_required": state.setup.token_required(),
-        "fingerprint": fingerprint,
     })
 }
 

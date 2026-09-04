@@ -43,15 +43,14 @@ const TODAY =
 const ADMIN_PASSWORD = "Function-Test-2026";
 // Initialisation activates before it creates the account, so this script needs
 // a licence the way a real installation does: an activation key checked against
-// a licence server, or a licence file that server minted for this machine.
-// LICENSE_SERVER_URL points the server at whichever one is running.
+// a licence server. LICENSE_SERVER_URL points the server at whichever one is
+// running.
 const ACTIVATION_KEY = process.env.LAYSI_ACTIVATION_KEY ?? "";
-const LICENSE_TOKEN = process.env.LAYSI_LICENSE_TOKEN ?? "";
-const LICENCE = { activation_key: ACTIVATION_KEY, license_token: LICENSE_TOKEN };
-if (!ACTIVATION_KEY && !LICENSE_TOKEN) {
+const LICENCE = { activation_key: ACTIVATION_KEY };
+if (!ACTIVATION_KEY) {
   console.error(
-    "需要 LAYSI_ACTIVATION_KEY（搭配 LICENSE_SERVER_URL）或 LAYSI_LICENSE_TOKEN。\n" +
-      "授權伺服器在 ~/projects/laysi-license，開立後把金鑰放進環境變數。",
+    "需要 LAYSI_ACTIVATION_KEY，並以 LICENSE_SERVER_URL 指向授權伺服器。\n" +
+      "授權伺服器在 ~/projects/laysi-one-license，開立後把金鑰放進環境變數。",
   );
   process.exit(1);
 }

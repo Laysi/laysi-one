@@ -23,7 +23,6 @@ export type SessionUser = z.infer<typeof sessionUser>;
 export const setupState = z.object({
   bootstrap_available: z.boolean(),
   token_required: z.boolean(),
-  fingerprint: z.string().default(''),
 });
 export type SetupState = z.infer<typeof setupState>;
 

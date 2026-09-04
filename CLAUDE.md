@@ -188,7 +188,7 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
 
 ### 5. 授權是簽章，不是資料庫裡的一列
 
-授權伺服器是另一個專案（`~/projects/laysi-license`），多租戶，經銷商與代理商在那裡開立
+授權伺服器是另一個專案（`~/projects/laysi-one-license`），多租戶，經銷商與代理商在那裡開立
 啟動金鑰；本產品是單租戶，資料表不帶 `company_id`，兩者不能合併。
 
 `license_state` 單列表存三樣東西：本安裝抽出的 `install_id`、客戶輸入的啟動金鑰，以及
@@ -213,14 +213,15 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
 請經銷商解除綁定。compose 把 `/etc/machine-id` 掛進 `api` 與 `mcp` 兩個服務，**兩個都要
 掛**，不然它們對同一個資料庫算出兩個識別碼，其中一個會認為自己未授權。
 
-**啟用在建立系統管理員帳號之前**（`POST /v1/auth/bootstrap` 收 `activation_key` 或
-`license_token`，`screens/Init.tsx` 是第一個欄位）：驗不過就什麼都不建，安裝維持原狀。
+**啟用在建立系統管理員帳號之前**（`POST /v1/auth/bootstrap` 收 `activation_key`，
+`screens/Init.tsx` 是第一個欄位）：驗不過就什麼都不建，安裝維持原狀。
 **導入前就存在的安裝有 90 天寬限**（0007 看得到 `install_bootstrap` 才寫 `grace_until`），
 不然升級當天所有既有客戶一起變唯讀。
 
 **每天回報四個欄位**：授權編號、主機識別碼、系統版本、在職人數。帳務與人事資料一個都不
-外傳，而「安全與營運」那張卡照實把這四項列出來。離線安裝走 `license_token`：經銷商拿
-客戶畫面上的主機識別碼產生授權檔，`not_after` 直接是合約到期日，不回報。
+外傳，而「安全與營運」那張卡照實把這四項列出來。**沒有離線授權檔**：一份撤銷不了也看不見
+的授權檔，加上一個收不到 `refresh_regulations` 與 `refresh_work_calendar`、費率永遠停在
+出廠映像那一版的安裝，兩件事都不該賣出去。理由寫在 `docs/architecture.md`。
 
 ## 資料層的四個不變量（由 SQL 強制）
 

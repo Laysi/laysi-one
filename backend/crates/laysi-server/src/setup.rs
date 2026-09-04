@@ -33,7 +33,7 @@ use crate::auth::{
     attach_session_cookie, env_bool, error_response, issue_session, user_json_with_role,
     MIN_PASSWORD_CHARS,
 };
-use crate::{today, Shared};
+use crate::Shared;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -119,10 +119,6 @@ pub struct BootstrapInput {
     /// holding the key is the person standing at this screen.
     #[serde(default)]
     activation_key: String,
-    /// A signed licence file, for an installation with no way out to the
-    /// internet. One of the two is required.
-    #[serde(default)]
-    license_token: String,
 }
 
 /// A validated account request. Building one is the only way to reach the
@@ -130,7 +126,6 @@ pub struct BootstrapInput {
 struct FirstAccount {
     password: String,
     activation_key: String,
-    license_token: String,
 }
 
 fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
@@ -142,15 +137,13 @@ fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
     }
 
     let activation_key = input.activation_key.trim().to_string();
-    let license_token = input.license_token.trim().to_string();
-    if activation_key.is_empty() && license_token.is_empty() {
+    if activation_key.is_empty() {
         return Err("請輸入經銷商提供的啟動金鑰");
     }
 
     Ok(FirstAccount {
         password: input.password,
         activation_key,
-        license_token,
     })
 }
 
@@ -163,12 +156,7 @@ fn validate(input: BootstrapInput) -> Result<FirstAccount, &'static str> {
 /// licence is good. Not a `Result`: an `axum::Response` is a large value to
 /// carry in an error variant, and there is nothing here to propagate.
 async fn activation_refusal(state: &Shared, account: &FirstAccount) -> Option<Response> {
-    let result = if account.license_token.is_empty() {
-        laysi_ops::ops::license::check_now(&state.store, &account.activation_key).await
-    } else {
-        laysi_ops::ops::license::activate_offline(&state.store, &account.license_token, today())
-            .await
-    };
+    let result = laysi_ops::ops::license::check_now(&state.store, &account.activation_key).await;
     match result {
         Ok(licence) => {
             tracing::info!(standing = licence.label(), "licence activated at setup");
@@ -383,7 +371,6 @@ mod tests {
             password: password.into(),
             setup_token: String::new(),
             activation_key: "LAYSI-AAAAA-AAAAA-AAAAA-AAAAA".into(),
-            license_token: String::new(),
         }
     }
 
@@ -403,15 +390,6 @@ mod tests {
         let mut without = input(GOOD_PASSWORD);
         without.activation_key = "  ".into();
         assert_eq!(validate(without).err(), Some("請輸入經銷商提供的啟動金鑰"));
-
-        // The offline path is the other half of the same requirement.
-        let mut offline = input(GOOD_PASSWORD);
-        offline.activation_key = String::new();
-        offline.license_token = "abc.def".into();
-        assert_eq!(
-            validate(offline).expect("離線授權檔也算").license_token,
-            "abc.def"
-        );
     }
 
     /// The caller supplies a password and nothing else. Everything that
