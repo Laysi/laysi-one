@@ -1,0 +1,122 @@
+# Builds the licence server and puts it on its host, on demand.
+#
+#   gh workflow run license-deploy.yml
+#
+# No registry: the image is built here and streamed down the SSH connection,
+# so it exists in exactly two places, this runner and that host. The signing
+# key travels the same way and never enters the image -- an image is a thing
+# that gets copied, cached and pulled, and this key cannot be rotated without
+# a release to every installation in the field.
+#
+# Set the repository variable LICENSE_DEPLOY_HOST before the first run.
+
+name: Deploy licence server
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_HOST: ${{ vars.LICENSE_DEPLOY_HOST }}
+  DEPLOY_USER: jiazhen
+  DEPLOY_DIR: laysi-one-license
+  # Pinned by `name:` in license-server/docker-compose.yml, which is what
+  # prefixes every volume. Changing one without the other starts the stack
+  # from an empty secrets volume and generates a second signing key.
+  SECRETS_VOLUME: laysi-one-license_secrets
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+
+      - name: Configure ssh
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          LICENSE_HOST_KEY: ${{ secrets.LICENSE_HOST_KEY }}
+        run: |
+          set -eu
+          test -n "$DEPLOY_HOST" || { echo "set the LICENSE_DEPLOY_HOST variable"; exit 1; }
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned rather than trusted on first use, the same as deploy.yml:
+          # the tunnel is reachable by anyone, and the host key is what proves
+          # this is the right machine.
+          printf '%s %s\n' "$DEPLOY_HOST" "$LICENSE_HOST_KEY" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host $DEPLOY_HOST
+              User $DEPLOY_USER
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              ProxyCommand cloudflared access ssh --hostname %h
+          EOF
+
+      - name: Build and send the image
+        run: |
+          set -eu
+          # The build context is the repository root: the token payload is a
+          # crate shared with the product, outside license-server/.
+          docker build --platform linux/amd64 \
+            -f license-server/Dockerfile -t laysi-one-license:deploy .
+          docker save laysi-one-license:deploy | gzip -1 | ssh "$DEPLOY_HOST" 'gunzip | podman load'
+
+      - name: Provision the signing key
+        env:
+          LICENSE_SIGNING_KEY: ${{ secrets.LICENSE_SIGNING_KEY }}
+        run: |
+          set -eu
+          test -n "$LICENSE_SIGNING_KEY" || { echo "set the LICENSE_SIGNING_KEY secret"; exit 1; }
+          ssh "$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
+          scp license-server/docker-compose.prod.yml "$DEPLOY_HOST:$DEPLOY_DIR/"
+          # Only when the volume has none. Overwriting a key that is already
+          # signing licences would invalidate every token in the field, and a
+          # deployment is not where that decision belongs.
+          printf '%s' "$LICENSE_SIGNING_KEY" | ssh "$DEPLOY_HOST" \
+            "podman volume create ${SECRETS_VOLUME} >/dev/null 2>&1 || true; \
+             podman run --rm -i -v ${SECRETS_VOLUME}:/secrets alpine:3.24 sh -c \
+             '[ -s /secrets/license_signing_key ] || { cat > /secrets/license_signing_key; \
+              chmod 0444 /secrets/license_signing_key; }'"
+
+      - name: Restart the stack
+        run: |
+          set -eu
+          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && \
+            podman-compose -f docker-compose.prod.yml up -d secrets && \
+            setsid nohup podman-compose -f docker-compose.prod.yml up -d --force-recreate \
+            > deploy.log 2>&1 < /dev/null & sleep 2"
+
+      - name: The running key must be the one the product verifies against
+        run: |
+          set -eu
+          for _ in $(seq 60); do
+              if ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
+                  'podman ps --format "{{.Names}} {{.Status}}" | grep -q "app.*Up"'; then
+                  ok=yes
+                  break
+              fi
+              sleep 5
+          done
+          [ "${ok:-}" = yes ] || { ssh "$DEPLOY_HOST" "tail -20 $DEPLOY_DIR/deploy.log"; exit 1; }
+          # The product carries this key as a constant and asks nobody at run
+          # time, so a server signing with a different one produces tokens
+          # every installation rejects -- and the only symptom is a sentence on
+          # the customer's screen. Compared here, where it is one line.
+          want=$(sed -n 's/^const PUBLIC_KEY_HEX: &str = "\([0-9a-f]\{64\}\)";$/\1/p' \
+            backend/crates/laysi-ops/src/ops/license.rs)
+          test -n "$want" || { echo "PUBLIC_KEY_HEX not found; did the constant change shape?"; exit 1; }
+          got=$(ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && podman-compose -f docker-compose.prod.yml exec -T app laysi-one-license public-key" | tr -d '\r\n')
+          echo "product expects $want"
+          echo "server signs as $got"
+          [ "$want" = "$got" ] || { echo "the signing key does not match PUBLIC_KEY_HEX"; exit 1; }

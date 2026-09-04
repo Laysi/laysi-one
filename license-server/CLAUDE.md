@@ -15,6 +15,26 @@ Laysi 授權伺服器：經銷商／代理商開立 Laysi One 的啟動金鑰，
 因為那個共用 crate 在 `license-server/` 之外。改 `Dockerfile` 的 `COPY` 路徑時記得
 它們是相對於根目錄，不是相對於本目錄。
 
+## 部署
+
+`.github/workflows/license-deploy.yml`（`gh workflow run license-deploy.yml`）：
+在 runner 上建映像、`docker save | ssh podman load` 送到主機、`podman-compose -f
+docker-compose.prod.yml up -d`。**不進任何 registry**——那個映像只存在於那次 runner
+與那台主機。
+
+**簽章私鑰由 `LICENSE_SIGNING_KEY` 這組 GitHub secret 提供，deploy 時寫進資料卷，
+不進映像**：映像會被複製、快取、拉取，而這把金鑰輪替一次要跨越 75 天協調每一個安裝
+升級（見產品的 `docs/architecture.md`），所以它的曝險面要壓到最小。寫入是
+`[ -s ] ||`，資料卷裡已經有一把就不覆蓋——覆蓋等於現場每一張授權檔同時失效，那不是
+部署該做的決定。
+
+最後一步比對**執行中的伺服器公鑰與產品的 `PUBLIC_KEY_HEX`**，不同就讓部署失敗。
+那個常數是手抄進產品原始碼的，沒有這一步，抄錯的症狀是客戶畫面上一句「授權檔無法驗證」。
+
+第一次執行前要設好：repository variable `LICENSE_DEPLOY_HOST`，secrets
+`LICENSE_SIGNING_KEY` 與 `LICENSE_HOST_KEY`（主機的 SSH host key，格式如
+`ssh-ed25519 AAAA…`）。
+
 ## 常用指令
 
 ```bash

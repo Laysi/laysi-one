@@ -1,0 +1,95 @@
+# Laysi 授權伺服器：正式部署，用送上來的映像。
+#
+#   podman-compose -f docker-compose.prod.yml up -d secrets
+#   podman-compose -f docker-compose.prod.yml up -d
+#
+# docker-compose.yml with `build:` replaced by the tag that
+# .github/workflows/license-deploy.yml loads over SSH: there is no source on
+# that host to build from. Reasoning for each service lives in
+# docker-compose.yml; only what differs is commented here.
+#
+# The signing key is written into the volume by that workflow, from a GitHub
+# secret, before this runs. The `secrets` service only writes what is missing,
+# so it fills in the database password and leaves the key alone.
+
+# The project name, and so the prefix on every volume, is pinned here rather
+# than taken from the directory name: a renamed checkout that silently starts
+# from an empty secrets volume would generate a new signing key, and a new
+# signing key invalidates every licence already in the field.
+name: laysi-one-license
+
+services:
+  # Generates what must differ between installations, once, into a volume.
+  # Never regenerates: a new signing key would invalidate every licence token
+  # already in the field, and a new database password against an existing
+  # pgdata leaves a database nobody can open.
+  secrets:
+    image: alpine:3.24
+    volumes:
+      - secrets:/secrets
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        umask 022
+        # Alphanumeric only: the password is interpolated into a connection
+        # string, where punctuation ends the string rather than joining it.
+        [ -s /secrets/pg_password ] || LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48 > /secrets/pg_password
+        # 32 bytes of hex: the Ed25519 seed every licence token is signed with.
+        [ -s /secrets/license_signing_key ] || od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > /secrets/license_signing_key
+        [ -s /secrets/database_url ] || printf 'postgres://%s:%s@postgres:5432/%s' \
+            "$${POSTGRES_USER:-laysi}" "$$(cat /secrets/pg_password)" "$${POSTGRES_DB:-license}" \
+            > /secrets/database_url
+        chmod 0444 /secrets/*
+        echo "簽章金鑰已就緒。取公鑰：docker compose exec app laysi-one-license public-key"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laysi}
+      POSTGRES_DB: ${POSTGRES_DB:-license}
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    # podman-compose translates depends_on into `podman --requires`, which
+    # demands the dependency be *running*; the secrets service exits as soon as
+    # it has written the volume. Bring it up once by name first instead.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laysi}
+      POSTGRES_PASSWORD_FILE: /secrets/pg_password
+      POSTGRES_DB: ${POSTGRES_DB:-license}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=zh-TW --locale=C.UTF-8"
+    volumes:
+      # 18 moved PGDATA to /var/lib/postgresql/18/docker and declares the
+      # volume one level up, so the mount is the parent directory.
+      - pgdata:/var/lib/postgresql
+      - secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laysi} -d ${POSTGRES_DB:-license}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    image: laysi-one-license:deploy
+    restart: unless-stopped
+    environment:
+      DATABASE_URL_FILE: /secrets/database_url
+      LICENSE_SIGNING_KEY_FILE: /secrets/license_signing_key
+      BIND_ADDR: 0.0.0.0:8090
+    volumes:
+      - secrets:/secrets:ro
+    ports:
+      # Loopback only. TLS and the public name `license.laysi.one` belong to
+      # the tunnel in front of this stack, the same arrangement the product's
+      # own deployment uses; nothing here should be reachable from the
+      # internet on its own. Override LICENSE_BIND to publish it wider.
+      - "${LICENSE_BIND:-127.0.0.1:8090}:8090"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/laysi-one-license", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  secrets:
