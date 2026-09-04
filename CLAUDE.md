@@ -3,7 +3,7 @@
 ## 專案
 
 Laysi 授權伺服器：經銷商／代理商開立 Laysi One 的啟動金鑰，安裝端定期報到。
-與 `~/projects/laysi-one` 是兩套系統、兩個資料庫——產品是單租戶，這裡是多租戶，
+與 `Laysi/laysi-one` 是兩套系統、兩個資料庫——產品是單租戶，這裡是多租戶，
 把它們合在一起等於要為經銷商在每一張產品資料表上加一個欄位。
 
 單一 crate，Rust + axum + sqlx + PostgreSQL 18。相依套件一律取自 laysi-one
