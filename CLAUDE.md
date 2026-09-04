@@ -188,7 +188,7 @@ favicon 裡的 `prefers-color-scheme`（只有 Firefox 讀，症狀是換主題�
 
 ### 5. 授權是簽章，不是資料庫裡的一列
 
-授權伺服器是另一個專案（`~/projects/laysi-one-license`），多租戶，經銷商與代理商在那裡開立
+授權伺服器是另一個專案（`Laysi/laysi-one-license`），多租戶，經銷商與代理商在那裡開立
 啟動金鑰；本產品是單租戶，資料表不帶 `company_id`，兩者不能合併。
 
 `license_state` 單列表存三樣東西：本安裝抽出的 `install_id`、客戶輸入的啟動金鑰，以及

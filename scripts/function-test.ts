@@ -50,7 +50,7 @@ const LICENCE = { activation_key: ACTIVATION_KEY };
 if (!ACTIVATION_KEY) {
   console.error(
     "需要 LAYSI_ACTIVATION_KEY，並以 LICENSE_SERVER_URL 指向授權伺服器。\n" +
-      "授權伺服器在 ~/projects/laysi-one-license，開立後把金鑰放進環境變數。",
+      "授權伺服器是 Laysi/laysi-one-license，開立後把金鑰放進環境變數。",
   );
   process.exit(1);
 }
