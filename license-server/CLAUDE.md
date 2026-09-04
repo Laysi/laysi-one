@@ -17,10 +17,20 @@ Laysi 授權伺服器：經銷商／代理商開立 Laysi One 的啟動金鑰，
 
 ## 部署
 
-`.github/workflows/license-deploy.yml`（`gh workflow run license-deploy.yml`）：
-在 runner 上建映像、`docker save | ssh podman load` 送到主機、`podman-compose -f
-docker-compose.prod.yml up -d`。**不進任何 registry**——那個映像只存在於那次 runner
-與那台主機。
+兩支 workflow，與產品同一套分工：
+
+```bash
+git tag license-v0.1.0 && git push origin license-v0.1.0   # 建映像推 ghcr
+gh workflow run license-deploy.yml -f version=license-v0.1.0
+```
+
+**標籤前綴分開**：`v*` 是產品（`release.yml`），`license-v*` 是這裡
+（`license-release.yml`）。兩個 pattern 不重疊，一個標籤只會觸發其中一支。少了前綴，
+一次發版會同時建出兩邊的映像。
+
+`license-deploy.yml` 從 ghcr 拉下指定標籤、`docker save | ssh podman load` 送到主機、
+`podman-compose -f docker-compose.prod.yml up -d`。**指定標籤而不是從 main 建**，
+所以回退就是再跑一次同一支 workflow 換一個版本。主機上沒有 registry 憑證。
 
 **簽章私鑰由 `LICENSE_SIGNING_KEY` 這組 GitHub secret 提供，deploy 時寫進資料卷，
 不進映像**：映像會被複製、快取、拉取，而這把金鑰輪替一次要跨越 75 天協調每一個安裝
@@ -32,7 +42,7 @@ docker-compose.prod.yml up -d`。**不進任何 registry**——那個映像只�
 那個常數是手抄進產品原始碼的，沒有這一步，抄錯的症狀是客戶畫面上一句「授權檔無法驗證」。
 
 第一次執行前要設好：repository variable `LICENSE_DEPLOY_HOST`，secrets
-`LICENSE_SIGNING_KEY` 與 `LICENSE_HOST_KEY`（主機的 SSH host key，格式如
+`LICENSE_SIGNING_KEY`（已設）與 `LICENSE_HOST_KEY`（主機的 SSH host key，格式如
 `ssh-ed25519 AAAA…`）。
 
 ## 常用指令

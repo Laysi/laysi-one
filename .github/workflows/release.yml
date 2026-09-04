@@ -14,6 +14,11 @@
 #
 # CI (ci.yml) still guards the code; this workflow only packages a tag that
 # already passed it.
+#
+# Two deployables share this repository and each cuts its own tags: `v*` is
+# the product and belongs here, `license-v*` is the licence server and belongs
+# to license-release.yml. The prefixes do not overlap, so a tag runs one of
+# these workflows and never both.
 
 name: Release
 
