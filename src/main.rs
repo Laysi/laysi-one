@@ -147,7 +147,6 @@ async fn main() -> Result<()> {
         .route("/licenses/{no}/renew", post(console::renew))
         .route("/licenses/{no}/unbind", post(console::unbind))
         .route("/licenses/{no}/status", post(console::set_status))
-        .route("/licenses/{no}/offline", post(console::offline))
         .route("/billing", get(console::billing))
         .route(
             "/partners",

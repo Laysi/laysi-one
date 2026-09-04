@@ -72,8 +72,8 @@ pub fn mint(key: &SigningKey, payload: &LicensePayload) -> Result<String> {
     Ok(token)
 }
 
-/// Verify a token and return what it says. Used by the offline signing tool
-/// to check its own output; the product has its own copy of this half.
+/// Verify a token and return what it says. Used by `mint` to check its own
+/// output; the product has its own copy of this half.
 pub fn verify(key: &VerifyingKey, token: &str) -> Result<LicensePayload> {
     let (body, sig) = token
         .split_once('.')

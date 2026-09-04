@@ -19,7 +19,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 
 use crate::db::{self, Actor};
-use crate::token::{self, LicensePayload};
+use crate::token;
 use crate::{auth, Shared};
 
 /// HTML-escape. Everything a partner typed passes through here on the way to
@@ -451,7 +451,6 @@ pub async fn detail(
     State(s): State<Shared>,
     headers: HeaderMap,
     Path(no): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let a = signed_in!(s, headers);
     let found = match db::license(&s.pool, &a, &no).await {
@@ -534,27 +533,6 @@ pub async fn detail(
         r#"<button name="status" value="suspended" class="warn">暫停</button>"#
     };
 
-    let offline = query.get("offline").cloned().unwrap_or_default();
-    let offline_block = if offline.is_empty() {
-        // A plain string: the pattern below contains `{64}`, which `format!`
-        // would read as a placeholder.
-        r#"<h2>離線授權檔</h2>
-            <p class="lede">客戶主機不對外連線時使用。請客戶在啟用畫面上讀出主機識別碼，貼在這裡產生授權檔。</p>
-            <form class="card" method="post" action="offline">
-              <label>主機識別碼<input name="fingerprint" required pattern="[0-9a-f]{64}" placeholder="64 碼十六進位"></label>
-              <div class="actions"><button class="plain">產生離線授權檔</button>
-                <span class="note">效期至到期日當天，期間不需回報。</span></div>
-            </form>"#
-        .to_string()
-    } else {
-        format!(
-            r#"<h2>離線授權檔</h2>
-            <p class="lede">整段複製給客戶，貼在啟用畫面的「離線授權檔」欄位。</p>
-            <textarea readonly onclick="this.select()">{}</textarea>"#,
-            esc(&offline)
-        )
-    };
-
     page(
         &no,
         Some(&a),
@@ -587,8 +565,7 @@ pub async fn detail(
             <h2>授權期間</h2>
             <table><thead><tr><th>期間</th><th>計費月份</th><th class="r">授權費</th></tr></thead>
             <tbody>{term_rows}</tbody></table>
-            {denial_block}
-            {offline_block}"#,
+            {denial_block}"#,
             no_esc = esc(&no),
             licensee = esc(&r.licensee),
             tax = esc(&r.licensee_tax_id),
@@ -719,62 +696,6 @@ pub async fn set_status(
         Err(error) => fail(error.into()),
     }
 }
-
-#[derive(Deserialize)]
-pub struct OfflineForm {
-    fingerprint: String,
-}
-
-/// Mint a token for an installation that will never call in.
-///
-/// The lease runs to the end of the licence year rather than the usual
-/// window, because there is no second call to extend it. The trade is
-/// visible on this page: an offline licence cannot be suspended remotely, so
-/// it is the partner's decision rather than a default.
-pub async fn offline(
-    State(s): State<Shared>,
-    headers: HeaderMap,
-    Path(no): Path<String>,
-    Form(form): Form<OfflineForm>,
-) -> Response {
-    let a = signed_in!(s, headers);
-    let fingerprint = form.fingerprint.trim().to_lowercase();
-    if fingerprint.len() != 64 || !fingerprint.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Redirect::to(&format!("/licenses/{}", urlencode(&no))).into_response();
-    }
-    let found = match db::license(&s.pool, &a, &no).await {
-        Ok(row) => row,
-        Err(error) => return fail(error),
-    };
-    let Some(r) = found else {
-        return Redirect::to("/licenses").into_response();
-    };
-    let payload = LicensePayload {
-        license_no: r.license_no.clone(),
-        fingerprint,
-        // No install has reported one, and the product only compares the
-        // fingerprint. A zero uuid says plainly that this token was minted
-        // without the installation on the line.
-        install_id: uuid::Uuid::nil().to_string(),
-        licensee: r.licensee.clone(),
-        licensee_tax_id: r.licensee_tax_id.clone(),
-        partner: r.partner_name.clone(),
-        partner_no: r.partner_no.clone(),
-        issued_at: Utc::now(),
-        not_after: r.expires_on,
-        expires_on: r.expires_on,
-    };
-    match token::mint(&s.signing_key, &payload) {
-        Ok(signed) => Redirect::to(&format!(
-            "/licenses/{}?offline={}",
-            urlencode(&no),
-            urlencode(&signed)
-        ))
-        .into_response(),
-        Err(error) => fail(error),
-    }
-}
-
 // Billing
 
 pub async fn billing(State(s): State<Shared>, headers: HeaderMap) -> Response {
