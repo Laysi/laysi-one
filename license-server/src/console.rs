@@ -336,14 +336,12 @@ pub async fn licenses(
                 <td class="wide">{partner}</td>
                 <td><span class="tag {tone}">{label}</span>{flag}</td>
                 <td class="num">{expires}</td>
-                <td class="wide">{bound}</td>
-                <td class="num r">{people}</td></tr>"#,
+                <td class="wide">{bound}</td></tr>"#,
                 no = esc(&r.license_no),
                 licensee = esc(&r.licensee),
                 tax = esc(&r.licensee_tax_id),
                 partner = esc(&r.partner_name),
                 expires = date(r.expires_on),
-                people = r.employee_count,
             )
         })
         .collect();
@@ -353,7 +351,7 @@ pub async fn licenses(
     } else {
         format!(
             r#"<table><thead><tr><th>授權編號</th><th>被授權單位</th><th class="wide">經銷商</th>
-            <th>狀態</th><th>到期日</th><th class="wide">安裝</th><th class="r">人數</th></tr></thead>
+            <th>狀態</th><th>到期日</th><th class="wide">安裝</th></tr></thead>
             <tbody>{body}</tbody></table>"#
         )
     };
@@ -532,12 +530,11 @@ pub async fn detail(
 
     let bound_block = match &r.fingerprint {
         Some(fp) => format!(
-            r#"<tr><td>綁定主機</td><td class="fp">{}<br>綁定於 {} · 最後回報 {} · 版本 {} · 員工 {} 人</td></tr>"#,
+            r#"<tr><td>綁定主機</td><td class="fp">{}<br>綁定於 {} · 最後回報 {} · 版本 {}</td></tr>"#,
             esc(fp),
             instant(r.bound_at),
             instant(r.last_seen_at),
-            esc(&r.version),
-            r.employee_count
+            esc(&r.version)
         ),
         None => r#"<tr><td>綁定主機</td><td>尚未啟用；客戶第一次輸入金鑰時綁定，更換主機後請在本頁解除綁定。</td></tr>"#.to_string(),
     };

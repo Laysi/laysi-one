@@ -84,8 +84,7 @@ CREATE TABLE IF NOT EXISTS license (
     last_conflict_at timestamptz,
     last_seen_at timestamptz,
     last_ip text NOT NULL DEFAULT '',
-    version text NOT NULL DEFAULT '',
-    employee_count integer NOT NULL DEFAULT 0
+    version text NOT NULL DEFAULT ''
 );
 COMMENT ON COLUMN license.nonce IS
     '上一次發出的續期識別字；下一次檢查必須帶著它回來，兩份複本會互相沖銷。';

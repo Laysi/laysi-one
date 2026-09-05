@@ -337,7 +337,6 @@ struct CheckRequest<'a> {
     install_id: String,
     fingerprint: &'a str,
     version: &'a str,
-    employee_count: i64,
     nonce: &'a str,
 }
 
@@ -358,20 +357,18 @@ fn build_version() -> &'static str {
 
 /// Present the stored key to the licence server and store what comes back.
 ///
-/// The five fields that travel are the whole of it: an identifier, the
-/// machine, the version and a head count. No customer data leaves, which is
-/// what the screen that starts this says in as many words.
+/// Five fields travel and that is the whole of it: the key, the installation,
+/// the host, the version and the continuity nonce. Nothing describes the
+/// business -- not its size, not its people, not a figure out of its books.
 pub async fn check_now(store: &Store, key: &str) -> Result<Licence, OpError> {
     let state = store.license_state().await?;
     let fingerprint = laysi_store::license::fingerprint(state.install_id);
-    let employees = store.licensed_employee_count().await.unwrap_or(0);
 
     let body = serde_json::to_string(&CheckRequest {
         activation_key: key,
         install_id: state.install_id.to_string(),
         fingerprint: &fingerprint,
         version: build_version(),
-        employee_count: employees,
         nonce: &state.nonce,
     })
     .map_err(|_| OpError::BadInput("無法組出驗證請求。".into()))?;

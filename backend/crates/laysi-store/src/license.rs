@@ -127,15 +127,6 @@ impl Store {
             .await?;
         Ok(())
     }
-
-    /// Head count reported with every check, and the only figure that leaves
-    /// the building. Employees on the books, not accounts.
-    pub async fn licensed_employee_count(&self) -> Result<i64> {
-        let row = sqlx::query("SELECT count(*) AS n FROM employee WHERE status = 'active'")
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(row.get("n"))
-    }
 }
 
 #[cfg(test)]

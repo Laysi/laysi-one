@@ -5,10 +5,10 @@
 //! renews the lease and reports what that installation now looks like. There
 //! is no second endpoint because there is no second decision.
 //!
-//! What travels here is deliberately thin — an identifier, a fingerprint, a
-//! version and a head count. None of the customer's books, names or figures
-//! leave the building, and the screen that starts this says so in as many
-//! words.
+//! What travels here is deliberately thin — an identifier, a fingerprint and
+//! a version. The fingerprint is a hash of the host, not of anything about
+//! the business: nothing here says how large the customer is, let alone what
+//! is in their books.
 
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -33,8 +33,6 @@ pub struct CheckRequest {
     pub fingerprint: String,
     #[serde(default)]
     pub version: String,
-    #[serde(default)]
-    pub employee_count: i32,
     /// The nonce handed out by the previous answer. Absent on the first
     /// check, and on any installation restored from a backup taken before the
     /// last one.
@@ -209,8 +207,7 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
                 nonce = $4,
                 last_seen_at = now(),
                 last_ip = $5,
-                version = $6,
-                employee_count = $7
+                version = $6
           WHERE id = $1",
     )
     .bind(id)
@@ -219,7 +216,6 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
     .bind(&nonce)
     .bind(ip)
     .bind(req.version.chars().take(40).collect::<String>())
-    .bind(req.employee_count.clamp(0, 100_000))
     .execute(&mut *tx)
     .await?;
 

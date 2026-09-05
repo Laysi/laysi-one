@@ -121,7 +121,6 @@ pub struct LicenseRow {
     pub bound_at: Option<DateTime<Utc>>,
     pub last_seen_at: Option<DateTime<Utc>>,
     pub version: String,
-    pub employee_count: i32,
     pub conflicts: i32,
     pub denials: i64,
 }
@@ -141,7 +140,6 @@ fn license_row(r: &sqlx::postgres::PgRow) -> LicenseRow {
         bound_at: r.get("bound_at"),
         last_seen_at: r.get("last_seen_at"),
         version: r.get("version"),
-        employee_count: r.get("employee_count"),
         conflicts: r.get("conflicts"),
         denials: r.get("denials"),
     }
@@ -150,7 +148,7 @@ fn license_row(r: &sqlx::postgres::PgRow) -> LicenseRow {
 const LICENSE_SELECT: &str = "SELECT l.license_no, l.licensee, l.licensee_tax_id,
             p.name AS partner_name, p.partner_no, l.key_prefix, l.expires_on,
             l.status, l.note, l.fingerprint, l.bound_at,
-            l.last_seen_at, l.version, l.employee_count, l.conflicts,
+            l.last_seen_at, l.version, l.conflicts,
             (SELECT count(*) FROM license_denial d WHERE d.license_id = l.id) AS denials
        FROM license l JOIN partner p ON p.id = l.partner_id";
 
