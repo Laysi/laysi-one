@@ -403,13 +403,16 @@ pub async fn member_ref(pool: &PgPool, id: i32) -> Result<Option<MemberRef>> {
     )
 }
 
-/// Active admins of one partner. Suspending or demoting the last one leaves
-/// that partner with nobody who can add a member or reset a password, and
-/// no operation here can hand the flag back.
+/// Who can still manage this partner: its own admins, plus any vendor staff
+/// sitting in it. Suspending or demoting the last one would leave nobody who
+/// can add a member or reset a password, and no operation here hands the flag
+/// back. `is_vendor` counts because `may_manage` already lets it through --
+/// counting only `is_admin` would trap the vendor's own partner, where the
+/// flag is redundant.
 pub async fn active_admins(pool: &PgPool, partner_id: i32) -> Result<i64> {
     Ok(sqlx::query(
         "SELECT count(*) AS n FROM partner_user
-          WHERE partner_id = $1 AND is_admin AND status = 'active'",
+          WHERE partner_id = $1 AND (is_admin OR is_vendor) AND status = 'active'",
     )
     .bind(partner_id)
     .fetch_one(pool)
