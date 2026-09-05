@@ -1,0 +1,20 @@
+# Rebuilds demo.laysi.one. Installed by .github/workflows/deploy.yml when it
+# deploys with target=demo, as a rootless user unit -- the whole stack is
+# rootless podman, so a system unit would be looking at another user's
+# containers.
+#
+# DEMO_ACTIVATION_KEY, and DEMO_PASSWORD if the default is not wanted, come
+# from ~/.config/laysi-demo.env. They are not in this file because it is
+# version controlled and the key is the credential that licenses the install.
+
+[Unit]
+Description=Rebuild the Laysi One demo install
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/laysi-one-demo
+EnvironmentFile=%h/.config/laysi-demo.env
+ExecStart=/usr/bin/env bun %h/laysi-one-demo/reset-demo.ts
+# The rebuild pulls no images and copies no data; anything past this is stuck.
+TimeoutStartSec=900

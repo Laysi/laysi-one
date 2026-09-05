@@ -1,13 +1,22 @@
-# Deploys a published version to one.laysi.io, on demand.
+# Deploys a published version to one of the two installs on that host.
 #
 #   gh workflow run deploy.yml -f version=0.1.0
+#   gh workflow run deploy.yml -f version=0.1.0 -f target=demo
 #
 # The host holds no registry credentials: the runner pulls with its own
 # GITHUB_TOKEN and streams the images down the SSH connection. It reaches the
 # host through the same Cloudflare Tunnel that serves the site, so the
 # deployment publishes nothing to the internet of its own.
 #
-# release.yml builds the images; this only moves one of them onto the host.
+# release.yml builds the images and then calls this with target=demo, so the
+# demo runs the newest release without anybody remembering to push it, while
+# one.laysi.io stays a deliberate act.
+#
+# The two installs share the images, docker-compose.prod.yml and this file.
+# They differ in a directory, an overlay and what happens to the data: the
+# product keeps its books across a deployment and the demo is rebuilt from
+# nothing, because a demo whose books survive is a demo somebody has already
+# edited.
 
 name: Deploy
 
@@ -17,6 +26,20 @@ on:
       version:
         description: Image tag to deploy
         default: latest
+      target:
+        description: Which install
+        type: choice
+        options: [production, demo]
+        default: production
+
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: latest
+      target:
+        type: string
+        default: production
 
 permissions:
   contents: read
@@ -25,7 +48,6 @@ permissions:
 env:
   DEPLOY_HOST: one-ssh.laysi.io
   DEPLOY_USER: jiazhen
-  DEPLOY_DIR: laysi-one
 
 jobs:
   deploy:
@@ -33,6 +55,34 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Name the install
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -eu
+          case "$TARGET" in
+              demo)
+                  {
+                      echo "DEPLOY_DIR=laysi-one-demo"
+                      echo "PROJECT=laysi-one-demo"
+                      echo "OVERLAY=docker-compose.demo.yml"
+                      echo "API_CONTAINER=laysi-demo-api"
+                      echo "SITE=https://demo.laysi.one/"
+                  } >> "$GITHUB_ENV"
+                  ;;
+              production|'')
+                  {
+                      echo "DEPLOY_DIR=laysi-one"
+                      echo "PROJECT=laysi-one"
+                      echo "OVERLAY=docker-compose.host.yml"
+                      echo "API_CONTAINER=laysi-one_api_1"
+                      echo "SITE=https://one.laysi.io/"
+                  } >> "$GITHUB_ENV"
+                  ;;
+              *)
+                  echo "unknown target \"$TARGET\""; exit 1 ;;
+          esac
 
       - name: Install cloudflared
         run: |
@@ -74,6 +124,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           set -eu
+          # metadata-action publishes `{{version}}`, which drops the tag's `v`,
+          # so release.yml can hand this workflow its own ref_name unchanged
+          # and a person can type either form.
+          VERSION=${VERSION#v}
+          echo "LAYSI_VERSION=$VERSION" >> "$GITHUB_ENV"
           # ghcr rejects an uppercase path; github.repository keeps the owner's case.
           base=$(printf 'ghcr.io/%s' "$REPOSITORY" | tr 'A-Z' 'a-z')
           names=""
@@ -84,33 +139,66 @@ jobs:
           # gzip -1: the tunnel is the slow half, not the compression.
           docker save $names | gzip -1 | ssh "$DEPLOY_HOST" 'gunzip | podman load'
 
-      - name: Restart the stack
-        env:
-          VERSION: ${{ inputs.version }}
+      - name: Send the compose files
         run: |
           set -eu
           ssh "$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
-          scp docker-compose.prod.yml docker-compose.host.yml "$DEPLOY_HOST:$DEPLOY_DIR/"
+          scp docker-compose.prod.yml "$OVERLAY" "$DEPLOY_HOST:$DEPLOY_DIR/"
+          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && printf 'LAYSI_VERSION=%s\n' '$LAYSI_VERSION' > .env"
+
+      - name: Restart the stack
+        if: inputs.target != 'demo'
+        run: |
+          set -eu
           # Detached: recreating containers reconfigures the podman bridge that
           # cloudflared sits on, which resets this very SSH connection. The step
           # below reconnects to find out how it went.
-          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && printf 'LAYSI_VERSION=%s\n' '$VERSION' > .env && \
-            setsid nohup podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml \
+          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && \
+            setsid nohup podman-compose -p $PROJECT -f docker-compose.prod.yml -f $OVERLAY \
             up -d --force-recreate > deploy.log 2>&1 < /dev/null & sleep 2"
+
+      # The demo is not restarted, it is rebuilt: the script throws the books
+      # away, brings the stack up on the new images, activates the licence and
+      # seeds again. Doing it here as well as nightly is what makes the seeded
+      # data match the build that is serving it.
+      - name: Rebuild the demo
+        if: inputs.target == 'demo'
+        run: |
+          set -eu
+          ssh "$DEPLOY_HOST" "command -v bun >/dev/null || { echo 'bun is not installed on the host'; exit 1; }"
+          ssh "$DEPLOY_HOST" "test -s .config/laysi-demo.env || \
+            { echo 'write ~/.config/laysi-demo.env with DEMO_ACTIVATION_KEY first'; exit 1; }"
+          ssh "$DEPLOY_HOST" "mkdir -p .config/systemd/user"
+          scp scripts/reset-demo.ts "$DEPLOY_HOST:$DEPLOY_DIR/"
+          scp deploy/laysi-demo-reset.service deploy/laysi-demo-reset.timer \
+            "$DEPLOY_HOST:.config/systemd/user/"
+          # A non-login ssh session has neither XDG_RUNTIME_DIR nor, unless the
+          # account lingers, a user manager to talk to. The stack itself is
+          # rootless podman, so lingering is already how it survives logout.
+          ssh "$DEPLOY_HOST" "loginctl enable-linger \$(id -un) 2>/dev/null || true; \
+            export XDG_RUNTIME_DIR=/run/user/\$(id -u) && \
+            systemctl --user daemon-reload && \
+            systemctl --user enable --now laysi-demo-reset.timer && \
+            systemctl --user start --no-block laysi-demo-reset.service"
 
       - name: Wait for the stack, then check the site
         run: |
           set -eu
-          for _ in $(seq 60); do
+          for _ in $(seq 90); do
               if ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
-                  'podman ps --format "{{.Names}} {{.Status}}" | grep -q "laysi-one_api_1 Up.*healthy"'; then
+                  "podman ps --format '{{.Names}} {{.Status}}' | grep -q '$API_CONTAINER Up.*healthy'"; then
                   ok=yes
                   break
               fi
               sleep 5
           done
-          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && podman ps -a --format '{{.Names}} | {{.Status}}' | grep laysi; tail -5 deploy.log"
+          # Whichever of the two left a trace: production writes deploy.log,
+          # the demo rebuild runs under systemd and writes to the journal.
+          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && \
+            podman ps -a --format '{{.Names}} | {{.Status}}' | grep laysi; \
+            tail -5 deploy.log 2>/dev/null; \
+            XDG_RUNTIME_DIR=/run/user/\$(id -u) journalctl --user -u laysi-demo-reset -n 20 --no-pager 2>/dev/null" || true
           [ "${ok:-}" = yes ] || { echo "api never reported healthy"; exit 1; }
-          code=$(curl -s -o /dev/null -w '%{http_code}' https://one.laysi.io/)
-          echo "https://one.laysi.io/ -> $code"
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$SITE")
+          echo "$SITE -> $code"
           [ "$code" = 200 ]

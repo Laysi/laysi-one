@@ -111,6 +111,13 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
       - secrets:/secrets:ro
+      # Half of what the licence is bound to, and both services that dispatch
+      # operations need it: without the mount each computes a fingerprint from
+      # the database identifier alone, so a copied pgdata volume on another
+      # host looks like the same installation. Adding it to a running install
+      # changes the fingerprint once, and the reseller has to unbind before
+      # the next check succeeds.
+      - /etc/machine-id:/etc/machine-id:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,6 +148,13 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
       - secrets:/secrets:ro
+      # Half of what the licence is bound to, and both services that dispatch
+      # operations need it: without the mount each computes a fingerprint from
+      # the database identifier alone, so a copied pgdata volume on another
+      # host looks like the same installation. Adding it to a running install
+      # changes the fingerprint once, and the reseller has to unbind before
+      # the next check succeeds.
+      - /etc/machine-id:/etc/machine-id:ro
     depends_on:
       postgres:
         condition: service_healthy

@@ -114,3 +114,15 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" docker-compose.prod.yml --generate-notes \
             || gh release upload "$GITHUB_REF_NAME" docker-compose.prod.yml --clobber
+
+  # The demo tracks the newest release; one.laysi.io does not. A customer's
+  # install is upgraded when its owner decides, and the demo has no owner and
+  # nothing to lose -- it is rebuilt from nothing every night anyway, so a
+  # release that reaches it late is a release nobody is evaluating.
+  demo:
+    needs: images
+    uses: ./.github/workflows/deploy.yml
+    with:
+      version: ${{ github.ref_name }}
+      target: demo
+    secrets: inherit

@@ -979,3 +979,27 @@ CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_
 每個操作恰好屬於一條 permission，以及每一列 grant 的風險分級與操作本身相同。少一筆
 grant，AI 看得到一個叫不動的工具；少一條 permission，deny-by-default 讓那個操作永遠
 打不開；分級寫低了，`scripts/mcp-role-matrix.ts` 的 INV1 會放過它本來要抓的那個工具。
+
+## 示範站
+
+`demo.laysi.one` 與 `one.laysi.io` 同一台主機、同一份映像、同一份
+`docker-compose.prod.yml`，只多一層 `docker-compose.demo.yml`。**推 `v*` 標籤就部署
+示範站**（`release.yml` 呼叫 `deploy.yml` 並帶 `target: demo`），正式站維持手動——
+客戶的安裝什麼時候升級由持有它的人決定，而示範站沒有持有人也沒有東西可失去。
+
+**每晚整份重建**（`scripts/reset-demo.ts`，systemd timer 台北時間 04:00）。共用的評估
+安裝沒有第二條路可以維持可用：第一個過帳、簽核或改公司名稱的訪客就改變了第二個訪客
+看到的東西，而把昨天的改動分成「示範」與「有人在試」比整份丟掉貴。**`secrets` 資料卷
+不動**，簽章之外資料庫密碼與初始化代碼也在裡面。
+
+**五個共用帳號由 `demo_freeze_shared_login` 凍結**，只認 `admin`／`boss`／`hr`／
+`acct`／`demo` 這五個名字：改密碼、停用、換角色與刪除一律還原。只綁那五個名字是刻意的
+——訪客自己建的帳號照常改得動、停得掉、刪得掉，帳號管理示範的仍然是真的行為。
+
+**示範站要有真授權**：全新的資料庫沒有 90 天寬限期（0007 只補給看得到
+`install_bootstrap` 的既有安裝），而未授權的安裝唯讀。金鑰放在主機的
+`~/.config/laysi-demo.env`，重建時由 `POST /v1/auth/bootstrap` 一併啟用——那是唯一
+不需要瀏覽器就能啟用授權的路。其餘見 `deploy/README.md`。
+
+**MCP 跑著但沒有對外入口**：`docker-compose.demo.yml` 不發佈埠也不接 `proxy` 網路，
+tunnel 沒有東西可以指。關掉它是少一條 ingress，不是一個設定。

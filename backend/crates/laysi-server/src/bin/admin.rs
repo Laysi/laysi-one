@@ -14,12 +14,12 @@ use std::collections::HashMap;
 
 const USAGE: &str = "\
 Usage:
-  laysi-admin create-user --username <u> --role <role> --display-name <n> [--employee-no <E001>] [--email <e>]
+  laysi-admin create-user --username <u> --role <role> --display-name <n> [--employee-no <E001>] [--email <e>] [--password <p>]
   laysi-admin reset-password --username <u>
   laysi-admin link-employee --username <u> --employee-no <E001>
   laysi-admin link-oauth --username <u> --provider <p> --subject <sub>
   laysi-admin list-users
-  laysi-admin seed-demo [--force]        seed demo data (throwaway evaluation installs only)";
+  laysi-admin seed-demo [--force] [--password <p>]   seed demo data (throwaway evaluation installs only)";
 
 struct Cli {
     command: String,
@@ -110,12 +110,13 @@ fn allowed_options(command: &str) -> Option<&'static [&'static str]> {
             "--display-name",
             "--employee-no",
             "--email",
+            "--password",
         ]),
         "reset-password" => Some(&["--username"]),
         "link-employee" => Some(&["--username", "--employee-no"]),
         "link-oauth" => Some(&["--username", "--provider", "--subject"]),
         "list-users" => Some(&[]),
-        "seed-demo" => Some(&["--force"]),
+        "seed-demo" => Some(&["--force", "--password"]),
         _ => None,
     }
 }
@@ -171,7 +172,15 @@ async fn create_user(store: &Store, cli: &Cli) -> anyhow::Result<()> {
         None => None,
     };
     let email = cli.options.get("--email").map_or("", |value| value.trim());
-    let temporary = password::temporary_password();
+    // A chosen password is not a temporary one, so it does not force a change
+    // at the first sign-in: whoever passed --password already decided what it
+    // should be. The demo install is the case this exists for -- its logins
+    // are rebuilt nightly and handed out in an invitation, so a forced change
+    // would lock every later visitor out of an account the first one edited.
+    // No minimum length here, unlike the web paths: reaching this binary means
+    // holding the host and the database already.
+    let chosen = cli.options.get("--password").map(|value| value.as_str());
+    let temporary = chosen.map_or_else(password::temporary_password, str::to_string);
     let password_hash = password::hash_password(&temporary)
         .map_err(|error| anyhow!("cannot produce the Argon2id password hash: {error}"))?;
     let user = store
@@ -183,7 +192,7 @@ async fn create_user(store: &Store, cli: &Cli) -> anyhow::Result<()> {
             role_code: role,
             employee_id,
             status: "active",
-            must_change_password: true,
+            must_change_password: chosen.is_none(),
             created_by: "laysi-admin",
         })
         .await
@@ -193,8 +202,15 @@ async fn create_user(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     // directly into a password manager.
     println!("{temporary}");
     eprintln!(
-        "created account {} ({}, role {}); the password must be changed at the first sign-in.",
-        user.username, user.display_name, user.role_code
+        "created account {} ({}, role {}){}.",
+        user.username,
+        user.display_name,
+        user.role_code,
+        if chosen.is_some() {
+            ""
+        } else {
+            "; the password must be changed at the first sign-in"
+        }
     );
     Ok(())
 }
@@ -314,7 +330,10 @@ async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     // screens can only show "this account is not linked to an employee",
     // which is the least interesting thing they do.
     let username = "demo";
-    let temporary = password::temporary_password();
+    // Same reading as create-user: a chosen password is one somebody already
+    // decided, so it is not temporary and forces no change.
+    let chosen = cli.options.get("--password").map(|value| value.as_str());
+    let temporary = chosen.map_or_else(password::temporary_password, str::to_string);
     if store
         .user_by_username(username)
         .await
@@ -336,15 +355,20 @@ async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
                 role_code: "staff",
                 employee_id: Some(employee.id),
                 status: "active",
-                must_change_password: true,
+                must_change_password: chosen.is_none(),
                 created_by: "laysi-admin",
             })
             .await
             .context("creating the demo employee account failed")?;
         println!("{temporary}");
         eprintln!(
-            "created self-service demo account {username} ({}); the password must be changed at the first sign-in.",
-            employee.name
+            "created self-service demo account {username} ({}){}.",
+            employee.name,
+            if chosen.is_some() {
+                ""
+            } else {
+                "; the password must be changed at the first sign-in"
+            }
         );
     } else {
         eprintln!("account {username} already exists and was left alone; use reset-password for a new one.");
@@ -416,6 +440,29 @@ mod tests {
         assert_eq!(
             required(&cli, "--role").expect("role should be present"),
             "boss"
+        );
+    }
+
+    /// Both subcommands the demo rebuild calls take `--password`, and it
+    /// carries a value: as a valueless flag it would swallow the next
+    /// argument, and the account would end up with a password of "--role".
+    #[test]
+    fn password_is_a_valued_flag_on_both_seeding_subcommands() {
+        assert!(!valueless("--password"));
+        for command in ["create-user", "seed-demo"] {
+            assert!(
+                allowed_options(command)
+                    .expect("both subcommands exist")
+                    .contains(&"--password"),
+                "{command} should accept --password"
+            );
+        }
+        let cli = parse_args(strings(&["seed-demo", "--force", "--password", "s3cret"]))
+            .expect("seed-demo takes both flags");
+        assert!(cli.options.contains_key("--force"));
+        assert_eq!(
+            cli.options.get("--password").map(String::as_str),
+            Some("s3cret")
         );
     }
 

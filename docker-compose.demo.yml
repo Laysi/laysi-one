@@ -1,0 +1,57 @@
+# The overlay demo.laysi.one runs with, on top of docker-compose.prod.yml.
+#
+#   podman-compose -p laysi-one-demo -f docker-compose.prod.yml -f docker-compose.demo.yml up -d
+#
+# It differs from docker-compose.host.yml, which the real install on the same
+# host uses, in three ways:
+#
+# 1. Its own container names and its own compose project, so the two stacks
+#    share a machine without sharing a volume, a name or a port.
+#
+# 2. `mcp` publishes nothing and joins no shared network, so the tunnel has
+#    nothing to point at. Closing MCP here is one absent ingress rule rather
+#    than a setting, because an evaluation account handed out by email is the
+#    wrong thing to give an AI agent write access through.
+#
+# 3. The books are rebuilt every night by scripts/reset-demo.ts. Nothing in
+#    this file is expected to survive a day, which is why nobody has to be
+#    told not to enter real data here.
+
+services:
+  postgres:
+    container_name: laysi-demo-postgres
+    # podman-compose turns depends_on into `podman --requires`, which wants the
+    # dependency running; `secrets` exits as soon as it has written the volume.
+    # Dropping the edge here drops it transitively from every other service.
+    depends_on: !override []
+
+  api:
+    container_name: laysi-demo-api
+    # Loopback only, and only so scripts/reset-demo.ts can post the nightly
+    # bootstrap: that call is the one path that activates a licence without a
+    # browser in front of it, and `web` publishes nothing here.
+    ports:
+      - "127.0.0.1:8091:8080"
+
+  web:
+    container_name: laysi-demo-web
+    ports: !override []
+    networks:
+      - default
+      - proxy
+
+  # Reachable from nothing: no published port and not on the shared network.
+  mcp:
+    container_name: laysi-demo-mcp
+    ports: !override []
+
+  # Left at the shipped interval. It copies nothing until somebody confirms a
+  # backup key on screen, which nobody will here, and a zero interval would
+  # turn its wait loop into a spin.
+  backup:
+    container_name: laysi-demo-backup
+
+networks:
+  default: {}
+  proxy:
+    external: true

@@ -1,0 +1,14 @@
+# 04:00 Taipei, named explicitly rather than left to the host clock, which
+# runs UTC. The quietest hour for a demo shown to customers in
+# Taiwan. Persistent so a host that was off at four rebuilds when it comes
+# back rather than serving yesterday's books until the next night.
+
+[Unit]
+Description=Rebuild the Laysi One demo install nightly
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Asia/Taipei
+Persistent=true
+
+[Install]
+WantedBy=timers.target
