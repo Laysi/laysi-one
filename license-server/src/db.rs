@@ -493,6 +493,29 @@ pub async fn set_member_password(pool: &PgPool, id: i32, password_hash: &str) ->
     Ok(())
 }
 
+pub async fn partner(pool: &PgPool, no: &str) -> Result<Option<PartnerRow>> {
+    Ok(sqlx::query(
+        "SELECT p.partner_no, p.name, p.tax_id,
+                p.unit_price::text AS unit_price, p.status,
+                (SELECT count(*) FROM license l WHERE l.partner_id = p.id) AS licenses,
+                (SELECT count(*) FROM partner_user u WHERE u.partner_id = p.id) AS users
+           FROM partner p WHERE p.partner_no = $1",
+    )
+    .bind(no)
+    .fetch_optional(pool)
+    .await
+    .context("讀取經銷商失敗")?
+    .map(|r| PartnerRow {
+        partner_no: r.get("partner_no"),
+        name: r.get("name"),
+        tax_id: r.get("tax_id"),
+        unit_price: r.get("unit_price"),
+        status: r.get("status"),
+        licenses: r.get("licenses"),
+        users: r.get("users"),
+    }))
+}
+
 /// The account changing its own password. Sessions are left alone: the
 /// caller has just proved they hold the old password, and signing them out
 /// of the browser they are typing in would be a strange reward for it.

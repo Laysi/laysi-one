@@ -53,12 +53,14 @@ header a:hover,header a.on{border-bottom-color:var(--accent)}
 header form{margin:0}
 main{max-width:1100px;margin:0 auto;padding:28px 24px 64px}
 h1{font-size:20px;font-weight:600;margin:0 0 4px}
-h2{font-size:15px;font-weight:600;margin:32px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--rule)}
+h2{font-size:15px;font-weight:600;margin:34px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--rule)}
 .lede{color:var(--muted);margin:0 0 24px}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th{text-align:left;font-weight:600;color:var(--muted);border-bottom:1px solid var(--rule);padding:8px 10px 8px 0}
-td{border-bottom:1px solid var(--rule);padding:10px 10px 10px 0;vertical-align:top}
-td.r,th.r{text-align:right;padding-right:0}
+th{text-align:left;font-weight:600;color:var(--muted);border-bottom:1px solid var(--rule);padding:8px 18px 8px 0}
+td{border-bottom:1px solid var(--rule);padding:11px 18px 11px 0;vertical-align:middle}
+td.r,th.r{text-align:right}
+/* Only the last column may sit flush against the table edge. */
+td:last-child,th:last-child{padding-right:0}
 a{color:var(--accent)}
 form.card{border:1px solid var(--rule);padding:18px;margin:0 0 24px;background:#fff}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
@@ -72,7 +74,8 @@ button.plain:hover{background:var(--rule);color:var(--ink)}
 button.warn{border-color:var(--warn);color:var(--warn)}
 button.warn:hover{background:var(--warn);color:#fff}
 .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;align-items:center}
-.tag{font-size:12px;border:1px solid var(--rule);padding:1px 7px;color:var(--muted);white-space:nowrap}
+.tag{font-size:12px;line-height:1.5;border:1px solid var(--rule);padding:3px 8px;color:var(--muted);white-space:nowrap}
+.cell{display:flex;align-items:center;gap:10px}
 .tag.on{border-color:var(--accent);color:var(--accent)}
 .tag.off{border-color:var(--warn);color:var(--warn)}
 .key{border:1px solid var(--accent);padding:16px;margin:0 0 24px;background:#fff}
@@ -83,6 +86,8 @@ button.warn:hover{background:var(--warn);color:#fff}
 textarea{font:13px/1.5 ui-monospace,monospace;width:100%;min-height:120px;padding:9px;border:1px solid var(--rule)}
 form.inline{display:inline-flex;gap:6px;align-items:center;margin:0}
 form.inline input{width:6.5em;text-align:right}
+label.row{flex-direction:row;align-items:center;gap:8px}
+label.row input{width:auto}
 @media (max-width:640px){.wide{display:none}}
 "#;
 
@@ -334,7 +339,7 @@ pub async fn licenses(
                 r#"<tr><td><a href="/licenses/{no}">{no}</a></td>
                 <td>{licensee}<br><span class="fp">{tax}</span></td>
                 <td class="wide">{partner}</td>
-                <td><span class="tag {tone}">{label}</span>{flag}</td>
+                <td><div class="cell"><span class="tag {tone}">{label}</span>{flag}</div></td>
                 <td class="num">{expires}</td>
                 <td class="wide">{bound}</td></tr>"#,
                 no = esc(&r.license_no),
@@ -366,7 +371,7 @@ pub async fn licenses(
             {issued}
             <form class="card" method="post" action="/licenses">
               <div class="grid">
-                <label>被授權單位<input name="licensee" required placeholder="○○股份有限公司"></label>
+                <label>被授權單位<input name="licensee" required></label>
                 <label>統一編號<input name="licensee_tax_id" inputmode="numeric" maxlength="8"></label>
                 <label>到期日<input name="expires_on" type="date" value="{default_expiry}" required></label>
                 <label>備註<input name="note"></label>
@@ -539,10 +544,16 @@ pub async fn detail(
         None => r#"<tr><td>綁定主機</td><td>尚未啟用；客戶第一次輸入金鑰時綁定，更換主機後請在本頁解除綁定。</td></tr>"#.to_string(),
     };
 
+    // Absolute: a relative action on /licenses/{no} resolves against the
+    // parent, so "unbind" posts to /licenses/unbind -- which matches the
+    // detail route, accepts GET only, and answers 405.
+    let path = urlencode(&no);
     let unbind = if r.fingerprint.is_some() {
-        r#"<form method="post" action="unbind" style="margin:0"><button class="plain">解除綁定</button></form>"#
+        format!(
+            r#"<form method="post" action="/licenses/{path}/unbind" style="margin:0"><button class="plain">解除綁定</button></form>"#
+        )
     } else {
-        ""
+        String::new()
     };
     let toggle = if r.status == "suspended" || r.status == "revoked" {
         r#"<button name="status" value="active" class="plain">恢復使用</button>"#
@@ -566,11 +577,11 @@ pub async fn detail(
             </tbody></table>
             <div class="actions">
               {unbind}
-              <form method="post" action="status" style="margin:0">{toggle}</form>
+              <form method="post" action="/licenses/{path}/status" style="margin:0">{toggle}</form>
             </div>
 
             <h2>續約</h2>
-            <form class="card" method="post" action="renew">
+            <form class="card" method="post" action="/licenses/{path}/renew">
               <div class="grid">
                 <label>新到期日<input name="expires_on" type="date" value="{next_year}" required></label>
               </div>
@@ -583,6 +594,7 @@ pub async fn detail(
             <tbody>{term_rows}</tbody></table>
             {denial_block}"#,
             no_esc = esc(&no),
+            path = path,
             licensee = esc(&r.licensee),
             tax = esc(&r.licensee_tax_id),
             partner = esc(&r.partner_name),
@@ -769,24 +781,16 @@ pub async fn partners(
     let body: String = rows
         .iter()
         .map(|r| {
-            // Price and status are the two things that move after a partner
-            // exists, so they are edited where they are read rather than on a
-            // page of their own.
-            let (next_status, next_label) = if r.status == "active" {
-                ("suspended", "停用")
-            } else {
-                ("active", "啟用")
-            };
+            // The listing reads; the actions live on the partner's own page.
+            // A price field and a suspend button on every row are two things
+            // to press by accident while looking something up.
             format!(
-                r#"<tr><td class="num">{no}</td><td>{name}<br><span class="fp">{tax}</span></td>
-                <td class="r"><form method="post" action="/partners/{no}" class="inline">
-                  <input name="unit_price" class="num" inputmode="numeric" value="{price}">
-                  <button class="plain">儲存</button></form></td>
-                <td class="num r">{licenses}</td><td class="num r"><a href="/members?partner={no}">{users}</a></td>
-                <td><span class="tag {tone}">{status}</span>
-                  <form method="post" action="/partners/{no}" class="inline">
-                    <input type="hidden" name="status" value="{next_status}">
-                    <button class="plain">{next_label}</button></form></td></tr>"#,
+                r#"<tr><td class="num"><a href="/partners/{no}">{no}</a></td>
+                <td>{name}<br><span class="fp">{tax}</span></td>
+                <td class="num r">{price}</td>
+                <td class="num r">{licenses}</td>
+                <td class="num r"><a href="/members?partner={no}">{users}</a></td>
+                <td><span class="tag {tone}">{status}</span></td></tr>"#,
                 no = esc(&r.partner_no),
                 name = esc(&r.name),
                 tax = esc(&r.tax_id),
@@ -912,6 +916,73 @@ pub struct PartnerEditForm {
 /// The price is copied onto each term as it is sold, so a change here sets
 /// what the next licence-year costs and leaves every invoice already raised
 /// exactly as it was.
+/// One partner, with the two things that move after it exists: the rate and
+/// whether it may still issue. Both were on the listing, where a field and a
+/// button sat on every row and could be pressed while reading one.
+pub async fn partner_detail(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(no): Path<String>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    if !a.is_vendor {
+        return Redirect::to("/licenses").into_response();
+    }
+    let r = match db::partner(&s.pool, &no).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return page("經銷商", Some(&a), r#"<h1>查無此經銷商代號</h1>"#).into_response()
+        }
+        Err(error) => return fail(error),
+    };
+    let path = urlencode(&r.partner_no);
+    let (next_status, next_label, next_class) = if r.status == "active" {
+        ("suspended", "停用", "warn")
+    } else {
+        ("active", "啟用", "plain")
+    };
+    page(
+        &r.name,
+        Some(&a),
+        &format!(
+            r#"<h1>{name}</h1><p class="lede">{no_esc}</p>
+            <table><tbody>
+              <tr><td style="width:120px">統一編號</td><td class="num">{tax}</td></tr>
+              <tr><td>狀態</td><td><span class="tag {tone}">{status}</span></td></tr>
+              <tr><td>開立授權</td><td class="num">{licenses}</td></tr>
+              <tr><td>登入帳號</td><td class="num"><a href="/members?partner={path}">{users}</a></td></tr>
+            </tbody></table>
+            <div class="actions">
+              <form method="post" action="/partners/{path}" style="margin:0">
+                <input type="hidden" name="status" value="{next_status}">
+                <button class="{next_class}">{next_label}</button></form>
+            </div>
+
+            <h2>年費</h2>
+            <form class="card" method="post" action="/partners/{path}">
+              <div class="grid">
+                <label>每組授權年費<input name="unit_price" class="num" inputmode="numeric" value="{price}"></label>
+              </div>
+              <div class="actions"><button>儲存</button>
+                <span class="note">開立與續約時複製到該筆授權上，已經賣出的不受影響。</span></div>
+            </form>"#,
+            name = esc(&r.name),
+            no_esc = esc(&r.partner_no),
+            tax = esc(&r.tax_id),
+            price = esc(&r.unit_price),
+            licenses = r.licenses,
+            users = r.users,
+            tone = if r.status == "active" { "on" } else { "off" },
+            status = if r.status == "active" {
+                "使用中"
+            } else {
+                "已停用"
+            },
+        ),
+    )
+    .into_response()
+}
+
 pub async fn update_partner(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -922,11 +993,14 @@ pub async fn update_partner(
     if !a.is_vendor {
         return Redirect::to("/licenses").into_response();
     }
+    // Back to the page the button was on, not to the listing: the figure
+    // that was just saved is the one the reader wants to see.
+    let back = format!("/partners/{}", urlencode(&no));
     if let Some(raw) = form.unit_price.as_deref() {
         // A price that is not a number is a typo. Storing zero for it would
         // quietly make the next renewal free.
         let Ok(price) = raw.trim().parse::<i64>() else {
-            return Redirect::to("/partners").into_response();
+            return Redirect::to(&back).into_response();
         };
         if let Err(error) =
             sqlx::query("UPDATE partner SET unit_price = $2::numeric WHERE partner_no = $1")
@@ -951,7 +1025,7 @@ pub async fn update_partner(
             return fail(error.into());
         }
     }
-    Redirect::to("/partners").into_response()
+    Redirect::to(&back).into_response()
 }
 
 /// A password that survives being read out over the telephone: no `0`/`o`,
@@ -1107,8 +1181,8 @@ pub async fn members(
             };
             format!(
                 r#"<tr><td>{email}<br><span class="fp">{name}</span></td>
-                <td><span class="tag {atone}">{arole}</span>{admin_action}</td>
-                <td><span class="tag {tone}">{status}</span>{status_action}</td>
+                <td><div class="cell"><span class="tag {atone}">{arole}</span>{admin_action}</div></td>
+                <td><div class="cell"><span class="tag {tone}">{status}</span>{status_action}</div></td>
                 <td class="r"><form method="post" action="/members/{id}" class="inline">{hidden}
                   <input type="hidden" name="reset" value="1">
                   <button class="plain">重設密碼</button></form></td></tr>"#,
@@ -1153,7 +1227,7 @@ pub async fn members(
               <div class="grid">
                 <label>登入帳號<input name="email" type="email" required></label>
                 <label>姓名<input name="name"></label>
-                <label style="flex-direction:row;align-items:center"><input type="checkbox" name="is_admin" style="width:auto"> 設為管理員</label>
+                <label class="row"><input type="checkbox" name="is_admin"> 設為管理員</label>
               </div>
               <div class="actions"><button>建立成員</button></div>
             </form>

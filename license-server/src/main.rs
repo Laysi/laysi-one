@@ -163,7 +163,10 @@ async fn main() -> Result<()> {
             "/partners",
             get(console::partners).post(console::create_partner),
         )
-        .route("/partners/{no}", post(console::update_partner))
+        .route(
+            "/partners/{no}",
+            get(console::partner_detail).post(console::update_partner),
+        )
         .route(
             "/members",
             get(console::members).post(console::create_member),
