@@ -121,3 +121,18 @@ COMMENT ON TABLE license_denial IS
     '被拒絕的檢查，經銷商在畫面上看得到。擋下來而沒有人知道，等於沒有擋。';
 
 CREATE INDEX IF NOT EXISTS license_denial_idx ON license_denial (license_id, at DESC);
+
+-- Members of a partner. One account per partner was all `create_partner`
+-- ever wrote, which left a reseller with nobody to add when the contact
+-- changed and no way to reset a forgotten password. The flag says who may
+-- do that; the account created with the partner carries it.
+ALTER TABLE partner_user ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false;
+COMMENT ON COLUMN partner_user.is_admin IS
+    '租戶管理員：新增、停用、重設本租戶其他成員。';
+
+-- Backfills the partners that predate the column: the oldest account is the
+-- one that was created with the partner. No-op once every partner has one,
+-- so it is safe on every start-up.
+UPDATE partner_user u SET is_admin = true
+ WHERE u.id = (SELECT min(o.id) FROM partner_user o WHERE o.partner_id = u.partner_id)
+   AND NOT EXISTS (SELECT 1 FROM partner_user o WHERE o.partner_id = u.partner_id AND o.is_admin);

@@ -94,13 +94,20 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
             } else {
                 ""
             };
+            // Drawn only for the people it works for: a plain member manages
+            // nobody, and the page would refuse them on arrival.
+            let members = if a.is_vendor || a.is_admin {
+                r#"<a href="/members">成員</a>"#
+            } else {
+                ""
+            };
             let who = if a.name.trim().is_empty() {
                 a.email.clone()
             } else {
                 a.name.clone()
             };
             format!(
-                r#"<nav><a href="/licenses">授權</a><a href="/billing">月結對帳</a>{partners}</nav>
+                r#"<nav><a href="/licenses">授權</a><a href="/billing">月結對帳</a>{partners}{members}</nav>
                    <span class="tag">{}（{}）· {}</span>
                    <form method="post" action="/logout"><button class="plain">登出</button></form>"#,
                 esc(&a.partner_name),
@@ -769,7 +776,7 @@ pub async fn partners(
                 <td class="r"><form method="post" action="/partners/{no}" class="inline">
                   <input name="unit_price" class="num" inputmode="numeric" value="{price}">
                   <button class="plain">存</button></form></td>
-                <td class="num r">{licenses}</td><td class="num r">{users}</td>
+                <td class="num r">{licenses}</td><td class="num r"><a href="/members?partner={no}">{users}</a></td>
                 <td><span class="tag {tone}">{status}</span>
                   <form method="post" action="/partners/{no}" class="inline">
                     <input type="hidden" name="status" value="{next_status}">
@@ -1017,6 +1024,317 @@ pub async fn home(State(s): State<Shared>, headers: HeaderMap) -> Response {
     match actor(&s, &headers).await {
         Some(_) => Redirect::to("/licenses").into_response(),
         None => Redirect::to("/login").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MemberForm {
+    /// Empty for one's own partner. Only the vendor may name another.
+    #[serde(default)]
+    partner_no: String,
+    email: String,
+    #[serde(default)]
+    name: String,
+    /// A checkbox: present when ticked, absent otherwise.
+    #[serde(default)]
+    is_admin: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct MemberEditForm {
+    #[serde(default)]
+    partner_no: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    is_admin: Option<String>,
+    #[serde(default)]
+    reset: Option<String>,
+}
+
+/// The partner whose members this request is about, once the actor is allowed
+/// to manage them. `None` covers both refusals -- no such partner, and one
+/// this actor may not touch -- because telling them apart would say whether a
+/// partner code exists to someone with no business asking.
+async fn manageable(
+    s: &Shared,
+    a: &Actor,
+    requested: &str,
+) -> anyhow::Result<Option<(i32, String)>> {
+    let (id, name) = match requested.trim() {
+        "" => (a.partner_id, a.partner_name.clone()),
+        no => match db::partner_by_no(&s.pool, no).await? {
+            Some(found) => found,
+            None => return Ok(None),
+        },
+    };
+    Ok(a.may_manage(id).then_some((id, name)))
+}
+
+pub async fn members(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    let requested = q.get("partner").map(String::as_str).unwrap_or_default();
+    let (partner_id, partner_name) = match manageable(&s, &a, requested).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return Redirect::to("/licenses").into_response(),
+        Err(error) => return fail(error),
+    };
+    let rows = match db::members(&s.pool, partner_id).await {
+        Ok(rows) => rows,
+        Err(error) => return fail(error),
+    };
+
+    let body: String = rows
+        .iter()
+        .map(|r| {
+            let hidden = if requested.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    r#"<input type="hidden" name="partner_no" value="{}">"#,
+                    esc(requested)
+                )
+            };
+            // The three actions are drawn only where they would work. A
+            // button that is always refused states the rule twice and gets
+            // one of them wrong.
+            let self_row = r.id == a.user_id;
+            let (next_status, status_label) = if r.status == "active" {
+                ("disabled", "停用")
+            } else {
+                ("active", "恢復")
+            };
+            let status_action = if self_row {
+                "<span class=\"fp\">本帳號</span>".to_string()
+            } else {
+                format!(
+                    r#"<form method="post" action="/members/{id}" class="inline">{hidden}
+                      <input type="hidden" name="status" value="{next_status}">
+                      <button class="plain">{status_label}</button></form>"#,
+                    id = r.id
+                )
+            };
+            let admin_action = if self_row {
+                String::new()
+            } else {
+                format!(
+                    r#"<form method="post" action="/members/{id}" class="inline">{hidden}
+                      <input type="hidden" name="is_admin" value="{next}">
+                      <button class="plain">{label}</button></form>"#,
+                    id = r.id,
+                    next = if r.is_admin { "false" } else { "true" },
+                    label = if r.is_admin {
+                        "改為一般成員"
+                    } else {
+                        "設為管理員"
+                    }
+                )
+            };
+            format!(
+                r#"<tr><td>{email}<br><span class="fp">{name}</span></td>
+                <td><span class="tag {atone}">{arole}</span>{admin_action}</td>
+                <td><span class="tag {tone}">{status}</span>{status_action}</td>
+                <td class="r"><form method="post" action="/members/{id}" class="inline">{hidden}
+                  <input type="hidden" name="reset" value="1">
+                  <button class="plain">重設密碼</button></form></td></tr>"#,
+                id = r.id,
+                email = esc(&r.email),
+                name = esc(&r.name),
+                atone = if r.is_admin { "on" } else { "off" },
+                arole = if r.is_admin {
+                    "管理員"
+                } else {
+                    "一般成員"
+                },
+                tone = if r.status == "active" { "on" } else { "off" },
+                status = if r.status == "active" {
+                    "使用中"
+                } else {
+                    "已停用"
+                },
+            )
+        })
+        .collect();
+
+    let created = match (q.get("email"), q.get("password")) {
+        (Some(email), Some(password)) if !password.is_empty() => format!(
+            r#"<div class="key"><strong>密碼僅顯示一次</strong>
+            <code>{}</code><code class="num">{}</code>
+            <p class="note">交給對方後請他自行更換。離開本頁後無法再顯示。</p></div>"#,
+            esc(email),
+            esc(password)
+        ),
+        _ => String::new(),
+    };
+
+    let scope = if requested.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<input type="hidden" name="partner_no" value="{}">"#,
+            esc(requested)
+        )
+    };
+
+    page(
+        "成員",
+        Some(&a),
+        &format!(
+            r#"<h1>成員 · {name}</h1>
+            <p class="lede">管理員可以新增成員、停用帳號與重設密碼。至少要留一位使用中的管理員。</p>
+            {created}
+            <form class="card" method="post" action="/members">{scope}
+              <div class="grid">
+                <label>登入帳號<input name="email" type="email" required></label>
+                <label>姓名<input name="name"></label>
+                <label style="flex-direction:row;align-items:center"><input type="checkbox" name="is_admin" style="width:auto"> 設為管理員</label>
+              </div>
+              <div class="actions"><button>建立成員</button></div>
+            </form>
+            <table><thead><tr><th>帳號</th><th>權限</th><th>狀態</th><th class="r">密碼</th></tr></thead>
+            <tbody>{body}</tbody></table>"#,
+            name = esc(&partner_name)
+        ),
+    )
+    .into_response()
+}
+
+pub async fn create_member(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Form(form): Form<MemberForm>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    let partner_id = match manageable(&s, &a, &form.partner_no).await {
+        Ok(Some((id, _))) => id,
+        Ok(None) => return Redirect::to("/licenses").into_response(),
+        Err(error) => return fail(error),
+    };
+    let back = members_path(&form.partner_no);
+    let email = form.email.trim();
+    if email.is_empty() {
+        return Redirect::to(&back).into_response();
+    }
+    let password = temporary_password();
+    let hash = match auth::hash_password(&password) {
+        Ok(hash) => hash,
+        Err(error) => return fail(error),
+    };
+    match db::create_member(
+        &s.pool,
+        partner_id,
+        email,
+        form.name.trim(),
+        form.is_admin.is_some(),
+        &hash,
+    )
+    .await
+    {
+        Ok(true) => Redirect::to(&format!(
+            "{back}{}email={}&password={}",
+            if back.contains('?') { "&" } else { "?" },
+            urlencode(email),
+            urlencode(&password)
+        ))
+        .into_response(),
+        // The address is unique across every partner, so the account it
+        // already belongs to may be one this actor cannot see. The message
+        // says what to do rather than where the row is.
+        Ok(false) => fail(anyhow::anyhow!(
+            "{email} 已經是其他帳號的登入信箱，請改用另一個地址。"
+        )),
+        Err(error) => fail(error),
+    }
+}
+
+pub async fn update_member(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<i32>,
+    Form(form): Form<MemberEditForm>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    let target = match db::member_ref(&s.pool, id).await {
+        Ok(Some(target)) => target,
+        Ok(None) => return Redirect::to("/licenses").into_response(),
+        Err(error) => return fail(error),
+    };
+    if !a.may_manage(target.partner_id) {
+        return Redirect::to("/licenses").into_response();
+    }
+    // Locking oneself out is the one mistake this page could make
+    // irreversible: the account that would fix it is the one being changed.
+    if id == a.user_id && (form.status.is_some() || form.is_admin.is_some()) {
+        return fail(anyhow::anyhow!("無法變更本帳號的權限或狀態。"));
+    }
+    let back = members_path(&form.partner_no);
+
+    if let Some(status) = form.status.as_deref() {
+        let status = if status == "disabled" {
+            "disabled"
+        } else {
+            "active"
+        };
+        if status == "disabled" && target.is_admin && last_admin(&s, target.partner_id).await {
+            return fail(anyhow::anyhow!(
+                "{} 是唯一使用中的管理員，請先指定另一位。",
+                target.email
+            ));
+        }
+        if let Err(error) = db::set_member_status(&s.pool, id, status).await {
+            return fail(error);
+        }
+    }
+
+    if let Some(flag) = form.is_admin.as_deref() {
+        let wanted = flag == "true";
+        if !wanted && target.is_admin && last_admin(&s, target.partner_id).await {
+            return fail(anyhow::anyhow!(
+                "{} 是唯一使用中的管理員，請先指定另一位。",
+                target.email
+            ));
+        }
+        if let Err(error) = db::set_member_admin(&s.pool, id, wanted).await {
+            return fail(error);
+        }
+    }
+
+    if form.reset.is_some() {
+        let password = temporary_password();
+        let hash = match auth::hash_password(&password) {
+            Ok(hash) => hash,
+            Err(error) => return fail(error),
+        };
+        if let Err(error) = db::set_member_password(&s.pool, id, &hash).await {
+            return fail(error);
+        }
+        return Redirect::to(&format!(
+            "{back}{}email={}&password={}",
+            if back.contains('?') { "&" } else { "?" },
+            urlencode(&target.email),
+            urlencode(&password)
+        ))
+        .into_response();
+    }
+
+    Redirect::to(&back).into_response()
+}
+
+async fn last_admin(s: &Shared, partner_id: i32) -> bool {
+    db::active_admins(&s.pool, partner_id)
+        .await
+        .map(|n| n <= 1)
+        .unwrap_or(true)
+}
+
+fn members_path(partner_no: &str) -> String {
+    match partner_no.trim() {
+        "" => "/members".to_string(),
+        no => format!("/members?partner={}", urlencode(no)),
     }
 }
 

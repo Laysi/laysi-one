@@ -153,6 +153,11 @@ async fn main() -> Result<()> {
             get(console::partners).post(console::create_partner),
         )
         .route("/partners/{no}", post(console::update_partner))
+        .route(
+            "/members",
+            get(console::members).post(console::create_member),
+        )
+        .route("/members/{id}", post(console::update_member))
         .with_state(state);
 
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8090".into());

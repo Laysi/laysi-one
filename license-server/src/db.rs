@@ -42,9 +42,19 @@ pub struct Actor {
     /// The vendor's own staff. Sees every partner, and is the only one that
     /// can create them.
     pub is_vendor: bool,
+    /// May add, suspend and reset the other members of their own partner.
+    /// The vendor is one everywhere; see `may_manage`.
+    pub is_admin: bool,
 }
 
 impl Actor {
+    /// Whether this actor may manage the members of `partner_id`. The vendor
+    /// manages every partner, an admin only their own, and a plain member
+    /// nobody -- including themselves.
+    pub fn may_manage(&self, partner_id: i32) -> bool {
+        self.is_vendor || (self.is_admin && self.partner_id == partner_id)
+    }
+
     /// The partners whose licences this actor may see: their own, plus anyone
     /// they signed. The vendor sees all, which is the empty filter.
     ///
@@ -72,7 +82,7 @@ pub fn hash_token(raw: &str) -> String {
 /// a live session: absent, unknown, expired, or a disabled account.
 pub async fn actor_of(pool: &PgPool, token: &str) -> Result<Option<Actor>> {
     let row = sqlx::query(
-        "SELECT u.id, u.name, u.email, u.partner_id, u.is_vendor,
+        "SELECT u.id, u.name, u.email, u.partner_id, u.is_vendor, u.is_admin,
                 p.partner_no, p.name AS partner_name
            FROM partner_session s
            JOIN partner_user u ON u.id = s.user_id
@@ -91,6 +101,7 @@ pub async fn actor_of(pool: &PgPool, token: &str) -> Result<Option<Actor>> {
         partner_no: r.get("partner_no"),
         partner_name: r.get("partner_name"),
         is_vendor: r.get("is_vendor"),
+        is_admin: r.get("is_admin"),
     }))
 }
 
@@ -326,4 +337,183 @@ pub async fn partners(pool: &PgPool) -> Result<Vec<PartnerRow>> {
             users: r.get("users"),
         })
         .collect())
+}
+
+/// One row of the member list.
+pub struct MemberRow {
+    pub id: i32,
+    pub email: String,
+    pub name: String,
+    pub is_admin: bool,
+    pub status: String,
+}
+
+/// Where a member sits. The partner id is what `Actor::may_manage` is asked
+/// about, so a member of another partner is refused by the same check that
+/// refuses a member who does not exist.
+pub struct MemberRef {
+    pub partner_id: i32,
+    pub is_admin: bool,
+    pub email: String,
+}
+
+pub async fn partner_by_no(pool: &PgPool, no: &str) -> Result<Option<(i32, String)>> {
+    Ok(
+        sqlx::query("SELECT id, name FROM partner WHERE partner_no = $1")
+            .bind(no)
+            .fetch_optional(pool)
+            .await
+            .context("讀取經銷商失敗")?
+            .map(|r| (r.get("id"), r.get("name"))),
+    )
+}
+
+pub async fn members(pool: &PgPool, partner_id: i32) -> Result<Vec<MemberRow>> {
+    Ok(sqlx::query(
+        "SELECT id, email, name, is_admin, status FROM partner_user
+          WHERE partner_id = $1 ORDER BY is_admin DESC, id",
+    )
+    .bind(partner_id)
+    .fetch_all(pool)
+    .await
+    .context("讀取成員失敗")?
+    .into_iter()
+    .map(|r| MemberRow {
+        id: r.get("id"),
+        email: r.get("email"),
+        name: r.get("name"),
+        is_admin: r.get("is_admin"),
+        status: r.get("status"),
+    })
+    .collect())
+}
+
+pub async fn member_ref(pool: &PgPool, id: i32) -> Result<Option<MemberRef>> {
+    Ok(
+        sqlx::query("SELECT partner_id, is_admin, email FROM partner_user WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .context("讀取成員失敗")?
+            .map(|r| MemberRef {
+                partner_id: r.get("partner_id"),
+                is_admin: r.get("is_admin"),
+                email: r.get("email"),
+            }),
+    )
+}
+
+/// Active admins of one partner. Suspending or demoting the last one leaves
+/// that partner with nobody who can add a member or reset a password, and
+/// no operation here can hand the flag back.
+pub async fn active_admins(pool: &PgPool, partner_id: i32) -> Result<i64> {
+    Ok(sqlx::query(
+        "SELECT count(*) AS n FROM partner_user
+          WHERE partner_id = $1 AND is_admin AND status = 'active'",
+    )
+    .bind(partner_id)
+    .fetch_one(pool)
+    .await
+    .context("清點管理員失敗")?
+    .get("n"))
+}
+
+/// `false` when the address already belongs to an account. The column is
+/// unique across every partner, so this is not a per-partner check.
+///
+/// `is_vendor` is inherited from the partner rather than passed in: a member
+/// added to the vendor's own partner is vendor staff, and anyone added to a
+/// reseller is not. Deriving it from the row keeps `P-000` out of the code,
+/// where it is only written by `create-vendor`.
+pub async fn create_member(
+    pool: &PgPool,
+    partner_id: i32,
+    email: &str,
+    name: &str,
+    is_admin: bool,
+    password_hash: &str,
+) -> Result<bool> {
+    let done = sqlx::query(
+        "INSERT INTO partner_user (partner_id, email, password_hash, name, is_admin, is_vendor)
+         SELECT $1, lower($2), $3, $4, $5,
+                EXISTS (SELECT 1 FROM partner_user v WHERE v.partner_id = $1 AND v.is_vendor)
+         ON CONFLICT (email) DO NOTHING",
+    )
+    .bind(partner_id)
+    .bind(email)
+    .bind(password_hash)
+    .bind(name)
+    .bind(is_admin)
+    .execute(pool)
+    .await
+    .context("建立成員失敗")?;
+    Ok(done.rows_affected() == 1)
+}
+
+pub async fn set_member_status(pool: &PgPool, id: i32, status: &str) -> Result<()> {
+    // Sessions are not deleted: `actor_of` joins on `status = 'active'`, so a
+    // suspension takes effect on the next request either way.
+    sqlx::query("UPDATE partner_user SET status = $2 WHERE id = $1")
+        .bind(id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .context("變更成員狀態失敗")?;
+    Ok(())
+}
+
+pub async fn set_member_admin(pool: &PgPool, id: i32, is_admin: bool) -> Result<()> {
+    sqlx::query("UPDATE partner_user SET is_admin = $2 WHERE id = $1")
+        .bind(id)
+        .bind(is_admin)
+        .execute(pool)
+        .await
+        .context("變更成員權限失敗")?;
+    Ok(())
+}
+
+/// Sets the password and signs the account out everywhere, in one statement
+/// pair: a password that is changed while the old sessions stay live is not
+/// changed.
+pub async fn set_member_password(pool: &PgPool, id: i32, password_hash: &str) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE partner_user SET password_hash = $2 WHERE id = $1")
+        .bind(id)
+        .bind(password_hash)
+        .execute(&mut *tx)
+        .await
+        .context("重設密碼失敗")?;
+    sqlx::query("DELETE FROM partner_session WHERE user_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("撤銷登入工作階段失敗")?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Actor;
+
+    fn actor(partner_id: i32, is_vendor: bool, is_admin: bool) -> Actor {
+        Actor {
+            user_id: 1,
+            name: String::new(),
+            email: String::new(),
+            partner_id,
+            partner_no: String::new(),
+            partner_name: String::new(),
+            is_vendor,
+            is_admin,
+        }
+    }
+
+    #[test]
+    fn an_admin_manages_only_their_own_partner() {
+        assert!(actor(1, true, false).may_manage(9), "vendor: every partner");
+        assert!(actor(1, false, true).may_manage(1), "admin: their own");
+        assert!(!actor(1, false, true).may_manage(9), "admin: not another's");
+        assert!(!actor(1, false, false).may_manage(1), "member: nobody");
+    }
 }
