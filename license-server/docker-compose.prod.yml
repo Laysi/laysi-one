@@ -76,6 +76,13 @@ services:
       DATABASE_URL_FILE: /secrets/database_url
       LICENSE_SIGNING_KEY_FILE: /secrets/license_signing_key
       BIND_ADDR: 0.0.0.0:8090
+      # Mails a generated password to the account it belongs to. The URL holds
+      # a credential and reaches the volume from license-deploy.yml; the
+      # address is a decided constant of this deployment, not a value anybody
+      # has to invent. Either one missing is not an error: the console falls
+      # back to showing the password on screen.
+      SMTP_URL_FILE: /secrets/smtp_url
+      SMTP_FROM: "Laysi One 授權管理 <no-reply@laysi.one>"
     volumes:
       - secrets:/secrets:ro
     ports:

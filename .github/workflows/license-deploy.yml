@@ -124,6 +124,20 @@ jobs:
              '[ -s /secrets/license_signing_key ] || { cat > /secrets/license_signing_key; \
               chmod 0444 /secrets/license_signing_key; }'"
 
+      - name: Provision the SMTP credential
+        env:
+          SMTP_URL: ${{ secrets.SMTP_URL }}
+        run: |
+          set -eu
+          # Rewritten every deploy, unlike the signing key: rotating an SES
+          # SMTP credential is routine, and nothing in the field depends on
+          # this one staying the same. An unset secret writes an empty file,
+          # which turns mail off rather than failing the deploy -- the console
+          # then shows the password on screen, as it did before mail existed.
+          printf '%s' "$SMTP_URL" | ssh "$DEPLOY_HOST" \
+            "podman run --rm -i -v ${SECRETS_VOLUME}:/secrets alpine:3.24 sh -c \
+             'cat > /secrets/smtp_url; chmod 0444 /secrets/smtp_url'"
+
       - name: Restart the stack
         run: |
           set -eu

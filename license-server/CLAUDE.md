@@ -138,3 +138,17 @@ docker compose exec app laysi-one-license public-key              # 編進產品
 密碼由 `SMTP_URL` 與 `SMTP_FROM`（兩者都吃 `_FILE`）寄給本人。**這兩個是環境變數而
 不是畫面設定**：這台伺服器是原廠自己的單一部署，不是客戶安裝的東西，沒有第二個人要填它。
 兩者缺一或寄送失敗都不算錯誤——畫面退回原本的「密碼只顯示一次」，因為密碼終究要有人拿到。
+
+寄件走 Amazon SES（東京 `ap-northeast-1`，網域識別 `laysi.one`，Easy DKIM）。
+**台北 `ap-east-2` 沒有 SES**，該區的服務清單裡沒有這一項，端點也不存在；寄一封核發
+密碼的信，東京與台北的延遲差別看不出來。寄件地址是 `no-reply@laysi.one`，寫在
+`docker-compose.prod.yml` 裡——它是這個部署決定好的常數，不是要人自己想一個值。
+
+`SMTP_URL` 是 GitHub secret，`license-deploy.yml` 每次部署都覆寫進資料卷。**與簽章
+金鑰相反**：輪替一組 SES SMTP 帳密是例行的事，現場沒有任何東西依賴它不變；secret
+沒設就寫進一個空檔案，等於關掉寄件而不是讓部署失敗。
+
+`laysi.one` 的 DMARC 是 `p=reject; adkim=s; aspf=s`。SES 預設的信封寄件網域是
+`amazonses.com`，對不齊 SPF，**所以 DMARC 靠 DKIM 對齊過關**：識別建在網域本身而不是
+子網域，`d=` 才會剛好是 `laysi.one`，嚴格對齊才成立。改成子網域識別或關掉 DKIM，
+信會被收件方直接退回。
