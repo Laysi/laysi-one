@@ -26,6 +26,16 @@ on:
         description: Image tag to deploy
         default: latest
 
+  # license-release.yml calls this on a license-v* tag, so cutting the tag
+  # deploys it. The version is named rather than latest: this host has to be
+  # able to say which build it runs, and a rollback is one more run of this
+  # workflow with an earlier tag.
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: latest
+
 permissions:
   contents: read
   packages: read

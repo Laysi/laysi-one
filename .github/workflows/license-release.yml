@@ -2,6 +2,9 @@
 #
 #   git tag license-v0.1.0 && git push origin license-v0.1.0
 #
+# The tag builds the image and then deploys it: the last job calls
+# license-deploy.yml with this tag.
+#
 # Two deployables share this repository and each cuts its own tags:
 # release.yml takes `v*` for the product, this takes `license-v*`. The
 # prefixes do not overlap, so a tag runs one of them and never both.
@@ -62,3 +65,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=license
           cache-to: type=gha,mode=max,scope=license
+
+  # Cutting the tag deploys it. Nothing else stands between the tag and the
+  # host: ci.yml already guards the code, and naming the tag here is what
+  # makes a rollback one run of license-deploy.yml with an earlier one.
+  deploy:
+    needs: image
+    uses: ./.github/workflows/license-deploy.yml
+    with:
+      version: ${{ github.ref_name }}
+    secrets: inherit
