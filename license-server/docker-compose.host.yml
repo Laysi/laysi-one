@@ -1,0 +1,25 @@
+# The overlay the licence server runs with on its host, on top of
+# docker-compose.prod.yml. Two things the shipped file cannot know:
+#
+# 1. cloudflared already shares a podman network called `proxy` on that host.
+#    Joining app to it lets the tunnel reach it by container name, so nothing
+#    is published on the host at all -- not even on loopback, which a second
+#    stack on the same host could otherwise reach.
+#
+# 2. The host runs the product as well. A fixed container name keeps the two
+#    apart in `podman ps` and gives the tunnel something stable to point at.
+#
+#   podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml up -d
+
+services:
+  app:
+    container_name: laysi-license
+    ports: !override []
+    networks:
+      - default
+      - proxy
+
+networks:
+  default: {}
+  proxy:
+    external: true

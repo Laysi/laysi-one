@@ -104,7 +104,7 @@ jobs:
           set -eu
           test -n "$LICENSE_SIGNING_KEY" || { echo "set the LICENSE_SIGNING_KEY secret"; exit 1; }
           ssh "$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
-          scp license-server/docker-compose.prod.yml "$DEPLOY_HOST:$DEPLOY_DIR/"
+          scp license-server/docker-compose.prod.yml license-server/docker-compose.host.yml "$DEPLOY_HOST:$DEPLOY_DIR/"
           # Only when the volume has none. Overwriting a key that is already
           # signing licences would invalidate every token in the field, and a
           # deployment is not where that decision belongs.
@@ -118,8 +118,8 @@ jobs:
         run: |
           set -eu
           ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && \
-            podman-compose -f docker-compose.prod.yml up -d secrets && \
-            setsid nohup podman-compose -f docker-compose.prod.yml up -d --force-recreate \
+            podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml up -d secrets && \
+            setsid nohup podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml up -d --force-recreate \
             > deploy.log 2>&1 < /dev/null & sleep 2"
 
       - name: The running key must be the one the product verifies against
@@ -127,7 +127,7 @@ jobs:
           set -eu
           for _ in $(seq 60); do
               if ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
-                  'podman ps --format "{{.Names}} {{.Status}}" | grep -q "app.*Up"'; then
+                  'podman ps --format "{{.Names}} {{.Status}}" | grep -q "laysi-license Up"'; then
                   ok=yes
                   break
               fi
@@ -141,7 +141,7 @@ jobs:
           want=$(sed -n 's/^const PUBLIC_KEY_HEX: &str = "\([0-9a-f]\{64\}\)";$/\1/p' \
             backend/crates/laysi-ops/src/ops/license.rs)
           test -n "$want" || { echo "PUBLIC_KEY_HEX not found; did the constant change shape?"; exit 1; }
-          got=$(ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && podman-compose -f docker-compose.prod.yml exec -T app laysi-one-license public-key" | tr -d '\r\n')
+          got=$(ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml exec -T app laysi-one-license public-key" | tr -d '\r\n')
           echo "product expects $want"
           echo "server signs as $got"
           [ "$want" = "$got" ] || { echo "the signing key does not match PUBLIC_KEY_HEX"; exit 1; }
