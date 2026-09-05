@@ -72,6 +72,10 @@ docker compose exec app laysi-one-license public-key              # 編進產品
 - **程式註解與文件字串一律英文**，畫面文字一律繁體中文，商務語氣，與 laysi-one 同一套判準。
 - **金鑰與授權檔是兩個東西**：啟動金鑰是客戶輸入的共享秘密（只存 BLAKE3 與前十碼），
   授權檔是本伺服器簽出去的 Ed25519 payload。`src/token.rs` 兩者都在。
+  **金鑰重新產生得了，但只限尚未啟用的授權**（`fingerprint IS NULL`）：客戶在啟用前
+  弄丟金鑰，唯一的退路本來是重開一張授權，而月結對帳數的是 `license_term`，等於自己
+  多開一次帳單。已綁定的不給——每一次回報都以 `key_hash` 找那一列，換掉等於租期用完
+  就轉唯讀。
 - **schema.sql 全部 `IF NOT EXISTS`**，啟動時整份套用，沒有 migration 版本號。
   這台伺服器的資料表沒有第二個寫入者。
 - 查詢一律執行期 `sqlx::query`，編譯不需要資料庫。動態拼接的 SQL 只拼

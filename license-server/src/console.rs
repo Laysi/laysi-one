@@ -304,7 +304,7 @@ pub async fn licenses(
         format!(
             r#"<div class="key"><strong>{} 的啟動金鑰</strong>
             <code class="num">{}</code>
-            <p class="note">交給客戶，在建立系統管理員帳號之前輸入。離開本頁之後無法再顯示，遺失時重新開立。</p>
+            <p class="note">交給客戶，在建立系統管理員帳號之前輸入。離開本頁之後無法再顯示，遺失時在授權詳情重新產生。</p>
             </div>"#,
             esc(&query.no),
             esc(&query.key)
@@ -548,12 +548,23 @@ pub async fn detail(
     // parent, so "unbind" posts to /licenses/unbind -- which matches the
     // detail route, accepts GET only, and answers 405.
     let path = urlencode(&no);
-    let unbind = if r.fingerprint.is_some() {
-        format!(
-            r#"<form method="post" action="/licenses/{path}/unbind" style="margin:0"><button class="plain">解除綁定</button></form>"#
+    // Rekeying and unbinding are the two halves of one licence's life: the
+    // key matters until the first check, the binding from then on.
+    let (unbind, rekey) = if r.fingerprint.is_some() {
+        (
+            format!(
+                r#"<form method="post" action="/licenses/{path}/unbind" style="margin:0"><button class="plain">解除綁定</button></form>"#
+            ),
+            String::new(),
         )
     } else {
-        String::new()
+        (
+            String::new(),
+            format!(
+                r#"<form method="post" action="/licenses/{path}/rekey" style="margin:0"><button class="plain">重新產生金鑰</button></form>
+                <span class="note">原本的金鑰立即失效。</span>"#
+            ),
+        )
     };
     let toggle = if r.status == "suspended" || r.status == "revoked" {
         r#"<button name="status" value="active" class="plain">恢復使用</button>"#
@@ -576,7 +587,7 @@ pub async fn detail(
               <tr><td>備註</td><td>{note}</td></tr>
             </tbody></table>
             <div class="actions">
-              {unbind}
+              {unbind}{rekey}
               <form method="post" action="/licenses/{path}/status" style="margin:0">{toggle}</form>
             </div>
 
@@ -684,6 +695,49 @@ pub async fn unbind(
         .execute(&s.pool)
         .await
     {
+        Ok(_) => Redirect::to(&format!("/licenses/{}", urlencode(&no))).into_response(),
+        Err(error) => fail(error.into()),
+    }
+}
+
+/// A second activation key for a licence nobody has activated yet.
+///
+/// The key is shown once and only its hash is kept, so a customer who loses
+/// it before the first check cannot get in. Issuing a replacement licence
+/// would work and would also bill them twice, since the billing month counts
+/// terms. `fingerprint IS NULL` is what keeps this narrow: a bound
+/// installation presents its key on every check, and replacing it underneath
+/// one takes that customer read-only when the lease runs out.
+pub async fn rekey(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(no): Path<String>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    let key = token::new_activation_key();
+    let sql = format!(
+        "UPDATE license l SET key_hash = $2, key_prefix = $3 FROM partner p
+          WHERE p.id = l.partner_id AND l.license_no = $1
+            AND l.fingerprint IS NULL AND {}",
+        a.scope_sql()
+    );
+    match sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(&no)
+        .bind(token::key_hash(&key))
+        .bind(token::key_prefix(&key))
+        .execute(&s.pool)
+        .await
+    {
+        // Shown on the listing, by the card that shows a key at issue: it is
+        // the same key, on the same terms, and there is nowhere else a key
+        // is ever displayed.
+        Ok(done) if done.rows_affected() == 1 => Redirect::to(&format!(
+            "/licenses?no={}&key={}",
+            urlencode(&no),
+            urlencode(&key)
+        ))
+        .into_response(),
+        // Bound between the page load and the button, or another partner's.
         Ok(_) => Redirect::to(&format!("/licenses/{}", urlencode(&no))).into_response(),
         Err(error) => fail(error.into()),
     }
