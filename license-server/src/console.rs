@@ -904,21 +904,25 @@ async fn create_partner_inner(s: &Shared, form: &PartnerForm) -> anyhow::Result<
 
 #[derive(Deserialize)]
 pub struct PartnerEditForm {
+    /// The details card posts all three together, so `name` present means
+    /// this is that card rather than the suspend button.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    tax_id: Option<String>,
     #[serde(default)]
     unit_price: Option<String>,
     #[serde(default)]
     status: Option<String>,
 }
 
-/// Change what moves after a partner exists: their price, or whether they are
-/// still trading.
+/// One partner, with what moves after it exists: its details, its rate, and
+/// whether it may still issue. All of it was on the listing, where a field
+/// and a button sat on every row and could be pressed while reading one.
 ///
 /// The price is copied onto each term as it is sold, so a change here sets
 /// what the next licence-year costs and leaves every invoice already raised
 /// exactly as it was.
-/// One partner, with the two things that move after it exists: the rate and
-/// whether it may still issue. Both were on the listing, where a field and a
-/// button sat on every row and could be pressed while reading one.
 pub async fn partner_detail(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -947,8 +951,7 @@ pub async fn partner_detail(
         &format!(
             r#"<h1>{name}</h1><p class="lede">{no_esc}</p>
             <table><tbody>
-              <tr><td style="width:120px">統一編號</td><td class="num">{tax}</td></tr>
-              <tr><td>狀態</td><td><span class="tag {tone}">{status}</span></td></tr>
+              <tr><td style="width:120px">狀態</td><td><span class="tag {tone}">{status}</span></td></tr>
               <tr><td>開立授權</td><td class="num">{licenses}</td></tr>
               <tr><td>登入帳號</td><td class="num"><a href="/members?partner={path}">{users}</a></td></tr>
             </tbody></table>
@@ -958,13 +961,15 @@ pub async fn partner_detail(
                 <button class="{next_class}">{next_label}</button></form>
             </div>
 
-            <h2>年費</h2>
+            <h2>基本資料</h2>
             <form class="card" method="post" action="/partners/{path}">
               <div class="grid">
+                <label>名稱<input name="name" value="{name}" required></label>
+                <label>統一編號<input name="tax_id" inputmode="numeric" maxlength="8" value="{tax}"></label>
                 <label>每組授權年費<input name="unit_price" class="num" inputmode="numeric" value="{price}"></label>
               </div>
               <div class="actions"><button>儲存</button>
-                <span class="note">開立與續約時複製到該筆授權上，已經賣出的不受影響。</span></div>
+                <span class="note">年費在開立與續約時複製到該筆授權上，已經賣出的不受影響。</span></div>
             </form>"#,
             name = esc(&r.name),
             no_esc = esc(&r.partner_no),
@@ -996,18 +1001,33 @@ pub async fn update_partner(
     // Back to the page the button was on, not to the listing: the figure
     // that was just saved is the one the reader wants to see.
     let back = format!("/partners/{}", urlencode(&no));
-    if let Some(raw) = form.unit_price.as_deref() {
+    if let Some(name) = form.name.as_deref() {
+        let name = name.trim();
         // A price that is not a number is a typo. Storing zero for it would
-        // quietly make the next renewal free.
-        let Ok(price) = raw.trim().parse::<i64>() else {
+        // quietly make the next renewal free, and a partner with no name is
+        // a row nobody can pick out of the listing.
+        let Ok(price) = form
+            .unit_price
+            .as_deref()
+            .unwrap_or("0")
+            .trim()
+            .parse::<i64>()
+        else {
             return Redirect::to(&back).into_response();
         };
-        if let Err(error) =
-            sqlx::query("UPDATE partner SET unit_price = $2::numeric WHERE partner_no = $1")
-                .bind(&no)
-                .bind(price.max(0))
-                .execute(&s.pool)
-                .await
+        if name.is_empty() {
+            return Redirect::to(&back).into_response();
+        }
+        if let Err(error) = sqlx::query(
+            "UPDATE partner SET name = $2, tax_id = $3, unit_price = $4::numeric
+              WHERE partner_no = $1",
+        )
+        .bind(&no)
+        .bind(name)
+        .bind(form.tax_id.as_deref().unwrap_or_default().trim())
+        .bind(price.max(0))
+        .execute(&s.pool)
+        .await
         {
             return fail(error.into());
         }
