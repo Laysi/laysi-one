@@ -46,13 +46,15 @@ impl Mailer {
     /// mailbox is an ordinary mistake rather than a fault: the caller reports
     /// it and shows the password instead.
     pub async fn send_password(&self, to: &str, password: &str, base: &str) -> Result<()> {
-        let to: Mailbox = to.parse().map_err(|_| anyhow!("{to} 不是可以收信的地址"))?;
+        let to: Mailbox = to
+            .parse()
+            .map_err(|_| anyhow!("{to} 不是有效的電子郵件地址"))?;
         let body = format!(
             "Laysi One 授權管理\n\n\
              帳號：{to_address}\n\
              密碼：{password}\n\
              網址：{base}\n\n\
-             首次登入必須重新設定密碼。本密碼僅此一封信留存。\n",
+             首次登入後請設定新密碼。本密碼只會寄出一次。\n",
             to_address = to.email,
         );
         let message = Message::builder()

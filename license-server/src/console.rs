@@ -297,7 +297,7 @@ pub async fn licenses(
         String::new()
     } else {
         format!(
-            r#"<div class="key"><strong>{} 的啟動金鑰（僅顯示一次）</strong>
+            r#"<div class="key"><strong>{} 的啟動金鑰</strong>
             <code class="num">{}</code>
             <p class="note">交給客戶，在建立系統管理員帳號之前輸入。離開本頁之後無法再顯示，遺失時重新開立。</p>
             </div>"#,
@@ -326,7 +326,7 @@ pub async fn licenses(
             }
             if r.denials > 0 {
                 flag.push_str(&format!(
-                    r#" <span class="tag off">被拒 {} 次</span>"#,
+                    r#" <span class="tag off">啟動被拒 {} 次</span>"#,
                     r.denials
                 ));
             }
@@ -349,7 +349,7 @@ pub async fn licenses(
         .collect();
 
     let table = if rows.is_empty() {
-        r#"<p class="empty">尚無授權。以上方的表單開立第一組。</p>"#.to_string()
+        r#"<p class="empty">請用上方表單開立第一組授權。</p>"#.to_string()
     } else {
         format!(
             r#"<table><thead><tr><th>授權編號</th><th>被授權單位</th><th class="wide">經銷商</th>
@@ -539,7 +539,7 @@ pub async fn detail(
             esc(&r.version),
             r.employee_count
         ),
-        None => r#"<tr><td>綁定主機</td><td>尚未啟用。客戶第一次輸入金鑰時綁定，之後換主機需要在本頁解除綁定。</td></tr>"#.to_string(),
+        None => r#"<tr><td>綁定主機</td><td>尚未啟用；客戶第一次輸入金鑰時綁定，更換主機後請在本頁解除綁定。</td></tr>"#.to_string(),
     };
 
     let unbind = if r.fingerprint.is_some() {
@@ -778,13 +778,13 @@ pub async fn partners(
             let (next_status, next_label) = if r.status == "active" {
                 ("suspended", "停用")
             } else {
-                ("active", "恢復")
+                ("active", "啟用")
             };
             format!(
                 r#"<tr><td class="num">{no}</td><td>{name}<br><span class="fp">{tax}</span></td>
                 <td class="r"><form method="post" action="/partners/{no}" class="inline">
                   <input name="unit_price" class="num" inputmode="numeric" value="{price}">
-                  <button class="plain">存</button></form></td>
+                  <button class="plain">儲存</button></form></td>
                 <td class="num r">{licenses}</td><td class="num r"><a href="/members?partner={no}">{users}</a></td>
                 <td><span class="tag {tone}">{status}</span>
                   <form method="post" action="/partners/{no}" class="inline">
@@ -1080,7 +1080,7 @@ pub async fn members(
             let (next_status, status_label) = if r.status == "active" {
                 ("disabled", "停用")
             } else {
-                ("active", "恢復")
+                ("active", "啟用")
             };
             let status_action = if self_row {
                 "<span class=\"fp\">本帳號</span>".to_string()
@@ -1209,7 +1209,7 @@ pub async fn create_member(
         // already belongs to may be one this actor cannot see. The message
         // says what to do rather than where the row is.
         Ok(false) => fail(anyhow::anyhow!(
-            "{email} 已經是其他帳號的登入信箱，請改用另一個地址。"
+            "{email} 已被其他帳號使用，請改用另一個地址。"
         )),
         Err(error) => fail(error),
     }
@@ -1233,7 +1233,9 @@ pub async fn update_member(
     // Locking oneself out is the one mistake this page could make
     // irreversible: the account that would fix it is the one being changed.
     if id == a.user_id && (form.status.is_some() || form.is_admin.is_some()) {
-        return fail(anyhow::anyhow!("無法變更本帳號的權限或狀態。"));
+        return fail(anyhow::anyhow!(
+            "無法變更本帳號的權限或狀態，請由其他管理員處理。"
+        ));
     }
     let back = members_path(&form.partner_no);
 
@@ -1245,7 +1247,7 @@ pub async fn update_member(
         };
         if status == "disabled" && target.is_admin && last_admin(&s, target.partner_id).await {
             return fail(anyhow::anyhow!(
-                "{} 是唯一使用中的管理員，請先指定另一位。",
+                "{} 是唯一使用中的管理員，請先指定另一位管理員。",
                 target.email
             ));
         }
@@ -1258,7 +1260,7 @@ pub async fn update_member(
         let wanted = flag == "true";
         if !wanted && target.is_admin && last_admin(&s, target.partner_id).await {
             return fail(anyhow::anyhow!(
-                "{} 是唯一使用中的管理員，請先指定另一位。",
+                "{} 是唯一使用中的管理員，請先指定另一位管理員。",
                 target.email
             ));
         }
@@ -1313,10 +1315,12 @@ pub struct PasswordForm {
 /// stored password is one this server generated.
 fn password_page(a: &Actor, note: &str) -> Response {
     let first = a.must_change_password;
+    // Nothing to say on the voluntary path: the heading and the three fields
+    // are the whole of it.
     let lede = if first {
-        "本帳號使用系統核發的密碼，設定新密碼之後才能使用其他功能。"
+        r#"<p class="lede">請先設定新密碼，才能使用其他功能。</p>"#
     } else {
-        "變更密碼不會結束其他裝置上的登入。"
+        ""
     };
     // Asking for a password the account presented one screen ago adds a step
     // and no assurance; asking for it later is what stops a borrowed session
@@ -1337,7 +1341,7 @@ fn password_page(a: &Actor, note: &str) -> Response {
         "變更密碼",
         if first { None } else { Some(a) },
         &format!(
-            r#"<h1>變更密碼</h1><p class="lede">{lede}</p>{message}
+            r#"<h1>變更密碼</h1>{lede}{message}
             <form class="card" method="post" action="/password" style="max-width:420px">
               <div class="grid" style="grid-template-columns:1fr">
                 {current}
@@ -1385,7 +1389,7 @@ pub async fn change_password(
         );
     }
     if form.password != form.confirm {
-        return password_page(&a, "兩次輸入的新密碼不相同。");
+        return password_page(&a, "兩次輸入的新密碼不一致。");
     }
     let hash = match auth::hash_password(&form.password) {
         Ok(hash) => hash,
@@ -1451,7 +1455,7 @@ fn password_card(q: &HashMap<String, String>) -> String {
     if q.contains_key("mailed") {
         return format!(
             r#"<div class="key"><strong>密碼已寄出</strong><code>{}</code>
-            <p class="note">首次登入必須重新設定密碼。</p></div>"#,
+            <p class="note">首次登入後請設定新密碼。</p></div>"#,
             esc(email)
         );
     }
@@ -1459,7 +1463,7 @@ fn password_card(q: &HashMap<String, String>) -> String {
         Some(password) if !password.is_empty() => format!(
             r#"<div class="key"><strong>密碼僅顯示一次</strong>
             <code>{}</code><code class="num">{}</code>
-            <p class="note">離開本頁之後無法再顯示。首次登入必須重新設定密碼。</p></div>"#,
+            <p class="note">離開本頁之後無法再顯示。首次登入後請設定新密碼。</p></div>"#,
             esc(email),
             esc(password)
         ),
