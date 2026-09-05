@@ -130,6 +130,26 @@ pub fn clear_cookie(secure: bool) -> String {
     format!("{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{flag}")
 }
 
+/// The shortest password this console accepts. Generated ones are longer;
+/// this bounds what a person may replace them with.
+pub const MIN_PASSWORD_CHARS: usize = 8;
+
+/// Whether this account's current password is `plain`. The change form asks
+/// for it, except where the stored password was generated and the account has
+/// already presented it once to get this far.
+pub async fn password_is(pool: &PgPool, id: i32, plain: &str) -> Result<bool> {
+    let Some(row) = sqlx::query("SELECT password_hash FROM partner_user WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(false);
+    };
+    Ok(password_matches(
+        plain,
+        &row.get::<String, _>("password_hash"),
+    ))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

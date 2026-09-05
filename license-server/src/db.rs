@@ -45,6 +45,9 @@ pub struct Actor {
     /// May add, suspend and reset the other members of their own partner.
     /// The vendor is one everywhere; see `may_manage`.
     pub is_admin: bool,
+    /// The password was generated rather than chosen. Every page redirects to
+    /// the change form until it is cleared.
+    pub must_change_password: bool,
 }
 
 impl Actor {
@@ -55,8 +58,8 @@ impl Actor {
         self.is_vendor || (self.is_admin && self.partner_id == partner_id)
     }
 
-    /// The partners whose licences this actor may see: their own, plus anyone
-    /// they signed. The vendor sees all, which is the empty filter.
+    /// The partners whose licences this actor may see: their own only. The
+    /// vendor sees all, which is the empty filter.
     ///
     /// Written into the statement rather than bound, because it is a whole
     /// predicate rather than a value. What it interpolates is an `i32` read
@@ -66,10 +69,7 @@ impl Actor {
         if self.is_vendor {
             "TRUE".into()
         } else {
-            format!(
-                "(l.partner_id = {id} OR p.parent_id = {id})",
-                id = self.partner_id
-            )
+            format!("l.partner_id = {id}", id = self.partner_id)
         }
     }
 }
@@ -82,7 +82,7 @@ pub fn hash_token(raw: &str) -> String {
 /// a live session: absent, unknown, expired, or a disabled account.
 pub async fn actor_of(pool: &PgPool, token: &str) -> Result<Option<Actor>> {
     let row = sqlx::query(
-        "SELECT u.id, u.name, u.email, u.partner_id, u.is_vendor, u.is_admin,
+        "SELECT u.id, u.name, u.email, u.partner_id, u.is_vendor, u.is_admin, u.must_change_password,
                 p.partner_no, p.name AS partner_name
            FROM partner_session s
            JOIN partner_user u ON u.id = s.user_id
@@ -102,6 +102,7 @@ pub async fn actor_of(pool: &PgPool, token: &str) -> Result<Option<Actor>> {
         partner_name: r.get("partner_name"),
         is_vendor: r.get("is_vendor"),
         is_admin: r.get("is_admin"),
+        must_change_password: r.get("must_change_password"),
     }))
 }
 
@@ -273,10 +274,7 @@ pub async fn billing(pool: &PgPool, actor: &Actor) -> Result<Vec<BillingRow>> {
     let scope = if actor.is_vendor {
         "TRUE".to_string()
     } else {
-        format!(
-            "(l.partner_id = {id} OR p.parent_id = {id})",
-            id = actor.partner_id
-        )
+        format!("l.partner_id = {id}", id = actor.partner_id)
     };
     let sql = format!(
         "SELECT to_char(t.billed_on, 'YYYY-MM') AS month, p.partner_no, p.name AS partner_name,
@@ -306,7 +304,6 @@ pub struct PartnerRow {
     pub partner_no: String,
     pub name: String,
     pub tax_id: String,
-    pub parent_name: Option<String>,
     pub unit_price: String,
     pub status: String,
     pub licenses: i64,
@@ -315,11 +312,11 @@ pub struct PartnerRow {
 
 pub async fn partners(pool: &PgPool) -> Result<Vec<PartnerRow>> {
     let rows = sqlx::query(
-        "SELECT p.partner_no, p.name, p.tax_id, parent.name AS parent_name,
+        "SELECT p.partner_no, p.name, p.tax_id,
                 p.unit_price::text AS unit_price, p.status,
                 (SELECT count(*) FROM license l WHERE l.partner_id = p.id) AS licenses,
                 (SELECT count(*) FROM partner_user u WHERE u.partner_id = p.id) AS users
-           FROM partner p LEFT JOIN partner parent ON parent.id = p.parent_id
+           FROM partner p
           ORDER BY p.partner_no",
     )
     .fetch_all(pool)
@@ -330,7 +327,6 @@ pub async fn partners(pool: &PgPool) -> Result<Vec<PartnerRow>> {
             partner_no: r.get("partner_no"),
             name: r.get("name"),
             tax_id: r.get("tax_id"),
-            parent_name: r.get("parent_name"),
             unit_price: r.get("unit_price"),
             status: r.get("status"),
             licenses: r.get("licenses"),
@@ -437,9 +433,11 @@ pub async fn create_member(
     password_hash: &str,
 ) -> Result<bool> {
     let done = sqlx::query(
-        "INSERT INTO partner_user (partner_id, email, password_hash, name, is_admin, is_vendor)
+        "INSERT INTO partner_user
+             (partner_id, email, password_hash, name, is_admin, is_vendor, must_change_password)
          SELECT $1, lower($2), $3, $4, $5,
-                EXISTS (SELECT 1 FROM partner_user v WHERE v.partner_id = $1 AND v.is_vendor)
+                EXISTS (SELECT 1 FROM partner_user v WHERE v.partner_id = $1 AND v.is_vendor),
+                true
          ON CONFLICT (email) DO NOTHING",
     )
     .bind(partner_id)
@@ -480,18 +478,35 @@ pub async fn set_member_admin(pool: &PgPool, id: i32, is_admin: bool) -> Result<
 /// changed.
 pub async fn set_member_password(pool: &PgPool, id: i32, password_hash: &str) -> Result<()> {
     let mut tx = pool.begin().await?;
-    sqlx::query("UPDATE partner_user SET password_hash = $2 WHERE id = $1")
-        .bind(id)
-        .bind(password_hash)
-        .execute(&mut *tx)
-        .await
-        .context("重設密碼失敗")?;
+    sqlx::query(
+        "UPDATE partner_user SET password_hash = $2, must_change_password = true WHERE id = $1",
+    )
+    .bind(id)
+    .bind(password_hash)
+    .execute(&mut *tx)
+    .await
+    .context("重設密碼失敗")?;
     sqlx::query("DELETE FROM partner_session WHERE user_id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await
         .context("撤銷登入工作階段失敗")?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// The account changing its own password. Sessions are left alone: the
+/// caller has just proved they hold the old password, and signing them out
+/// of the browser they are typing in would be a strange reward for it.
+pub async fn set_own_password(pool: &PgPool, id: i32, password_hash: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE partner_user SET password_hash = $2, must_change_password = false WHERE id = $1",
+    )
+    .bind(id)
+    .bind(password_hash)
+    .execute(pool)
+    .await
+    .context("變更密碼失敗")?;
     Ok(())
 }
 
@@ -509,6 +524,7 @@ mod tests {
             partner_name: String::new(),
             is_vendor,
             is_admin,
+            must_change_password: false,
         }
     }
 

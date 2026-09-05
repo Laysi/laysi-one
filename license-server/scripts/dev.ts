@@ -29,7 +29,7 @@ const PG_PASSWORD = "dev";
 // 5432 belongs to whichever laysi-one stack is already up on this machine.
 const PG_PORT = 5433;
 const BIND_ADDR = "127.0.0.1:8090";
-const VENDOR_EMAIL = "dev@laysi.one";
+const VENDOR_EMAIL = "ruisi@laysi.io";
 
 const DATABASE_URL = `postgres://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${PG_PORT}/${PG_DB}`;
 
@@ -107,7 +107,11 @@ function cargoTool(name: string): string | null {
 function serverEnv(): Record<string, string> {
   return {
     ...process.env,
-    PATH: `${process.env.HOME}/.cargo/bin:${process.env.PATH}`,
+    // Appended rather than prepended: `~/.cargo/bin/cargo` is the rustup shim,
+    // and putting it first hands the build to rustup's default toolchain
+    // instead of the one proto pins here. Two compilers sharing one `target`
+    // fail with E0514 on the first crate the other one built.
+    PATH: `${process.env.PATH}:${process.env.HOME}/.cargo/bin`,
     DATABASE_URL,
     LICENSE_SIGNING_KEY: signingKey(),
     BIND_ADDR,

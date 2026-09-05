@@ -96,6 +96,13 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
             };
             // Drawn only for the people it works for: a plain member manages
             // nobody, and the page would refuse them on arrival.
+            // Pricing and the monthly statement are the vendor's side of the
+            // relationship; a reseller neither sets a price nor reconciles one.
+            let billing = if a.is_vendor {
+                r#"<a href="/billing">月結對帳</a>"#
+            } else {
+                ""
+            };
             let members = if a.is_vendor || a.is_admin {
                 r#"<a href="/members">成員</a>"#
             } else {
@@ -107,7 +114,7 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
                 a.name.clone()
             };
             format!(
-                r#"<nav><a href="/licenses">授權</a><a href="/billing">月結對帳</a>{partners}{members}</nav>
+                r#"<nav><a href="/licenses">授權</a>{billing}{partners}{members}</nav>
                    <span class="tag">{}（{}）· {}</span>
                    <form method="post" action="/logout"><button class="plain">登出</button></form>"#,
                 esc(&a.partner_name),
@@ -120,8 +127,8 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
     Html(format!(
         r#"<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{} · Laysi 授權管理</title><style>{STYLE}</style></head>
-<body><header><b>Laysi 授權管理</b>{nav}</header><main>{body}</main></body></html>"#,
+<title>{} · Laysi One 授權管理</title><style>{STYLE}</style></head>
+<body><header><b>Laysi One 授權管理</b>{nav}</header><main>{body}</main></body></html>"#,
         esc(title)
     ))
 }
@@ -166,7 +173,7 @@ pub async fn login_form(State(s): State<Shared>, headers: HeaderMap) -> Response
     page(
         "登入",
         None,
-        r#"<h1>登入</h1><p class="lede">經銷商與代理商帳號。</p>
+        r#"<h1>登入</h1><p class="lede">使用經銷商帳號登入。</p>
         <form class="card" method="post" action="/login" style="max-width:420px">
           <div class="grid" style="grid-template-columns:1fr">
             <label>電子郵件<input name="email" type="email" autocomplete="username" required></label>
@@ -252,6 +259,8 @@ fn fail(error: anyhow::Error) -> Response {
 macro_rules! signed_in {
     ($s:expr, $headers:expr) => {
         match actor(&$s, &$headers).await {
+            // A generated password has one destination until it is replaced.
+            Some(a) if a.must_change_password => return Redirect::to("/password").into_response(),
             Some(a) => a,
             None => return Redirect::to("/login").into_response(),
         }
@@ -290,7 +299,7 @@ pub async fn licenses(
         format!(
             r#"<div class="key"><strong>{} 的啟動金鑰（僅顯示一次）</strong>
             <code class="num">{}</code>
-            <p class="note">交給客戶，在建立系統管理員帳號之前輸入。離開本頁後無法再顯示，遺失時請重新開立。</p>
+            <p class="note">交給客戶，在建立系統管理員帳號之前輸入。離開本頁之後無法再顯示，遺失時重新開立。</p>
             </div>"#,
             esc(&query.no),
             esc(&query.key)
@@ -340,7 +349,7 @@ pub async fn licenses(
         .collect();
 
     let table = if rows.is_empty() {
-        r#"<p class="empty">目前沒有授權。用上方表單開立第一組。</p>"#.to_string()
+        r#"<p class="empty">尚無授權。以上方的表單開立第一組。</p>"#.to_string()
     } else {
         format!(
             r#"<table><thead><tr><th>授權編號</th><th>被授權單位</th><th class="wide">經銷商</th>
@@ -355,14 +364,13 @@ pub async fn licenses(
         Some(&a),
         &format!(
             r#"<h1>授權</h1>
-            <p class="lede">開立後把啟動金鑰交給客戶，客戶在建立系統管理員帳號之前輸入。到期日由您決定。</p>
+            <p class="lede">開立後把啟動金鑰交給客戶，客戶在建立系統管理員帳號之前輸入。</p>
             {issued}
             <form class="card" method="post" action="/licenses">
               <div class="grid">
                 <label>被授權單位<input name="licensee" required placeholder="○○股份有限公司"></label>
                 <label>統一編號<input name="licensee_tax_id" inputmode="numeric" maxlength="8"></label>
                 <label>到期日<input name="expires_on" type="date" value="{default_expiry}" required></label>
-                <label>授權費<input name="amount" class="num" inputmode="numeric" placeholder="留空採預設價"></label>
                 <label>備註<input name="note"></label>
               </div>
               <div class="actions"><button>開立授權</button></div>
@@ -384,8 +392,6 @@ pub struct IssueForm {
     #[serde(default)]
     licensee_tax_id: String,
     expires_on: NaiveDate,
-    #[serde(default)]
-    amount: String,
     #[serde(default)]
     note: String,
 }
@@ -412,8 +418,6 @@ async fn issue_inner(s: &Shared, a: &Actor, form: &IssueForm) -> anyhow::Result<
     let mut tx = s.pool.begin().await?;
     let no = db::next_license_no(&mut tx, today).await?;
     let key = token::new_activation_key();
-    let price: i64 = form.amount.trim().parse().unwrap_or(-1);
-
     let id: i32 = sqlx::query(
         "INSERT INTO license (license_no, partner_id, licensee, licensee_tax_id,
                               key_hash, key_prefix, expires_on, note, created_by)
@@ -432,20 +436,16 @@ async fn issue_inner(s: &Shared, a: &Actor, form: &IssueForm) -> anyhow::Result<
     .await?
     .get("id");
 
-    // The first term. An empty price falls back to the partner's own unit
-    // price, and whatever lands here is the figure invoiced: a later price
-    // change must not rewrite what was already sold.
+    // The first term, priced from the partner rate the vendor set. The figure
+    // is copied rather than looked up later: a price change must not rewrite
+    // what was already sold.
     sqlx::query(
         "INSERT INTO license_term (license_id, from_on, to_on, amount, created_by)
-         VALUES ($1, $2, $3,
-                 CASE WHEN $4 < 0 THEN (SELECT unit_price FROM partner WHERE id = $5)
-                      ELSE $4::numeric END,
-                 $5)",
+         VALUES ($1, $2, $3, (SELECT unit_price FROM partner WHERE id = $4), $5)",
     )
     .bind(id)
     .bind(today)
     .bind(form.expires_on)
-    .bind(price)
     .bind(a.partner_id)
     .bind(a.user_id)
     .execute(&mut *tx)
@@ -481,15 +481,28 @@ pub async fn detail(
     let today = s.today();
     let (label, tone) = status_label(&r.status, r.expires_on, today);
 
+    // The fee column belongs to the vendor: the partner rate is set and
+    // reconciled on that side, and a reseller reading this page is checking
+    // dates rather than an invoice.
+    let (fee_head, fee_cell) = if a.is_vendor {
+        (r#"<th class="r">授權費</th>"#, true)
+    } else {
+        ("", false)
+    };
     let term_rows: String = terms
         .iter()
         .map(|t| {
+            let fee = if fee_cell {
+                format!(r#"<td class="num r">{}</td>"#, esc(&t.amount))
+            } else {
+                String::new()
+            };
             format!(
-                r#"<tr><td class="num">{} 至 {}</td><td class="num">{}</td><td class="num r">{}</td></tr>"#,
+                r#"<tr><td class="num">{} 至 {}</td><td class="num">{}</td>{}</tr>"#,
                 date(t.from_on),
                 date(t.to_on),
                 date(t.billed_on),
-                esc(&t.amount)
+                fee
             )
         })
         .collect();
@@ -563,14 +576,13 @@ pub async fn detail(
             <form class="card" method="post" action="renew">
               <div class="grid">
                 <label>新到期日<input name="expires_on" type="date" value="{next_year}" required></label>
-                <label>授權費<input name="amount" class="num" inputmode="numeric" placeholder="留空採預設價"></label>
               </div>
               <div class="actions"><button>續約</button>
-                <span class="note">寫入一筆新的授權期間，客戶端在下一次回報時取得新的到期日。</span></div>
+                <span class="note">新增一筆授權期間，客戶的系統在下一次回報時取得新的到期日。</span></div>
             </form>
 
             <h2>授權期間</h2>
-            <table><thead><tr><th>期間</th><th>計費月份</th><th class="r">授權費</th></tr></thead>
+            <table><thead><tr><th>期間</th><th>計費月份</th>{fee_head}</tr></thead>
             <tbody>{term_rows}</tbody></table>
             {denial_block}"#,
             no_esc = esc(&no),
@@ -593,7 +605,7 @@ fn denial_label(reason: &str) -> &'static str {
         "revoked" => "授權已註銷",
         "suspended" => "授權已暫停",
         "partner_suspended" => "經銷商已停用",
-        "duplicate_install" => "疑似重複安裝（同一台主機出現兩份資料）",
+        "duplicate_install" => "疑似重複安裝：同一組授權出現兩份資料",
         _ => "其他",
     }
 }
@@ -601,8 +613,6 @@ fn denial_label(reason: &str) -> &'static str {
 #[derive(Deserialize)]
 pub struct RenewForm {
     expires_on: NaiveDate,
-    #[serde(default)]
-    amount: String,
 }
 
 pub async fn renew(
@@ -612,7 +622,6 @@ pub async fn renew(
     Form(form): Form<RenewForm>,
 ) -> Response {
     let a = signed_in!(s, headers);
-    let price: i64 = form.amount.trim().parse().unwrap_or(-1);
     let sql = format!(
         "WITH target AS (
              SELECT l.id, l.expires_on, l.partner_id FROM license l
@@ -624,10 +633,9 @@ pub async fn renew(
               WHERE id IN (SELECT id FROM target) RETURNING id
          )
          INSERT INTO license_term (license_id, from_on, to_on, amount, created_by)
-         SELECT t.id, GREATEST(t.expires_on, $4), $2,
-                CASE WHEN $3 < 0 THEN (SELECT unit_price FROM partner WHERE id = t.partner_id)
-                     ELSE $3::numeric END,
-                $5
+         SELECT t.id, GREATEST(t.expires_on, $3), $2,
+                (SELECT unit_price FROM partner WHERE id = t.partner_id),
+                $4
            FROM target t WHERE EXISTS (SELECT 1 FROM extended)",
         a.scope_sql()
     );
@@ -637,7 +645,6 @@ pub async fn renew(
     match sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&no)
         .bind(form.expires_on)
-        .bind(price)
         .bind(s.today())
         .bind(a.user_id)
         .execute(&s.pool)
@@ -707,6 +714,9 @@ pub async fn set_status(
 
 pub async fn billing(State(s): State<Shared>, headers: HeaderMap) -> Response {
     let a = signed_in!(s, headers);
+    if !a.is_vendor {
+        return Redirect::to("/licenses").into_response();
+    }
     let rows = match db::billing(&s.pool, &a).await {
         Ok(rows) => rows,
         Err(error) => return fail(error),
@@ -726,7 +736,7 @@ pub async fn billing(State(s): State<Shared>, headers: HeaderMap) -> Response {
         })
         .collect();
     let table = if rows.is_empty() {
-        r#"<p class="empty">還沒有開立或續約紀錄。</p>"#.to_string()
+        r#"<p class="empty">尚無開立或續約紀錄。</p>"#.to_string()
     } else {
         format!(
             r#"<table><thead><tr><th>月份</th><th>經銷商</th><th class="r">筆數</th>
@@ -772,7 +782,6 @@ pub async fn partners(
             };
             format!(
                 r#"<tr><td class="num">{no}</td><td>{name}<br><span class="fp">{tax}</span></td>
-                <td>{parent}</td>
                 <td class="r"><form method="post" action="/partners/{no}" class="inline">
                   <input name="unit_price" class="num" inputmode="numeric" value="{price}">
                   <button class="plain">存</button></form></td>
@@ -784,7 +793,6 @@ pub async fn partners(
                 no = esc(&r.partner_no),
                 name = esc(&r.name),
                 tax = esc(&r.tax_id),
-                parent = esc(r.parent_name.as_deref().unwrap_or("—")),
                 price = esc(&r.unit_price),
                 licenses = r.licenses,
                 users = r.users,
@@ -798,48 +806,26 @@ pub async fn partners(
         })
         .collect();
 
-    let options: String = rows
-        .iter()
-        .map(|r| {
-            format!(
-                r#"<option value="{}">{}</option>"#,
-                esc(&r.partner_no),
-                esc(&r.name)
-            )
-        })
-        .collect();
-
-    let created = match (q.get("email"), q.get("password")) {
-        (Some(email), Some(password)) if !password.is_empty() => format!(
-            r#"<div class="key"><strong>新帳號（密碼僅顯示一次）</strong>
-            <code>{}</code><code class="num">{}</code>
-            <p class="note">交給對方後請他自行更換。離開本頁後無法再顯示。</p></div>"#,
-            esc(email),
-            esc(password)
-        ),
-        _ => String::new(),
-    };
+    let created = password_card(&q);
 
     page(
         "經銷商",
         Some(&a),
         &format!(
             r#"<h1>經銷商</h1>
-            <p class="lede">代理商不填上層；經銷商填上層代理商後，該代理商看得到它開立的授權。
-            年費一家一個價，開立與續約時複製到該筆授權上，改價不影響已經賣掉的。</p>
+            <p class="lede">年費一家一個價，開立與續約時複製到該筆授權上，改價不影響已經賣出的授權。</p>
             {created}
             <form class="card" method="post" action="/partners">
               <div class="grid">
                 <label>名稱<input name="name" required></label>
                 <label>統一編號<input name="tax_id" inputmode="numeric" maxlength="8"></label>
-                <label>上層代理商<select name="parent_no"><option value="">（無，本身為代理商）</option>{options}</select></label>
                 <label>每組授權年費<input name="unit_price" class="num" inputmode="numeric" value="0"></label>
                 <label>登入帳號<input name="email" type="email" required></label>
                 <label>聯絡人<input name="contact"></label>
               </div>
               <div class="actions"><button>建立經銷商與帳號</button></div>
             </form>
-            <table><thead><tr><th>代號</th><th>名稱</th><th>上層</th><th class="r">年費</th>
+            <table><thead><tr><th>代號</th><th>名稱</th><th class="r">年費</th>
             <th class="r">授權數</th><th class="r">帳號</th><th>狀態</th></tr></thead>
             <tbody>{body}</tbody></table>"#
         ),
@@ -852,8 +838,6 @@ pub struct PartnerForm {
     name: String,
     #[serde(default)]
     tax_id: String,
-    #[serde(default)]
-    parent_no: String,
     #[serde(default)]
     unit_price: String,
     email: String,
@@ -872,9 +856,8 @@ pub async fn create_partner(
     }
     match create_partner_inner(&s, &form).await {
         Ok(password) => Redirect::to(&format!(
-            "/partners?email={}&password={}",
-            urlencode(form.email.trim()),
-            urlencode(&password)
+            "/partners?{}",
+            password_result(&s, &headers, form.email.trim(), &password).await
         ))
         .into_response(),
         Err(error) => fail(error),
@@ -883,15 +866,6 @@ pub async fn create_partner(
 
 async fn create_partner_inner(s: &Shared, form: &PartnerForm) -> anyhow::Result<String> {
     let mut tx = s.pool.begin().await?;
-    let parent: Option<i32> = if form.parent_no.trim().is_empty() {
-        None
-    } else {
-        sqlx::query("SELECT id FROM partner WHERE partner_no = $1")
-            .bind(form.parent_no.trim())
-            .fetch_optional(&mut *tx)
-            .await?
-            .map(|r| r.get("id"))
-    };
     let seq: i64 = sqlx::query("SELECT count(*) AS n FROM partner")
         .fetch_one(&mut *tx)
         .await?
@@ -900,13 +874,12 @@ async fn create_partner_inner(s: &Shared, form: &PartnerForm) -> anyhow::Result<
     let price: i64 = form.unit_price.trim().parse().unwrap_or(0);
 
     let partner_id: i32 = sqlx::query(
-        "INSERT INTO partner (partner_no, name, tax_id, parent_id, unit_price)
-         VALUES ($1,$2,$3,$4,$5::numeric) RETURNING id",
+        "INSERT INTO partner (partner_no, name, tax_id, unit_price)
+         VALUES ($1,$2,$3,$4::numeric) RETURNING id",
     )
     .bind(&partner_no)
     .bind(form.name.trim())
     .bind(form.tax_id.trim())
-    .bind(parent)
     .bind(price)
     .fetch_one(&mut *tx)
     .await?
@@ -914,8 +887,9 @@ async fn create_partner_inner(s: &Shared, form: &PartnerForm) -> anyhow::Result<
 
     let password = temporary_password();
     sqlx::query(
-        "INSERT INTO partner_user (partner_id, email, password_hash, name)
-         VALUES ($1, lower($2), $3, $4)",
+        "INSERT INTO partner_user
+             (partner_id, email, password_hash, name, is_admin, must_change_password)
+         VALUES ($1, lower($2), $3, $4, true, true)",
     )
     .bind(partner_id)
     .bind(form.email.trim())
@@ -1160,16 +1134,7 @@ pub async fn members(
         })
         .collect();
 
-    let created = match (q.get("email"), q.get("password")) {
-        (Some(email), Some(password)) if !password.is_empty() => format!(
-            r#"<div class="key"><strong>密碼僅顯示一次</strong>
-            <code>{}</code><code class="num">{}</code>
-            <p class="note">交給對方後請他自行更換。離開本頁後無法再顯示。</p></div>"#,
-            esc(email),
-            esc(password)
-        ),
-        _ => String::new(),
-    };
+    let created = password_card(&q);
 
     let scope = if requested.is_empty() {
         String::new()
@@ -1185,7 +1150,7 @@ pub async fn members(
         Some(&a),
         &format!(
             r#"<h1>成員 · {name}</h1>
-            <p class="lede">管理員可以新增成員、停用帳號與重設密碼。至少要留一位使用中的管理員。</p>
+            <p class="lede">管理員可以新增成員、停用帳號與重設密碼。至少保留一位使用中的管理員。</p>
             {created}
             <form class="card" method="post" action="/members">{scope}
               <div class="grid">
@@ -1235,10 +1200,9 @@ pub async fn create_member(
     .await
     {
         Ok(true) => Redirect::to(&format!(
-            "{back}{}email={}&password={}",
+            "{back}{}{}",
             if back.contains('?') { "&" } else { "?" },
-            urlencode(email),
-            urlencode(&password)
+            password_result(&s, &headers, email, &password).await
         ))
         .into_response(),
         // The address is unique across every partner, so the account it
@@ -1313,10 +1277,9 @@ pub async fn update_member(
             return fail(error);
         }
         return Redirect::to(&format!(
-            "{back}{}email={}&password={}",
+            "{back}{}{}",
             if back.contains('?') { "&" } else { "?" },
-            urlencode(&target.email),
-            urlencode(&password)
+            password_result(&s, &headers, &target.email, &password).await
         ))
         .into_response();
     }
@@ -1335,6 +1298,172 @@ fn members_path(partner_no: &str) -> String {
     match partner_no.trim() {
         "" => "/members".to_string(),
         no => format!("/members?partner={}", urlencode(no)),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PasswordForm {
+    #[serde(default)]
+    current: String,
+    password: String,
+    confirm: String,
+}
+
+/// The change form. Reached by choice, and by every other page while the
+/// stored password is one this server generated.
+fn password_page(a: &Actor, note: &str) -> Response {
+    let first = a.must_change_password;
+    let lede = if first {
+        "本帳號使用系統核發的密碼，設定新密碼之後才能使用其他功能。"
+    } else {
+        "變更密碼不會結束其他裝置上的登入。"
+    };
+    // Asking for a password the account presented one screen ago adds a step
+    // and no assurance; asking for it later is what stops a borrowed session
+    // from changing the password on the way out.
+    let current = if first {
+        String::new()
+    } else {
+        r#"<label>目前密碼<input name="current" type="password"
+             autocomplete="current-password" required></label>"#
+            .to_string()
+    };
+    let message = if note.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<p class="lede">{}</p>"#, esc(note))
+    };
+    page(
+        "變更密碼",
+        if first { None } else { Some(a) },
+        &format!(
+            r#"<h1>變更密碼</h1><p class="lede">{lede}</p>{message}
+            <form class="card" method="post" action="/password" style="max-width:420px">
+              <div class="grid" style="grid-template-columns:1fr">
+                {current}
+                <label>新密碼<input name="password" type="password"
+                  autocomplete="new-password" minlength="{min}" required></label>
+                <label>再輸入一次<input name="confirm" type="password"
+                  autocomplete="new-password" minlength="{min}" required></label>
+              </div>
+              <div class="actions"><button>設定密碼</button></div>
+            </form>"#,
+            min = auth::MIN_PASSWORD_CHARS
+        ),
+    )
+    .into_response()
+}
+
+pub async fn password_form(State(s): State<Shared>, headers: HeaderMap) -> Response {
+    match actor(&s, &headers).await {
+        Some(a) => password_page(&a, ""),
+        None => Redirect::to("/login").into_response(),
+    }
+}
+
+pub async fn change_password(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Form(form): Form<PasswordForm>,
+) -> Response {
+    // Not `signed_in!`: that macro sends every request here, so this handler
+    // is the one place that has to resolve the actor itself.
+    let Some(a) = actor(&s, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !a.must_change_password {
+        match auth::password_is(&s.pool, a.user_id, &form.current).await {
+            Ok(true) => {}
+            Ok(false) => return password_page(&a, "目前密碼不正確。"),
+            Err(error) => return fail(error),
+        }
+    }
+    if form.password.chars().count() < auth::MIN_PASSWORD_CHARS {
+        return password_page(
+            &a,
+            &format!("新密碼至少 {} 個字元。", auth::MIN_PASSWORD_CHARS),
+        );
+    }
+    if form.password != form.confirm {
+        return password_page(&a, "兩次輸入的新密碼不相同。");
+    }
+    let hash = match auth::hash_password(&form.password) {
+        Ok(hash) => hash,
+        Err(error) => return fail(error),
+    };
+    if let Err(error) = db::set_own_password(&s.pool, a.user_id, &hash).await {
+        return fail(error);
+    }
+    Redirect::to("/licenses").into_response()
+}
+
+/// The absolute address of this console, taken from the request rather than
+/// from a setting: the same reason the session cookie reads its Secure flag
+/// off the proxy's header.
+fn public_base(headers: &HeaderMap) -> String {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("localhost");
+    let scheme = if auth::secure(headers) {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{host}")
+}
+
+/// Delivers a generated password and reports how, as the query the redirect
+/// carries. Mail that does not go out is not an error worth failing the whole
+/// operation over: the account exists either way, and the password still has
+/// to reach somebody, so it falls back to the screen.
+async fn password_result(s: &Shared, headers: &HeaderMap, email: &str, password: &str) -> String {
+    let mailed = match s.mailer.as_ref() {
+        None => false,
+        Some(mailer) => match mailer
+            .send_password(email, password, &public_base(headers))
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "mailing the password failed");
+                false
+            }
+        },
+    };
+    if mailed {
+        format!("email={}&mailed=1", urlencode(email))
+    } else {
+        format!(
+            "email={}&password={}",
+            urlencode(email),
+            urlencode(password)
+        )
+    }
+}
+
+/// The card that reports a newly generated password, on both the partner and
+/// the member page.
+fn password_card(q: &HashMap<String, String>) -> String {
+    let Some(email) = q.get("email") else {
+        return String::new();
+    };
+    if q.contains_key("mailed") {
+        return format!(
+            r#"<div class="key"><strong>密碼已寄出</strong><code>{}</code>
+            <p class="note">首次登入必須重新設定密碼。</p></div>"#,
+            esc(email)
+        );
+    }
+    match q.get("password") {
+        Some(password) if !password.is_empty() => format!(
+            r#"<div class="key"><strong>密碼僅顯示一次</strong>
+            <code>{}</code><code class="num">{}</code>
+            <p class="note">離開本頁之後無法再顯示。首次登入必須重新設定密碼。</p></div>"#,
+            esc(email),
+            esc(password)
+        ),
+        _ => String::new(),
     }
 }
 

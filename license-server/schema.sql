@@ -13,10 +13,6 @@ CREATE TABLE IF NOT EXISTS partner (
     partner_no text UNIQUE NOT NULL,
     name text NOT NULL,
     tax_id text NOT NULL DEFAULT '',
-    -- Distributors have no parent; a reseller points at the distributor that
-    -- signed it. One level, because that is the whole channel: a distributor
-    -- sees its own resellers' licences and nothing above itself.
-    parent_id integer REFERENCES partner(id),
     -- What one licence-year costs this partner. Copied onto every term as it
     -- is sold, so a later price change does not rewrite what was invoiced.
     unit_price numeric(12, 0) NOT NULL DEFAULT 0,
@@ -24,7 +20,7 @@ CREATE TABLE IF NOT EXISTS partner (
     note text NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now()
 );
-COMMENT ON TABLE partner IS '代理商與經銷商同一張表；parent_id 為空即為代理商。';
+COMMENT ON TABLE partner IS '經銷商一家一列。每一家只看得到自己開立的授權。';
 
 CREATE TABLE IF NOT EXISTS partner_user (
     id serial PRIMARY KEY,
@@ -34,6 +30,12 @@ CREATE TABLE IF NOT EXISTS partner_user (
     name text NOT NULL DEFAULT '',
     -- The vendor's own staff: sees every partner and may create them.
     is_vendor boolean NOT NULL DEFAULT false,
+    -- Adds, suspends, demotes and resets the other members of this partner.
+    -- The account created alongside the partner carries it.
+    is_admin boolean NOT NULL DEFAULT false,
+    -- Set on every generated password. The next sign-in lands on the change
+    -- form and goes nowhere else until it is cleared.
+    must_change_password boolean NOT NULL DEFAULT false,
     status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
     created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -122,17 +124,3 @@ COMMENT ON TABLE license_denial IS
 
 CREATE INDEX IF NOT EXISTS license_denial_idx ON license_denial (license_id, at DESC);
 
--- Members of a partner. One account per partner was all `create_partner`
--- ever wrote, which left a reseller with nobody to add when the contact
--- changed and no way to reset a forgotten password. The flag says who may
--- do that; the account created with the partner carries it.
-ALTER TABLE partner_user ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false;
-COMMENT ON COLUMN partner_user.is_admin IS
-    '租戶管理員：新增、停用、重設本租戶其他成員。';
-
--- Backfills the partners that predate the column: the oldest account is the
--- one that was created with the partner. No-op once every partner has one,
--- so it is safe on every start-up.
-UPDATE partner_user u SET is_admin = true
- WHERE u.id = (SELECT min(o.id) FROM partner_user o WHERE o.partner_id = u.partner_id)
-   AND NOT EXISTS (SELECT 1 FROM partner_user o WHERE o.partner_id = u.partner_id AND o.is_admin);

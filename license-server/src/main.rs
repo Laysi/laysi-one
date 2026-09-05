@@ -1,4 +1,4 @@
-//! Laysi 授權伺服器.
+//! Laysi One 授權伺服器.
 //!
 //! Two jobs in one process:
 //!
@@ -28,6 +28,7 @@ mod auth;
 mod check;
 mod console;
 mod db;
+mod mail;
 mod token;
 
 /// Business time zone. The licence year is sold in Taiwan, so a date that
@@ -42,6 +43,9 @@ pub fn business_offset() -> FixedOffset {
 pub struct State {
     pub pool: PgPool,
     pub signing_key: SigningKey,
+    /// `None` when SMTP is not configured; the console then shows generated
+    /// passwords on screen instead of mailing them.
+    pub mailer: Option<mail::Mailer>,
 }
 
 impl State {
@@ -125,9 +129,12 @@ async fn main() -> Result<()> {
     }
 
     let pool = db::connect(&database_url()?).await?;
+    let mailer = mail::Mailer::from_env(env_or_file("SMTP_URL"), env_or_file("SMTP_FROM"));
+    tracing::info!(mail = mailer.is_some(), "outgoing mail");
     let state: Shared = Arc::new(State {
         pool,
         signing_key: signing_key()?,
+        mailer,
     });
     tracing::info!(
         public_key = %hex::encode(state.signing_key.verifying_key().to_bytes()),
@@ -142,6 +149,10 @@ async fn main() -> Result<()> {
         .route("/", get(console::home))
         .route("/login", get(console::login_form).post(console::login))
         .route("/logout", post(console::logout))
+        .route(
+            "/password",
+            get(console::password_form).post(console::change_password),
+        )
         .route("/licenses", get(console::licenses).post(console::issue))
         .route("/licenses/{no}", get(console::detail))
         .route("/licenses/{no}/renew", post(console::renew))
@@ -191,7 +202,7 @@ async fn create_vendor(pool: &PgPool, email: &str) -> Result<String> {
     {
         Some(row) => row.get("id"),
         None => sqlx::query(
-            "INSERT INTO partner (partner_no, name) VALUES ('P-000', 'Laysi') RETURNING id",
+            "INSERT INTO partner (partner_no, name) VALUES ('P-000', 'Laysi One') RETURNING id",
         )
         .fetch_one(&mut *tx)
         .await?
@@ -199,10 +210,12 @@ async fn create_vendor(pool: &PgPool, email: &str) -> Result<String> {
     };
     let password = console::temporary_password();
     sqlx::query(
-        "INSERT INTO partner_user (partner_id, email, password_hash, name, is_vendor)
-         VALUES ($1, lower($2), $3, '原廠', true)
+        "INSERT INTO partner_user
+             (partner_id, email, password_hash, name, is_vendor, is_admin, must_change_password)
+         VALUES ($1, lower($2), $3, '原廠', true, true, true)
          ON CONFLICT (email) DO UPDATE
-            SET password_hash = EXCLUDED.password_hash, status = 'active'",
+            SET password_hash = EXCLUDED.password_hash, status = 'active',
+                must_change_password = true",
     )
     .bind(partner_id)
     .bind(email)
