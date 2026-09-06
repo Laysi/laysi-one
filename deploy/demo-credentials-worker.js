@@ -20,33 +20,104 @@
 // which turned every UTF-8 byte into its own character and served the panel
 // double-encoded.
 
-const PANEL = [
+// Every value is a button that copies itself. Selecting the text by hand does
+// not work here: a double click stops at the hyphen and takes "laysi" alone,
+// and dragging across the row picks up the whitespace between the cells. A
+// password that copies wrong is worse than no panel, because the screen then
+// says the password is incorrect and the panel looks right.
+const ROWS = [
+  ["負責人", "boss"],
+  ["人資", "hr"],
+  ["會計", "acct"],
+  ["職員", "demo"],
+  ["系統管理員", "admin"],
+  ["密碼", "laysi-demo-2026"],
+];
+
+const VALUE_STYLE = [
+  "font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;",
+  "background:none;border:1px solid transparent;border-radius:2px;",
+  "padding:1px 5px;margin:-1px -5px;color:inherit;cursor:copy;",
+  "pointer-events:auto",
+].join("");
+
+const LABEL_STYLE = "padding:2px 14px 2px 0;color:#6b6b6b;white-space:nowrap";
+
+// Joined with no separator: whitespace between tags is selectable text, and
+// this panel exists to be copied from.
+const MARKUP = [
   '<aside id="laysi-demo-hint" hidden style="',
-  'position:fixed;left:16px;bottom:16px;z-index:2147483000;max-width:320px;',
+  "position:fixed;left:16px;bottom:16px;z-index:2147483000;max-width:340px;",
   "border:1px solid #c9c4b8;background:#fbfaf7;color:#2b2b2b;",
   "font:13px/1.7 system-ui,-apple-system,'Noto Sans TC',sans-serif;",
   "padding:14px 16px;border-radius:2px;box-shadow:0 1px 4px rgba(0,0,0,.08);",
   // The panel is an overlay on somebody else's page. Without this it swallows
   // clicks meant for whatever sits beneath it, and on a short window that is
-  // the login button. The table takes pointer events back, so the password is
-  // still selectable.
+  // the login button. The buttons take pointer events back.
   'pointer-events:none">',
-  '<div style="font-weight:600;letter-spacing:.04em;margin-bottom:8px">示範帳號</div>',
-  '<table style="border-collapse:collapse;width:100%;pointer-events:auto">',
-  row("負責人", "boss"),
-  row("人資", "hr"),
-  row("會計", "acct"),
-  row("職員", "demo"),
-  row("系統管理員", "admin"),
-  '<tr><td style="padding:7px 12px 1px 0;color:#6b6b6b">密碼</td>',
-  '<td style="padding-top:7px"><code>laysi-demo-2026</code></td></tr>',
+  '<div style="font-weight:600;letter-spacing:.04em;margin-bottom:6px">',
+  "示範帳號</div>",
+  '<table style="border-collapse:collapse">',
+  ROWS.map(row).join(""),
   "</table>",
-  '<p style="margin:10px 0 0;color:#6b6b6b">本站每日凌晨四點整份重建，畫面上的都是示範資料。</p>',
+  '<p id="laysi-demo-note" style="margin:8px 0 0;color:#6b6b6b">',
+  "點一下即複製。本站每日凌晨四點整份重建。</p>",
   "</aside>",
+].join("");
+
+function row(pair) {
+  return (
+    '<tr><td style="' +
+    LABEL_STYLE +
+    '">' +
+    pair[0] +
+    '</td><td><button type="button" data-copy="' +
+    pair[1] +
+    '" style="' +
+    VALUE_STYLE +
+    '">' +
+    pair[1] +
+    "</button></td></tr>"
+  );
+}
+
+const SCRIPT = [
   "<script>",
   "(function () {",
   "  var panel = document.getElementById('laysi-demo-hint');",
   "  if (!panel) return;",
+  "  var note = document.getElementById('laysi-demo-note');",
+  "  var said = note.textContent;",
+  "  var timer;",
+  "  panel.addEventListener('click', function (event) {",
+  "    var button = event.target.closest('button[data-copy]');",
+  "    if (!button) return;",
+  "    var text = button.getAttribute('data-copy');",
+  "    var done = function () {",
+  "      note.textContent = '已複製 ' + text;",
+  "      button.style.borderColor = '#c9c4b8';",
+  "      clearTimeout(timer);",
+  "      timer = setTimeout(function () {",
+  "        note.textContent = said;",
+  "        button.style.borderColor = 'transparent';",
+  "      }, 2000);",
+  "    };",
+  // The clipboard API needs a secure context and permission; when it is not
+  // there, selecting the button's text still leaves a working ctrl-C.
+  "    if (navigator.clipboard) {",
+  "      navigator.clipboard.writeText(text).then(done, select);",
+  "    } else {",
+  "      select();",
+  "    }",
+  "    function select() {",
+  "      var range = document.createRange();",
+  "      range.selectNodeContents(button);",
+  "      var selection = getSelection();",
+  "      selection.removeAllRanges();",
+  "      selection.addRange(range);",
+  "      note.textContent = '已選取，請按 Ctrl-C';",
+  "    }",
+  "  });",
   "  var queued = false;",
   "  function sync() {",
   "    queued = false;",
@@ -67,16 +138,6 @@ const PANEL = [
   "<\/script>",
 ].join("\n");
 
-function row(label, name) {
-  return (
-    '<tr><td style="padding:1px 12px 1px 0;color:#6b6b6b">' +
-    label +
-    "</td><td><code>" +
-    name +
-    "</code></td></tr>"
-  );
-}
-
 export default {
   async fetch(request) {
     const response = await fetch(request);
@@ -88,7 +149,7 @@ export default {
     return new HTMLRewriter()
       .on("body", {
         element(body) {
-          body.append(PANEL, { html: true });
+          body.append(MARKUP + SCRIPT, { html: true });
         },
       })
       .transform(response);
