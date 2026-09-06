@@ -987,7 +987,7 @@ grant，AI 看得到一個叫不動的工具；少一條 permission，deny-by-de
 示範站**（`release.yml` 呼叫 `deploy.yml` 並帶 `target: demo`），正式站維持手動——
 客戶的安裝什麼時候升級由持有它的人決定，而示範站沒有持有人也沒有東西可失去。
 
-**每晚整份重建**（`scripts/reset-demo.ts`，systemd timer 台北時間 04:00）。共用的評估
+**每晚整份重建**（`deploy/reset-demo.sh`，systemd timer 台北時間 04:00）。共用的評估
 安裝沒有第二條路可以維持可用：第一個過帳、簽核或改公司名稱的訪客就改變了第二個訪客
 看到的東西，而把昨天的改動分成「示範」與「有人在試」比整份丟掉貴。**`secrets` 資料卷
 不動**，簽章之外資料庫密碼與初始化代碼也在裡面。

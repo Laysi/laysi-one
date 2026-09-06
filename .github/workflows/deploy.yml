@@ -165,11 +165,10 @@ jobs:
         if: inputs.target == 'demo'
         run: |
           set -eu
-          ssh "$DEPLOY_HOST" "command -v bun >/dev/null || { echo 'bun is not installed on the host'; exit 1; }"
           ssh "$DEPLOY_HOST" "test -s .config/laysi-demo.env || \
             { echo 'write ~/.config/laysi-demo.env with DEMO_ACTIVATION_KEY first'; exit 1; }"
           ssh "$DEPLOY_HOST" "mkdir -p .config/systemd/user"
-          scp scripts/reset-demo.ts "$DEPLOY_HOST:$DEPLOY_DIR/"
+          scp deploy/reset-demo.sh "$DEPLOY_HOST:$DEPLOY_DIR/"
           scp deploy/laysi-demo-reset.service deploy/laysi-demo-reset.timer \
             "$DEPLOY_HOST:.config/systemd/user/"
           # A non-login ssh session has neither XDG_RUNTIME_DIR nor, unless the

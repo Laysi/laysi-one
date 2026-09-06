@@ -15,6 +15,6 @@ After=network-online.target
 Type=oneshot
 WorkingDirectory=%h/laysi-one-demo
 EnvironmentFile=%h/.config/laysi-demo.env
-ExecStart=/usr/bin/env bun %h/laysi-one-demo/reset-demo.ts
+ExecStart=/bin/sh %h/laysi-one-demo/reset-demo.sh
 # The rebuild pulls no images and copies no data; anything past this is stuck.
 TimeoutStartSec=900

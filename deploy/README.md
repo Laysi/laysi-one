@@ -9,9 +9,9 @@
 
 ## 主機上要先準備的兩件事
 
-這兩件事 CI 做不到，缺任何一件部署會停下來並說出缺什麼。
+這兩件事 CI 做不到。第二件缺了部署會停下來並說出缺什麼，第一件由重建腳本自己擋。
 
-1. **`bun`**：重建腳本是 `reset-demo.ts`。
+1. **`curl`**：重建時要呼叫一次 `/v1/auth/bootstrap`。其餘只用到 podman。
 2. **`~/.config/laysi-demo.env`**，systemd 單元讀它：
 
    ```sh
@@ -24,7 +24,7 @@
 
 ## 重建做了什麼
 
-`scripts/reset-demo.ts`：丟掉 `pgdata` 與 `rustfsdata`（**不動 `secrets`**，簽章之外
+`deploy/reset-demo.sh`：丟掉 `pgdata` 與 `rustfsdata`（**不動 `secrets`**，簽章之外
 資料庫密碼與初始化代碼也在那裡）、以新映像起來、呼叫 `/v1/auth/bootstrap` 建
 `admin` 並啟用授權、建 `boss`／`hr`／`acct`、跑 `seed-demo` 種帳本與 `demo` 職員帳號，
 最後裝上一個把這五個帳號凍結的 trigger。
