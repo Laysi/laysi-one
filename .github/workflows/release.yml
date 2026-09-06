@@ -99,21 +99,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Whole history: the notes below are the commits since the previous tag,
+      # and a shallow clone has neither the tag nor the commits.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # The attached copy pins LAYSI_VERSION to this tag. The copy in the
       # repository keeps `latest`, which is what a git clone should follow.
       - name: Pin the compose file to this tag
         run: sed -i "s/\${LAYSI_VERSION:-latest}/\${LAYSI_VERSION:-${GITHUB_REF_NAME#v}}/g" docker-compose.prod.yml
 
-      # `gh` is preinstalled on the runner. Upload rather than fail when the
-      # release already exists, which is the case for a tag cut in the web UI.
+      # Written here rather than by --generate-notes, which lists merged pull
+      # requests and finds none: this repository commits to main. The page a
+      # customer lands on has to answer how to install and how to upgrade,
+      # because the compose file attached to it is the whole distribution.
+      - name: Write the notes
+        run: sh .github/release-notes.sh "$GITHUB_REF_NAME" > notes.md
+
+      # `gh` is preinstalled on the runner. Editing rather than failing when
+      # the release already exists, which is the case for a tag cut in the
+      # web UI or a workflow re-run.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" docker-compose.prod.yml --generate-notes \
-            || gh release upload "$GITHUB_REF_NAME" docker-compose.prod.yml --clobber
+          gh release create "$GITHUB_REF_NAME" docker-compose.prod.yml --notes-file notes.md \
+            || { gh release edit "$GITHUB_REF_NAME" --notes-file notes.md &&
+                 gh release upload "$GITHUB_REF_NAME" docker-compose.prod.yml --clobber; }
 
   # The demo tracks the newest release; one.laysi.io does not. A customer's
   # install is upgraded when its owner decides, and the demo has no owner and
