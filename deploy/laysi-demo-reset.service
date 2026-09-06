@@ -18,3 +18,9 @@ EnvironmentFile=%h/.config/laysi-demo.env
 ExecStart=/bin/sh %h/laysi-one-demo/reset-demo.sh
 # The rebuild pulls no images and copies no data; anything past this is stuck.
 TimeoutStartSec=900
+# The containers this starts must outlive the run. `podman-compose up -d`
+# leaves one conmon per container in this unit's cgroup, and the default
+# KillMode=control-group kills every one of them the moment ExecStart returns
+# -- the stack came up, the script reported success, and the whole thing was
+# torn down a second later.
+KillMode=process

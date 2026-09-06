@@ -114,4 +114,17 @@ CREATE TRIGGER demo_freeze_shared_login
     EXECUTE FUNCTION demo_freeze_shared_login();
 SQL
 
+# The last thing checked is the thing visitors actually reach. Everything
+# above can succeed while the site is down: `web` is the only container the
+# tunnel talks to, and it is the one the api's health says nothing about.
+waited=0
+until curl -fsS -o /dev/null "$BASE/v1/auth/me" -w '' 2>/dev/null ||
+      [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/auth/me")" = 401 ]; do
+    waited=$((waited + 5))
+    [ "$waited" -lt 60 ] || die "api 起來了但沒有回應，示範站沒有重建完成。"
+    sleep 5
+done
+podman ps --format '{{.Names}}' | grep -qx laysi-demo-web ||
+    die "laysi-demo-web 沒有在執行，示範站對外會是 502。"
+
 echo "示範站已重建：https://demo.laysi.one　登入 admin／boss／hr／acct／demo，密碼 $PASSWORD"
