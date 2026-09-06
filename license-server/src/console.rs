@@ -19,6 +19,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 
 use crate::db::{self, Actor};
+use crate::statement;
 use crate::token;
 use crate::{auth, Shared};
 
@@ -167,6 +168,38 @@ fn status_label(
         "issued" => ("尚未啟用", ""),
         _ => ("使用中", "on"),
     }
+}
+
+/// How many licence years one term may cover. A partner buys whole years,
+/// several at once if the customer paid up front; how they then invoice that
+/// customer is between the two of them.
+const MAX_TERM_YEARS: i32 = 10;
+
+/// The years a form asked for, or nothing when the figure is outside the
+/// range the console offers. Rejected rather than clamped: the number decides
+/// both the term and the amount, so silently selling a different one is
+/// worse than refusing the post.
+fn term_years(raw: i32) -> Option<u32> {
+    (1..=MAX_TERM_YEARS).contains(&raw).then_some(raw as u32)
+}
+
+/// End of a term of `years` licence years starting on `from`.
+///
+/// The partner picks a whole number of years, never a date: the date is what
+/// the vendor invoices them for, and a date field on the payer's form is a
+/// field that decides its own price. Calendar months rather than 365 days, so
+/// a term still ends on the same day of the month it started.
+fn term_end(from: NaiveDate, years: u32) -> NaiveDate {
+    from.checked_add_months(chrono::Months::new(12 * years))
+        .unwrap_or(from)
+}
+
+/// Options for the 年數 dropdown, shared by the issue and renewal forms so
+/// the two cannot drift apart on what a term may be.
+fn years_select() -> String {
+    (1..=MAX_TERM_YEARS)
+        .map(|y| format!(r#"<option value="{y}">{y} 年</option>"#))
+        .collect::<String>()
 }
 
 // Sign in
@@ -361,7 +394,7 @@ pub async fn licenses(
         )
     };
 
-    let default_expiry = date(today + chrono::Duration::days(365));
+    let years = years_select();
     page(
         "授權",
         Some(&a),
@@ -373,10 +406,11 @@ pub async fn licenses(
               <div class="grid">
                 <label>被授權單位<input name="licensee" required></label>
                 <label>統一編號<input name="licensee_tax_id" inputmode="numeric" maxlength="8"></label>
-                <label>到期日<input name="expires_on" type="date" value="{default_expiry}" required></label>
+                <label>授權年數<select name="years">{years}</select></label>
                 <label>備註<input name="note"></label>
               </div>
-              <div class="actions"><button>開立授權</button></div>
+              <div class="actions"><button>開立授權</button>
+                <span class="note">到期日為今天往後推算，開立後在授權詳情看得到。</span></div>
             </form>
             <form method="get" action="/licenses" class="actions" style="margin-bottom:18px">
               <input name="q" value="{q}" placeholder="搜尋單位名稱、統編或授權編號" style="min-width:260px">
@@ -394,7 +428,7 @@ pub struct IssueForm {
     licensee: String,
     #[serde(default)]
     licensee_tax_id: String,
-    expires_on: NaiveDate,
+    years: i32,
     #[serde(default)]
     note: String,
 }
@@ -405,7 +439,10 @@ pub async fn issue(
     Form(form): Form<IssueForm>,
 ) -> Response {
     let a = signed_in!(s, headers);
-    match issue_inner(&s, &a, &form).await {
+    let Some(years) = term_years(form.years) else {
+        return (StatusCode::BAD_REQUEST, "授權年數超出範圍").into_response();
+    };
+    match issue_inner(&s, &a, &form, years).await {
         Ok((no, key)) => Redirect::to(&format!(
             "/licenses?no={}&key={}",
             urlencode(&no),
@@ -416,8 +453,14 @@ pub async fn issue(
     }
 }
 
-async fn issue_inner(s: &Shared, a: &Actor, form: &IssueForm) -> anyhow::Result<(String, String)> {
+async fn issue_inner(
+    s: &Shared,
+    a: &Actor,
+    form: &IssueForm,
+    years: u32,
+) -> anyhow::Result<(String, String)> {
     let today = s.today();
+    let expires_on = term_end(today, years);
     let mut tx = s.pool.begin().await?;
     let no = db::next_license_no(&mut tx, today).await?;
     let key = token::new_activation_key();
@@ -432,25 +475,26 @@ async fn issue_inner(s: &Shared, a: &Actor, form: &IssueForm) -> anyhow::Result<
     .bind(form.licensee_tax_id.trim())
     .bind(token::key_hash(&key))
     .bind(token::key_prefix(&key))
-    .bind(form.expires_on)
+    .bind(expires_on)
     .bind(form.note.trim())
     .bind(a.user_id)
     .fetch_one(&mut *tx)
     .await?
     .get("id");
 
-    // The first term, priced from the partner rate the vendor set. The figure
-    // is copied rather than looked up later: a price change must not rewrite
-    // what was already sold.
+    // The first term, priced from the partner rate the vendor set times the
+    // years sold. The rate is copied rather than looked up later: a price
+    // change must not rewrite what was already sold.
     sqlx::query(
         "INSERT INTO license_term (license_id, from_on, to_on, amount, created_by)
-         VALUES ($1, $2, $3, (SELECT unit_price FROM partner WHERE id = $4), $5)",
+         VALUES ($1, $2, $3, (SELECT unit_price FROM partner WHERE id = $4) * $6, $5)",
     )
     .bind(id)
     .bind(today)
-    .bind(form.expires_on)
+    .bind(expires_on)
     .bind(a.partner_id)
     .bind(a.user_id)
+    .bind(years as i32)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -594,10 +638,10 @@ pub async fn detail(
             <h2>續約</h2>
             <form class="card" method="post" action="/licenses/{path}/renew">
               <div class="grid">
-                <label>新到期日<input name="expires_on" type="date" value="{next_year}" required></label>
+                <label>續約年數<select name="years">{years}</select></label>
               </div>
               <div class="actions"><button>續約</button>
-                <span class="note">新增一筆授權期間，客戶的系統在下一次回報時取得新的到期日。</span></div>
+                <span class="note">自 {renew_from} 起算，客戶的系統在下一次回報時取得新的到期日。</span></div>
             </form>
 
             <h2>授權期間</h2>
@@ -613,7 +657,8 @@ pub async fn detail(
             prefix = esc(&r.key_prefix),
             expires = date(r.expires_on),
             note = esc(&r.note),
-            next_year = date(r.expires_on.max(today) + chrono::Duration::days(365)),
+            years = years_select(),
+            renew_from = date(r.expires_on.max(today)),
         ),
     )
     .into_response()
@@ -632,7 +677,7 @@ fn denial_label(reason: &str) -> &'static str {
 
 #[derive(Deserialize)]
 pub struct RenewForm {
-    expires_on: NaiveDate,
+    years: i32,
 }
 
 pub async fn renew(
@@ -642,31 +687,36 @@ pub async fn renew(
     Form(form): Form<RenewForm>,
 ) -> Response {
     let a = signed_in!(s, headers);
+    let Some(years) = term_years(form.years) else {
+        return (StatusCode::BAD_REQUEST, "續約年數超出範圍").into_response();
+    };
+    // The new term starts where the old one ended, or today when the licence
+    // already lapsed: a renewal bought late runs from now, not backdated over
+    // months nobody was licensed for. The partner names the years, never the
+    // date, and the same figure prices the term row.
     let sql = format!(
         "WITH target AS (
-             SELECT l.id, l.expires_on, l.partner_id FROM license l
+             SELECT l.id, GREATEST(l.expires_on, $2) AS from_on, l.partner_id FROM license l
                JOIN partner p ON p.id = l.partner_id
               WHERE l.license_no = $1 AND {}
          ), extended AS (
-             UPDATE license SET expires_on = $2,
-                    status = CASE WHEN status = 'revoked' THEN status ELSE 'active' END
-              WHERE id IN (SELECT id FROM target) RETURNING id
+             UPDATE license l
+                SET expires_on = (t.from_on + make_interval(years => $4))::date,
+                    status = CASE WHEN l.status = 'revoked' THEN l.status ELSE 'active' END
+               FROM target t WHERE l.id = t.id RETURNING l.id
          )
          INSERT INTO license_term (license_id, from_on, to_on, amount, created_by)
-         SELECT t.id, GREATEST(t.expires_on, $3), $2,
-                (SELECT unit_price FROM partner WHERE id = t.partner_id),
-                $4
+         SELECT t.id, t.from_on, (t.from_on + make_interval(years => $4))::date,
+                (SELECT unit_price FROM partner WHERE id = t.partner_id) * $4,
+                $3
            FROM target t WHERE EXISTS (SELECT 1 FROM extended)",
         a.scope_sql()
     );
-    // The new term starts where the old one ended, or today when the licence
-    // already lapsed: a renewal bought late is a year from now, not a year
-    // backdated over months nobody was licensed for.
     match sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&no)
-        .bind(form.expires_on)
         .bind(s.today())
         .bind(a.user_id)
+        .bind(years as i32)
         .execute(&s.pool)
         .await
     {
@@ -775,46 +825,221 @@ pub async fn set_status(
 }
 // Billing
 
-pub async fn billing(State(s): State<Shared>, headers: HeaderMap) -> Response {
+/// A figure with thousands separators. The statement exists to be read as
+/// money, and an unseparated seven-digit total is read twice.
+fn money(n: i64) -> String {
+    let digits = n.abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
+/// One partner's section of the statement: the lines, then the subtotal that
+/// is the figure to invoice them.
+fn billing_section(rows: &[db::BillingRow]) -> String {
+    let first = &rows[0];
+    let subtotal = money(rows.iter().map(|r| r.amount).sum());
+    let lines: String = rows
+        .iter()
+        .map(|r| {
+            format!(
+                r#"<tr><td class="num">{no}</td><td>{licensee}</td><td>{kind}</td>
+                <td class="num">{from} – {to}</td><td class="num r">{amount}</td></tr>"#,
+                no = esc(&r.license_no),
+                licensee = esc(&r.licensee),
+                kind = if r.first_term { "開立" } else { "續約" },
+                from = date(r.from_on),
+                to = date(r.to_on),
+                amount = money(r.amount),
+            )
+        })
+        .collect();
+    // The tax id sits in the heading because it is what an invoice is made
+    // out to, and a section without one is a section somebody has to go and
+    // look up before they can bill it.
+    let tax = if first.tax_id.trim().is_empty() {
+        r#"<span class="tag off">統一編號未填</span>"#.to_string()
+    } else {
+        format!(
+            r#"<span class="tag">統一編號 {}</span>"#,
+            esc(&first.tax_id)
+        )
+    };
+    format!(
+        r#"<h2>{name}（{no}）{tax}</h2>
+        <table><thead><tr><th>授權編號</th><th>被授權單位</th><th>種類</th>
+        <th>授權期間</th><th class="r">授權費</th></tr></thead>
+        <tbody>{lines}</tbody>
+        <tfoot><tr><td colspan="4">應收 {count} 筆</td>
+        <td class="num r"><b>{subtotal}</b></td></tr></tfoot></table>"#,
+        name = esc(&first.partner_name),
+        no = esc(&first.partner_no),
+        count = rows.len(),
+    )
+}
+
+pub async fn billing(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
     let a = signed_in!(s, headers);
     if !a.is_vendor {
         return Redirect::to("/licenses").into_response();
     }
-    let rows = match db::billing(&s.pool, &a).await {
+    let months = match db::billing_months(&s.pool).await {
+        Ok(months) => months,
+        Err(error) => return fail(error),
+    };
+    let asked = q
+        .get("month")
+        .and_then(|m| NaiveDate::parse_from_str(&format!("{m}-01"), "%Y-%m-%d").ok());
+    // The newest month with sales, not the calendar month: on the second of
+    // the month the page is still opened to settle the one that just ended.
+    let Some(month) = asked
+        .filter(|m| months.contains(m))
+        .or(months.first().copied())
+    else {
+        return page(
+            "月結對帳",
+            Some(&a),
+            r#"<h1>月結對帳</h1><p class="empty">尚無開立或續約紀錄。</p>"#,
+        )
+        .into_response();
+    };
+    let rows = match db::billing(&s.pool, month).await {
         Ok(rows) => rows,
         Err(error) => return fail(error),
     };
-    let body: String = rows
+    let (webhook_url, notified) = match db::vendor_setting(&s.pool).await {
+        Ok(setting) => setting,
+        Err(error) => return fail(error),
+    };
+
+    let options: String = months
         .iter()
-        .map(|r| {
-            format!(
-                r#"<tr><td class="num">{}</td><td>{}（{}）</td><td class="num r">{}</td>
-                <td class="num r">{}</td></tr>"#,
-                esc(&r.month),
-                esc(&r.partner_name),
-                esc(&r.partner_no),
-                r.terms,
-                esc(&r.amount)
-            )
+        .map(|m| {
+            let value = m.format("%Y-%m").to_string();
+            let on = if *m == month { " selected" } else { "" };
+            format!(r#"<option value="{value}"{on}>{value}</option>"#)
         })
         .collect();
-    let table = if rows.is_empty() {
-        r#"<p class="empty">尚無開立或續約紀錄。</p>"#.to_string()
+    let total: i64 = rows.iter().map(|r| r.amount).sum();
+    let mut sections = String::new();
+    for chunk in rows.chunk_by(|a, b| a.partner_no == b.partner_no) {
+        sections.push_str(&billing_section(chunk));
+    }
+    let partners = rows.chunk_by(|a, b| a.partner_no == b.partner_no).count();
+    let summary = if rows.is_empty() {
+        r#"<p class="empty">本月沒有開立或續約紀錄。</p>"#.to_string()
     } else {
         format!(
-            r#"<table><thead><tr><th>月份</th><th>經銷商</th><th class="r">筆數</th>
-            <th class="r">授權費</th></tr></thead><tbody>{body}</tbody></table>"#
+            r#"<table><tbody><tr><td>本月合計</td>
+            <td class="num r">{partners} 家經銷商 · {terms} 筆</td>
+            <td class="num r"><b>{total}</b></td></tr></tbody></table>{sections}"#,
+            terms = rows.len(),
+            total = money(total),
         )
     };
+    // Where the last announcement got to, so the person setting the address
+    // can see the schedule working without waiting for a month to end.
+    let sent = match notified {
+        Some(m) if !webhook_url.trim().is_empty() => {
+            format!("上次推送到 {}。", m.format("%Y-%m"))
+        }
+        _ => String::new(),
+    };
+    let notice = q.get("push").map_or(String::new(), |note| {
+        format!(r#"<p class="note">{}</p>"#, esc(note))
+    });
     page(
         "月結對帳",
         Some(&a),
         &format!(
             r#"<h1>月結對帳</h1>
-            <p class="lede">開立與續約各計一筆，金額為開立當下的單價。</p>{table}"#
+            <p class="lede">一家經銷商一段，小計就是這個月向他請的款。金額為賣出當下的單價
+            乘以授權年數，未含營業稅。</p>
+            <form method="get" action="/billing" class="actions" style="margin-bottom:24px">
+              <label class="row">月份<select name="month">{options}</select></label>
+              <button class="plain">查看</button>
+            </form>
+            {summary}
+
+            <h2>月結通知</h2>
+            <form class="card" method="post" action="/billing/webhook">
+              <label>推送網址<input name="url" type="url" value="{url}"
+                placeholder="https://example.com/hooks/statement"></label>
+              <div class="actions">
+                <button name="action" value="save">儲存</button>
+                <button class="plain" name="action" value="test">測試推送</button>
+                <button class="plain" name="action" value="clear">清除</button>
+                <span class="note">每月一日推送上個月的月結報告。{sent}</span>
+              </div>
+              {notice}
+            </form>"#,
+            url = esc(&webhook_url),
         ),
     )
     .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct WebhookForm {
+    #[serde(default)]
+    url: String,
+    action: String,
+}
+
+pub async fn set_statement_webhook(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Form(form): Form<WebhookForm>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    if !a.is_vendor {
+        return Redirect::to("/licenses").into_response();
+    }
+    let url = form.url.trim().to_string();
+    // The test posts to the address in the box rather than the stored one, so
+    // an address can be tried before it is saved.
+    let note = match form.action.as_str() {
+        "clear" => match db::set_statement_webhook(&s.pool, "", s.today()).await {
+            Ok(()) => "已清除推送網址。".to_string(),
+            Err(error) => return fail(error),
+        },
+        "test" => match statement::validate_url(&url) {
+            Err(note) => note,
+            Ok(()) => {
+                let month = statement::previous_month(s.today());
+                let rows = match db::billing(&s.pool, month).await {
+                    Ok(rows) => rows,
+                    Err(error) => return fail(error),
+                };
+                match statement::deliver(&url, &statement::payload(month, &rows)).await {
+                    Ok(()) => format!("已推送 {} 的月結報告。", month.format("%Y-%m")),
+                    Err(note) => note,
+                }
+            }
+        },
+        _ if url.is_empty() => "請填入推送網址，或按清除停用推送。".to_string(),
+        _ => match statement::validate_url(&url) {
+            Err(note) => note,
+            Ok(()) => match db::set_statement_webhook(&s.pool, &url, s.today()).await {
+                Ok(()) => "已儲存推送網址，下個月一日開始推送。".to_string(),
+                Err(error) => return fail(error),
+            },
+        },
+    };
+    Redirect::to(&format!("/billing?push={}", urlencode(&note))).into_response()
 }
 
 // Partners (vendor only)
@@ -1640,6 +1865,79 @@ mod tests {
         // A revoked licence reads as revoked whatever the date says.
         assert_eq!(status_label("revoked", future, today).0, "已註銷");
         assert_eq!(status_label("suspended", past, today).0, "已暫停");
+    }
+
+    #[test]
+    fn a_term_is_a_whole_number_of_calendar_years() {
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        assert_eq!(term_end(day(2026, 9, 6), 1), day(2027, 9, 6));
+        assert_eq!(term_end(day(2026, 9, 6), 3), day(2029, 9, 6));
+        // Across a leap day the term still lands on the same day of the month.
+        assert_eq!(term_end(day(2027, 3, 1), 1), day(2028, 3, 1));
+        // A leap day has no counterpart the next year; the term ends on the 28th.
+        assert_eq!(term_end(day(2028, 2, 29), 1), day(2029, 2, 28));
+    }
+
+    #[test]
+    fn a_term_outside_the_offered_range_is_refused_rather_than_clamped() {
+        assert_eq!(term_years(1), Some(1));
+        assert_eq!(term_years(MAX_TERM_YEARS), Some(MAX_TERM_YEARS as u32));
+        // A hand-made post must not buy a century, nor a term of zero years
+        // that would still be invoiced as one row.
+        assert_eq!(term_years(0), None);
+        assert_eq!(term_years(-1), None);
+        assert_eq!(term_years(MAX_TERM_YEARS + 1), None);
+    }
+
+    #[test]
+    fn an_amount_is_grouped_in_threes() {
+        assert_eq!(money(0), "0");
+        assert_eq!(money(999), "999");
+        assert_eq!(money(1_000), "1,000");
+        assert_eq!(money(360_000), "360,000");
+        assert_eq!(money(1_234_567), "1,234,567");
+        assert_eq!(money(-1_500), "-1,500");
+    }
+
+    #[test]
+    fn a_partner_section_totals_the_lines_it_shows() {
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let line = |license_no: &str, amount, first_term| db::BillingRow {
+            partner_no: "P-001".into(),
+            partner_name: "台北資訊".into(),
+            tax_id: "12345678".into(),
+            license_no: license_no.into(),
+            licensee: "客戶".into(),
+            from_on: day(2026, 9, 1),
+            to_on: day(2029, 9, 1),
+            amount,
+            first_term,
+        };
+        let html = billing_section(&[
+            line("L2609-001", 36_000, true),
+            line("L2609-002", 24_000, false),
+        ]);
+        assert!(html.contains("60,000"), "小計要等於各列相加：{html}");
+        assert!(html.contains("應收 2 筆"));
+        assert!(html.contains("開立") && html.contains("續約"));
+        assert!(html.contains("統一編號 12345678"));
+    }
+
+    #[test]
+    fn a_partner_with_no_tax_id_is_flagged_rather_than_left_blank() {
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let html = billing_section(&[db::BillingRow {
+            partner_no: "P-002".into(),
+            partner_name: "高雄系統".into(),
+            tax_id: "  ".into(),
+            license_no: "L2609-003".into(),
+            licensee: "客戶".into(),
+            from_on: day(2026, 9, 1),
+            to_on: day(2027, 9, 1),
+            amount: 12_000,
+            first_term: true,
+        }]);
+        assert!(html.contains("統一編號未填"));
     }
 
     #[test]

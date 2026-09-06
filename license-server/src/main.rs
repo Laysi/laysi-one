@@ -29,6 +29,7 @@ mod check;
 mod console;
 mod db;
 mod mail;
+mod statement;
 mod token;
 
 /// Business time zone. The licence year is sold in Taiwan, so a date that
@@ -140,6 +141,7 @@ async fn main() -> Result<()> {
         public_key = %hex::encode(state.signing_key.verifying_key().to_bytes()),
         "signing key loaded"
     );
+    statement::watch(state.clone());
 
     let app = Router::new()
         // The product's side of the contract. One endpoint, no session.
@@ -160,6 +162,7 @@ async fn main() -> Result<()> {
         .route("/licenses/{no}/rekey", post(console::rekey))
         .route("/licenses/{no}/status", post(console::set_status))
         .route("/billing", get(console::billing))
+        .route("/billing/webhook", post(console::set_statement_webhook))
         .route(
             "/partners",
             get(console::partners).post(console::create_partner),

@@ -258,44 +258,72 @@ pub async fn denials(pool: &PgPool, license_no: &str) -> Result<Vec<DenialRow>> 
         .collect())
 }
 
+/// One term sold, as the monthly statement lists it. The partner columns
+/// repeat down the rows; the page groups on them rather than the query, so
+/// that a partner's subtotal and the lines behind it come from one read and
+/// cannot disagree.
 pub struct BillingRow {
-    pub month: String,
     pub partner_no: String,
     pub partner_name: String,
-    pub terms: i64,
-    pub amount: String,
+    pub tax_id: String,
+    pub license_no: String,
+    pub licensee: String,
+    pub from_on: NaiveDate,
+    pub to_on: NaiveDate,
+    /// `numeric(12, 0)`, so it arrives whole and adds up without a decimal
+    /// type on this side.
+    pub amount: i64,
+    /// The first term of its licence. Derived rather than stored: a licence
+    /// is issued once and renewed after that, and the row order says which.
+    pub first_term: bool,
 }
 
-/// Sold by month and by partner. Reads `license_term`, so a renewal counts
-/// the same as a first sale, which is what is being invoiced.
-pub async fn billing(pool: &PgPool, actor: &Actor) -> Result<Vec<BillingRow>> {
-    let scope = if actor.is_vendor {
-        "TRUE".to_string()
-    } else {
-        format!("l.partner_id = {id}", id = actor.partner_id)
-    };
-    let sql = format!(
-        "SELECT to_char(t.billed_on, 'YYYY-MM') AS month, p.partner_no, p.name AS partner_name,
-                count(*) AS terms, sum(t.amount)::text AS amount
+/// Every term invoiced in `month`, oldest partner name first.
+///
+/// Grouped by `billed_on` rather than `from_on`: a term sold in advance is
+/// invoiced in the month it was sold, which is the month the vendor is
+/// billing the partner for.
+pub async fn billing(pool: &PgPool, month: NaiveDate) -> Result<Vec<BillingRow>> {
+    let rows = sqlx::query(
+        "SELECT p.partner_no, p.name AS partner_name, p.tax_id,
+                l.license_no, l.licensee, t.from_on, t.to_on, t.amount::bigint AS amount,
+                t.id = (SELECT min(t2.id) FROM license_term t2
+                         WHERE t2.license_id = t.license_id) AS first_term
            FROM license_term t
            JOIN license l ON l.id = t.license_id
            JOIN partner p ON p.id = l.partner_id
-          WHERE {scope}
-          GROUP BY 1, 2, 3 ORDER BY 1 DESC, 3"
-    );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .fetch_all(pool)
-        .await?;
+          WHERE t.billed_on >= $1 AND t.billed_on < ($1 + interval '1 month')::date
+          ORDER BY p.name, p.partner_no, l.license_no, t.from_on",
+    )
+    .bind(month)
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .iter()
         .map(|r| BillingRow {
-            month: r.get("month"),
             partner_no: r.get("partner_no"),
             partner_name: r.get("partner_name"),
-            terms: r.get("terms"),
+            tax_id: r.get("tax_id"),
+            license_no: r.get("license_no"),
+            licensee: r.get("licensee"),
+            from_on: r.get("from_on"),
+            to_on: r.get("to_on"),
             amount: r.get("amount"),
+            first_term: r.get("first_term"),
         })
         .collect())
+}
+
+/// The months that have anything to invoice, newest first. The picker offers
+/// these and nothing else: a month with no sales is not a month to open.
+pub async fn billing_months(pool: &PgPool) -> Result<Vec<NaiveDate>> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT date_trunc('month', billed_on)::date AS month
+           FROM license_term ORDER BY 1 DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(|r| r.get("month")).collect())
 }
 
 pub struct PartnerRow {
@@ -528,6 +556,76 @@ pub async fn set_own_password(pool: &PgPool, id: i32, password_hash: &str) -> Re
     .execute(pool)
     .await
     .context("變更密碼失敗")?;
+    Ok(())
+}
+
+/// The single `vendor_setting` row: the statement address and the last month
+/// announced to it.
+pub async fn vendor_setting(pool: &PgPool) -> Result<(String, Option<NaiveDate>)> {
+    let row = sqlx::query(
+        "SELECT statement_webhook_url, notified_month FROM vendor_setting WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await
+    .context("讀取原廠設定失敗")?;
+    Ok((row.get("statement_webhook_url"), row.get("notified_month")))
+}
+
+/// Store the statement address, and take the month before `today` as already
+/// announced: an address saved in the middle of a month starts announcing at
+/// the end of that month rather than replaying whatever came before it.
+pub async fn set_statement_webhook(pool: &PgPool, url: &str, today: NaiveDate) -> Result<()> {
+    sqlx::query(
+        "UPDATE vendor_setting
+            SET statement_webhook_url = $1, updated_at = now(),
+                notified_month = (date_trunc('month', $2::date) - interval '1 month')::date
+          WHERE id = 1",
+    )
+    .bind(url)
+    .bind(today)
+    .execute(pool)
+    .await
+    .context("儲存推送網址失敗")?;
+    Ok(())
+}
+
+/// Claim `month` as the one to announce, returning the address to announce it
+/// to. `None` when it is already claimed or no address is set.
+///
+/// The claim is the UPDATE itself, so two servers against one database cannot
+/// both send: the second matches no row. Delivery happens after the claim and
+/// hands the month back on failure, which is the pairing that neither sends
+/// twice nor drops a month for good.
+pub async fn claim_statement_month(pool: &PgPool, month: NaiveDate) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "UPDATE vendor_setting SET notified_month = $1
+          WHERE id = 1 AND statement_webhook_url <> ''
+            AND (notified_month IS NULL OR notified_month < $1)
+      RETURNING statement_webhook_url",
+    )
+    .bind(month)
+    .fetch_optional(pool)
+    .await
+    .context("認領月結推送失敗")?;
+    Ok(row.map(|r| r.get("statement_webhook_url")))
+}
+
+/// Hand a claimed month back after a failed delivery, so the next tick tries
+/// it again. Guarded on the value this task claimed, so a save that happened
+/// meanwhile is not overwritten.
+pub async fn release_statement_month(
+    pool: &PgPool,
+    month: NaiveDate,
+    previous: Option<NaiveDate>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE vendor_setting SET notified_month = $2 WHERE id = 1 AND notified_month = $1",
+    )
+    .bind(month)
+    .bind(previous)
+    .execute(pool)
+    .await
+    .context("退回月結推送失敗")?;
     Ok(())
 }
 

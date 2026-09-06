@@ -58,9 +58,10 @@ CREATE TABLE IF NOT EXISTS license (
     -- person to recognise it, not enough for whoever copies the database.
     key_hash text UNIQUE NOT NULL,
     key_prefix text NOT NULL,
-    -- Always set, and chosen by the partner at issue and at every renewal:
-    -- when the licence year ends is what they are invoicing, so the date is
-    -- theirs rather than a term this server computes.
+    -- Always set, and computed rather than typed: the partner chooses whole
+    -- licence years, and the server runs them out from the issue, or from the
+    -- end of the previous term at a renewal. A date field on the payer's form
+    -- would be a field that decides its own price.
     expires_on date NOT NULL,
     status text NOT NULL DEFAULT 'issued'
         CHECK (status IN ('issued', 'active', 'suspended', 'revoked')),
@@ -99,16 +100,34 @@ CREATE TABLE IF NOT EXISTS license_term (
     -- Which month this is invoiced in. Separate from from_on so that a term
     -- sold in advance is billed when it was sold.
     billed_on date NOT NULL DEFAULT current_date,
-    -- The partner's unit price at the moment of sale, not a live lookup.
+    -- The partner's unit price at the moment of sale times the years this
+    -- term covers, not a live lookup.
     amount numeric(12, 0) NOT NULL DEFAULT 0,
     created_by integer REFERENCES partner_user(id),
     created_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT license_term_range_check CHECK (to_on > from_on)
 );
 COMMENT ON TABLE license_term IS
-    '開立與續約各一筆，期間由經銷商自己填；月結對帳讀的就是這張表。';
+    '開立與續約各一筆，期間為整數年、金額為單價乘以年數；月結對帳讀的就是這張表。';
 
 CREATE INDEX IF NOT EXISTS license_term_billing_idx ON license_term (billed_on);
+
+-- The vendor's own settings, one row. A table rather than an environment
+-- variable because the address is typed on the console by the person who
+-- reads the statement, and changing it must not need a deploy.
+CREATE TABLE IF NOT EXISTS vendor_setting (
+    id integer PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    -- Where the monthly statement is announced. Empty means nobody asked.
+    statement_webhook_url text NOT NULL DEFAULT '',
+    -- First day of the last month already announced, so a restart does not
+    -- send it twice. Set to the month before the address was saved, which is
+    -- what makes the first announcement the month that is still running.
+    notified_month date,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO vendor_setting (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+COMMENT ON TABLE vendor_setting IS
+    '原廠自己的設定，單列。目前只有月結報告的推送網址。';
 
 CREATE TABLE IF NOT EXISTS license_denial (
     id serial PRIMARY KEY,
