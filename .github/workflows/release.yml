@@ -141,6 +141,11 @@ jobs:
           base-url: ${{ vars.AI_BASE_URL }}
           model: ${{ vars.AI_MODEL }}
           api-key: ${{ secrets.AI_API_KEY }}
+          # Authenticates to the gateway itself, which is a separate credential
+          # from the provider key above: an authenticated gateway rejects a
+          # request without it. Omitted entirely when the secret is unset, so a
+          # provider called directly is not sent a stray header.
+          extra-headers: ${{ secrets.CF_AIG_TOKEN && format('cf-aig-authorization: Bearer {0}', secrets.CF_AIG_TOKEN) || '' }}
 
       - name: Write the notes
         env:
