@@ -57,6 +57,9 @@
 面板只在畫面上有密碼欄位時出現，也就是登入頁。工作階段 cookie 是 HttpOnly，JS 讀不到，
 問畫面是唯一的判斷方式，而且比綁一個 class 名稱更禁得起改版。
 
+同一支 Worker 對 HTML 回應加上 `X-Robots-Tag: noindex, nofollow`：爬蟲在這裡只到得了
+登入頁，而那一頁印著共用密碼，被索引還會在品牌字上跟 `laysi.one` 相爭。
+
 改了原始碼要自己上傳，沒有 CI：
 
 ```bash

@@ -146,12 +146,21 @@ export default {
     if (!(response.headers.get("content-type") || "").includes("text/html")) {
       return response;
     }
-    return new HTMLRewriter()
+    const rewritten = new HTMLRewriter()
       .on("body", {
         element(body) {
           body.append(MARKUP + SCRIPT, { html: true });
         },
       })
       .transform(response);
+    // Keep the demo out of search results. The only page a crawler reaches is
+    // the sign-in screen, which carries the shared passwords this worker
+    // prints; indexed, it also competes with laysi.one on the brand name. A
+    // header rather than a meta tag: the markup is the product's and this
+    // arrangement is not. Headers from fetch() are immutable, so the response
+    // is rebuilt to set one.
+    const out = new Response(rewritten.body, rewritten);
+    out.headers.set("X-Robots-Tag", "noindex, nofollow");
+    return out;
   },
 };
