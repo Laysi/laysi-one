@@ -216,21 +216,21 @@ async fn seed_documents(registry: &Registry, ctx: &OpCtx, calls: &mut usize) -> 
     // that and would imply the demo shipped someone's paperwork.
     let files = [
         (
-            "AP-2601 聯欣物流請款單.txt",
+            "AP-2601 範例物流請款單.txt",
             "vendor_bill",
             "ap_bill",
             "AP-2601",
             "供應商請款單",
         ),
         (
-            "AP-2604 同茂貿易對帳單.txt",
+            "AP-2604 範例物料對帳單.txt",
             "vendor_bill",
             "ap_bill",
             "AP-2604",
             "月結對帳單",
         ),
         (
-            "AR-2605 宥昇國際訂購單.txt",
+            "AR-2605 範例國際訂購單.txt",
             "contract",
             "ar_invoice",
             "AR-2605",
@@ -286,8 +286,8 @@ fn base64(bytes: &[u8]) -> String {
 /// capital that everything else is paid out of.
 async fn seed_company(registry: &Registry, ctx: &OpCtx, calls: &mut usize) -> anyhow::Result<()> {
     for (code, value) in [
-        ("company_name", "承祐貿易有限公司"),
-        ("tax_id", "24681353"),
+        ("company_name", "示範貿易有限公司"),
+        ("tax_id", "00000000"),
         ("budget_alert_percent", "85"),
         // Without these the clock-in screens work but decline to say whether
         // anyone was late, which is correct behaviour and a poor
@@ -329,7 +329,7 @@ async fn seed_company(registry: &Registry, ctx: &OpCtx, calls: &mut usize) -> an
         registry,
         ctx,
         "create_bank_account",
-        json!({ "name": "第一銀行 · 營運帳戶", "account_no": "07310218842", "gl_code": "1102" }),
+        json!({ "name": "示範銀行 · 營運帳戶", "account_no": "00000000000", "gl_code": "1102" }),
         calls,
     )
     .await?;
@@ -421,14 +421,14 @@ async fn seed_ledger(
     let mut steps: Vec<(NaiveDate, Step)> = vec![(back(today, 3, 1), Step::Opening)];
 
     let invoices = [
-        ("AR-2601", "明泰科技股份有限公司", "486000", 3, 5, 30, true),
-        ("AR-2602", "首鴻實業有限公司", "212500", 3, 18, 30, true),
-        ("AR-2603", "合眾電子股份有限公司", "358000", 2, 8, 45, true),
-        ("AR-2604", "大川五金行", "94200", 2, 22, 30, false),
-        ("AR-2605", "宥昇國際貿易", "627400", 1, 6, 60, false),
+        ("AR-2601", "範例科技股份有限公司", "486000", 3, 5, 30, true),
+        ("AR-2602", "範例實業有限公司", "212500", 3, 18, 30, true),
+        ("AR-2603", "範例電子股份有限公司", "358000", 2, 8, 45, true),
+        ("AR-2604", "範例五金行", "94200", 2, 22, 30, false),
+        ("AR-2605", "範例國際貿易", "627400", 1, 6, 60, false),
         (
             "AR-2606",
-            "明泰科技股份有限公司",
+            "範例科技股份有限公司",
             "173800",
             1,
             24,
@@ -456,7 +456,7 @@ async fn seed_ledger(
     let bills = [
         (
             "AP-2601",
-            "聯欣物流有限公司",
+            "範例物流有限公司",
             "68400",
             "6131",
             3,
@@ -464,20 +464,11 @@ async fn seed_ledger(
             30,
             true,
         ),
-        (
-            "AP-2602",
-            "永信文具事務用品",
-            "12750",
-            "6199",
-            2,
-            14,
-            30,
-            true,
-        ),
-        ("AP-2603", "宏碁資訊服務", "145000", "6199", 2, 26, 45, true),
+        ("AP-2602", "範例文具用品", "12750", "6199", 2, 14, 30, true),
+        ("AP-2603", "範例資訊服務", "145000", "6199", 2, 26, 45, true),
         (
             "AP-2604",
-            "同茂貿易股份有限公司",
+            "範例物料股份有限公司",
             "392000",
             "5111",
             1,
@@ -485,7 +476,7 @@ async fn seed_ledger(
             30,
             true,
         ),
-        ("AP-2605", "台灣大哥大", "8360", "6131", 1, 20, 15, false),
+        ("AP-2605", "範例電信", "8360", "6131", 1, 20, 15, false),
     ];
     for (no, vendor, amount, account, months, day, terms, post) in bills {
         let billed = back(today, months, day);
