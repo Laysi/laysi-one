@@ -179,6 +179,22 @@ jobs:
             systemctl --user daemon-reload && \
             systemctl --user enable --now laysi-demo-reset.timer && \
             systemctl --user start --no-block laysi-demo-reset.service"
+          # Started detached because recreating containers reconfigures the
+          # podman bridge cloudflared sits on, which resets this connection --
+          # so wait on the unit rather than the command. Without this the next
+          # step reads yesterday's containers, which are still up and about to
+          # be torn down, and calls a rebuild that has not started yet a
+          # failure.
+          for _ in $(seq 60); do
+              state=$(ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
+                "XDG_RUNTIME_DIR=/run/user/\$(id -u) systemctl --user is-active laysi-demo-reset.service" 2>/dev/null || echo unknown)
+              echo "reset unit: $state"
+              [ "$state" = activating ] || [ "$state" = unknown ] || break
+              sleep 10
+          done
+          ssh "$DEPLOY_HOST" "XDG_RUNTIME_DIR=/run/user/\$(id -u) \
+            systemctl --user is-failed laysi-demo-reset.service >/dev/null && \
+            { journalctl --user -u laysi-demo-reset -n 40 --no-pager; exit 1; } || true"
 
       - name: Wait for the stack, then check the site
         run: |
