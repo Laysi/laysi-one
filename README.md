@@ -3,7 +3,10 @@
 面向台灣中小企業的財務＋人資系統。Rust（axum + sqlx）＋ React（Vite + TS）＋
 PostgreSQL 18 ＋ RustFS，以 Docker Compose 自架。
 
-**授權：專有商業授權** · **狀態：0.1.0，開發中**
+**授權：專有商業授權** · **狀態：0.1.5，開發中**
+
+**線上試用：<https://demo.laysi.one>** —— 帳號 `boss`／`hr`／`acct`／`demo`，
+密碼 `laysi-demo-2026`。每天凌晨四點整份重建，畫面上的都是示範資料。
 
 新安裝只有基礎科目、權限、流程與法規設定，公司資料登入後自行建立。
 
