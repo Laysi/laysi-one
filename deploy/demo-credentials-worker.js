@@ -25,9 +25,14 @@ const PANEL = [
   'position:fixed;left:16px;bottom:16px;z-index:2147483000;max-width:320px;',
   "border:1px solid #c9c4b8;background:#fbfaf7;color:#2b2b2b;",
   "font:13px/1.7 system-ui,-apple-system,'Noto Sans TC',sans-serif;",
-  'padding:14px 16px;border-radius:2px;box-shadow:0 1px 4px rgba(0,0,0,.08)">',
+  "padding:14px 16px;border-radius:2px;box-shadow:0 1px 4px rgba(0,0,0,.08);",
+  // The panel is an overlay on somebody else's page. Without this it swallows
+  // clicks meant for whatever sits beneath it, and on a short window that is
+  // the login button. The table takes pointer events back, so the password is
+  // still selectable.
+  'pointer-events:none">',
   '<div style="font-weight:600;letter-spacing:.04em;margin-bottom:8px">示範帳號</div>',
-  '<table style="border-collapse:collapse;width:100%">',
+  '<table style="border-collapse:collapse;width:100%;pointer-events:auto">',
   row("負責人", "boss"),
   row("人資", "hr"),
   row("會計", "acct"),
