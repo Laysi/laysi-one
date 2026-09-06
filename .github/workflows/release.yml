@@ -127,8 +127,12 @@ jobs:
       # commit list, which is what this page said before there was a model, and
       # it never fails the job -- the compose file attached below is the whole
       # distribution.
+      #
+      # Pinned to a commit rather than to @v1: this step is handed AI_API_KEY,
+      # and a tag moves. Changing version is an edit here, not a push in
+      # another repository.
       - id: changes
-        uses: Laysi/release-notes-action@v1
+        uses: Laysi/release-notes-action@78cb0e07c831cea17f6a05eeb6752525285a7eff  # v1.1.0
         with:
           tag: ${{ github.ref_name }}
           tag-pattern: v*
