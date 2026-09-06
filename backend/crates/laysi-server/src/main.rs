@@ -719,6 +719,24 @@ struct CallBody {
     prompt: Option<String>,
 }
 
+/// The HTTP status a refused or failed operation answers with.
+///
+/// A function rather than a `match` inside the handler so the mapping can be
+/// asserted: every refusal has to reach 403, because 5xx tells the caller to
+/// retry and drops the sentence the refusal wrote about what to do instead.
+/// `NeedsAdmin` fell through to the catch-all for exactly that reason.
+fn status_for(error: &laysi_ops::OpError) -> StatusCode {
+    match error {
+        laysi_ops::OpError::UnknownTool(_) => StatusCode::NOT_FOUND,
+        laysi_ops::OpError::ToolDisabled { .. }
+        | laysi_ops::OpError::NeedsBoss { .. }
+        | laysi_ops::OpError::NeedsAdmin { .. }
+        | laysi_ops::OpError::NotPermitted { .. } => StatusCode::FORBIDDEN,
+        laysi_ops::OpError::BadInput(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 async fn call_op(
     State(s): State<Shared>,
     Path(name): Path<String>,
@@ -755,14 +773,7 @@ async fn call_op(
             Json(json!({ "ok": true, "data": data })).into_response()
         }
         Err(e) => {
-            let code = match e {
-                laysi_ops::OpError::UnknownTool(_) => StatusCode::NOT_FOUND,
-                laysi_ops::OpError::ToolDisabled { .. }
-                | laysi_ops::OpError::NeedsBoss { .. }
-                | laysi_ops::OpError::NotPermitted { .. } => StatusCode::FORBIDDEN,
-                laysi_ops::OpError::BadInput(_) => StatusCode::BAD_REQUEST,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
+            let code = status_for(&e);
             (
                 code,
                 Json(
@@ -776,7 +787,48 @@ async fn call_op(
 
 #[cfg(test)]
 mod tests {
-    use super::company_setup_required;
+    use super::{company_setup_required, status_for, StatusCode};
+    use laysi_ops::OpError;
+
+    /// A refusal is an answer, not a fault. `NeedsAdmin` was missing from the
+    /// forbidden arm, so every AdminOnly operation a non-admin called closed
+    /// the connection instead of saying who may run it.
+    #[test]
+    fn every_refusal_answers_403() {
+        let refusals = [
+            OpError::NeedsAdmin {
+                tool: "讀帳號".into(),
+                role: "負責人".into(),
+            },
+            OpError::NeedsBoss {
+                tool: "讀薪資明細".into(),
+                role: "人資".into(),
+            },
+            OpError::NotPermitted {
+                tool: "讀預算執行率".into(),
+                role: "人資".into(),
+            },
+            OpError::ToolDisabled {
+                tool: "過帳".into(),
+            },
+        ];
+        for refusal in refusals {
+            assert_eq!(
+                status_for(&refusal),
+                StatusCode::FORBIDDEN,
+                "{} should be refused, not reported as a fault",
+                refusal.code()
+            );
+        }
+        assert_eq!(
+            status_for(&OpError::BadInput("金額不可為負".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_for(&OpError::UnknownTool("no_such_op".into())),
+            StatusCode::NOT_FOUND
+        );
+    }
 
     #[test]
     fn an_empty_company_name_requires_initial_setup() {
