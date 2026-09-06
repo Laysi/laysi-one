@@ -198,6 +198,14 @@ jobs:
             tail -5 deploy.log 2>/dev/null; \
             XDG_RUNTIME_DIR=/run/user/\$(id -u) journalctl --user -u laysi-demo-reset -n 20 --no-pager 2>/dev/null" || true
           [ "${ok:-}" = yes ] || { echo "api never reported healthy"; exit 1; }
-          code=$(curl -s -o /dev/null -w '%{http_code}' "$SITE")
-          echo "$SITE -> $code"
-          [ "$code" = 200 ]
+          # Retried, because a healthy api is not yet a served page: `web`
+          # starts only once api reports healthy, and the tunnel needs a moment
+          # to find the container it was just recreated as. One shot here reads
+          # that gap as a failed deployment and returns 502.
+          for _ in $(seq 24); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' "$SITE")
+              echo "$SITE -> $code"
+              [ "$code" = 200 ] && exit 0
+              sleep 5
+          done
+          exit 1
