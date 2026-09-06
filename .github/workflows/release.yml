@@ -114,7 +114,33 @@ jobs:
       # requests and finds none: this repository commits to main. The page a
       # customer lands on has to answer how to install and how to upgrade,
       # because the compose file attached to it is the whole distribution.
+      # Shared with the other repositories in the organization, and so are the
+      # three settings it reads: one endpoint, one model and one key on the
+      # organization rather than a copy in each repository. The endpoint is a
+      # URL, so any service speaking the OpenAI format is reachable by changing
+      # a variable.
+      #
+      # `license-v*` tags and the license-server/ tree are the other deployable
+      # in this repository, and a customer reading this page runs neither.
+      #
+      # None of it is required: when the call fails the action hands back the
+      # commit list, which is what this page said before there was a model, and
+      # it never fails the job -- the compose file attached below is the whole
+      # distribution.
+      - id: changes
+        uses: Laysi/release-notes-action@v1
+        with:
+          tag: ${{ github.ref_name }}
+          tag-pattern: v*
+          exclude-paths: license-server
+          context: Laysi One 是台灣中小企業的財務與人事系統，讀者是安裝與維運這套系統的人。
+          base-url: ${{ vars.AI_BASE_URL }}
+          model: ${{ vars.AI_MODEL }}
+          api-key: ${{ secrets.AI_API_KEY }}
+
       - name: Write the notes
+        env:
+          CHANGES_FILE: ${{ steps.changes.outputs.file }}
         run: sh .github/release-notes.sh "$GITHUB_REF_NAME" > notes.md
 
       # `gh` is preinstalled on the runner. Editing rather than failing when

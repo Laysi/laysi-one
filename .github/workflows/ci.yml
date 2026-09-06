@@ -112,6 +112,10 @@ jobs:
 
       - run: bun scripts/nav-test.ts
 
+      # The release page is the whole distribution, so it has to be written
+      # even when the model behind the notes is down.
+      - run: bun scripts/release-notes-test.ts
+
       # A rule file the generator cannot read would publish a feed that is
       # missing a rate, and the failure would land on the installation.
       - run: bun scripts/regulation-manifest.ts /dev/null

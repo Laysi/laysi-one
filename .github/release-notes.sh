@@ -10,6 +10,13 @@
 # attached to it is what they run, and there is no installer and no
 # documentation site. So it answers how to install and how to upgrade before
 # it says what changed.
+#
+# CHANGES_FILE replaces the commit list under 「本版變更」 with the contents of
+# that file, which is how release.yml drops in the notes a model wrote. The
+# model, and the same commit filter repeated below, live in
+# Laysi/release-notes-action, shared with the other repositories in the
+# organization; unset, or pointing at nothing, this script prints the commit
+# subjects exactly as it always has, which is what running it by hand does.
 
 set -eu
 
@@ -18,6 +25,26 @@ version=${tag#v}
 repo=${GITHUB_REPOSITORY:-Laysi/laysi-one}
 download="https://github.com/$repo/releases/download/$tag/docker-compose.prod.yml"
 previous=$(git tag --list 'v*' --sort=-v:refname | grep -A1 -x "$tag" | tail -n1)
+
+# Commit subjects, not merged pull requests: this repository commits to main.
+#
+# `license-server/` is excluded by path. It is a second deployable in the same
+# repository, it ships on its own `license-v*` tags, and no customer reading
+# this page runs it -- but its history arrived here in one merge, so without
+# this the first release after that merge lists every commit it ever had.
+range=$tag
+[ -n "$previous" ] && [ "$previous" != "$tag" ] && range="$previous..$tag"
+#
+# `ci:` and `chore:` are dropped by type. Nothing a customer runs changes when
+# a workflow does, and a changelog that lists them buries the lines that do.
+log=$(git log --no-merges --pretty='- %s' "$range" -- . ':(exclude)license-server' |
+    grep -vE '^- (ci|chore)(\([^)]*\))?:' |
+    head -40)
+
+changes=$log
+if [ -n "${CHANGES_FILE:-}" ] && [ -s "${CHANGES_FILE:-}" ]; then
+    changes=$(cat "$CHANGES_FILE")
+fi
 
 cat <<EOF
 Laysi One $version。台灣中小企業的財務與人事系統。
@@ -56,20 +83,7 @@ ghcr.io/laysi/laysi-one-backup:$version
 ## 本版變更
 EOF
 
-# Commit subjects, not merged pull requests: this repository commits to main.
-#
-# `license-server/` is excluded by path. It is a second deployable in the same
-# repository, it ships on its own `license-v*` tags, and no customer reading
-# this page runs it -- but its history arrived here in one merge, so without
-# this the first release after that merge lists every commit it ever had.
-range=$tag
-[ -n "$previous" ] && [ "$previous" != "$tag" ] && range="$previous..$tag"
-#
-# `ci:` and `chore:` are dropped by type. Nothing a customer runs changes when
-# a workflow does, and a changelog that lists them buries the lines that do.
-git log --no-merges --pretty='- %s' "$range" -- . ':(exclude)license-server' |
-    grep -vE '^- (ci|chore)(\([^)]*\))?:' |
-    head -40
+printf '%s\n' "$changes"
 
 if [ "$range" != "$tag" ]; then
     printf '\n**完整變更**：https://github.com/%s/compare/%s...%s\n' "$repo" "$previous" "$tag"
