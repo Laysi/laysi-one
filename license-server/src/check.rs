@@ -103,7 +103,7 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
     // same key at the same moment must not both come out bound.
     let row = sqlx::query(
         "SELECT l.id, l.license_no, l.licensee, l.licensee_tax_id, l.expires_on, l.status,
-                l.fingerprint, l.nonce, p.name AS partner_name, p.partner_no,
+                l.fingerprint, l.install_id, l.nonce, p.name AS partner_name, p.partner_no,
                 p.status AS partner_status
            FROM license l JOIN partner p ON p.id = l.partner_id
           WHERE l.key_hash = $1
@@ -129,6 +129,7 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
     let partner_status: String = row.get("partner_status");
     let partner_name: String = row.get("partner_name");
     let bound: Option<String> = row.get("fingerprint");
+    let bound_install: Option<uuid::Uuid> = row.get("install_id");
     let stored_nonce: Option<String> = row.get("nonce");
 
     // Refusal code, recorded reason and the sentence the installation prints.
@@ -171,12 +172,20 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
         return Ok(refuse(code, &message));
     }
 
+    // A database that has never been answered has no nonce to carry, and a
+    // fresh one draws its own `install_id`. Both together on the host this
+    // licence is already bound to is a reinstall, which is the most ordinary
+    // thing an administrator does: the fingerprint says it is the same
+    // machine, so nothing here is a second installation.
+    let reinstalled = is_reinstall(req.nonce.as_deref(), bound_install, req.install_id);
+
     // Two copies of one database each carry the other's nonce, so each check
     // invalidates the other. Counted and shown, never blocked: a restore from
     // yesterday's backup is indistinguishable from a clone, and locking a
     // customer out of their own books on a heuristic is the worse mistake.
     let continuity_broken = bound.is_some()
         && stored_nonce.is_some()
+        && !reinstalled
         && req.nonce.as_deref() != stored_nonce.as_deref();
     if continuity_broken {
         sqlx::query(
@@ -248,6 +257,21 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
     .into_response())
 }
 
+/// Whether this check is a fresh database on the host the licence is already
+/// bound to.
+///
+/// Reached only once the fingerprint has matched, so the machine is not in
+/// question: what is left is whether the books are the same books. A database
+/// that has never been answered carries no nonce and draws its own
+/// `install_id`, and neither of those travels with a copy.
+fn is_reinstall(
+    nonce: Option<&str>,
+    bound_install: Option<uuid::Uuid>,
+    install_id: uuid::Uuid,
+) -> bool {
+    nonce.unwrap_or_default().is_empty() && bound_install != Some(install_id)
+}
+
 /// How long this answer is good for.
 ///
 /// The lease never reaches past the licence year the partner sold, so a
@@ -279,6 +303,21 @@ mod tests {
         // Already over: the token comes back stale rather than refused, which
         // is what lets the screen name the date and the partner.
         assert_eq!(lease_until(today, d(2026, 8, 1)), d(2026, 8, 1));
+    }
+
+    #[test]
+    fn a_rebuilt_installation_on_the_bound_host_is_not_a_duplicate() {
+        let old = uuid::Uuid::from_u128(1);
+        let new = uuid::Uuid::from_u128(2);
+        // The nightly demo rebuild, and every reinstall: new database, with no
+        // answer yet to carry back.
+        assert!(is_reinstall(Some(""), Some(old), new));
+        assert!(is_reinstall(None, Some(old), new));
+        // A copy of the books carries both, so it stays visible.
+        assert!(!is_reinstall(Some("n1"), Some(old), old));
+        assert!(!is_reinstall(Some("n1"), Some(old), new));
+        // The same database with its nonce lost is a restore, not a reinstall.
+        assert!(!is_reinstall(Some(""), Some(old), old));
     }
 
     #[test]
