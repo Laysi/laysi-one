@@ -6,3 +6,5 @@
 
 /scripts/node_modules/
 /scripts/bun.lock
+
+.claude/settings.local.json
