@@ -155,10 +155,11 @@ Repo `Laysi/laysi-one`（private）。看板：owner `Laysi`（org）；**number
 
 MCP 的 projects 工具不在時走這條。**先回報再 fallback。**
 
-現況：`gh` 已登入（帳號 `jerry830401`），issue 與 label 馬上可用，但看板欄位需要補 scope：
+現況：`gh` 已登入（帳號 `jerry830401`），issue 與 label 馬上可用，但看板欄位需要補 scope。
+請使用者在 Claude Code 裡跑（`!` 是非互動模式，少了 `-h` 會直接報錯；agent 自己完成不了瀏覽器授權）：
 
 ```bash
-gh auth refresh -s read:project,project
+! gh auth refresh -h github.com -s read:project,project
 ```
 
 `.mcp.json` 走的是另一組 token（環境變數 `GITHUB_PERSONAL_ACCESS_TOKEN`），要 MCP 的 projects 工具出得來，那組 PAT 也要勾 `project` scope。
