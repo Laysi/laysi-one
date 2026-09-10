@@ -109,7 +109,7 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
             } else {
                 ""
             };
-            let members = if a.is_vendor || a.is_admin {
+            let members = if a.is_admin {
                 r#"<a href="/members">成員</a>"#
             } else {
                 ""
@@ -1068,14 +1068,22 @@ pub async fn partners(
                 <td>{name}<br><span class="fp">{tax}</span></td>
                 <td class="num r">{price}</td>
                 <td class="num r">{licenses}</td>
-                <td class="num r"><a href="/members?partner={no}">{users}</a></td>
+                <td class="num r">{users}</td>
                 <td><span class="tag {tone}">{status}</span></td></tr>"#,
                 no = esc(&r.partner_no),
                 name = esc(&r.name),
                 tax = esc(&r.tax_id),
                 price = esc(&r.unit_price),
                 licenses = r.licenses,
-                users = r.users,
+                users = if a.is_admin {
+                    format!(
+                        r#"<a href="/members?partner={}">{}</a>"#,
+                        esc(&r.partner_no),
+                        r.users
+                    )
+                } else {
+                    r.users.to_string()
+                },
                 tone = if r.status == "active" { "on" } else { "off" },
                 status = if r.status == "active" {
                     "使用中"
@@ -1219,6 +1227,11 @@ pub async fn partner_detail(
         Err(error) => return fail(error),
     };
     let path = urlencode(&r.partner_no);
+    let users = if a.is_admin {
+        format!(r#"<a href="/members?partner={path}">{}</a>"#, r.users)
+    } else {
+        r.users.to_string()
+    };
     let (next_status, next_label, next_class) = if r.status == "active" {
         ("suspended", "停用", "warn")
     } else {
@@ -1232,7 +1245,7 @@ pub async fn partner_detail(
             <table><tbody>
               <tr><td style="width:120px">狀態</td><td><span class="tag {tone}">{status}</span></td></tr>
               <tr><td>開立授權</td><td class="num">{licenses}</td></tr>
-              <tr><td>登入帳號</td><td class="num"><a href="/members?partner={path}">{users}</a></td></tr>
+              <tr><td>登入帳號</td><td class="num">{users}</td></tr>
             </tbody></table>
             <div class="actions">
               <form method="post" action="/partners/{path}" style="margin:0">
@@ -1255,7 +1268,6 @@ pub async fn partner_detail(
             tax = esc(&r.tax_id),
             price = esc(&r.unit_price),
             licenses = r.licenses,
-            users = r.users,
             tone = if r.status == "active" { "on" } else { "off" },
             status = if r.status == "active" {
                 "使用中"

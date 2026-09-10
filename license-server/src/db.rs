@@ -43,7 +43,7 @@ pub struct Actor {
     /// can create them.
     pub is_vendor: bool,
     /// May add, suspend and reset the other members of their own partner.
-    /// The vendor is one everywhere; see `may_manage`.
+    /// A vendor admin is one everywhere; see `may_manage`.
     pub is_admin: bool,
     /// The password was generated rather than chosen. Every page redirects to
     /// the change form until it is cleared.
@@ -51,11 +51,12 @@ pub struct Actor {
 }
 
 impl Actor {
-    /// Whether this actor may manage the members of `partner_id`. The vendor
-    /// manages every partner, an admin only their own, and a plain member
-    /// nobody -- including themselves.
+    /// Whether this actor may manage the members of `partner_id`. Only admins
+    /// manage: a vendor admin every partner, a reseller admin their own. A
+    /// plain member manages nobody -- including themselves -- and that holds
+    /// in the vendor's own partner too, where every member is `is_vendor`.
     pub fn may_manage(&self, partner_id: i32) -> bool {
-        self.is_vendor || (self.is_admin && self.partner_id == partner_id)
+        self.is_admin && (self.is_vendor || self.partner_id == partner_id)
     }
 
     /// The partners whose licences this actor may see: their own only. The
@@ -425,16 +426,14 @@ pub async fn member_ref(pool: &PgPool, id: i32) -> Result<Option<MemberRef>> {
     )
 }
 
-/// Who can still manage this partner: its own admins, plus any vendor staff
-/// sitting in it. Suspending or demoting the last one would leave nobody who
-/// can add a member or reset a password, and no operation here hands the flag
-/// back. `is_vendor` counts because `may_manage` already lets it through --
-/// counting only `is_admin` would trap the vendor's own partner, where the
-/// flag is redundant.
+/// Active admins of one partner. Suspending or demoting the last one would
+/// leave nobody who can add a member or reset a password, and no operation
+/// here hands the flag back. Only `is_admin` counts, as in `may_manage`: a
+/// plain member of the vendor's partner is `is_vendor` and manages nobody.
 pub async fn active_admins(pool: &PgPool, partner_id: i32) -> Result<i64> {
     Ok(sqlx::query(
         "SELECT count(*) AS n FROM partner_user
-          WHERE partner_id = $1 AND (is_admin OR is_vendor) AND status = 'active'",
+          WHERE partner_id = $1 AND is_admin AND status = 'active'",
     )
     .bind(partner_id)
     .fetch_one(pool)
@@ -649,7 +648,18 @@ mod tests {
 
     #[test]
     fn an_admin_manages_only_their_own_partner() {
-        assert!(actor(1, true, false).may_manage(9), "vendor: every partner");
+        assert!(
+            actor(1, true, true).may_manage(9),
+            "vendor admin: every partner"
+        );
+        assert!(
+            !actor(1, true, false).may_manage(1),
+            "vendor member: nobody"
+        );
+        assert!(
+            !actor(1, true, false).may_manage(9),
+            "vendor member: nobody"
+        );
         assert!(actor(1, false, true).may_manage(1), "admin: their own");
         assert!(!actor(1, false, true).may_manage(9), "admin: not another's");
         assert!(!actor(1, false, false).may_manage(1), "member: nobody");
