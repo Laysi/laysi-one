@@ -43,7 +43,7 @@ pub struct Actor {
     /// can create them.
     pub is_vendor: bool,
     /// May add, suspend and reset the other members of their own partner.
-    /// The vendor is one everywhere; see `may_manage`.
+    /// A vendor admin is one everywhere; see `may_manage`.
     pub is_admin: bool,
     /// The password was generated rather than chosen. Every page redirects to
     /// the change form until it is cleared.
@@ -51,11 +51,12 @@ pub struct Actor {
 }
 
 impl Actor {
-    /// Whether this actor may manage the members of `partner_id`. The vendor
-    /// manages every partner, an admin only their own, and a plain member
-    /// nobody -- including themselves.
+    /// Whether this actor may manage the members of `partner_id`. Only admins
+    /// manage: a vendor admin every partner, a reseller admin their own. A
+    /// plain member manages nobody -- including themselves -- and that holds
+    /// in the vendor's own partner too, where every member is `is_vendor`.
     pub fn may_manage(&self, partner_id: i32) -> bool {
-        self.is_vendor || (self.is_admin && self.partner_id == partner_id)
+        self.is_admin && (self.is_vendor || self.partner_id == partner_id)
     }
 
     /// The partners whose licences this actor may see: their own only. The
@@ -425,16 +426,14 @@ pub async fn member_ref(pool: &PgPool, id: i32) -> Result<Option<MemberRef>> {
     )
 }
 
-/// Who can still manage this partner: its own admins, plus any vendor staff
-/// sitting in it. Suspending or demoting the last one would leave nobody who
-/// can add a member or reset a password, and no operation here hands the flag
-/// back. `is_vendor` counts because `may_manage` already lets it through --
-/// counting only `is_admin` would trap the vendor's own partner, where the
-/// flag is redundant.
+/// Active admins of one partner. Suspending or demoting the last one would
+/// leave nobody who can add a member or reset a password, and no operation
+/// here hands the flag back. Only `is_admin` counts, as in `may_manage`: a
+/// plain member of the vendor's partner is `is_vendor` and manages nobody.
 pub async fn active_admins(pool: &PgPool, partner_id: i32) -> Result<i64> {
     Ok(sqlx::query(
         "SELECT count(*) AS n FROM partner_user
-          WHERE partner_id = $1 AND (is_admin OR is_vendor) AND status = 'active'",
+          WHERE partner_id = $1 AND is_admin AND status = 'active'",
     )
     .bind(partner_id)
     .fetch_one(pool)
@@ -559,29 +558,44 @@ pub async fn set_own_password(pool: &PgPool, id: i32, password_hash: &str) -> Re
     Ok(())
 }
 
+/// Where the statement is posted: the address, and the secret a signed Lark
+/// bot checks it against (empty when the bot does not verify).
+pub struct Webhook {
+    pub url: String,
+    pub secret: String,
+}
+
 /// The single `vendor_setting` row: the statement address and the last month
 /// announced to it.
-pub async fn vendor_setting(pool: &PgPool) -> Result<(String, Option<NaiveDate>)> {
+pub async fn vendor_setting(pool: &PgPool) -> Result<(Webhook, Option<NaiveDate>)> {
     let row = sqlx::query(
-        "SELECT statement_webhook_url, notified_month FROM vendor_setting WHERE id = 1",
+        "SELECT statement_webhook_url, statement_webhook_secret, notified_month
+           FROM vendor_setting WHERE id = 1",
     )
     .fetch_one(pool)
     .await
     .context("讀取原廠設定失敗")?;
-    Ok((row.get("statement_webhook_url"), row.get("notified_month")))
+    Ok((
+        Webhook {
+            url: row.get("statement_webhook_url"),
+            secret: row.get("statement_webhook_secret"),
+        },
+        row.get("notified_month"),
+    ))
 }
 
 /// Store the statement address, and take the month before `today` as already
 /// announced: an address saved in the middle of a month starts announcing at
 /// the end of that month rather than replaying whatever came before it.
-pub async fn set_statement_webhook(pool: &PgPool, url: &str, today: NaiveDate) -> Result<()> {
+pub async fn set_statement_webhook(pool: &PgPool, hook: &Webhook, today: NaiveDate) -> Result<()> {
     sqlx::query(
         "UPDATE vendor_setting
-            SET statement_webhook_url = $1, updated_at = now(),
-                notified_month = (date_trunc('month', $2::date) - interval '1 month')::date
+            SET statement_webhook_url = $1, statement_webhook_secret = $2, updated_at = now(),
+                notified_month = (date_trunc('month', $3::date) - interval '1 month')::date
           WHERE id = 1",
     )
-    .bind(url)
+    .bind(&hook.url)
+    .bind(&hook.secret)
     .bind(today)
     .execute(pool)
     .await
@@ -596,18 +610,21 @@ pub async fn set_statement_webhook(pool: &PgPool, url: &str, today: NaiveDate) -
 /// both send: the second matches no row. Delivery happens after the claim and
 /// hands the month back on failure, which is the pairing that neither sends
 /// twice nor drops a month for good.
-pub async fn claim_statement_month(pool: &PgPool, month: NaiveDate) -> Result<Option<String>> {
+pub async fn claim_statement_month(pool: &PgPool, month: NaiveDate) -> Result<Option<Webhook>> {
     let row = sqlx::query(
         "UPDATE vendor_setting SET notified_month = $1
           WHERE id = 1 AND statement_webhook_url <> ''
             AND (notified_month IS NULL OR notified_month < $1)
-      RETURNING statement_webhook_url",
+      RETURNING statement_webhook_url, statement_webhook_secret",
     )
     .bind(month)
     .fetch_optional(pool)
     .await
     .context("認領月結推送失敗")?;
-    Ok(row.map(|r| r.get("statement_webhook_url")))
+    Ok(row.map(|r| Webhook {
+        url: r.get("statement_webhook_url"),
+        secret: r.get("statement_webhook_secret"),
+    }))
 }
 
 /// Hand a claimed month back after a failed delivery, so the next tick tries
@@ -649,7 +666,18 @@ mod tests {
 
     #[test]
     fn an_admin_manages_only_their_own_partner() {
-        assert!(actor(1, true, false).may_manage(9), "vendor: every partner");
+        assert!(
+            actor(1, true, true).may_manage(9),
+            "vendor admin: every partner"
+        );
+        assert!(
+            !actor(1, true, false).may_manage(1),
+            "vendor member: nobody"
+        );
+        assert!(
+            !actor(1, true, false).may_manage(9),
+            "vendor member: nobody"
+        );
         assert!(actor(1, false, true).may_manage(1), "admin: their own");
         assert!(!actor(1, false, true).may_manage(9), "admin: not another's");
         assert!(!actor(1, false, false).may_manage(1), "member: nobody");

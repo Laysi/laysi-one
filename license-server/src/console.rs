@@ -109,7 +109,7 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
             } else {
                 ""
             };
-            let members = if a.is_vendor || a.is_admin {
+            let members = if a.is_admin {
                 r#"<a href="/members">成員</a>"#
             } else {
                 ""
@@ -920,7 +920,13 @@ pub async fn billing(
         Ok(rows) => rows,
         Err(error) => return fail(error),
     };
-    let (webhook_url, notified) = match db::vendor_setting(&s.pool).await {
+    let (
+        db::Webhook {
+            url: webhook_url,
+            secret: webhook_secret,
+        },
+        notified,
+    ) = match db::vendor_setting(&s.pool).await {
         Ok(setting) => setting,
         Err(error) => return fail(error),
     };
@@ -978,6 +984,8 @@ pub async fn billing(
             <form class="card" method="post" action="/billing/webhook">
               <label>推送網址<input name="url" type="url" value="{url}"
                 placeholder="https://example.com/hooks/statement"></label>
+              <label>簽名校驗密鑰<input name="secret" type="password" autocomplete="off"
+                value="{secret}" placeholder="Lark 機器人未開啟簽名校驗時留空"></label>
               <div class="actions">
                 <button name="action" value="save">儲存</button>
                 <button class="plain" name="action" value="test">測試推送</button>
@@ -987,6 +995,7 @@ pub async fn billing(
               {notice}
             </form>"#,
             url = esc(&webhook_url),
+            secret = esc(&webhook_secret),
         ),
     )
     .into_response()
@@ -996,6 +1005,8 @@ pub async fn billing(
 pub struct WebhookForm {
     #[serde(default)]
     url: String,
+    #[serde(default)]
+    secret: String,
     action: String,
 }
 
@@ -1008,15 +1019,27 @@ pub async fn set_statement_webhook(
     if !a.is_vendor {
         return Redirect::to("/licenses").into_response();
     }
-    let url = form.url.trim().to_string();
+    let hook = db::Webhook {
+        url: form.url.trim().to_string(),
+        secret: form.secret.trim().to_string(),
+    };
     // The test posts to the address in the box rather than the stored one, so
     // an address can be tried before it is saved.
     let note = match form.action.as_str() {
-        "clear" => match db::set_statement_webhook(&s.pool, "", s.today()).await {
-            Ok(()) => "已清除推送網址。".to_string(),
-            Err(error) => return fail(error),
-        },
-        "test" => match statement::validate_url(&url) {
+        "clear" => {
+            let none = db::Webhook {
+                url: String::new(),
+                secret: String::new(),
+            };
+            match db::set_statement_webhook(&s.pool, &none, s.today()).await {
+                Ok(()) => "已清除推送網址。".to_string(),
+                Err(error) => return fail(error),
+            }
+        }
+        _ if !hook.secret.is_empty() && !statement::is_lark(&hook.url) => {
+            "簽名校驗密鑰只用於 Lark 與飛書的推送網址，其他網址請留空。".to_string()
+        }
+        "test" => match statement::validate_url(&hook.url) {
             Err(note) => note,
             Ok(()) => {
                 let month = statement::previous_month(s.today());
@@ -1024,16 +1047,16 @@ pub async fn set_statement_webhook(
                     Ok(rows) => rows,
                     Err(error) => return fail(error),
                 };
-                match statement::deliver(&url, &statement::payload(month, &rows)).await {
+                match statement::deliver(&hook, &statement::payload(month, &rows)).await {
                     Ok(()) => format!("已推送 {} 的月結報告。", month.format("%Y-%m")),
                     Err(note) => note,
                 }
             }
         },
-        _ if url.is_empty() => "請填入推送網址，或按清除停用推送。".to_string(),
-        _ => match statement::validate_url(&url) {
+        _ if hook.url.is_empty() => "請填入推送網址，或按清除停用推送。".to_string(),
+        _ => match statement::validate_url(&hook.url) {
             Err(note) => note,
-            Ok(()) => match db::set_statement_webhook(&s.pool, &url, s.today()).await {
+            Ok(()) => match db::set_statement_webhook(&s.pool, &hook, s.today()).await {
                 Ok(()) => "已儲存推送網址，下個月一日開始推送。".to_string(),
                 Err(error) => return fail(error),
             },
@@ -1068,14 +1091,22 @@ pub async fn partners(
                 <td>{name}<br><span class="fp">{tax}</span></td>
                 <td class="num r">{price}</td>
                 <td class="num r">{licenses}</td>
-                <td class="num r"><a href="/members?partner={no}">{users}</a></td>
+                <td class="num r">{users}</td>
                 <td><span class="tag {tone}">{status}</span></td></tr>"#,
                 no = esc(&r.partner_no),
                 name = esc(&r.name),
                 tax = esc(&r.tax_id),
                 price = esc(&r.unit_price),
                 licenses = r.licenses,
-                users = r.users,
+                users = if a.is_admin {
+                    format!(
+                        r#"<a href="/members?partner={}">{}</a>"#,
+                        esc(&r.partner_no),
+                        r.users
+                    )
+                } else {
+                    r.users.to_string()
+                },
                 tone = if r.status == "active" { "on" } else { "off" },
                 status = if r.status == "active" {
                     "使用中"
@@ -1219,6 +1250,11 @@ pub async fn partner_detail(
         Err(error) => return fail(error),
     };
     let path = urlencode(&r.partner_no);
+    let users = if a.is_admin {
+        format!(r#"<a href="/members?partner={path}">{}</a>"#, r.users)
+    } else {
+        r.users.to_string()
+    };
     let (next_status, next_label, next_class) = if r.status == "active" {
         ("suspended", "停用", "warn")
     } else {
@@ -1232,7 +1268,7 @@ pub async fn partner_detail(
             <table><tbody>
               <tr><td style="width:120px">狀態</td><td><span class="tag {tone}">{status}</span></td></tr>
               <tr><td>開立授權</td><td class="num">{licenses}</td></tr>
-              <tr><td>登入帳號</td><td class="num"><a href="/members?partner={path}">{users}</a></td></tr>
+              <tr><td>登入帳號</td><td class="num">{users}</td></tr>
             </tbody></table>
             <div class="actions">
               <form method="post" action="/partners/{path}" style="margin:0">
@@ -1255,7 +1291,6 @@ pub async fn partner_detail(
             tax = esc(&r.tax_id),
             price = esc(&r.unit_price),
             licenses = r.licenses,
-            users = r.users,
             tone = if r.status == "active" { "on" } else { "off" },
             status = if r.status == "active" {
                 "使用中"

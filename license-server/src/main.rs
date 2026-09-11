@@ -199,7 +199,9 @@ fn database_url() -> Result<String> {
 /// The first console account: the vendor's own, which every partner is then
 /// created from. Re-running it on an existing address resets that password
 /// rather than failing, because the alternative is a server nobody can sign
-/// in to and no way back that does not involve `psql`.
+/// in to and no way back that does not involve `psql`. On vendor staff it also
+/// restores `is_admin`, which `may_manage` requires and which accounts created
+/// before the flag existed do not carry.
 async fn create_vendor(pool: &PgPool, email: &str) -> Result<String> {
     use sqlx::Row;
     let mut tx = pool.begin().await?;
@@ -222,7 +224,8 @@ async fn create_vendor(pool: &PgPool, email: &str) -> Result<String> {
          VALUES ($1, lower($2), $3, '原廠', true, true, true)
          ON CONFLICT (email) DO UPDATE
             SET password_hash = EXCLUDED.password_hash, status = 'active',
-                must_change_password = true",
+                must_change_password = true,
+                is_admin = partner_user.is_admin OR partner_user.is_vendor",
     )
     .bind(partner_id)
     .bind(email)
