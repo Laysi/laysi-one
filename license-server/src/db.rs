@@ -558,29 +558,44 @@ pub async fn set_own_password(pool: &PgPool, id: i32, password_hash: &str) -> Re
     Ok(())
 }
 
+/// Where the statement is posted: the address, and the secret a signed Lark
+/// bot checks it against (empty when the bot does not verify).
+pub struct Webhook {
+    pub url: String,
+    pub secret: String,
+}
+
 /// The single `vendor_setting` row: the statement address and the last month
 /// announced to it.
-pub async fn vendor_setting(pool: &PgPool) -> Result<(String, Option<NaiveDate>)> {
+pub async fn vendor_setting(pool: &PgPool) -> Result<(Webhook, Option<NaiveDate>)> {
     let row = sqlx::query(
-        "SELECT statement_webhook_url, notified_month FROM vendor_setting WHERE id = 1",
+        "SELECT statement_webhook_url, statement_webhook_secret, notified_month
+           FROM vendor_setting WHERE id = 1",
     )
     .fetch_one(pool)
     .await
     .context("讀取原廠設定失敗")?;
-    Ok((row.get("statement_webhook_url"), row.get("notified_month")))
+    Ok((
+        Webhook {
+            url: row.get("statement_webhook_url"),
+            secret: row.get("statement_webhook_secret"),
+        },
+        row.get("notified_month"),
+    ))
 }
 
 /// Store the statement address, and take the month before `today` as already
 /// announced: an address saved in the middle of a month starts announcing at
 /// the end of that month rather than replaying whatever came before it.
-pub async fn set_statement_webhook(pool: &PgPool, url: &str, today: NaiveDate) -> Result<()> {
+pub async fn set_statement_webhook(pool: &PgPool, hook: &Webhook, today: NaiveDate) -> Result<()> {
     sqlx::query(
         "UPDATE vendor_setting
-            SET statement_webhook_url = $1, updated_at = now(),
-                notified_month = (date_trunc('month', $2::date) - interval '1 month')::date
+            SET statement_webhook_url = $1, statement_webhook_secret = $2, updated_at = now(),
+                notified_month = (date_trunc('month', $3::date) - interval '1 month')::date
           WHERE id = 1",
     )
-    .bind(url)
+    .bind(&hook.url)
+    .bind(&hook.secret)
     .bind(today)
     .execute(pool)
     .await
@@ -595,18 +610,21 @@ pub async fn set_statement_webhook(pool: &PgPool, url: &str, today: NaiveDate) -
 /// both send: the second matches no row. Delivery happens after the claim and
 /// hands the month back on failure, which is the pairing that neither sends
 /// twice nor drops a month for good.
-pub async fn claim_statement_month(pool: &PgPool, month: NaiveDate) -> Result<Option<String>> {
+pub async fn claim_statement_month(pool: &PgPool, month: NaiveDate) -> Result<Option<Webhook>> {
     let row = sqlx::query(
         "UPDATE vendor_setting SET notified_month = $1
           WHERE id = 1 AND statement_webhook_url <> ''
             AND (notified_month IS NULL OR notified_month < $1)
-      RETURNING statement_webhook_url",
+      RETURNING statement_webhook_url, statement_webhook_secret",
     )
     .bind(month)
     .fetch_optional(pool)
     .await
     .context("認領月結推送失敗")?;
-    Ok(row.map(|r| r.get("statement_webhook_url")))
+    Ok(row.map(|r| Webhook {
+        url: r.get("statement_webhook_url"),
+        secret: r.get("statement_webhook_secret"),
+    }))
 }
 
 /// Hand a claimed month back after a failed delivery, so the next tick tries

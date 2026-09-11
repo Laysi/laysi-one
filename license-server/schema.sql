@@ -125,9 +125,13 @@ CREATE TABLE IF NOT EXISTS vendor_setting (
     notified_month date,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- The secret a Lark bot with signature verification on checks each message
+-- against. Empty means the bot does not verify.
+ALTER TABLE vendor_setting
+    ADD COLUMN IF NOT EXISTS statement_webhook_secret text NOT NULL DEFAULT '';
 INSERT INTO vendor_setting (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 COMMENT ON TABLE vendor_setting IS
-    '原廠自己的設定，單列。目前只有月結報告的推送網址。';
+    '原廠自己的設定，單列。目前只有月結報告的推送網址與簽名校驗密鑰。';
 
 CREATE TABLE IF NOT EXISTS license_denial (
     id serial PRIMARY KEY,

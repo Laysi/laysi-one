@@ -175,10 +175,15 @@ docker compose exec app laysi-one-license public-key              # 編進產品
 送九月，而不是把之前每一個月補送一輪。**沒有紀錄的月份認領後不送**：沒有帳單可請款，
 不送與送一份零元一樣清楚。
 
-**payload 同時帶 `text` 與結構化欄位**，不看主機決定形狀：原廠的帳務系統要的是逐家
-經銷商的金額，聊天室只讀 `text`。兩個都給的成本是一個字串，換掉的是「這個網址是哪一種」
-這個問題。產品端 `ops/webhook.rs` 那張 Discord／Lark 對照表不搬過來——那是為了把公告
-貼進聊天室，這裡的收件人是一套會解析 JSON 的系統。
+**payload 帶 `text` 與結構化欄位**：原廠的帳務系統要的是逐家經銷商的金額，聊天室讀的是
+那一行字。**Lark／飛書是唯一的例外**：它讀 `msg_type` 底下的 `content.text`，
+`statement::body_for` 對那兩個主機換成這個形狀，其餘主機照送整份。**Lark 對送錯形狀的
+訊息一樣回 200**，拒絕寫在 body 的 `code`，所以 `deliver` 對 Lark 另讀 body：只看狀態碼
+的版本在測試鈕上印「已推送」，排程那一側則把月份認領掉、永遠不再送。
+**開了簽名校驗的 Lark 機器人**要在同一張卡填密鑰（`statement_webhook_secret`），每則訊息
+帶 `timestamp` 與 `sign`（`timestamp` 換行接密鑰當 HMAC-SHA256 的鍵、簽空字串、base64），
+時間戳在送出當下取，Lark 拒收超過一小時的簽名。密鑰只對 Lark 網址有意義，填在其他網址
+旁邊存不進去。
 
 ### 7. 核發的密碼寄出去，首次登入必須換掉
 
