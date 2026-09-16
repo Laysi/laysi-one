@@ -285,6 +285,16 @@ function Workspace() {
     };
   }, [reloadKey, section]);
 
+  useEffect(() => {
+    const refresh = () => document.visibilityState === 'visible' && reload();
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('focus', refresh);
+    };
+  }, [reload]);
+
   async function punchNow(kind: 'in' | 'out') {
     setPunching(true);
     try {
@@ -293,6 +303,7 @@ function Workspace() {
       reload();
     } catch (e) {
       showToast(e instanceof OpFailed ? e.error.message : String(e));
+      reload();
     } finally {
       setPunching(false);
     }

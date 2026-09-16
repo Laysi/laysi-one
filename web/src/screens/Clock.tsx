@@ -198,6 +198,7 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
       const msg = e instanceof OpFailed ? e.error.message : String(e);
       setFormError(msg);
       onToast(msg);
+      onChanged();
     } finally {
       setBusy(false);
     }
