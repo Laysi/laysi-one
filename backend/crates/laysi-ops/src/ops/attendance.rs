@@ -19,6 +19,7 @@
 
 use crate::ops::employees::{service_months, BASIS_HOURLY};
 use crate::ops::insurance::ruleset_json;
+use crate::ops::settings::{deciding_as, own_request_refusal};
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{
@@ -1096,17 +1097,15 @@ impl Operation for ListLeaveRequests {
         // Whether this identity can decide each request, answered here so the
         // screen can draw the button dead with the reason beside it. Same
         // separation of duties as the expense flow.
+        let deciding_as = deciding_as(ctx).await?;
         let rows = requests
             .iter()
             .map(|request| {
                 let mut row = leave_json(request, balances.get(&request.employee_id).copied());
-                let own = ctx.employee_id.is_some() && ctx.employee_id == Some(request.employee_id);
+                let own = deciding_as.is_some() && deciding_as == Some(request.employee_id);
                 row["can_decide"] = json!(request.status == "pending" && !own);
                 row["decide_blocked_reason"] = json!(own.then(|| {
-                    format!(
-                        "{} 由本人送出，要由另一個帳號簽核。目前沒有其他可簽核的帳號，請系統管理員在「帳號管理」建立。",
-                        request.leave_no
-                    )
+                    own_request_refusal(&ctx.actor_role, &format!("{} ", request.leave_no))
                 }));
                 row
             })
@@ -1175,7 +1174,7 @@ impl Operation for DecideLeaveRequest {
     }
 
     fn summary(&self) -> &'static str {
-        "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕；申請人不得核准本人送出的單據。"
+        "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕；申請人不得核准本人送出的單據，公司設定允許時負責人例外。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1191,10 +1190,11 @@ impl Operation for DecideLeaveRequest {
                 i.approve,
                 &ctx.actor,
                 &ctx.actor_role,
-                ctx.employee_id,
+                deciding_as(ctx).await?,
                 i.note.as_deref().unwrap_or(""),
             )
-            .await?;
+            .await
+            .map_err(|e| own_request_error(ctx, e))?;
 
         let action = if i.approve { "准假" } else { "駁回" };
         let summary = format!(
@@ -1264,6 +1264,24 @@ pub(crate) fn punch_correction_json(c: &PunchCorrection, offset: FixedOffset) ->
         "created_by": c.created_by,
         "created_at": c.created_at,
     })
+}
+
+/// How a punch-correction refusal names the request, which has no number.
+const PUNCH_SUBJECT: &str = "這張補登申請";
+
+/// The store's refusal of a requester points at the account screen, which is
+/// not the owner's way out; the message is rebuilt for the caller's role.
+fn own_request_error(ctx: &OpCtx, e: laysi_store::StoreError) -> OpError {
+    use laysi_store::StoreError;
+    match e {
+        StoreError::LeaveDecidedByRequester { no } => {
+            OpError::BadInput(own_request_refusal(&ctx.actor_role, &format!("{no} ")))
+        }
+        StoreError::PunchCorrectionDecidedByRequester => {
+            OpError::BadInput(own_request_refusal(&ctx.actor_role, PUNCH_SUBJECT))
+        }
+        e => e.into(),
+    }
 }
 
 /// Why a correction cannot be approved, or `None` when it can.
@@ -1441,19 +1459,17 @@ impl Operation for ListOvertimeRequests {
         let rs = laysi_regulation::resolve("overtime", ctx.today)?;
         let ceiling = laysi_regulation::overtime_monthly_max_hours(rs)?;
         let include_done = i.include_done.unwrap_or(false);
+        let deciding_as = deciding_as(ctx).await?;
 
         let rows = all
             .iter()
             .filter(|o| include_done || o.status == "pending")
             .map(|o| {
                 let mut row = overtime_json(o)?;
-                let own = ctx.employee_id.is_some() && ctx.employee_id == Some(o.employee_id);
+                let own = deciding_as.is_some() && deciding_as == Some(o.employee_id);
                 row["can_decide"] = json!(o.status == "pending" && !own);
                 row["decide_blocked_reason"] = json!(own.then(|| {
-                    format!(
-                        "{} 由本人送出，要由另一個帳號簽核。目前沒有其他可簽核的帳號，請系統管理員在「帳號管理」建立。",
-                        o.request_no
-                    )
+                    own_request_refusal(&ctx.actor_role, &format!("{} ", o.request_no))
                 }));
                 Ok(row)
             })
@@ -1519,7 +1535,7 @@ impl Operation for DecideOvertimeRequest {
     }
 
     fn summary(&self) -> &'static str {
-        "核准或駁回一張仍在等簽核的加班申請，留下決定者、身分與說明。核准後該時數會列入當期薪資的加班費。狀態不是等簽核時一律拒絕；申請人不得核准本人送出的申請。"
+        "核准或駁回一張仍在等簽核的加班申請，留下決定者、身分與說明。核准後該時數會列入當期薪資的加班費。狀態不是等簽核時一律拒絕；申請人不得核准本人送出的申請，公司設定允許時負責人例外。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1535,10 +1551,11 @@ impl Operation for DecideOvertimeRequest {
                 i.approve,
                 &ctx.actor,
                 &ctx.actor_role,
-                ctx.employee_id,
+                deciding_as(ctx).await?,
                 i.note.as_deref().unwrap_or(""),
             )
-            .await?;
+            .await
+            .map_err(|e| own_request_error(ctx, e))?;
 
         let action = if i.approve { "核准" } else { "駁回" };
         let summary = format!(
@@ -1595,16 +1612,15 @@ impl Operation for ListPunchCorrections {
 
         // Whether this identity can decide each request, answered here so the
         // screen draws the reason instead of a button that must be refused.
+        let deciding_as = deciding_as(ctx).await?;
         let rows = corrections
             .iter()
             .map(|c| {
                 let mut row = punch_correction_json(c, ctx.offset);
-                let own = ctx.employee_id.is_some() && ctx.employee_id == Some(c.employee_id);
+                let own = deciding_as.is_some() && deciding_as == Some(c.employee_id);
                 row["can_decide"] = json!(c.status == "submitted" && !own);
-                row["decide_blocked_reason"] = json!(own.then(|| {
-                    "這張申請由本人送出，要由另一個帳號決定。目前沒有其他可決定的帳號，請系統管理員在「帳號管理」建立。"
-                        .to_string()
-                }));
+                row["decide_blocked_reason"] =
+                    json!(own.then(|| own_request_refusal(&ctx.actor_role, PUNCH_SUBJECT)));
                 let blocked = approve_blocked(&c.kind, c.day_has_in);
                 row["can_approve"] = json!(blocked.is_none());
                 row["approve_blocked_reason"] = json!(blocked);
@@ -1664,7 +1680,7 @@ impl Operation for DecidePunchCorrection {
     }
 
     fn summary(&self) -> &'static str {
-        "核准或駁回一張待審核的補登申請。核准會在同一個交易寫進打卡紀錄，來源記為補登並留下決定者。申請人不得決定本人送出的申請。"
+        "核准或駁回一張待審核的補登申請。核准會在同一個交易寫進打卡紀錄，來源記為補登並留下決定者。申請人不得決定本人送出的申請，公司設定允許時負責人例外。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1680,11 +1696,12 @@ impl Operation for DecidePunchCorrection {
                 approve: i.approve,
                 actor: &ctx.actor,
                 actor_role: &ctx.actor_role,
-                actor_employee_id: ctx.employee_id,
+                actor_employee_id: deciding_as(ctx).await?,
                 note: i.note.as_deref().unwrap_or("").trim(),
                 offset: ctx.offset,
             })
-            .await?;
+            .await
+            .map_err(|e| own_request_error(ctx, e))?;
 
         let summary = format!(
             "{} {} 的{}卡補登 {} · {} 決定",
