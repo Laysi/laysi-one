@@ -244,9 +244,61 @@ const FISCAL_MONTHS: [&str; 12] = [
 fn setting_options(code: &str) -> Vec<&'static str> {
     match code {
         "punch_correction_policy" => crate::ops::attendance::CORRECTION_POLICIES.to_vec(),
+        OWNER_SELF_DECIDE_SETTING => SELF_DECIDE_POLICIES.to_vec(),
         "fiscal_year" => FISCAL_MONTHS.to_vec(),
         BRAND_DISPLAY_SETTING => BRAND_DISPLAYS.to_vec(),
         _ => Vec::new(),
+    }
+}
+
+/// Whether the owner may decide the leave, overtime, punch-correction and
+/// expense requests they submitted themselves.
+///
+/// Everyone else's requests reach the owner, who holds every approval
+/// permission, so only the owner's own can stall for want of a second
+/// signatory. The setting lifts the rule for that one role and no other.
+pub(crate) const OWNER_SELF_DECIDE_SETTING: &str = "owner_self_decide";
+pub(crate) const SELF_DECIDE_OFF: &str = "由他人簽核";
+pub(crate) const SELF_DECIDE_ON: &str = "可自行核決";
+const SELF_DECIDE_POLICIES: [&str; 2] = [SELF_DECIDE_OFF, SELF_DECIDE_ON];
+
+/// Whether the company has turned [`OWNER_SELF_DECIDE_SETTING`] on.
+pub(crate) async fn self_decide_on(ctx: &OpCtx) -> Result<bool, OpError> {
+    Ok(ctx
+        .store
+        .company_settings()
+        .await?
+        .iter()
+        .any(|s| s.code == OWNER_SELF_DECIDE_SETTING && s.value.trim() == SELF_DECIDE_ON))
+}
+
+/// Whether a caller in `role` may decide their own requests. The setting
+/// reaches the owner and nobody else.
+pub(crate) fn owner_decides_own(role: &str, setting_on: bool) -> bool {
+    setting_on && role == crate::ROLE_BOSS
+}
+
+/// The employee whose own requests the caller may not decide, or `None` when
+/// [`owner_decides_own`] lifts the rule. The store refuses the requester on
+/// this id, so `None` is what lets the owner through.
+pub(crate) async fn deciding_as(ctx: &OpCtx) -> Result<Option<i32>, OpError> {
+    Ok(
+        if owner_decides_own(&ctx.actor_role, self_decide_on(ctx).await?) {
+            None
+        } else {
+            ctx.employee_id
+        },
+    )
+}
+
+/// Why a request's own submitter cannot decide it. The owner's way out is the
+/// setting; anyone else's is a second account, since the owner can sign
+/// theirs.
+pub(crate) fn own_request_refusal(role: &str, subject: &str) -> String {
+    if role == crate::ROLE_BOSS {
+        format!("{subject}由本人送出。要自行核決，請系統管理員在「基礎設定」把「負責人自行核決」改成「{SELF_DECIDE_ON}」。")
+    } else {
+        format!("{subject}由本人送出，要由另一個帳號簽核。目前沒有其他可簽核的帳號，請系統管理員在「帳號管理」建立。")
     }
 }
 
@@ -353,6 +405,11 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
             Err(OpError::BadInput(format!(
                 "公司識別顯示方式填「{}」、「{}」或「{}」，收到「{value}」",
                 BRAND_DISPLAYS[0], BRAND_DISPLAYS[1], BRAND_DISPLAYS[2]
+            )))
+        }
+        OWNER_SELF_DECIDE_SETTING if !SELF_DECIDE_POLICIES.contains(&value) => {
+            Err(OpError::BadInput(format!(
+                "負責人自行核決填「{SELF_DECIDE_OFF}」或「{SELF_DECIDE_ON}」，收到「{value}」"
             )))
         }
         "punch_correction_policy"
@@ -2194,6 +2251,53 @@ mod tests {
             assert!(validate_setting(BRAND_DISPLAY_SETTING, good).is_ok());
         }
         assert!(validate_setting(BRAND_DISPLAY_SETTING, "兩個都要").is_err());
+    }
+
+    #[test]
+    fn owner_self_decide_takes_its_two_answers_only() {
+        for good in SELF_DECIDE_POLICIES {
+            assert!(validate_setting(OWNER_SELF_DECIDE_SETTING, good).is_ok());
+        }
+        let err = validate_setting(OWNER_SELF_DECIDE_SETTING, "看情況")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(SELF_DECIDE_OFF) && err.contains(SELF_DECIDE_ON),
+            "錯誤訊息要列出兩個可用值：{err}"
+        );
+        assert_eq!(
+            setting_options(OWNER_SELF_DECIDE_SETTING),
+            SELF_DECIDE_POLICIES
+        );
+    }
+
+    #[test]
+    fn self_decide_reaches_the_owner_and_nobody_else() {
+        assert!(owner_decides_own(crate::ROLE_BOSS, true));
+        assert!(!owner_decides_own(crate::ROLE_BOSS, false));
+        for role in [
+            "acct",
+            "manager",
+            "hr",
+            crate::ROLE_STAFF,
+            crate::ROLE_ADMIN,
+        ] {
+            assert!(!owner_decides_own(role, true), "{role} 不因設定而放行");
+        }
+    }
+
+    #[test]
+    fn the_owner_is_told_where_the_self_decide_setting_is() {
+        let boss = own_request_refusal(crate::ROLE_BOSS, "LV2609-001 ");
+        assert!(
+            boss.contains("基礎設定") && !boss.contains("帳號管理"),
+            "{boss}"
+        );
+        let manager = own_request_refusal("manager", "LV2609-001 ");
+        assert!(
+            manager.contains("帳號管理") && !manager.contains("基礎設定"),
+            "{manager}"
+        );
     }
 
     #[test]

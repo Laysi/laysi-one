@@ -28,6 +28,7 @@
 //! and the payment batch — the only path by which the money leaves — reads
 //! that same table.
 
+use crate::ops::settings::{own_request_refusal, owner_decides_own, self_decide_on};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -84,13 +85,18 @@ fn next_step<'a>(claim: &ExpenseClaim, steps: &[&'a ApprovalRule]) -> Option<&'a
 ///
 /// The owner may stand in for any step — small companies work that way, and
 /// a claim should not stall while a manager travels. But a claimant may
-/// never approve their own claim, which is the one separation-of-duties rule
-/// enforceable today: comparing names is enough, no permission matrix needed.
+/// never approve their own claim, unless the caller is the owner and
+/// `self_decide_on` says the company allows it.
 ///
-/// A company whose only accounts are the administrator and the owner has no
-/// second signatory, so the refusal says where one comes from. Creating an
-/// account is `AdminOnly`, which is why it names the administrator rather
-/// than telling the reader to go and do it.
+/// A claim is the caller's own when its employee id is the caller's, or when
+/// its claimant name is the caller's. The id is the key a self-service claim
+/// carries; a claim filed on someone's behalf has only the name, and without
+/// that comparison the owner could file one under their own name and sign it.
+///
+/// The refusal says where the way out is: a second account for everyone
+/// else, the setting for the owner. Both are the administrator's to change,
+/// which is why it names the administrator rather than telling the reader to
+/// go and do it.
 ///
 /// `role_label` is the role as the screens name it; the role code never
 /// reaches the message.
@@ -107,13 +113,17 @@ fn may_decide(
     step: Option<&ApprovalRule>,
     claim: &ExpenseClaim,
     actor: &str,
+    employee_id: Option<i32>,
     role: &str,
     role_label: &str,
+    self_decide_on: bool,
 ) -> Result<(), OpError> {
-    if actor == claim.claimant {
-        return Err(OpError::BadInput(format!(
-            "{} 由 {} 本人送出，要由另一個帳號簽核。目前沒有其他可簽核的帳號，請系統管理員在「帳號管理」建立。",
-            claim.claim_no, claim.claimant
+    let own = (claim.employee_id.is_some() && claim.employee_id == employee_id)
+        || actor == claim.claimant;
+    if own && !owner_decides_own(role, self_decide_on) {
+        return Err(OpError::BadInput(own_request_refusal(
+            role,
+            &format!("{} ", claim.claim_no),
         )));
     }
     let Some(step) = step else {
@@ -267,6 +277,7 @@ impl Operation for ListExpenseClaims {
         // be drawn dead with the reason beside it instead of being live and
         // answering with a refusal.
         let role_label = crate::role_name(ctx).await;
+        let self_decide_on = self_decide_on(ctx).await?;
         // Receipts are what the approver is being asked to check. One query
         // per claim, the same shape the claimant sees in `list_my_expense_claims`.
         let mut receipts_by_claim: std::collections::BTreeMap<&str, Vec<Value>> =
@@ -298,9 +309,17 @@ impl Operation for ListExpenseClaims {
                 let in_flight = c.status == "submitted" || c.status == "approving";
                 let blocked = in_flight
                     .then(|| {
-                        may_decide(next, c, &ctx.actor, &ctx.actor_role, &role_label)
-                            .err()
-                            .map(|e| e.to_string())
+                        may_decide(
+                            next,
+                            c,
+                            &ctx.actor,
+                            ctx.employee_id,
+                            &ctx.actor_role,
+                            &role_label,
+                            self_decide_on,
+                        )
+                        .err()
+                        .map(|e| e.to_string())
                     })
                     .flatten();
                 row["can_approve"] = json!(in_flight && blocked.is_none());
@@ -492,7 +511,7 @@ impl Operation for ApproveExpenseClaim {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "簽核費用報支單目前所在的關卡。會計關卡要帶入費用科目；最後一關會產生待過帳的費用傳票（借費用科目／貸應付帳款或零用金）。付款方式為月底彙總匯款時，同時列入應付帳款，由付款單匯出。申請人不得核准本人送出的單據。"
+        "簽核費用報支單目前所在的關卡。會計關卡要帶入費用科目；最後一關會產生待過帳的費用傳票（借費用科目／貸應付帳款或零用金）。付款方式為月底彙總匯款時，同時列入應付帳款，由付款單匯出。申請人不得核准本人送出的單據，公司設定允許時負責人例外。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ApproveExpenseClaimInput>()
@@ -527,8 +546,10 @@ impl Operation for ApproveExpenseClaim {
             step,
             &claim,
             &ctx.actor,
+            ctx.employee_id,
             &ctx.actor_role,
             &crate::role_name(ctx).await,
+            self_decide_on(ctx).await?,
         )?;
 
         // Confirming the account is what the accounting step is for, so that
@@ -690,8 +711,10 @@ impl Operation for RejectExpenseClaim {
             Some(step),
             &claim,
             &ctx.actor,
+            ctx.employee_id,
             &ctx.actor_role,
             &crate::role_name(ctx).await,
+            self_decide_on(ctx).await?,
         )?;
 
         let note = i.note.as_deref().unwrap_or("請補資料");
@@ -772,6 +795,7 @@ mod tests {
             memo: String::new(),
             created_at: Utc::now(),
             created_by: "申請人甲".into(),
+            employee_id: Some(7),
             steps: done
                 .iter()
                 .map(|s| laysi_store::ExpenseStep {
@@ -855,26 +879,57 @@ mod tests {
         let steps = required_steps(&rules, c.amount);
         let step = next_step(&c, &steps).unwrap();
 
-        let err = may_decide(Some(step), &c, "申請人甲", "boss", "負責人").unwrap_err();
+        let err =
+            may_decide(Some(step), &c, "申請人甲", None, "boss", "負責人", false).unwrap_err();
         assert!(
-            err.to_string().contains("要由另一個帳號簽核"),
-            "連負責人都不能簽自己的單"
+            err.to_string().contains("基礎設定"),
+            "設定關著時負責人也簽不了自己的單，並看得到開關在哪：{err}"
+        );
+        let err = may_decide(
+            Some(step),
+            &c,
+            "改過名的申請人",
+            Some(7),
+            "boss",
+            "負責人",
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("由本人送出"),
+            "員工編號相同就是本人，名字不同也一樣：{err}"
         );
         assert!(
+            may_decide(Some(step), &c, "申請人甲", Some(7), "boss", "負責人", true).is_ok(),
+            "設定開著時負責人簽得動自己的單"
+        );
+
+        let err =
+            may_decide(Some(step), &c, "申請人甲", Some(7), "manager", "主管", true).unwrap_err();
+        assert!(
             err.to_string().contains("帳號管理"),
-            "只有一個帳號的公司要看得到出路在哪：{err}"
+            "設定只放行負責人，主管仍要第二個帳號：{err}"
         );
 
         assert!(
-            may_decide(Some(step), &c, "會計人員", "acct", "會計").is_ok(),
+            may_decide(Some(step), &c, "會計人員", Some(8), "acct", "會計", false).is_ok(),
             "會計簽會計那一關"
         );
         assert!(
-            may_decide(Some(step), &c, "負責人", "boss", "負責人").is_ok(),
+            may_decide(Some(step), &c, "負責人", Some(1), "boss", "負責人", false).is_ok(),
             "負責人可以代任何一關"
         );
 
-        let err = may_decide(Some(step), &c, "出納人員", "cashier", "出納").unwrap_err();
+        let err = may_decide(
+            Some(step),
+            &c,
+            "出納人員",
+            Some(9),
+            "cashier",
+            "出納",
+            false,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("會計確認科目"),
             "擋下來時要說清楚該誰簽：{err}"
@@ -903,12 +958,12 @@ mod tests {
         assert!(next.is_none(), "沒有關卡在等，剩下的是開傳票");
 
         assert!(
-            may_decide(next, &c, "會計人員", "acct", "會計").is_ok(),
+            may_decide(next, &c, "會計人員", Some(8), "acct", "會計", false).is_ok(),
             "沒有關卡可比對角色時不擋人，權限由角色對照表決定"
         );
-        let err = may_decide(next, &c, "申請人甲", "boss", "負責人").unwrap_err();
+        let err = may_decide(next, &c, "申請人甲", Some(7), "boss", "負責人", false).unwrap_err();
         assert!(
-            err.to_string().contains("要由另一個帳號簽核"),
+            err.to_string().contains("由本人送出"),
             "申請人不得核准本人送出的單據，沒有關卡也一樣：{err}"
         );
 

@@ -4693,7 +4693,7 @@ impl Store {
                     sa.name AS suggested_account_name, aa.name AS account_name,
                     c.pay_method, c.status, c.voucher_no, v.status AS voucher_status,
                     c.document_id, doc.doc_no, doc.name AS document_name,
-                    c.memo, c.created_at, c.created_by
+                    c.memo, c.created_at, c.created_by, c.employee_id
                FROM expense_claim c
                LEFT JOIN dimension_value d ON d.id = c.dept_id
                LEFT JOIN account sa ON sa.code = c.suggested_account_code
@@ -4745,6 +4745,7 @@ impl Store {
                     memo: r.get("memo"),
                     created_at: r.get("created_at"),
                     created_by: r.get("created_by"),
+                    employee_id: r.get("employee_id"),
                     steps: steps
                         .iter()
                         .filter(|s| s.get::<i32, _>("claim_id") == id)
@@ -8279,6 +8280,9 @@ pub struct ExpenseClaim {
     pub memo: String,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
+    /// The claimant's employee, set by self-service filing only; a claim
+    /// filed on someone's behalf carries a name and no key.
+    pub employee_id: Option<i32>,
     pub steps: Vec<ExpenseStep>,
 }
 
