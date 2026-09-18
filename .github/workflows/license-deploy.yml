@@ -42,7 +42,7 @@ permissions:
 
 env:
   DEPLOY_HOST: ${{ vars.LICENSE_DEPLOY_HOST }}
-  DEPLOY_USER: jiazhen
+  DEPLOY_USER: ai-km
   DEPLOY_DIR: laysi-one-license
   # Pinned by `name:` in license-server/docker-compose.yml, which is what
   # prefixes every volume. Changing one without the other starts the stack
@@ -66,7 +66,6 @@ jobs:
       - name: Configure ssh
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          LICENSE_HOST_KEY: ${{ secrets.LICENSE_HOST_KEY }}
         run: |
           set -eu
           test -n "$DEPLOY_HOST" || { echo "set the LICENSE_DEPLOY_HOST variable"; exit 1; }
@@ -75,8 +74,12 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           # Pinned rather than trusted on first use, the same as deploy.yml:
           # the tunnel is reachable by anyone, and the host key is what proves
-          # this is the right machine.
-          printf '%s %s\n' "$DEPLOY_HOST" "$LICENSE_HOST_KEY" > ~/.ssh/known_hosts
+          # this is the right machine. Written out here rather than kept in a
+          # secret: a host public key is not one, and a copy nobody can read is
+          # a copy nobody notices has gone stale.
+          printf '%s ssh-ed25519 %s\n' "$DEPLOY_HOST" \
+            'AAAAC3NzaC1lZDI1NTE5AAAAIC604ENTjAQN0XSpM17AYa8XZUds/bMxrTTDIs1dIxsP' \
+            > ~/.ssh/known_hosts
           cat > ~/.ssh/config <<EOF
           Host $DEPLOY_HOST
               User $DEPLOY_USER
@@ -99,7 +102,15 @@ jobs:
           set -eu
           # ghcr rejects an uppercase path; github.repository keeps the owner's case.
           image=$(printf 'ghcr.io/%s-license:%s' "$REPOSITORY" "$VERSION" | tr 'A-Z' 'a-z')
-          docker pull --platform linux/amd64 "$image"
+          # The host's architecture, not the runner's. A pinned platform is
+          # wrong the moment the server moves to another machine, and the
+          # symptom is an image that loads and a container that never starts.
+          case $(ssh "$DEPLOY_HOST" 'uname -m') in
+              x86_64)  platform=linux/amd64 ;;
+              aarch64) platform=linux/arm64 ;;
+              *) echo "unsupported host architecture"; exit 1 ;;
+          esac
+          docker pull --platform "$platform" "$image"
           # The compose file names one fixed tag, so the deployed version is
           # whatever this step last loaded rather than something the host has
           # to be told separately.
