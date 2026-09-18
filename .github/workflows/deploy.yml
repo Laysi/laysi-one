@@ -48,6 +48,10 @@ permissions:
 env:
   DEPLOY_HOST: one-ssh.laysi.io
   DEPLOY_USER: ai-km
+  # This host keeps its `podman` and `podman-compose` shims in ~/bin, and an
+  # ssh command runs a non-login shell, which does not have it on PATH. The
+  # value is literal on purpose: the remote shell expands $HOME, not this one.
+  REMOTE_PATH: PATH=$HOME/bin:$PATH
 
 jobs:
   deploy:
@@ -137,7 +141,7 @@ jobs:
               names="$names $base-$n:$VERSION"
           done
           # gzip -1: the tunnel is the slow half, not the compression.
-          docker save $names | gzip -1 | ssh "$DEPLOY_HOST" 'gunzip | podman load'
+          docker save $names | gzip -1 | ssh "$DEPLOY_HOST" "$REMOTE_PATH; gunzip | podman load"
 
       - name: Send the compose files
         run: |
@@ -153,7 +157,7 @@ jobs:
           # Detached: recreating containers reconfigures the podman bridge that
           # cloudflared sits on, which resets this very SSH connection. The step
           # below reconnects to find out how it went.
-          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && \
+          ssh "$DEPLOY_HOST" "$REMOTE_PATH; cd $DEPLOY_DIR && \
             setsid nohup podman-compose -p $PROJECT -f docker-compose.prod.yml -f $OVERLAY \
             up -d --force-recreate > deploy.log 2>&1 < /dev/null & sleep 2"
 
@@ -201,7 +205,7 @@ jobs:
           set -eu
           for _ in $(seq 90); do
               if ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
-                  "podman ps --format '{{.Names}} {{.Status}}' | grep -q '$API_CONTAINER Up.*healthy'"; then
+                  "$REMOTE_PATH; podman ps --format '{{.Names}} {{.Status}}' | grep -q '$API_CONTAINER Up.*healthy'"; then
                   ok=yes
                   break
               fi
@@ -209,7 +213,7 @@ jobs:
           done
           # Whichever of the two left a trace: production writes deploy.log,
           # the demo rebuild runs under systemd and writes to the journal.
-          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && \
+          ssh "$DEPLOY_HOST" "$REMOTE_PATH; cd $DEPLOY_DIR && \
             podman ps -a --format '{{.Names}} | {{.Status}}' | grep laysi; \
             tail -5 deploy.log 2>/dev/null; \
             XDG_RUNTIME_DIR=/run/user/\$(id -u) journalctl --user -u laysi-demo-reset -n 20 --no-pager 2>/dev/null" || true
