@@ -44,6 +44,10 @@ env:
   DEPLOY_HOST: ${{ vars.LICENSE_DEPLOY_HOST }}
   DEPLOY_USER: ai-km
   DEPLOY_DIR: laysi-one-license
+  # This host keeps its `podman` and `podman-compose` shims in ~/bin, and an
+  # ssh command runs a non-login shell, which does not have it on PATH. The
+  # value is literal on purpose: the remote shell expands $HOME, not this one.
+  REMOTE_PATH: PATH=$HOME/bin:$PATH
   # Pinned by `name:` in license-server/docker-compose.yml, which is what
   # prefixes every volume. Changing one without the other starts the stack
   # from an empty secrets volume and generates a second signing key.
@@ -116,7 +120,7 @@ jobs:
           # to be told separately.
           docker tag "$image" laysi-one-license:deploy
           # gzip -1: the tunnel is the slow half, not the compression.
-          docker save laysi-one-license:deploy | gzip -1 | ssh "$DEPLOY_HOST" 'gunzip | podman load'
+          docker save laysi-one-license:deploy | gzip -1 | ssh "$DEPLOY_HOST" "$REMOTE_PATH; gunzip | podman load"
 
       - name: Provision the signing key
         env:
@@ -130,7 +134,7 @@ jobs:
           # signing licences would invalidate every token in the field, and a
           # deployment is not where that decision belongs.
           printf '%s' "$LICENSE_SIGNING_KEY" | ssh "$DEPLOY_HOST" \
-            "podman volume create ${SECRETS_VOLUME} >/dev/null 2>&1 || true; \
+            "$REMOTE_PATH; podman volume create ${SECRETS_VOLUME} >/dev/null 2>&1 || true; \
              podman run --rm -i -v ${SECRETS_VOLUME}:/secrets alpine:3.24 sh -c \
              '[ -s /secrets/license_signing_key ] || { cat > /secrets/license_signing_key; \
               chmod 0444 /secrets/license_signing_key; }'"
@@ -146,13 +150,13 @@ jobs:
           # which turns mail off rather than failing the deploy -- the console
           # then shows the password on screen, as it did before mail existed.
           printf '%s' "$SMTP_URL" | ssh "$DEPLOY_HOST" \
-            "podman run --rm -i -v ${SECRETS_VOLUME}:/secrets alpine:3.24 sh -c \
+            "$REMOTE_PATH; podman run --rm -i -v ${SECRETS_VOLUME}:/secrets alpine:3.24 sh -c \
              'cat > /secrets/smtp_url; chmod 0444 /secrets/smtp_url'"
 
       - name: Restart the stack
         run: |
           set -eu
-          ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && \
+          ssh "$DEPLOY_HOST" "$REMOTE_PATH; cd $DEPLOY_DIR && \
             podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml up -d secrets && \
             setsid nohup podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml up -d --force-recreate \
             > deploy.log 2>&1 < /dev/null & sleep 2"
@@ -162,7 +166,7 @@ jobs:
           set -eu
           for _ in $(seq 60); do
               if ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
-                  'podman ps --format "{{.Names}} {{.Status}}" | grep -q "laysi-license Up"'; then
+                  "$REMOTE_PATH; podman ps --format '{{.Names}} {{.Status}}' | grep -q 'laysi-license Up'"; then
                   ok=yes
                   break
               fi
@@ -176,7 +180,7 @@ jobs:
           want=$(sed -n 's/^const PUBLIC_KEY_HEX: &str = "\([0-9a-f]\{64\}\)";$/\1/p' \
             backend/crates/laysi-ops/src/ops/license.rs)
           test -n "$want" || { echo "PUBLIC_KEY_HEX not found; did the constant change shape?"; exit 1; }
-          got=$(ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml exec -T app laysi-one-license public-key" | tr -d '\r\n')
+          got=$(ssh "$DEPLOY_HOST" "$REMOTE_PATH; cd $DEPLOY_DIR && podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml exec -T app laysi-one-license public-key" | tr -d '\r\n')
           echo "product expects $want"
           echo "server signs as $got"
           [ "$want" = "$got" ] || { echo "the signing key does not match PUBLIC_KEY_HEX"; exit 1; }
