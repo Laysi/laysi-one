@@ -21,13 +21,18 @@ export function MyNotices({ reloadKey, onRead }: Props) {
   const [open, setOpen] = useState<Set<number>>(new Set());
 
   const load = useCallback(() => {
+    let live = true;
     setError(null);
     callOp('list_my_notices', {}, undefined, myNoticeList)
       .then((d) => {
+        if (!live) return;
         setData(d);
         setOpen(new Set(d.notices.filter((n) => n.unread).map((n) => n.id)));
       })
-      .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
+      .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
+    return () => {
+      live = false;
+    };
   }, []);
 
   useEffect(load, [load, reloadKey]);

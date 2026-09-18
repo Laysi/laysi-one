@@ -134,7 +134,14 @@ export function Employees({
   const [issuing, setIssuing] = useState(false);
   const [issued, setIssued] = useState<{ username: string; password: string | null } | null>(null);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp(
       'list_employees',
@@ -145,8 +152,9 @@ export function Employees({
       undefined,
       employeeList,
     )
-      .then(setData)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setData(d))
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, [q, includeLeft]);
 
   useEffect(load, [load, reloadKey]);

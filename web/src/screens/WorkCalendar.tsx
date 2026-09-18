@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import {
   businessToday,
@@ -38,10 +38,18 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     callOp('list_work_calendar', { year }, undefined, workCalendarYear)
-      .then(setData)
-      .catch(() => setData(null));
+      .then((d) => live && setData(d))
+      .catch(() => live && setData(null));
+    return () => running.current?.();
   }, [year]);
 
   useEffect(load, [load, reloadKey]);

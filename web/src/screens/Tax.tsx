@@ -47,16 +47,21 @@ export function Tax({ reloadKey }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
+    let live = true;
     setError(null);
     Promise.all([
       callOp('get_vat_return', asOf ? { as_of: asOf } : {}, undefined, vatReturn),
       callOp('list_withholding', {}, undefined, withholdingList),
     ])
       .then(([v, w]) => {
+        if (!live) return;
         setVat(v);
         setWht(w);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => {
+      live = false;
+    };
   }, [asOf]);
 
   useEffect(load, [load, reloadKey]);

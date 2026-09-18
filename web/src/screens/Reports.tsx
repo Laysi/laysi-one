@@ -59,6 +59,7 @@ export function Reports({ reloadKey }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
+    let live = true;
     setError(null);
     Promise.all([
       callOp('get_balance_sheet', {}, undefined, balanceSheet),
@@ -66,11 +67,15 @@ export function Reports({ reloadKey }: Props) {
       callOp('get_cash_flow', {}, undefined, cashFlow),
     ])
       .then(([b, p, c]) => {
+        if (!live) return;
         setBs(b);
         setPl(p);
         setCf(c);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => {
+      live = false;
+    };
   }, []);
 
   useEffect(load, [load, reloadKey]);

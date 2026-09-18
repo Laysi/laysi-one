@@ -41,11 +41,19 @@ export function ExpenseRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   const [unattached, setUnattached] = useState<string[]>([]);
   const filePicker = useRef<HTMLInputElement | null>(null);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_my_expense_claims', {}, undefined, myExpenseClaimList)
-      .then(setData)
-      .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
+      .then((d) => live && setData(d))
+      .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);

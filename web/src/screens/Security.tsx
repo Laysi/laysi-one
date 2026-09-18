@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { CopyButton } from '../components/CopyButton';
@@ -131,38 +131,51 @@ export function Security({ onToast, reloadKey }: Props) {
   const canReadLicence = me.permissions.includes('get_license');
   const canActivateLicence = me.permissions.includes('activate_license');
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     Promise.all([
       callOp('list_api_tokens', {}, undefined, apiTokenList),
       callOp('get_system_health', {}, undefined, systemHealth),
     ])
       .then(([t, h]) => {
+        if (!live) return;
         setTokens(t);
         setHealth(h);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
 
-    getHealthz().then(setHz).catch(() => setHz(null));
-    getMeta().then(setInfo).catch(() => setInfo(null));
+    getHealthz()
+      .then((d) => live && setHz(d))
+      .catch(() => live && setHz(null));
+    getMeta()
+      .then((d) => live && setInfo(d))
+      .catch(() => live && setInfo(null));
 
     if (canReadOidc) {
       callOp('get_oidc_setting', {}, undefined, oidcSetting)
-        .then(setOidc)
-        .catch(() => setOidc(null));
+        .then((d) => live && setOidc(d))
+        .catch(() => live && setOidc(null));
     }
 
     if (canReadBackup) {
       callOp('get_backup_setting', {}, undefined, backupSetting)
-        .then(setBackup)
-        .catch(() => setBackup(null));
+        .then((d) => live && setBackup(d))
+        .catch(() => live && setBackup(null));
     }
 
     if (canReadLicence) {
       callOp('get_license', {}, undefined, licenseState)
-        .then(setLicence)
-        .catch(() => setLicence(null));
+        .then((d) => live && setLicence(d))
+        .catch(() => live && setLicence(null));
     }
+    return () => running.current?.();
   }, [canReadOidc, canReadBackup, canReadLicence]);
 
   useEffect(load, [load, reloadKey]);

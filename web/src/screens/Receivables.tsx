@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   accountList,
   arAging,
@@ -68,7 +68,14 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
   const [savingInvoice, setSavingInvoice] = useState(false);
   const [missing, setMissing] = useState<string[]>([]);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     Promise.all([
       callOp('get_ar_aging', {}, undefined, arAging),
@@ -82,12 +89,14 @@ export function Receivables({ onToast, reloadKey, onChanged }: Props) {
       ),
     ])
       .then(([a, l]) => {
+        if (!live) return;
         setAging(a);
         setRows(l.invoices);
         setVat(l.vat);
         setIssuedOn((v) => v || businessToday());
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, [onlyOverdue]);
 
   useEffect(load, [load, reloadKey]);

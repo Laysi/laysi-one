@@ -38,15 +38,20 @@ export function Withholding({ onGo, canViewStatements, reloadKey }: Props) {
   const [showPayroll, setShowPayroll] = useState(false);
 
   const load = useCallback(() => {
+    let live = true;
+    const done = () => {
+      live = false;
+    };
     setError(null);
     callOp('get_hr_compliance', {}, undefined, hrCompliance)
-      .then(setCompliance)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setCompliance(d))
+      .catch((e: Error) => live && setError(e.message));
 
-    if (!canViewStatements) return;
+    if (!canViewStatements) return done;
     callOp('list_withholding_statements', year ? { year } : {}, undefined, withholdingStatements)
-      .then(setStatements)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setStatements(d))
+      .catch((e: Error) => live && setError(e.message));
+    return done;
   }, [year, canViewStatements]);
 
   useEffect(load, [load, reloadKey]);

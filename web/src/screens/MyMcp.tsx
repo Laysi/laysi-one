@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { OPS } from '../api/generated';
 import { CopyButton } from '../components/CopyButton';
 import {
@@ -31,11 +31,19 @@ export function MyMcp({ onToast, reloadKey }: Props) {
   const [rotateDays, setRotateDays] = useState('90');
   const [showBlocked, setShowBlocked] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_my_api_tokens', {}, undefined, myApiTokenList)
-      .then(setData)
-      .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
+      .then((d) => live && setData(d))
+      .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);

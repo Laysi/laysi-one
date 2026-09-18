@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   attendancePunchList,
   callOp,
@@ -60,7 +60,14 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<Record<string, string>>({});
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     Promise.all([
       callOp('list_leave_requests', { include_done: includeDone }, undefined, leaveRequestList),
@@ -75,10 +82,12 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       ),
     ])
       .then(([l, p]) => {
+        if (!live) return;
         setLeave(l);
         setPunches(p);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, [month, includeDone, picked]);
 
   const me = useCurrentUser();
@@ -87,8 +96,15 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const canSeeOvertime = me.permissions.includes('list_overtime_requests');
   const canDecideOvertime = me.permissions.includes('decide_overtime_request');
 
+  const runningOvertime = useRef<(() => void) | null>(null);
+
   const loadOvertime = useCallback(() => {
+    runningOvertime.current?.();
     if (!canSeeOvertime) return;
+    let live = true;
+    runningOvertime.current = () => {
+      live = false;
+    };
     callOp(
       'list_overtime_requests',
       {
@@ -98,8 +114,9 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       undefined,
       overtimeRequestList,
     )
-      .then(setOvertime)
-      .catch(() => setOvertime(null));
+      .then((d) => live && setOvertime(d))
+      .catch(() => live && setOvertime(null));
+    return () => runningOvertime.current?.();
   }, [canSeeOvertime, month, otDone]);
 
   useEffect(loadOvertime, [loadOvertime, reloadKey]);
@@ -127,11 +144,19 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
     }
   }
 
+  const runningFixes = useRef<(() => void) | null>(null);
+
   const loadFixes = useCallback(() => {
+    runningFixes.current?.();
     if (!canSeeFixes) return;
+    let live = true;
+    runningFixes.current = () => {
+      live = false;
+    };
     callOp('list_punch_corrections', { include_done: true }, undefined, punchCorrectionList)
-      .then(setFixes)
-      .catch(() => setFixes(null));
+      .then((d) => live && setFixes(d))
+      .catch(() => live && setFixes(null));
+    return () => runningFixes.current?.();
   }, [canSeeFixes]);
 
   useEffect(loadFixes, [loadFixes, reloadKey]);

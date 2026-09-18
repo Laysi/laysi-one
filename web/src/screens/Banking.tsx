@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   accountList,
   bankMatchSuggestions,
@@ -39,19 +39,28 @@ export function Banking({ onToast, reloadKey, onChanged }: Props) {
   const [glCode, setGlCode] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     Promise.all([
       callOp('get_cash_position', {}, undefined, cashPosition),
       callOp('list_bank_transactions', {}, undefined, bankTransactions),
     ])
       .then(([c, t]) => {
+        if (!live) return;
         setAccounts(c.accounts);
         setTotal(c.total);
         setUnattributed(c.unattributed);
         setRows(t.transactions);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);
