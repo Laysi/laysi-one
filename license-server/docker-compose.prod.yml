@@ -3,10 +3,10 @@
 #   podman-compose -f docker-compose.prod.yml up -d secrets
 #   podman-compose -f docker-compose.prod.yml up -d
 #
-# docker-compose.yml with `build:` replaced by the tag that
-# .github/workflows/license-deploy.yml loads over SSH: there is no source on
-# that host to build from. Reasoning for each service lives in
-# docker-compose.yml; only what differs is commented here.
+# docker-compose.yml with `build:` replaced by the published image the host
+# pulls for itself: there is no source on that host to build from. Reasoning
+# for each service lives in docker-compose.yml; only what differs is commented
+# here.
 #
 # The signing key is written into the volume by that workflow, from a GitHub
 # secret, before this runs. The `secrets` service only writes what is missing,
@@ -70,7 +70,13 @@ services:
       retries: 20
 
   app:
-    image: laysi-one-license:deploy
+    # A registry address and a version, not a local tag. The host pulls this
+    # itself, so the registry hands it the build that matches its architecture
+    # and no workflow has to guess one -- guessing wrong is what took the
+    # product's site down for 25 minutes. LICENSE_VERSION comes from the .env
+    # that license-deploy.yml writes beside this file, so the host can also
+    # say which version it runs.
+    image: ghcr.io/laysi/laysi-one-license:${LICENSE_VERSION:-latest}
     restart: unless-stopped
     environment:
       DATABASE_URL_FILE: /secrets/database_url

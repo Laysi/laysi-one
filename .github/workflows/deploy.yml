@@ -128,6 +128,14 @@ jobs:
           echo "LAYSI_VERSION=$VERSION" >> "$GITHUB_ENV"
           ssh "$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
           scp docker-compose.prod.yml "$OVERLAY" "$DEPLOY_HOST:$DEPLOY_DIR/"
+          # The version is free text from workflow_dispatch and lands inside a
+          # single-quoted argument of a command that runs on the production
+          # host. A quote or a semicolon in it would close that argument and
+          # run as the deployment user; nothing a tag legitimately contains is
+          # outside this set.
+          case $VERSION in
+              *[!A-Za-z0-9._-]*) echo "version may only contain letters, digits, dot, underscore and hyphen"; exit 1 ;;
+          esac
           ssh "$DEPLOY_HOST" "cd $DEPLOY_DIR && printf 'LAYSI_VERSION=%s\n' '$VERSION' > .env"
 
       # The host pulls, rather than the runner pulling and streaming the images
