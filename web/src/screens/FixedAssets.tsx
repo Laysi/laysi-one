@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   accountList,
   callOp,
@@ -56,17 +56,26 @@ export function FixedAssets({ onToast, reloadKey, onChanged }: Props) {
   const [assetMemo, setAssetMemo] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     Promise.all([
       callOp('list_fixed_assets', {}, undefined, fixedAssetList),
       callOp('preview_depreciation', {}, undefined, depreciationPreview),
     ])
       .then(([a, p]) => {
+        if (!live) return;
         setData(a);
         setPreview(p);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);

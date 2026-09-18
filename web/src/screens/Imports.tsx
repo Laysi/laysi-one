@@ -32,11 +32,19 @@ export function Imports({ onToast, reloadKey, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_imports', {}, undefined, importList)
-      .then(setData)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setData(d))
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   businessDate,
   callOp,
@@ -37,11 +37,19 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
   const [voidReason, setVoidReason] = useState('');
   const [voidOpen, setVoidOpen] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     setSlipError(null);
     callOp('get_payroll_summary', period ? { period } : {}, undefined, payrollSummary)
       .then((s) => {
+        if (!live) return;
         setSummary(s);
         setRunPeriod((v) => v || s.next_period || '');
         setPayOn((v) => v || s.suggested_pay_on);
@@ -51,13 +59,15 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
           return;
         }
         callOp('list_payslips', period ? { period } : {}, undefined, payslipList)
-          .then(setSlips)
+          .then((d) => live && setSlips(d))
           .catch((e: Error) => {
+            if (!live) return;
             setSlips(null);
             setSlipError(e.message);
           });
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, [period]);
 
   useEffect(load, [load, reloadKey]);

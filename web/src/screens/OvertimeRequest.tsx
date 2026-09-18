@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   businessToday,
   callOp,
@@ -53,10 +53,18 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
   const [dayType, setDayType] = useState('');
   const [reason, setReason] = useState('');
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_my_overtime_requests', {}, undefined, myOvertimeList)
       .then((d) => {
+        if (!live) return;
         setData(d);
         const today = businessToday();
         setFromDay((v) => v || today);
@@ -64,7 +72,8 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
         setFromTime((v) => v || d.schedule.work_end || '18:00');
         setDayType((v) => v || (restDay(today) ? 'rest_day' : 'weekday'));
       })
-      .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
+      .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);

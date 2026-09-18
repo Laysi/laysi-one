@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   businessClock,
   callOp,
@@ -94,11 +94,19 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
     return () => window.clearInterval(id);
   }, []);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_my_punches', month ? { month } : {}, undefined, myPunchList)
-      .then(setData)
-      .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
+      .then((d) => live && setData(d))
+      .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
+    return () => running.current?.();
   }, [month]);
 
   const [fixes, setFixes] = useState<MyPunchCorrectionList | null>(null);
@@ -108,10 +116,18 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
   const [fixBusy, setFixBusy] = useState(false);
   const [trailOn, setTrailOn] = useState<string | null>(null);
 
+  const runningFixes = useRef<(() => void) | null>(null);
+
   const loadFixes = useCallback(() => {
+    runningFixes.current?.();
+    let live = true;
+    runningFixes.current = () => {
+      live = false;
+    };
     callOp('list_my_punch_corrections', {}, undefined, myPunchCorrectionList)
-      .then(setFixes)
-      .catch(() => setFixes(null));
+      .then((d) => live && setFixes(d))
+      .catch(() => live && setFixes(null));
+    return () => runningFixes.current?.();
   }, []);
 
   useEffect(loadFixes, [loadFixes, reloadKey]);

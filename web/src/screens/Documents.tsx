@@ -26,11 +26,19 @@ export function Documents({ onToast, reloadKey }: Props) {
   const [openHash, setOpenHash] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_documents', q.trim() ? { q: q.trim() } : {}, undefined, documentList)
-      .then(setData)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setData(d))
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, [q]);
 
   useEffect(load, [load, reloadKey]);

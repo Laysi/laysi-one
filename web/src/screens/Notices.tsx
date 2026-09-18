@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { DateField } from '../components/DateField';
 import { Markdown, MARKDOWN_HINT } from '../components/Markdown';
 import { NoticeHistory } from '../components/NoticeHistory';
@@ -54,11 +54,19 @@ export function Notices({ onToast, reloadKey, canManage }: Props) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState<Set<number>>(new Set());
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_notices', { include_ended: includeEnded }, undefined, noticeList)
-      .then(setData)
-      .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
+      .then((d) => live && setData(d))
+      .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
+    return () => running.current?.();
   }, [includeEnded]);
 
   useEffect(load, [load, reloadKey]);

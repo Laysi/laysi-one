@@ -24,10 +24,14 @@ export function Insurance({ onToast, reloadKey }: Props) {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
+    let live = true;
     setError(null);
     callOp('get_insurance_summary', {}, undefined, insuranceSummary)
-      .then(setData)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setData(d))
+      .catch((e: Error) => live && setError(e.message));
+    return () => {
+      live = false;
+    };
   }, []);
 
   useEffect(load, [load, reloadKey]);

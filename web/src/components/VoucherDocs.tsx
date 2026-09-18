@@ -30,13 +30,21 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
   const [fetching, setFetching] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
     if (!no) return;
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     const fetchFor = (ref: string) =>
       callOp('list_documents', { q: ref, limit: 200 }, undefined, documentList);
     Promise.all(claimNo ? [fetchFor(no), fetchFor(claimNo)] : [fetchFor(no)])
       .then(([own, claim]) => {
+        if (!live) return;
         const rows = own.documents.filter((x) => x.link_type === 'voucher' && x.link_ref === no);
         if (claim) {
           rows.push(
@@ -48,7 +56,8 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
         setDocs(rows);
         setMaxBytes(own.max_object_bytes);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, [no, claimNo]);
 
   useEffect(load, [load]);

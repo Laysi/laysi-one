@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import {
   approvalRules,
@@ -66,18 +66,27 @@ export function Roles({ onToast, reloadKey }: Props) {
   const [stepForm, setStepForm] = useState<StepForm>(emptyStepForm(1));
   const [savingStep, setSavingStep] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
+    const done = () => running.current?.();
     setError(null);
     callOp('list_roles', {}, undefined, roleMatrix)
-      .then(setMatrix)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setMatrix(d))
+      .catch((e: Error) => live && setError(e.message));
     if (!canReadFlow) {
       setFlow(null);
-      return;
+      return done;
     }
     callOp('list_approval_rules', {}, undefined, approvalRules)
-      .then(setFlow)
-      .catch((e: Error) => setFlowError(e.message));
+      .then((d) => live && setFlow(d))
+      .catch((e: Error) => live && setFlowError(e.message));
+    return done;
   }, [canReadFlow]);
 
   useEffect(load, [load, reloadKey]);

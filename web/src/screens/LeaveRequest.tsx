@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   businessToday,
   callOp,
@@ -92,10 +92,18 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   const [toTime, setToTime] = useState('');
   const [reason, setReason] = useState('');
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_my_leave_requests', {}, undefined, myLeaveList)
       .then((d) => {
+        if (!live) return;
         setData(d);
         const today = nextWorkday(businessToday());
         setFromDay((v) => v || today);
@@ -103,7 +111,8 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
         setFromTime((v) => v || d.schedule.work_start || '');
         setToTime((v) => v || d.schedule.work_end || '');
       })
-      .catch((e) => setError(e instanceof OpFailed ? e.error.message : String(e)));
+      .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);

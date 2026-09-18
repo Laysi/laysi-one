@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import { TimeField } from '../components/TimeField';
 import {
@@ -168,36 +168,48 @@ export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
   const [pushNote, setPushNote] = useState<string | null>(null);
   const [pushBusy, setPushBusy] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
+    const done = () => running.current?.();
     setError(null);
     Promise.all([
       callOp('get_company_settings', {}, undefined, companySettings),
       callOp('list_dimensions', {}, undefined, dimensionList),
     ])
       .then(([s, d]) => {
+        if (!live) return;
         setSettings(s.settings);
         setPushTargets(s.push_targets);
         setPushDraft(s.settings.find((r) => r.code === NOTICE_WEBHOOK_SETTING)?.value ?? '');
         setDims(d);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
     if (me.permissions.includes('list_user_accounts')) {
       callOp('list_user_accounts', {}, undefined, userAccountList)
-        .then((d) =>
-          setOwnerMissing(
-            !d.accounts.some((a) => a.role_code === 'boss' && a.status === 'active'),
-          ),
+        .then(
+          (d) =>
+            live &&
+            setOwnerMissing(
+              !d.accounts.some((a) => a.role_code === 'boss' && a.status === 'active'),
+            ),
         )
-        .catch(() => setOwnerMissing(false));
+        .catch(() => live && setOwnerMissing(false));
     }
     if (showBalances) {
       callOp('list_chart_of_accounts', {}, undefined, chartOfAccounts)
-        .then(setCoa)
-        .catch(() => setCoa(null));
-      return;
+        .then((d) => live && setCoa(d))
+        .catch(() => live && setCoa(null));
+      return done;
     }
     callOp('list_accounts', {}, undefined, accountList)
       .then((d) => {
+        if (!live) return;
         setFullAccounts(d.accounts);
         setCoa({
           accounts: d.accounts.map(structureOnly),
@@ -206,7 +218,8 @@ export function Setup({ onGo, onToast, onChanged, reloadKey }: Props) {
           as_of: '',
         });
       })
-      .catch(() => setCoa(null));
+      .catch(() => live && setCoa(null));
+    return done;
   }, [showBalances, me.permissions]);
 
   useEffect(load, [load, reloadKey]);

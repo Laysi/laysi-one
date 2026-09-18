@@ -246,15 +246,20 @@ function Workspace() {
   }, [navOpen]);
 
   useEffect(() => {
+    let live = true;
     getMeta()
       .then((m) => {
+        if (!live) return;
         setMeta(m);
         if (m.setup_required && canSetUp && !wizardPromptedRef.current) {
           wizardPromptedRef.current = true;
           setShowWizard(true);
         }
       })
-      .catch(() => setMeta(null));
+      .catch(() => live && setMeta(null));
+    return () => {
+      live = false;
+    };
   }, [reloadKey, canSetUp]);
 
   useEffect(() => {
@@ -314,12 +319,16 @@ function Workspace() {
       setPendingCount(0);
       return;
     }
+    let live = true;
     Promise.all([
       callOp('search_vouchers', { status: 'pending', limit: 500 }, undefined, voucherList),
       callOp('search_vouchers', { status: 'draft', limit: 500 }, undefined, voucherList),
     ])
-      .then(([p, d]) => setPendingCount(p.vouchers.length + d.vouchers.length))
-      .catch(() => setPendingCount(0));
+      .then(([p, d]) => live && setPendingCount(p.vouchers.length + d.vouchers.length))
+      .catch(() => live && setPendingCount(0));
+    return () => {
+      live = false;
+    };
   }, [reloadKey, section]);
 
   function switchSection(next: Section) {

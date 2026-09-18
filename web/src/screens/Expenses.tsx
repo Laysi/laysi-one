@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   accountList,
   businessToday,
@@ -79,11 +79,19 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit, canDocs }: 
     }
   }
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_expense_claims', { include_done: includeDone }, undefined, expenseClaimList)
-      .then(setData)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setData(d))
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, [includeDone]);
 
   useEffect(load, [load, reloadKey]);

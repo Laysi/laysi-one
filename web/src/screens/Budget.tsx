@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   accountList,
   budgetStatus,
@@ -35,17 +35,26 @@ export function Budget({ onToast, reloadKey }: Props) {
   const [newAmount, setNewAmount] = useState('');
   const canSetBudget = me.permissions.includes('set_budget');
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     Promise.all([
       callOp('get_budget_status', version ? { version } : {}, undefined, budgetStatus),
       callOp('get_department_pl', {}, undefined, departmentPl),
     ])
       .then(([b, d]) => {
+        if (!live) return;
         setStatus(b);
         setPl(d);
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, [version]);
 
   useEffect(load, [load, reloadKey]);

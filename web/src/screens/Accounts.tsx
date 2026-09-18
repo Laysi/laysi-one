@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   businessTime,
   callOp,
@@ -71,11 +71,19 @@ export function Accounts({ onGo, onToast, reloadKey }: Props) {
   const [copied, setCopied] = useState(false);
   const [oidc, setOidc] = useState<OidcSetting | null>(null);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_user_accounts', {}, undefined, userAccountList)
-      .then(setList)
-      .catch((e: Error) => setError(e.message));
+      .then((d) => live && setList(d))
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);

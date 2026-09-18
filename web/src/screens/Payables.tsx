@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   businessToday,
   callOp,
@@ -55,15 +55,24 @@ export function Payables({ onToast, reloadKey, onChanged }: Props) {
   const [memo, setMemo] = useState('');
   const [savingBill, setSavingBill] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     setError(null);
     callOp('list_payables', {}, undefined, payablesResult)
       .then((d) => {
+        if (!live) return;
         setData(d);
         setBilledOn((v) => v || businessToday());
         setPicked((p) => p.filter((no) => d.bills.some((b) => b.bill_no === no && b.state === 'open')));
       })
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => live && setError(e.message));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);

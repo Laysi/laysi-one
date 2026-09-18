@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import { DateField } from '../components/DateField';
 import {
@@ -98,13 +98,22 @@ export function Regulations({ onToast, reloadKey }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const running = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    running.current?.();
+    let live = true;
+    running.current = () => {
+      live = false;
+    };
     callOp('list_regulations', {}, undefined, regulationList)
       .then((d) => {
+        if (!live) return;
         setData(d);
         setDomain((now) => now ?? d.domains[0]?.domain ?? null);
       })
-      .catch(() => setData(null));
+      .catch(() => live && setData(null));
+    return () => running.current?.();
   }, []);
 
   useEffect(load, [load, reloadKey]);
