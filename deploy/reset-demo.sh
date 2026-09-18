@@ -21,6 +21,13 @@
 
 set -eu
 
+# A systemd user unit inherits the user manager's PATH, and an ssh command a
+# non-login shell's; neither has ~/bin, where this host keeps the podman and
+# podman-compose it calls below. Without this the run ends at the first one
+# with `not found`, and the timer reports it at four in the morning.
+PATH=$HOME/bin:$PATH
+export PATH
+
 DIR=${DEMO_DIR:-$HOME/laysi-one-demo}
 PROJECT=laysi-one-demo
 BASE=http://127.0.0.1:8091
