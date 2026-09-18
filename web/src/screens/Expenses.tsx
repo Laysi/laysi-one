@@ -385,7 +385,6 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit, canDocs }: 
             <div className="drawer__head">
               <div>
                 <div className="drawer__title">建立報支單</div>
-                <div className="drawer__subtitle">代沒有登入帳號的員工送單</div>
               </div>
               <button className="btn btn--close" onClick={() => setDrawer(false)} aria-label="關閉">
                 ×
