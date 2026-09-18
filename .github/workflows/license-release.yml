@@ -9,8 +9,10 @@
 # release.yml takes `v*` for the product, this takes `license-v*`. The
 # prefixes do not overlap, so a tag runs one of them and never both.
 #
-# One image, linux/amd64 only: it runs on one host we own, unlike the product
-# images, which a customer may put on an ARM server or an Apple silicon Mac.
+# Built for both architectures, like the product images. It runs on one host we
+# own and that host is an ARM board today, but an image that only matches the
+# machine it happens to sit on cannot be moved to another one without a release
+# first -- which is how an amd64-only build ended up unable to follow its host.
 #
 # The signing key is not here and not in the image. license-deploy.yml writes
 # it into the host's volume from a secret; an image gets copied, cached and
@@ -33,6 +35,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      # Only the runtime stage is emulated. license-server/Dockerfile builds on
+      # the runner's own architecture and cross-compiles.
+      - uses: docker/setup-qemu-action@v4
 
       - uses: docker/setup-buildx-action@v4
 
@@ -59,7 +65,7 @@ jobs:
           # product, outside license-server/.
           context: .
           file: license-server/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

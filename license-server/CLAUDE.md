@@ -51,9 +51,13 @@ gh workflow run license-deploy.yml -f version=license-v0.1.0
 最後一步比對**執行中的伺服器公鑰與產品的 `PUBLIC_KEY_HEX`**，不同就讓部署失敗。
 那個常數是手抄進產品原始碼的，沒有這一步，抄錯的症狀是客戶畫面上一句「授權檔無法驗證」。
 
-第一次執行前要設好：repository variable `LICENSE_DEPLOY_HOST`，secrets
-`LICENSE_SIGNING_KEY`（已設）與 `LICENSE_HOST_KEY`（主機的 SSH host key，格式如
-`ssh-ed25519 AAAA…`）。
+第一次執行前要設好：repository variable `LICENSE_DEPLOY_HOST` 與 secret
+`LICENSE_SIGNING_KEY`（已設）。主機的 SSH host key 寫在 workflow 檔案裡，與
+`deploy.yml` 同一種寫法——公鑰不是機密，而藏在讀不到的 secret 裡，它指著一台已經
+退役的主機三天都沒有人發現。
+
+**映像建 amd64 與 arm64 兩種**：build stage 留在 runner 自己的架構上交叉編譯，
+只有 runtime stage 走模擬。原本只建 amd64，主機換成 ARM 板子之後映像就跑不起來。
 
 ## 常用指令
 

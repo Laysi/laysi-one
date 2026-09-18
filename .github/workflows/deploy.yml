@@ -47,7 +47,7 @@ permissions:
 
 env:
   DEPLOY_HOST: one-ssh.laysi.io
-  DEPLOY_USER: jiazhen
+  DEPLOY_USER: ai-km
 
 jobs:
   deploy:
@@ -102,7 +102,7 @@ jobs:
           # Pinned rather than trusted on first use: the tunnel is reachable by
           # anyone, and the host key is what proves this is the right machine.
           printf '%s ssh-ed25519 %s\n' "$DEPLOY_HOST" \
-            'AAAAC3NzaC1lZDI1NTE5AAAAIDox4bXtSWIXclSaq+WyCW5beXroElVK0Lf/yWFLpsQ2' \
+            'AAAAC3NzaC1lZDI1NTE5AAAAIC604ENTjAQN0XSpM17AYa8XZUds/bMxrTTDIs1dIxsP' \
             > ~/.ssh/known_hosts
           cat > ~/.ssh/config <<EOF
           Host $DEPLOY_HOST
