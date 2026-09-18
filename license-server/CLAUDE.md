@@ -38,9 +38,19 @@ gh workflow run license-deploy.yml -f version=license-v0.1.0
 （`license-release.yml`）。兩個 pattern 不重疊，一個標籤只會觸發其中一支。少了前綴，
 一次發版會同時建出兩邊的映像。
 
-`license-deploy.yml` 從 ghcr 拉下指定標籤、`docker save | ssh podman load` 送到主機、
-`podman-compose -f docker-compose.prod.yml up -d`。**指定標籤而不是從 main 建**，
-所以回退就是再跑一次同一支 workflow 換一個版本。主機上沒有 registry 憑證。
+`license-deploy.yml` 送 compose 檔與寫著 `LICENSE_VERSION` 的 `.env`、讓**主機自己**
+從 ghcr 拉下指定標籤、`podman-compose -f docker-compose.prod.yml up -d`。
+**指定標籤而不是從 main 建**，所以回退就是再跑一次同一支 workflow 換一個版本。
+
+**主機拉，而不是 runner 拉完再串過 tunnel**：registry 會給每台機器對得上的那一份，所以
+這支 workflow 沒有平台要猜——產品那邊猜錯的那次載進了主機執行不了的映像，站台 502
+二十五分鐘（`deploy.yml` 因此先改）。憑證是那次 run 現鑄的 `GITHUB_TOKEN`，由 workflow
+的 `permissions` 限成 `packages: read`、job 結束即失效，用完 `trap` 登出，所以
+**主機上不留 registry 憑證**。
+
+`docker-compose.prod.yml` 的 `app.image` 因此是 registry 位址加 `${LICENSE_VERSION}`，
+不是本機標籤——主機拉不了一個不存在於任何 registry 的名字，而且這樣主機說得出自己跑哪
+一版。
 
 **簽章私鑰由 `LICENSE_SIGNING_KEY` 這組 GitHub secret 提供，deploy 時寫進資料卷，
 不進映像**：映像會被複製、快取、拉取，而這把金鑰輪替一次要跨越 75 天協調每一個安裝
