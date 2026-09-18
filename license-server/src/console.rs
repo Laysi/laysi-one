@@ -80,6 +80,7 @@ button.warn:hover{background:var(--warn);color:#fff}
 .tag.on{border-color:var(--accent);color:var(--accent)}
 .tag.off{border-color:var(--warn);color:var(--warn)}
 .key{border:1px solid var(--accent);padding:16px;margin:0 0 24px;background:#fff}
+.key.warn{border-color:var(--warn)}
 .key code{font-size:20px;letter-spacing:.08em;display:block;margin:8px 0}
 .note{color:var(--muted);font-size:13px;margin:6px 0 0}
 .fp{font-size:12px;color:var(--muted);word-break:break-all}
@@ -122,6 +123,7 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
             format!(
                 r#"<nav><a href="/licenses">授權</a>{billing}{partners}{members}</nav>
                    <span class="tag">{}（{}）· {}</span>
+                   <a href="/password">變更密碼</a>
                    <form method="post" action="/logout"><button class="plain">登出</button></form>"#,
                 esc(&a.partner_name),
                 esc(&a.partner_no),
@@ -277,6 +279,18 @@ pub async fn logout(State(s): State<Shared>, headers: HeaderMap) -> Response {
 async fn actor(s: &Shared, headers: &HeaderMap) -> Option<Actor> {
     let token = auth::cookie(headers)?;
     db::actor_of(&s.pool, &token).await.ok().flatten()
+}
+
+/// A refusal the reader can act on, as against `fail`, which hides the cause
+/// because nothing they do would change it. The message is written for the
+/// screen, so it goes back to the page they came from rather than into a log.
+fn refuse(back: &str, message: &str) -> Response {
+    Redirect::to(&format!(
+        "{back}{}note={}",
+        if back.contains('?') { "&" } else { "?" },
+        urlencode(message)
+    ))
+    .into_response()
 }
 
 fn fail(error: anyhow::Error) -> Response {
@@ -1117,7 +1131,7 @@ pub async fn partners(
         })
         .collect();
 
-    let created = password_card(&q);
+    let created = format!("{}{}", note_card(&q), password_card(&q));
 
     page(
         "經銷商",
@@ -1513,14 +1527,23 @@ pub async fn members(
                     }
                 )
             };
+            // A reset drops every session of the account it touches, so on
+            // one's own row it points at the page that does not.
+            let reset_action = if self_row {
+                r#"<a href="/password">變更密碼</a>"#.to_string()
+            } else {
+                format!(
+                    r#"<form method="post" action="/members/{id}" class="inline">{hidden}
+                      <input type="hidden" name="reset" value="1">
+                      <button class="plain">重設密碼</button></form>"#,
+                    id = r.id
+                )
+            };
             format!(
                 r#"<tr><td>{email}<br><span class="fp">{name}</span></td>
                 <td><div class="cell"><span class="tag {atone}">{arole}</span>{admin_action}</div></td>
                 <td><div class="cell"><span class="tag {tone}">{status}</span>{status_action}</div></td>
-                <td class="r"><form method="post" action="/members/{id}" class="inline">{hidden}
-                  <input type="hidden" name="reset" value="1">
-                  <button class="plain">重設密碼</button></form></td></tr>"#,
-                id = r.id,
+                <td class="r">{reset_action}</td></tr>"#,
                 email = esc(&r.email),
                 name = esc(&r.name),
                 atone = if r.is_admin { "on" } else { "off" },
@@ -1539,7 +1562,7 @@ pub async fn members(
         })
         .collect();
 
-    let created = password_card(&q);
+    let created = format!("{}{}", note_card(&q), password_card(&q));
 
     let scope = if requested.is_empty() {
         String::new()
@@ -1613,11 +1636,28 @@ pub async fn create_member(
         // The address is unique across every partner, so the account it
         // already belongs to may be one this actor cannot see. The message
         // says what to do rather than where the row is.
-        Ok(false) => fail(anyhow::anyhow!(
-            "{email} 已被其他帳號使用，請改用另一個地址。"
-        )),
+        Ok(false) => refuse(
+            &back,
+            &format!("{email} 已被其他帳號使用，請改用另一個地址。"),
+        ),
         Err(error) => fail(error),
     }
+}
+
+/// Why an actor may not apply this form to their own account. Locking oneself
+/// out is the one mistake this page could make irreversible: the account that
+/// would fix it is the one being changed. A reset counts because
+/// `set_member_password` drops every session of the account, the caller's
+/// included, and the new password is only ever drawn on the page that redirect
+/// can no longer reach.
+fn self_change_refusal(form: &MemberEditForm) -> Option<&'static str> {
+    if form.reset.is_some() {
+        return Some("無法重設本帳號的密碼，請於「變更密碼」頁自行更改。");
+    }
+    if form.status.is_some() || form.is_admin.is_some() {
+        return Some("無法變更本帳號的權限或狀態，請由其他管理員處理。");
+    }
+    None
 }
 
 pub async fn update_member(
@@ -1635,14 +1675,12 @@ pub async fn update_member(
     if !a.may_manage(target.partner_id) {
         return Redirect::to("/licenses").into_response();
     }
-    // Locking oneself out is the one mistake this page could make
-    // irreversible: the account that would fix it is the one being changed.
-    if id == a.user_id && (form.status.is_some() || form.is_admin.is_some()) {
-        return fail(anyhow::anyhow!(
-            "無法變更本帳號的權限或狀態，請由其他管理員處理。"
-        ));
-    }
     let back = members_path(&form.partner_no);
+    if id == a.user_id {
+        if let Some(message) = self_change_refusal(&form) {
+            return refuse(&back, message);
+        }
+    }
 
     if let Some(status) = form.status.as_deref() {
         let status = if status == "disabled" {
@@ -1651,10 +1689,13 @@ pub async fn update_member(
             "active"
         };
         if status == "disabled" && target.is_admin && last_admin(&s, target.partner_id).await {
-            return fail(anyhow::anyhow!(
-                "{} 是唯一使用中的管理員，請先指定另一位管理員。",
-                target.email
-            ));
+            return refuse(
+                &back,
+                &format!(
+                    "{} 是唯一使用中的管理員，請先指定另一位管理員。",
+                    target.email
+                ),
+            );
         }
         if let Err(error) = db::set_member_status(&s.pool, id, status).await {
             return fail(error);
@@ -1664,10 +1705,13 @@ pub async fn update_member(
     if let Some(flag) = form.is_admin.as_deref() {
         let wanted = flag == "true";
         if !wanted && target.is_admin && last_admin(&s, target.partner_id).await {
-            return fail(anyhow::anyhow!(
-                "{} 是唯一使用中的管理員，請先指定另一位管理員。",
-                target.email
-            ));
+            return refuse(
+                &back,
+                &format!(
+                    "{} 是唯一使用中的管理員，請先指定另一位管理員。",
+                    target.email
+                ),
+            );
         }
         if let Err(error) = db::set_member_admin(&s.pool, id, wanted).await {
             return fail(error);
@@ -1853,6 +1897,17 @@ async fn password_result(s: &Shared, headers: &HeaderMap, email: &str, password:
 
 /// The card that reports a newly generated password, on both the partner and
 /// the member page.
+/// The refusal `refuse` carried back in the query string. Escaped like any
+/// other value off the wire: the address bar is a way to write one.
+fn note_card(q: &HashMap<String, String>) -> String {
+    match q.get("note") {
+        Some(note) if !note.trim().is_empty() => {
+            format!(r#"<div class="key warn">{}</div>"#, esc(note))
+        }
+        _ => String::new(),
+    }
+}
+
 fn password_card(q: &HashMap<String, String>) -> String {
     let Some(email) = q.get("email") else {
         return String::new();
@@ -1973,6 +2028,70 @@ mod tests {
             first_term: true,
         }]);
         assert!(html.contains("統一編號未填"));
+    }
+
+    #[test]
+    fn no_field_of_this_form_may_be_applied_to_ones_own_account() {
+        let form =
+            |status: Option<&str>, is_admin: Option<&str>, reset: Option<&str>| MemberEditForm {
+                partner_no: String::new(),
+                status: status.map(String::from),
+                is_admin: is_admin.map(String::from),
+                reset: reset.map(String::from),
+            };
+        // A reset would drop the caller's own session before the page that
+        // shows the new password could be drawn.
+        assert_eq!(
+            self_change_refusal(&form(None, None, Some("1"))),
+            Some("無法重設本帳號的密碼，請於「變更密碼」頁自行更改。")
+        );
+        assert!(self_change_refusal(&form(Some("disabled"), None, None)).is_some());
+        assert!(self_change_refusal(&form(None, Some("false"), None)).is_some());
+        // The reset is named first: a form carrying both must not be refused
+        // with a message about permissions.
+        assert_eq!(
+            self_change_refusal(&form(Some("disabled"), None, Some("1"))),
+            self_change_refusal(&form(None, None, Some("1")))
+        );
+        assert_eq!(self_change_refusal(&form(None, None, None)), None);
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_page_it_came_from_rather_than_a_log() {
+        let message = "無法重設本帳號的密碼，請於「變更密碼」頁自行更改。";
+        let mut q = HashMap::new();
+        for back in ["/members", "/members?partner=P-001"] {
+            let location = match refuse(back, message).headers().get("location") {
+                Some(value) => value.to_str().unwrap().to_string(),
+                None => panic!("拒絕要導回 {back}"),
+            };
+            assert!(location.starts_with(back));
+            // One separator, whichever the path already carries.
+            assert_eq!(location.matches('?').count(), 1);
+            let note = location.split("note=").nth(1).expect("要帶 note");
+            q.insert("note".to_string(), decode(note));
+            assert!(note_card(&q).contains(message), "拒絕訊息要畫在卡片上");
+        }
+        // A refusal nobody sent draws nothing.
+        assert_eq!(note_card(&HashMap::new()), "");
+    }
+
+    /// Enough of a decoder to read back what `urlencode` wrote.
+    fn decode(raw: &str) -> String {
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+                out.push(u8::from_str_radix(hex, 16).unwrap());
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
     }
 
     #[test]
