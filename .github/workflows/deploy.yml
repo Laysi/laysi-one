@@ -135,9 +135,18 @@ jobs:
           echo "LAYSI_VERSION=$VERSION" >> "$GITHUB_ENV"
           # ghcr rejects an uppercase path; github.repository keeps the owner's case.
           base=$(printf 'ghcr.io/%s' "$REPOSITORY" | tr 'A-Z' 'a-z')
+          # The host's architecture, not the runner's. A pinned platform sends
+          # images the host cannot execute: the containers are recreated, every
+          # one of them exits 255 with `exec format error`, and the site is down
+          # until somebody loads the right ones by hand.
+          case $(ssh "$DEPLOY_HOST" 'uname -m') in
+              x86_64)  platform=linux/amd64 ;;
+              aarch64) platform=linux/arm64 ;;
+              *) echo "unsupported host architecture"; exit 1 ;;
+          esac
           names=""
           for n in api web backup; do
-              docker pull --platform linux/amd64 "$base-$n:$VERSION"
+              docker pull --platform "$platform" "$base-$n:$VERSION"
               names="$names $base-$n:$VERSION"
           done
           # gzip -1: the tunnel is the slow half, not the compression.
