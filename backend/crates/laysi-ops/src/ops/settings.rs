@@ -891,16 +891,13 @@ async fn link_employee(
         }
     }
 
-    let emp_no = if employee_no.is_empty() {
-        ctx.store.next_employee_no().await?
-    } else {
-        employee_no.to_string()
-    };
-
+    // A blank number is passed through: the write allocates it under a lock,
+    // so this and an external sign-in arriving at the same moment cannot read
+    // the same highest number.
     let employee = ctx
         .store
         .create_employee(laysi_store::WriteEmployee {
-            emp_no: &emp_no,
+            emp_no: employee_no,
             name,
             dept_code: None,
             title: "",

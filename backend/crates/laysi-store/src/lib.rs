@@ -104,6 +104,33 @@ fn duplicate_message(constraint: &str) -> Option<&'static str> {
         .map(|(_, msg)| *msg)
 }
 
+/// Whether this failure is the named uniqueness rule being broken.
+///
+/// Keyed on the constraint rather than on "the insert failed": another
+/// uniqueness rule on the same row has nothing to do with the number, and
+/// rewording it would hide what actually collided.
+fn violates(err: &sqlx::Error, constraint: &str) -> bool {
+    err.as_database_error()
+        .and_then(|db| db.constraint())
+        .is_some_and(|name| name == constraint)
+}
+
+/// Reword a duplicate on a number the transaction allocated for itself.
+///
+/// `DUPLICATE_MESSAGES` answers the person who typed the number and tells them
+/// to pick another one. Nobody typed this one, the field was left blank, so
+/// the only action left is to send the same request again. The lock makes this
+/// rare rather than impossible: a restore, an import or a future writer can
+/// still insert a number without taking it.
+fn generated_number_collision(err: StoreError, generated: bool) -> StoreError {
+    match err {
+        StoreError::Duplicate { .. } if generated => StoreError::Duplicate {
+            message: "與另一筆資料同時建立，編號重複了，請重新送出一次。".to_string(),
+        },
+        other => other,
+    }
+}
+
 /// Turn the database rules a person can actually break into sentences they can
 /// act on.
 ///
@@ -2268,7 +2295,11 @@ impl Store {
         .bind(&voucher_no)
         .bind(&memo)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(|e| {
+            let ours = req.code.is_none() && violates(&e, "fixed_asset_code_key");
+            generated_number_collision(e.into(), ours)
+        })?;
 
         tx.commit().await?;
         self.fixed_assets(true)
@@ -3834,23 +3865,7 @@ impl Store {
         req: ProvisionExternalUser<'_>,
     ) -> Result<ProvisionedUser> {
         let mut tx = self.pool.begin().await?;
-        // Two sign-ins at once would otherwise read the same highest employee
-        // number and the second insert would fail on the unique constraint.
-        // The lock is held to the end of this transaction only.
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(PROVISION_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
-
-        let highest: Option<i32> = sqlx::query(
-            "SELECT MAX((NULLIF(regexp_replace(emp_no, '^E0*', ''), ''))::int) AS highest
-               FROM employee
-              WHERE emp_no ~ '^E[0-9]+$'",
-        )
-        .fetch_one(&mut *tx)
-        .await?
-        .get("highest");
-        let emp_no = format!("E{:03}", highest.unwrap_or(0) + 1);
+        let emp_no = next_employee_no(&mut tx).await?;
 
         let employee_id: i32 = sqlx::query(
             "INSERT INTO employee
@@ -5676,26 +5691,26 @@ impl Store {
     // minimum wage check all happen in laysi-ops via `laysi-regulation`; the
     // repository must not become a second opinion.
 
-    /// Next number in the `E###` series. Numbers typed in another shape are
-    /// left out of the calculation rather than reinterpreted, so a roster that
-    /// uses its own scheme is not renumbered by this.
-    pub async fn next_employee_no(&self) -> Result<String> {
-        let highest: Option<i32> = sqlx::query(
-            "SELECT MAX((NULLIF(regexp_replace(emp_no, '^E0*', ''), ''))::int) AS highest
-               FROM employee
-              WHERE emp_no ~ '^E[0-9]+$'",
-        )
-        .fetch_one(&self.pool)
-        .await?
-        .get("highest");
-        Ok(format!("E{:03}", highest.unwrap_or(0) + 1))
-    }
-
     /// Create an employee record. The three insured brackets are kept exactly
     /// as filed and are never validated, corrected or truncated against a
     /// ruleset here; rates and ceilings are the regulated part.
+    ///
+    /// A blank `emp_no` means "give me the next one". The number is allocated
+    /// here rather than handed in already chosen, because allocating and
+    /// inserting have to be one decision: a caller that numbered first and
+    /// wrote afterwards holds no lock over the gap between the two.
     pub async fn create_employee(&self, req: WriteEmployee<'_>) -> Result<Employee> {
         let mut tx = self.pool.begin().await?;
+        // Trimmed, not taken as given: a field holding only spaces is a field
+        // nobody filled in, and storing it would put a number on the roster
+        // that no screen can show and no search can find.
+        let given = req.emp_no.trim();
+        let generated = given.is_empty();
+        let emp_no = if generated {
+            next_employee_no(&mut tx).await?
+        } else {
+            given.to_string()
+        };
         let dept_id = resolve_department_id(&mut tx, req.dept_code).await?;
 
         let employee_id: i32 = sqlx::query(
@@ -5707,7 +5722,7 @@ impl Store {
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
              RETURNING id",
         )
-        .bind(req.emp_no)
+        .bind(&emp_no)
         .bind(req.name)
         .bind(dept_id)
         .bind(req.title)
@@ -5726,13 +5741,17 @@ impl Store {
         .bind(req.note)
         .bind(req.actor)
         .fetch_one(&mut *tx)
-        .await?
+        .await
+        .map_err(|e| {
+            let ours = generated && violates(&e, "employee_emp_no_key");
+            generated_number_collision(e.into(), ours)
+        })?
         .get("id");
 
         replace_bank_accounts(&mut tx, employee_id, &req).await?;
 
         tx.commit().await?;
-        self.employee(req.emp_no).await
+        self.employee(&emp_no).await
     }
 
     /// Update an employee record. Every column is overwritten except the four
@@ -7891,9 +7910,13 @@ pub struct WriteOidcSetting<'a> {
     pub updated_by: &'a str,
 }
 
-/// Advisory lock guarding employee number allocation while an account is
-/// created from an external sign-in.
-const PROVISION_LOCK_KEY: i64 = 4801;
+/// Advisory lock guarding `E###` allocation. Every path that allocates one
+/// takes this key; a lock only one of three writers holds is not a lock.
+const EMPLOYEE_NO_LOCK_KEY: i64 = 4801;
+
+/// Advisory lock guarding `FA###` allocation. Separate from the employee
+/// series so registering an asset does not wait behind creating an account.
+const ASSET_CODE_LOCK_KEY: i64 = 4802;
 
 /// An account, its roster entry and its external identity, created together.
 #[derive(Debug, Clone)]
@@ -9190,12 +9213,42 @@ async fn bank_gl_code(tx: &mut Tx<'_>, bank_account_id: i32) -> Result<String> {
         })
 }
 
-/// Next free asset code in the `FA###` series.
+/// Next free number in the `E###` series, allocated under a lock held to the
+/// end of `tx`.
+///
+/// The lock is the point of the function. `MAX` and the insert that follows it
+/// are one decision, and two transactions that read the same highest number
+/// both go on to write it. Numbers typed in another shape are left out of the
+/// calculation rather than reinterpreted, so a roster that uses its own scheme
+/// is not renumbered by this.
+async fn next_employee_no(tx: &mut Tx<'_>) -> Result<String> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(EMPLOYEE_NO_LOCK_KEY)
+        .execute(&mut **tx)
+        .await?;
+    let highest: Option<i32> = sqlx::query(
+        "SELECT MAX((NULLIF(regexp_replace(emp_no, '^E0*', ''), ''))::int) AS highest
+           FROM employee
+          WHERE emp_no ~ '^E[0-9]+$'",
+    )
+    .fetch_one(&mut **tx)
+    .await?
+    .get("highest");
+    Ok(format!("E{:03}", highest.unwrap_or(0) + 1))
+}
+
+/// Next free asset code in the `FA###` series, under the same kind of lock as
+/// `next_employee_no` and for the same reason.
 ///
 /// Not a `doc_sequence` prefix: those restart every period, and an asset code
 /// identifies one machine for its whole life rather than one document in one
-/// month.
+/// month. A counter would also start at 1 against a register imported with
+/// `FA001`–`FA050` already in it, while scanning reads what is actually there.
 async fn next_asset_code(tx: &mut Tx<'_>) -> Result<String> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(ASSET_CODE_LOCK_KEY)
+        .execute(&mut **tx)
+        .await?;
     let highest: Option<i32> = sqlx::query(
         "SELECT MAX((NULLIF(regexp_replace(code, '^FA0*', ''), ''))::int) AS highest
            FROM fixed_asset WHERE code ~ '^FA[0-9]+$'",
@@ -11166,5 +11219,144 @@ mod tests {
             matches!(second_void, StoreError::NotVoidable { ref status, .. } if status == "已作廢")
         );
         assert!(second_void.to_string().contains("已作廢"));
+    }
+
+    /// A duplicate on a number the caller chose keeps naming the field; a
+    /// duplicate on one the write allocated asks for the request again.
+    ///
+    /// "請換一個" is an instruction the second case cannot be followed on: the
+    /// number never appeared on screen, because the field was left blank.
+    #[test]
+    fn a_collision_on_a_number_nobody_typed_asks_for_the_request_again() {
+        let typed = StoreError::Duplicate {
+            message: duplicate_message("employee_emp_no_key")
+                .expect("員工編號應有對應訊息")
+                .to_string(),
+        };
+        assert!(generated_number_collision(typed, false)
+            .to_string()
+            .contains("請換一個"));
+
+        let allocated = StoreError::Duplicate {
+            message: duplicate_message("fixed_asset_code_key")
+                .expect("資產編號應有對應訊息")
+                .to_string(),
+        };
+        let reworded = generated_number_collision(allocated, true).to_string();
+        assert!(reworded.contains("請重新送出"), "沒有指向重送：{reworded}");
+        assert!(!reworded.contains("請換一個"), "仍要求改一個沒填過的編號");
+
+        // Only duplicates are reworded; every other failure keeps its own words.
+        let other = StoreError::EmployeeNotFound {
+            no: "E001".to_string(),
+        };
+        assert!(matches!(
+            generated_number_collision(other, true),
+            StoreError::EmployeeNotFound { .. }
+        ));
+    }
+
+    /// Two creations arriving together are given different numbers and both
+    /// land.
+    ///
+    /// Calling the allocator twice would not show this. The scan leaves the
+    /// table unchanged, so a second transaction reading after the first
+    /// released the lock still sees the same highest number: the lock is worth
+    /// something only while it also covers the insert. That is why this writes
+    /// rows.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// two_creations_at_once_are_given_different_numbers -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn two_creations_at_once_are_given_different_numbers() {
+        use chrono::NaiveDate;
+
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 4)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let hired_on = NaiveDate::from_ymd_opt(2099, 1, 6).unwrap();
+        fn unnumbered(name: &str, hired_on: NaiveDate) -> WriteEmployee<'_> {
+            WriteEmployee {
+                emp_no: "",
+                name,
+                dept_code: None,
+                title: "",
+                employment_type: "full_time",
+                pay_basis: "monthly",
+                insured_as: "employee",
+                birthday: None,
+                hired_on,
+                left_on: None,
+                status: "active",
+                base_salary: None,
+                labor_insured_salary: None,
+                health_insured_salary: None,
+                pension_wage: None,
+                id_no: "",
+                bank_accounts: None,
+                note: "並行配號測試",
+                actor: "測試",
+                keep_active_role: "admin",
+            }
+        }
+
+        let (first, second) = tokio::join!(
+            store.create_employee(unnumbered("並行甲", hired_on)),
+            store.create_employee(unnumbered("並行乙", hired_on)),
+        );
+        let first = first.expect("同時建立的第一筆應寫得進去");
+        let second = second.expect("同時建立的第二筆應寫得進去");
+        assert_ne!(
+            first.emp_no, second.emp_no,
+            "兩筆同時建立拿到同一個員工編號"
+        );
+
+        fn unnumbered_asset(name: &str, acquired_on: NaiveDate) -> NewFixedAsset<'_> {
+            NewFixedAsset {
+                code: None,
+                name,
+                category: "equipment",
+                acquired_on,
+                cost: Money::from(1000),
+                tax_amount: Money::ZERO,
+                gl_code: "1601",
+                accum_gl_code: "1602",
+                input_tax_account_code: "1284",
+                paid_from_account_code: Some("1102"),
+                origin_voucher_no: None,
+                dept_code: None,
+                memo: "",
+                created_by: "測試",
+            }
+        }
+
+        let (left, right) = tokio::join!(
+            store.create_fixed_asset(unnumbered_asset("並行資產甲", hired_on)),
+            store.create_fixed_asset(unnumbered_asset("並行資產乙", hired_on)),
+        );
+        let left = left.expect("同時登記的第一筆資產應寫得進去");
+        let right = right.expect("同時登記的第二筆資產應寫得進去");
+        assert_ne!(left.code, right.code, "兩筆同時登記拿到同一個資產編號");
+
+        for code in [&left.code, &right.code] {
+            sqlx::query("DELETE FROM fixed_asset WHERE code = $1")
+                .bind(code)
+                .execute(&store.pool)
+                .await
+                .expect("應清得掉");
+        }
+        for emp_no in [&first.emp_no, &second.emp_no] {
+            sqlx::query("DELETE FROM employee WHERE emp_no = $1")
+                .bind(emp_no)
+                .execute(&store.pool)
+                .await
+                .expect("應清得掉");
+        }
     }
 }

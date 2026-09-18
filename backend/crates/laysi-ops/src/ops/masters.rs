@@ -449,9 +449,19 @@ fn is_valid_id_no(value: &str) -> bool {
     (sum + digits[8]) % 10 == 0
 }
 
+/// Checks for an edit, which names the employee it is editing.
 fn validate_employee(input: &EmployeeInput) -> Result<(), OpError> {
-    if input.emp_no.trim().is_empty() || input.name.trim().is_empty() {
-        return Err(OpError::BadInput("員工編號與姓名都要填寫".into()));
+    if input.emp_no.trim().is_empty() {
+        return Err(OpError::BadInput("員工編號要填寫".into()));
+    }
+    validate_new_employee(input)
+}
+
+/// Checks for a new employee, whose number may still be blank: the write
+/// allocates it.
+fn validate_new_employee(input: &EmployeeInput) -> Result<(), OpError> {
+    if input.name.trim().is_empty() {
+        return Err(OpError::BadInput("姓名要填寫".into()));
     }
     let id_no = input.id_no.trim();
     if !id_no.is_empty() && !is_valid_id_no(id_no) {
@@ -620,14 +630,13 @@ impl Operation for CreateEmployee {
     }
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let mut input: EmployeeInput = parse(input)?;
+        let input: EmployeeInput = parse(input)?;
         // Blank means "give me the next one", the same as `create_user_account`.
         // Two screens asking for the same field and only one of them numbering
-        // it is a difference the user has to learn for no reason.
-        if input.emp_no.trim().is_empty() {
-            input.emp_no = ctx.store.next_employee_no().await?;
-        }
-        validate_employee(&input)?;
+        // it is a difference the user has to learn for no reason. The number is
+        // allocated by the write itself, under the lock that keeps two of these
+        // from picking the same one.
+        validate_new_employee(&input)?;
         let accounts = employee_accounts(&input);
         let employee = ctx
             .store
