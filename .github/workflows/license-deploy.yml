@@ -153,6 +153,41 @@ jobs:
             "$REMOTE_PATH; podman run --rm -i -v ${SECRETS_VOLUME}:/secrets alpine:3.24 sh -c \
              'cat > /secrets/smtp_url; chmod 0444 /secrets/smtp_url'"
 
+      - name: Install the nightly backup
+        run: |
+          set -eu
+          ssh "$DEPLOY_HOST" "mkdir -p .config/systemd/user"
+          scp license-server/deploy/backup.sh "$DEPLOY_HOST:$DEPLOY_DIR/"
+          scp license-server/deploy/laysi-license-backup.service \
+              license-server/deploy/laysi-license-backup.timer \
+            "$DEPLOY_HOST:.config/systemd/user/"
+          # A non-login ssh session has neither XDG_RUNTIME_DIR nor, unless the
+          # account lingers, a user manager to talk to. The stack itself is
+          # rootless podman, so lingering is already how it survives logout.
+          ssh "$DEPLOY_HOST" "loginctl enable-linger \$(id -un) 2>/dev/null || true; \
+            export XDG_RUNTIME_DIR=/run/user/\$(id -u) && \
+            systemctl --user daemon-reload && \
+            systemctl --user enable --now laysi-license-backup.timer"
+          # The credentials are set up once, by hand, and are not a deployment
+          # input: three of the four are secrets that belong to the bucket
+          # rather than to this repository. Their absence is reported here
+          # instead of failing the deploy, because a licence server that is
+          # running and not yet backed up is still better than one that is not
+          # running. The timer is enabled either way, so writing the file is
+          # all that remains.
+          if ssh "$DEPLOY_HOST" "test -s .config/laysi-license-backup.env"; then
+              ssh "$DEPLOY_HOST" "XDG_RUNTIME_DIR=/run/user/\$(id -u) \
+                systemctl --user start laysi-license-backup.service" || true
+              # `systemctl status`, not `journalctl`: this account is not in
+              # systemd-journal, so a user journal read comes back empty while
+              # the unit's own status still carries its last lines.
+              ssh "$DEPLOY_HOST" "XDG_RUNTIME_DIR=/run/user/\$(id -u) \
+                systemctl --user status laysi-license-backup.service --no-pager -l" || true
+          else
+              echo "no ~/.config/laysi-license-backup.env on the host; backups will not run."
+              echo "see license-server/deploy/README.md"
+          fi
+
       - name: Restart the stack
         run: |
           set -eu

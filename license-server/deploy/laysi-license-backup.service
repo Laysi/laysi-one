@@ -1,0 +1,24 @@
+# Backs up the licence database to Cloudflare R2. Installed by
+# .github/workflows/license-deploy.yml as a rootless user unit -- the stack is
+# rootless podman, so a system unit would be looking at another user's
+# containers and volumes.
+#
+# R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and AGE_RECIPIENT come
+# from ~/.config/laysi-license-backup.env. They are not in this file because it
+# is version controlled and three of the four are credentials.
+
+[Unit]
+Description=Back up the Laysi One licence database to Cloudflare R2
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/laysi-one-license
+# Optional on purpose: a missing file must reach backup.sh, which names the
+# variable that is not set. A mandatory EnvironmentFile fails the unit before
+# anything runs, and systemd reports only "unavailable resources".
+EnvironmentFile=-%h/.config/laysi-license-backup.env
+ExecStart=/bin/sh %h/laysi-one-license/backup.sh
+# One pg_dump of a few hundred kilobytes and one upload. Anything past this is
+# a stalled connection, not a slow backup.
+TimeoutStartSec=600

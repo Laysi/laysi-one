@@ -1,0 +1,14 @@
+# 04:30 Taipei, named explicitly rather than left to the host clock, which runs
+# UTC. Half an hour after laysi-demo-reset.timer so the two do not compete for
+# the same machine. Persistent so a host that was off at half past four backs
+# up when it comes back rather than skipping the day in silence.
+
+[Unit]
+Description=Back up the Laysi One licence database nightly
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 Asia/Taipei
+Persistent=true
+
+[Install]
+WantedBy=timers.target
