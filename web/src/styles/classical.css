@@ -429,7 +429,7 @@ textarea {
   cursor: pointer;
 }
 
-.tag--warn:hover {
+.tag--warn:not(.tag--static):hover {
   background: var(--wash-accent);
 }
 
@@ -1243,10 +1243,6 @@ textarea {
 .tag--static {
   cursor: default;
   margin-left: var(--space-md);
-}
-
-.tag--static:hover {
-  background: transparent;
 }
 
 .tag--spaced {
