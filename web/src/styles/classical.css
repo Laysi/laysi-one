@@ -138,7 +138,7 @@
   --brand-icon-lg: 26px;
 
   --brand-logo-rail: 32px;
-  --brand-logo-panel: 44px;
+  --brand-logo-panel: 56px;
   --brand-logo-preview: 64px;
 
   --tap-target: 40px;
@@ -564,8 +564,19 @@ textarea {
   max-height: var(--brand-logo-rail);
 }
 
+.company-brand--panel {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xl);
+  margin-top: 0;
+}
+
 .company-brand--panel .company-brand__logo {
   max-height: var(--brand-logo-panel);
+}
+
+.company-brand--panel .company-brand__name {
+  font-size: var(--display-xs);
 }
 
 .sidebar__tabs {
