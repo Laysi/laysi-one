@@ -554,6 +554,12 @@ impl Operation for RefreshRegulations {
                 .apply_regulation_update(&u.file, &candidate)
                 .await?
             {
+                // A later payload's probe can need an earlier one in the same
+                // feed: owner_insurance resolves health_insurance, and resolve()
+                // reads the installed set, not the table. Without this the whole
+                // refresh dies on owner_insurance whenever the process has no
+                // applicable health_insurance.
+                ctx.store.reload_regulations().await?;
                 applied.push(json!({
                     "domain": u.domain,
                     "label": domain_label(&u.domain),
