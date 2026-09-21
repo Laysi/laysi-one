@@ -12,8 +12,8 @@ description: Laysi/laysi-one GitHub 看板的專案政策 overlay。凡是「開
 看板操作的執行引擎是 vendored skill `github-loop-engineering-skill`（Discover → Frame → Act → Verify → Persist → Continue/Stop，GitHub MCP-only，寫後必讀回驗證）。做任何看板操作前先載入該 skill；本 skill 只補 laysi-one 專屬的政策與參數，兩者衝突時**以本 skill（repo 政策）為準**。已知的 repo 政策覆寫：
 
 - **內文格式用本 repo 的七段中文結構**（見下方「issue 內文格式」），覆寫 loop skill 的 `references/work-item-format.md`。那份參考自己也寫著 repo 既有格式優先。
-- **不新增 label 分類**：laysi-one 只用現有五個 label（見下方「語意約定」）。要新增分類先問使用者，不要自行建立。
-- **分級設兩處且要一致**：看板 Priority 欄位與 org 的 issue 欄位 Priority（對照見「語意約定」），沒有 `priority:*` label。
+- **不新增 label 分類**：laysi-one 只用現有八個 label（見下方「語意約定」）。要新增分類先問使用者，不要自行建立。
+- **分級設兩處且要一致**：看板 Priority 欄位與 `priority:*` label（對照見「語意約定」）。**org 的 issue 欄位 Priority 不用**。
 - **建 issue 時 assignee 設為自己**。MCP 路徑：`@me` 是 gh CLI 專屬簡寫，`issue_write.assignees` 不吃——先 `get_me` 解析出 login 再帶入；gh fallback 才用 `-a "@me"`。
 - **MCP 缺 projects 工具時不停在回報**：看板同步是必要步驟，MCP 做不到的欄位操作允許走本 skill 的 gh CLI fallback（先回報再 fallback，不是靜默繞過）。
 
@@ -31,9 +31,9 @@ Repo `Laysi/laysi-one`（private）。看板：owner `Laysi`（org）；**number
 ## 語意約定
 
 - **Status**：**Triage＝AI 產生、尚未經人工審核**——agent 自行發現或建立的 issue 一律停在這裡；**Todo＝使用者核准過、真正可啟動的工作**。把卡移出 Triage（核准進 Todo，或 close 不做）是**使用者的動作，agent 不得自行升級**；使用者明示指派的工作才可直接進 Todo 或 In Progress。
-- **Priority**：P0＝生產事故或阻斷，立即處理並主動告知使用者；P1＝當前重點；P2＝backlog。未設＝尚未分級，建 issue 時必設。**兩處一起設**：看板欄位（P0／P1／P2），以及 org 的 issue 欄位 Priority（P0→`Urgent`、P1→`High`、P2→`Medium`，`Low` 不用）——看板欄位不會出現在 issue 頁面，只設一邊，另一邊的人會以為沒分級。issue 欄位走 `issue_write` 的 `issue_fields: [{field_name:"Priority", field_option_name:"Medium"}]`，選項以 `list_issue_fields` 現查。改分級時兩邊同步改。**不設 label**——laysi-one 沒有 `priority:*` label，不要為了分級去建。
+- **Priority**：P0＝生產事故或阻斷，立即處理並主動告知使用者；P1＝當前重點；P2＝backlog。未設＝尚未分級，建 issue 時必設。**兩處一起設**：看板 Priority 欄位（`P0`／`P1`／`P2`），以及 `priority:P0`／`priority:P1`／`priority:P2` label——看板欄位不會出現在 issue 頁面，只設一邊，另一邊的人會以為沒分級。改分級時兩邊同步改，label 走 `gh issue edit <N> --remove-label <舊> --add-label <新>`（MCP `issue_write` 的 `labels` 是整組替換）。**org 的 issue 欄位 Priority 不用**：選項是 Urgent／High／Medium／Low，改名要 org owner（本 org 只有 `Ruisi-Lu`），而同一件事兩種寫法會被當成兩件事。trustiot 走的也是 label 這條路。
 - **Issue type**：repo 已啟用三種，現有 issue 全部設過：**Feature**＝新能力；**Bug**＝行為錯誤或資安漏洞；**Task**＝其餘（重構、驗證、維運、決策、文件）。MCP `issue_write` 直接帶 `type`。
-- **Labels**：只用 repo 現有的五個——`bug`／`enhancement`／`documentation`／`ui`／`ci/cd`。慣例是 type 與 label 對齊（Bug 配 `bug`、Feature 配 `enhancement`），畫面改動加 `ui`，文件改動加 `documentation`，CI 與 workflow 改動加 `ci/cd`；一張可以多個。**新分類要先問使用者**，不要自行 `create_label`。改 label 時記得 MCP `issue_write` 的 `labels` 是**整組替換**——先讀全集再送完整清單。
+- **Labels**：只用 repo 現有的八個。分類五個——`bug`／`enhancement`／`documentation`／`ui`／`ci/cd`：慣例是 type 與 label 對齊（Bug 配 `bug`、Feature 配 `enhancement`），畫面改動加 `ui`，文件改動加 `documentation`，CI 與 workflow 改動加 `ci/cd`；一張可以多個。分級三個——`priority:P0`／`priority:P1`／`priority:P2`：一張恰好一個，見上一條。**新分類要先問使用者**，不要自行 `create_label`。改 label 時記得 MCP `issue_write` 的 `labels` 是**整組替換**——先讀全集再送完整清單，或改用 `gh issue edit --add-label`／`--remove-label`。
 - **語言**：issue 標題與內文 zh-TW（技術名詞、識別字、指令保留英文）；commit message 英文，沿用 repo 的 conventional commits（`fix(license): …`）。
 
 ## issue 內文格式
@@ -106,7 +106,7 @@ Repo `Laysi/laysi-one`（private）。看板：owner `Laysi`（org）；**number
 1. **先查重**（`search_issues`）。
 2. `issue_write` create：zh-TW 標題、七段內文、`type` ＋ label ＋ assignee＝自己的 login（先 `get_me` 取得；`@me` 在 MCP 無效）。**type 與 label 兩者必齊。**
 3. 掛板並設欄位：MCP `projects_write`（`add_project_item` → `update_project_item`）或 gh fallback。看板若有 auto-add workflow 會搶掛（非同步）——「already exists」視為成功，找到既有 item 續設欄位。
-4. Status：AI 自行發現的工作→**Triage**；使用者明示指派→Todo 或直接 In Progress。看板 Priority 欄位與 issue 欄位 Priority 同時設（對照見「語意約定」）。
+4. Status：AI 自行發現的工作→**Triage**；使用者明示指派→Todo 或直接 In Progress。看板 Priority 欄位與 `priority:*` label 同時設（對照見「語意約定」）。
 5. **讀回驗證** issue 與看板欄位（loop skill 的 Verify 步驟，勿省）。
 
 ## 拆 sub-issue

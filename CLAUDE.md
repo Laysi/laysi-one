@@ -364,11 +364,14 @@ commit 之前先跑 `codex-review` skill，問題在 commit 前就解掉。**被
   尚未經人工審核）；**Todo 只放使用者核准過、真正可啟動的工作**。把卡移出 Triage 是
   使用者的決定，agent 不得自行升級；使用者明示指派的工作才可直接進 Todo 或 In Progress。
 - **建 issue 時 type 與 label 必齊**：type 三選一（Feature 新能力／Bug 行為錯誤與資安
-  漏洞／Task 其餘），label 只用 repo 現有的五個（`bug`／`enhancement`／`documentation`／
-  `ui`／`ci/cd`）。**新增 label 分類要先問過**——同一個 repo 長出兩套命名之後，讀的人會
-  以為是兩件事。分級設兩處且要一致：看板的 Priority 欄位（P0 生產事故／P1 當前重點／
-  P2 backlog），與 org 的 issue 欄位 Priority（P0→Urgent、P1→High、P2→Medium，Low
-  不用）——前者只在看板上看得到，後者才出現在 issue 頁面。**沒有 `priority:*` label**。
+  漏洞／Task 其餘），label 只用 repo 現有的八個——分類五個（`bug`／`enhancement`／
+  `documentation`／`ui`／`ci/cd`）與分級三個（`priority:P0`／`priority:P1`／
+  `priority:P2`）。**新增 label 分類要先問過**——同一個 repo 長出兩套命名之後，讀的人會
+  以為是兩件事。分級設兩處且要一致：看板的 Priority 欄位與 `priority:*` label（P0 生產
+  事故或阻斷／P1 當前重點／P2 backlog）——前者只在看板上看得到，後者才出現在 issue
+  頁面。**org 的 issue 欄位 Priority 不用**：它的選項是 Urgent／High／Medium／Low，
+  改名只有 org owner 做得到，而同一件事有兩種寫法就會被當成兩件事；trustiot 用的也是
+  label 這條路。
 - **內文寫成冷啟動讀得懂**：七段結構（成果／背景／範圍／驗收條件／驗證／附記／預估），
   背景要指到檔案與行號。驗收條件每一條獨立可驗證並對應 CI 跑得到的 gate，**全部勾完才
   允許 close**，而勾的依據是那一條的驗證跑過了，不是程式碼寫完了。
