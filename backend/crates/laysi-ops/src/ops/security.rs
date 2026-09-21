@@ -198,8 +198,9 @@ impl Operation for IssueApiToken {
                 expiry_note: &expiry_note,
                 // A token the owner issued on the installation's behalf
                 // belongs to no one person, even when it acts as one. Only
-                // `issue_my_api_token` sets an owner.
+                // `issue_my_api_token` and OAuth set an owner.
                 owner_employee_id: None,
+                owner_user_id: None,
             })
             .await?;
 
