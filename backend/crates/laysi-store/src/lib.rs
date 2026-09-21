@@ -3590,6 +3590,45 @@ impl Store {
         .ok_or(StoreError::UserNotFound { id: user_id })?;
         Ok(row_to_user_account(&row))
     }
+    /// Set an account's own new password and revoke every other live session
+    /// in the same transaction, returning how many were revoked. The session
+    /// making the change is kept: the person signing out other devices is the
+    /// one holding it.
+    pub async fn change_own_password(
+        &self,
+        user_id: i32,
+        password_hash: &str,
+        keep_session_id: i32,
+        actor: &str,
+    ) -> Result<(UserAccount, u64)> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "UPDATE user_account
+                SET password_hash = $2, must_change_password = false
+              WHERE id = $1
+             RETURNING id, username, display_name, email, password_hash, role_code,
+                       employee_id, status, must_change_password, created_at, created_by,
+                       last_login_at",
+        )
+        .bind(user_id)
+        .bind(password_hash)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::UserNotFound { id: user_id })?;
+        let revoked = sqlx::query(
+            "UPDATE user_session
+                SET revoked_at = now(), revoked_by = $3
+              WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(user_id)
+        .bind(keep_session_id)
+        .bind(actor)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok((row_to_user_account(&row), revoked))
+    }
     /// Drop the "change this password before continuing" flag without
     /// touching the hash. Set when an administrator generates a temporary
     /// password, it has no meaning for someone who signed in through the

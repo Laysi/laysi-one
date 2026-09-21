@@ -719,19 +719,25 @@ pub async fn change_password(
             }
         };
 
+    let session = &verified.session;
     match state
         .store
-        .set_password_hash(verified.session.user.id, Some(&new_hash), false)
+        .change_own_password(
+            session.user.id,
+            &new_hash,
+            session.id,
+            &session.user.display_name,
+        )
         .await
     {
-        Ok(user) => {
+        Ok((user, revoked)) => {
             write_auth_audit(
                 &state,
                 &headers,
                 &user.display_name,
                 &user.role_code,
                 "change_password",
-                "變更密碼",
+                &format!("變更密碼 · 登出其他 {revoked} 個工作階段"),
                 "ok",
             )
             .await;
@@ -838,8 +844,12 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@127.0.0.1/laysi_test")
             .expect("測試用延遲連線池必須可建立");
+        state_with(laysi_store::Store::from_pool(pool))
+    }
+
+    fn state_with(store: laysi_store::Store) -> Shared {
         Arc::new(crate::AppState {
-            store: laysi_store::Store::from_pool(pool),
+            store,
             registry: laysi_ops::Registry::new(),
             objects: None,
             rustfs_endpoint: String::new(),
@@ -1082,6 +1092,112 @@ mod tests {
         sqlx::query("DELETE FROM user_account WHERE id = $1")
             .bind(user.id)
             .execute(store.pool())
+            .await
+            .expect("應可清除測試帳號");
+    }
+
+    async fn signed_in(store: &laysi_store::Store, user_id: i32) -> HeaderMap {
+        let secret = session_token();
+        store
+            .create_session(CreateSession {
+                token_hash: &laysi_store::token_hash(&secret),
+                user_id,
+                expires_at: Utc::now() + Duration::hours(1),
+                user_agent: "整合測試",
+                ip: "",
+            })
+            .await
+            .expect("應可建立測試 session");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE_NAME}={secret}")).unwrap(),
+        );
+        headers
+    }
+
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-server
+    /// changing_the_password_signs_out_every_other_session -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn changing_the_password_signs_out_every_other_session() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = laysi_store::Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let username = format!("password-test-{}", uuid::Uuid::new_v4());
+        let current = "password integration current";
+        let password_hash = password::hash_password(current).expect("應可產生測試密碼雜湊");
+        let user = store
+            .create_user(laysi_store::CreateUser {
+                username: &username,
+                display_name: &username,
+                email: "",
+                password_hash: Some(&password_hash),
+                role_code: "staff",
+                employee_id: None,
+                status: "active",
+                must_change_password: false,
+                created_by: "整合測試",
+            })
+            .await
+            .expect("應可建立測試帳號");
+        let mine = signed_in(&store, user.id).await;
+        let other = signed_in(&store, user.id).await;
+        let state = state_with(store);
+        let change = |current_password: &str, new_password: &str| {
+            change_password(
+                State(state.clone()),
+                mine.clone(),
+                Json(ChangePasswordInput {
+                    current_password: Some(current_password.into()),
+                    new_password: new_password.into(),
+                }),
+            )
+        };
+
+        let wrong = change("not the current password", "a fresh password").await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let short = change(current, "short").await;
+        assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            authenticate_session(&state, &other).await.is_ok(),
+            "變更失敗時不撤銷任何工作階段"
+        );
+
+        let changed = change(current, "a fresh password").await;
+        assert_eq!(changed.status(), StatusCode::OK);
+        assert!(
+            matches!(
+                authenticate_session(&state, &other).await,
+                Err(AuthError::Unauthorized)
+            ),
+            "另一個瀏覽器的工作階段要結束"
+        );
+        assert!(
+            authenticate_session(&state, &mine).await.is_ok(),
+            "執行變更的工作階段維持登入"
+        );
+
+        let summary: String = sqlx::query(
+            "SELECT result_summary FROM ai_audit_log
+              WHERE actor = $1 AND tool_name = 'change_password'
+              ORDER BY id DESC LIMIT 1",
+        )
+        .bind(&username)
+        .fetch_one(state.store.pool())
+        .await
+        .expect("應可讀回變更密碼的稽核紀錄")
+        .get("result_summary");
+        assert_eq!(summary, "變更密碼 · 登出其他 1 個工作階段");
+
+        sqlx::query("DELETE FROM user_account WHERE id = $1")
+            .bind(user.id)
+            .execute(state.store.pool())
             .await
             .expect("應可清除測試帳號");
     }
