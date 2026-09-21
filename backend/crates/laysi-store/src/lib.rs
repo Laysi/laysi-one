@@ -459,6 +459,42 @@ macro_rules! voucher_docs {
     };
 }
 
+/// Whether the owner of token `t` still holds an active account under the
+/// role the token acts as. Suspending or deleting an account writes only
+/// `user_account`, so this is read at authentication rather than written into
+/// `api_token`, the way `session_by_hash` requires `u.status = 'active'`. The
+/// role has to match as well: `actor_role` is a snapshot taken at issue time
+/// and is what `/mcp` acts as.
+///
+/// A connector token names the account it was authorised from
+/// (`owner_user_id`), and only that account keeps it alive; a deleted
+/// account's id matches nothing. A self-issued token names the employee, and
+/// any of their accounts will do, but `user_account.employee_id` is not
+/// unique, so without the role check an account created later for the same
+/// person under another role would bring the old role back. A token issued on
+/// the installation's behalf names neither; it is bound to no one on purpose,
+/// so no account can end it.
+///
+/// Shared by the read and the acceptance update so the rule exists once. A
+/// macro rather than a `const` because sqlx takes only `&'static str`.
+macro_rules! token_owner_active {
+    () => {
+        "(CASE
+            WHEN t.owner_user_id IS NOT NULL THEN
+              EXISTS (SELECT 1 FROM user_account u
+                       WHERE u.id = t.owner_user_id
+                         AND u.status = 'active'
+                         AND u.role_code = t.actor_role)
+            WHEN t.owner_employee_id IS NOT NULL THEN
+              EXISTS (SELECT 1 FROM user_account u
+                       WHERE u.employee_id = t.owner_employee_id
+                         AND u.status = 'active'
+                         AND u.role_code = t.actor_role)
+            ELSE true
+          END)"
+    };
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
@@ -3439,21 +3475,23 @@ impl Store {
         .await?
         .rows_affected();
 
-        // Only tokens the person issued for themselves carry `owner_employee_id`.
-        // `actor` is a display name and can collide, so it is not a key here
-        // either.
-        let tokens = match user.employee_id {
-            Some(employee_id) => sqlx::query(
-                "UPDATE api_token SET revoked_at = now(), revoked_by = $2
-                  WHERE owner_employee_id = $1 AND revoked_at IS NULL",
-            )
-            .bind(employee_id)
-            .bind(req.actor)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected(),
-            None => 0,
-        };
+        // A connector names the account it was authorised from, a self-issued
+        // token names the employee; an account with no roster row has only
+        // the first. `actor` is a display name and can collide, so it is not a
+        // key here either. Revoking rather than leaving the role check in
+        // `token_owner_active!` to refuse them keeps a later change back to
+        // the old role from reviving them.
+        let tokens = sqlx::query(
+            "UPDATE api_token SET revoked_at = now(), revoked_by = $3
+              WHERE (owner_user_id = $1 OR owner_employee_id = $2)
+                AND revoked_at IS NULL",
+        )
+        .bind(user.id)
+        .bind(user.employee_id)
+        .bind(req.actor)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
 
         tx.commit().await?;
         Ok(Some(RoleChange {
@@ -4219,35 +4257,46 @@ impl Store {
         .map(row_to_api_token)
         .collect())
     }
-    /// Fetch a token row by hash, whether or not it is revoked or expired.
+    /// Fetch a token row by hash, along with whether its owner still holds an
+    /// active account under the role the token acts as (`token_owner_active!`),
+    /// whether or not the token is revoked or expired.
     ///
     /// Revoked and expired rows are deliberately not filtered out in SQL: the
     /// caller (`/mcp` auth) needs to tell revocation and expiry apart in the
-    /// audit summary. Usability is decided by calling
-    /// [`ApiToken::is_expired`] and checking `revoked_at`; finding a row must
-    /// never be treated as authentication having succeeded.
-    pub async fn token_by_hash(&self, token_hash: &str) -> Result<Option<ApiToken>> {
-        Ok(sqlx::query(
+    /// audit summary, and an owner whose account was suspended, deleted or
+    /// moved to another role is a third reason it has to name. Usability is
+    /// decided by calling [`ApiToken::is_expired`], checking `revoked_at` and
+    /// reading the returned flag; finding a row must never be treated as
+    /// authentication having succeeded.
+    pub async fn token_by_hash(&self, token_hash: &str) -> Result<Option<(ApiToken, bool)>> {
+        Ok(sqlx::query(concat!(
             "SELECT t.id, t.name, t.kind, t.scope, t.prefix, t.actor, t.actor_role,
                     r.name AS actor_role_name, t.created_at, t.created_by,
                     t.last_used_at, t.rotate_days, t.expiry_note,
-                    t.revoked_at, t.revoked_by, t.owner_employee_id
+                    t.revoked_at, t.revoked_by, t.owner_employee_id,
+                    ",
+            token_owner_active!(),
+            " AS owner_active
                FROM api_token t LEFT JOIN role r ON r.code = t.actor_role
               WHERE t.token_hash = $1",
-        )
+        ))
         .bind(token_hash)
         .fetch_optional(&self.pool)
         .await?
         .as_ref()
-        .map(row_to_api_token))
+        .map(|row| (row_to_api_token(row), row.get("owner_active"))))
     }
-    /// Record the last successful use of a token. Revoked tokens are not
-    /// updated.
+    /// Record the last successful use of a token, and accept it. `false`
+    /// means the token was revoked, or its owner lost the account
+    /// (`token_owner_active!`), after [`Store::token_by_hash`] read it; the
+    /// caller must refuse the call then too. Neither kind of token gets a
+    /// `last_used_at` later than the moment it stopped working.
     pub async fn touch_api_token_used(&self, id: i32) -> Result<bool> {
-        Ok(sqlx::query(
-            "UPDATE api_token SET last_used_at = now()
-              WHERE id = $1 AND revoked_at IS NULL",
-        )
+        Ok(sqlx::query(concat!(
+            "UPDATE api_token t SET last_used_at = now()
+              WHERE t.id = $1 AND t.revoked_at IS NULL AND ",
+            token_owner_active!(),
+        ))
         .bind(id)
         .execute(&self.pool)
         .await?
@@ -4268,8 +4317,9 @@ impl Store {
 
         let id: i32 = sqlx::query(
             "INSERT INTO api_token (name, kind, scope, prefix, token_hash, actor, actor_role,
-                                    created_by, rotate_days, expiry_note, owner_employee_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id",
+                                    created_by, rotate_days, expiry_note, owner_employee_id,
+                                    owner_user_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id",
         )
         .bind(req.name)
         .bind(req.kind)
@@ -4282,6 +4332,7 @@ impl Store {
         .bind(req.rotate_days)
         .bind(req.expiry_note)
         .bind(req.owner_employee_id)
+        .bind(req.owner_user_id)
         .fetch_one(&self.pool)
         .await?
         .get("id");
@@ -8120,6 +8171,10 @@ pub struct IssueApiToken<'a> {
     /// against, because `actor` is a display name and two people can share
     /// one.
     pub owner_employee_id: Option<i32>,
+    /// The account a connector was authorised from. Set by OAuth issuing,
+    /// which is the one path that can start from an account with no roster
+    /// row; the token stops working with that account.
+    pub owner_user_id: Option<i32>,
 }
 
 /// A freshly issued token. `secret` is the plaintext and is visible only
@@ -9427,9 +9482,10 @@ async fn set_line_dept(
 }
 
 /// Close every way the person still had in, in the transaction that records
-/// them as having left. `user_account.status` alone stops a session on its
-/// next request, but an MCP token never reads it, and a live session that is
-/// merely ignored leaves no record of when access ended.
+/// them as having left. `user_account.status` alone stops a session and a
+/// self-issued MCP token on their next request, but only while the account
+/// stays suspended: a rehire under the same role would bring both back, and
+/// a credential that is merely ignored leaves no record of when access ended.
 async fn close_access(
     tx: &mut Tx<'_>,
     employee_id: i32,
@@ -10995,6 +11051,313 @@ mod tests {
                 .is_none(),
             "解除連結後同一個 subject 不該再指向任何帳號"
         );
+    }
+
+    /// A self-issued or connector token stops working as soon as its owner's
+    /// account does, and stays stopped when the person comes back under
+    /// another role, or, for a connector, under a new account at all.
+    /// Suspension and deletion are both writes to `user_account` that leave
+    /// `api_token` alone, so the answer can only come from the join; a token
+    /// issued on the installation's behalf is bound to no account and is
+    /// unaffected.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// a_token_follows_its_owners_account -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn a_token_follows_its_owners_account() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        async fn owner_active(store: &Store, secret: &str) -> bool {
+            store
+                .token_by_hash(&token_hash(secret))
+                .await
+                .expect("應查得到 Token")
+                .expect("Token 應存在")
+                .1
+        }
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let username = format!("tok{}", &suffix[..10]);
+        let provisioned = store
+            .provision_external_user(ProvisionExternalUser {
+                username: &username,
+                display_name: "Token 擁有者測試",
+                email: &format!("{username}@example.test"),
+                role_code: "staff",
+                provider: &format!("https://issuer.invalid/{suffix}"),
+                subject: &suffix,
+                hired_on: NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
+                created_by: "測試",
+            })
+            .await
+            .expect("應可建立測試帳號與員工主檔");
+        let employee_id = provisioned
+            .user
+            .employee_id
+            .expect("自動建立的帳號一定要連結員工主檔");
+
+        let mine = store
+            .issue_api_token(IssueApiToken {
+                name: "自助核發測試",
+                kind: "mcp",
+                scope: "測試",
+                actor: "Token 擁有者測試",
+                actor_role: "staff",
+                created_by: &username,
+                rotate_days: None,
+                expiry_note: "",
+                owner_employee_id: Some(employee_id),
+                owner_user_id: None,
+            })
+            .await
+            .expect("應可簽發自助 Token");
+        let installation = store
+            .issue_api_token(IssueApiToken {
+                name: "安裝本身核發測試",
+                kind: "mcp",
+                scope: "測試",
+                actor: "系統管理員",
+                actor_role: "admin",
+                created_by: "測試",
+                rotate_days: None,
+                expiry_note: "",
+                owner_employee_id: None,
+                owner_user_id: None,
+            })
+            .await
+            .expect("應可簽發不綁定員工的 Token");
+
+        assert!(owner_active(&store, &mine.secret).await);
+        assert!(owner_active(&store, &installation.secret).await);
+
+        store
+            .update_user(UpdateUser {
+                username: &username,
+                display_name: None,
+                email: None,
+                status: Some("suspended"),
+                employee_id: None,
+            })
+            .await
+            .expect("應可改帳號狀態")
+            .expect("帳號應存在");
+        assert!(
+            !owner_active(&store, &mine.secret).await,
+            "擁有者停用後，自助 Token 不該再通過認證"
+        );
+        assert!(
+            owner_active(&store, &installation.secret).await,
+            "沒有擁有者的 Token 不受其他帳號停用影響"
+        );
+        // The acceptance update checks the same rule, so a suspension that
+        // lands between the read and the update still refuses the call.
+        assert!(
+            !store
+                .touch_api_token_used(mine.token.id)
+                .await
+                .expect("應可更新使用時間"),
+            "擁有者停用後，自助 Token 不該被接受"
+        );
+        assert!(store
+            .touch_api_token_used(installation.token.id)
+            .await
+            .expect("應可更新使用時間"));
+
+        // Reinstating the account brings the token back: the flag is read at
+        // authentication time, not written into `api_token` once.
+        store
+            .update_user(UpdateUser {
+                username: &username,
+                display_name: None,
+                email: None,
+                status: Some("active"),
+                employee_id: None,
+            })
+            .await
+            .expect("應可改帳號狀態")
+            .expect("帳號應存在");
+        assert!(owner_active(&store, &mine.secret).await);
+        assert!(store
+            .touch_api_token_used(mine.token.id)
+            .await
+            .expect("應可更新使用時間"));
+
+        store
+            .delete_user(&username)
+            .await
+            .expect("應可刪除帳號")
+            .expect("帳號應存在");
+        assert!(
+            !owner_active(&store, &mine.secret).await,
+            "擁有者的帳號刪除後，自助 Token 不該再通過認證"
+        );
+        assert!(owner_active(&store, &installation.secret).await);
+
+        // A later account for the same person under another role must not
+        // bring back the role the token was issued under.
+        let rejoined = format!("{username}.hr");
+        sqlx::query(
+            "INSERT INTO user_account (username, display_name, role_code, status, employee_id)
+             VALUES ($1, 'Token 擁有者測試', 'hr', 'active', $2)",
+        )
+        .bind(&rejoined)
+        .bind(employee_id)
+        .execute(&store.pool)
+        .await
+        .expect("應可為同一位員工另建帳號");
+        assert!(
+            !owner_active(&store, &mine.secret).await,
+            "以其他角色重建的帳號不該讓舊 Token 帶著原角色復活"
+        );
+        store
+            .delete_user(&rejoined)
+            .await
+            .expect("應可刪除帳號")
+            .expect("帳號應存在");
+
+        // A connector authorised from an account with no roster row, the way
+        // the bootstrap `admin` is, is bound to that account alone.
+        let unlinked_name = format!("{username}.admin");
+        let unlinked_account = |status| CreateUser {
+            username: &unlinked_name,
+            display_name: "連接器擁有者測試",
+            email: "",
+            password_hash: None,
+            role_code: "admin",
+            employee_id: None,
+            status,
+            must_change_password: false,
+            created_by: "測試",
+        };
+        let unlinked = store
+            .create_user(unlinked_account("active"))
+            .await
+            .expect("應可建立沒有員工主檔的帳號");
+        let connector = store
+            .issue_api_token(IssueApiToken {
+                name: "連接器測試",
+                kind: "mcp",
+                scope: "與本人相同",
+                actor: "連接器擁有者測試",
+                actor_role: "admin",
+                created_by: "連接器擁有者測試",
+                rotate_days: None,
+                expiry_note: "",
+                owner_employee_id: None,
+                owner_user_id: Some(unlinked.id),
+            })
+            .await
+            .expect("應可簽發連接器 Token");
+        assert!(owner_active(&store, &connector.secret).await);
+
+        store
+            .update_user(UpdateUser {
+                username: &unlinked_name,
+                display_name: None,
+                email: None,
+                status: Some("suspended"),
+                employee_id: None,
+            })
+            .await
+            .expect("應可改帳號狀態")
+            .expect("帳號應存在");
+        assert!(
+            !owner_active(&store, &connector.secret).await,
+            "沒有員工主檔的帳號停用後，連接器 Token 不該再通過認證"
+        );
+        assert!(!store
+            .touch_api_token_used(connector.token.id)
+            .await
+            .expect("應可更新使用時間"));
+
+        store
+            .delete_user(&unlinked_name)
+            .await
+            .expect("應可刪除帳號")
+            .expect("帳號應存在");
+        assert!(
+            !owner_active(&store, &connector.secret).await,
+            "沒有員工主檔的帳號刪除後，連接器 Token 不該再通過認證"
+        );
+        let rebuilt = store
+            .create_user(unlinked_account("active"))
+            .await
+            .expect("應可以同一個登入名稱重建帳號");
+        assert!(
+            !owner_active(&store, &connector.secret).await,
+            "同名重建的帳號不該讓連接器 Token 復活"
+        );
+
+        // A role change revokes the connector outright, so changing the role
+        // back does not revive it the way the role check alone would.
+        let moved = store
+            .issue_api_token(IssueApiToken {
+                name: "變更角色測試",
+                kind: "mcp",
+                scope: "與本人相同",
+                actor: "連接器擁有者測試",
+                actor_role: "admin",
+                created_by: "連接器擁有者測試",
+                rotate_days: None,
+                expiry_note: "",
+                owner_employee_id: None,
+                owner_user_id: Some(rebuilt.id),
+            })
+            .await
+            .expect("應可簽發連接器 Token");
+        let change = |role_code| ChangeUserRole {
+            username: &unlinked_name,
+            role_code,
+            actor: "測試",
+        };
+        let away = store
+            .change_user_role(change("acct"))
+            .await
+            .expect("應可變更角色")
+            .expect("帳號應存在");
+        assert_eq!(away.tokens, 1, "變更角色應撤銷該帳號的連接器 Token");
+        store
+            .change_user_role(change("admin"))
+            .await
+            .expect("應可變更角色")
+            .expect("帳號應存在");
+        let (moved_row, _) = store
+            .token_by_hash(&token_hash(&moved.secret))
+            .await
+            .expect("應查得到 Token")
+            .expect("Token 應存在");
+        assert!(
+            moved_row.revoked_at.is_some(),
+            "改回原角色不該讓連接器 Token 恢復"
+        );
+        store
+            .delete_user(&unlinked_name)
+            .await
+            .expect("應可刪除帳號")
+            .expect("帳號應存在");
+
+        sqlx::query("DELETE FROM api_token WHERE id = ANY($1)")
+            .bind(vec![
+                mine.token.id,
+                installation.token.id,
+                connector.token.id,
+                moved.token.id,
+            ])
+            .execute(&store.pool)
+            .await
+            .expect("應可清除測試 Token");
+        sqlx::query("DELETE FROM employee WHERE id = $1")
+            .bind(employee_id)
+            .execute(&store.pool)
+            .await
+            .expect("應可清除測試員工主檔");
     }
 
     /// Run with:

@@ -16,9 +16,10 @@
 //! 1. Origin validation (required by the MCP spec, guarding against DNS
 //!    rebinding): see [`origin_allowed`].
 //! 2. Token expiry: with `rotate_days` set, the token stops working after
-//!    `created_at + rotate_days`. Expiry and revocation write different audit
-//!    summaries but return the same 401 externally, see [`denial_reason`], so
-//!    a caller cannot infer which one it was.
+//!    `created_at + rotate_days`. Expiry, revocation and an owner whose
+//!    account is gone or holds another role write different audit summaries
+//!    but return the same 401 externally, see [`denial_reason`], so a caller
+//!    cannot infer which one it was.
 //! 3. Per-token rate limiting: see [`crate::ratelimit`], counted in process
 //!    with no redis dependency.
 
@@ -100,27 +101,36 @@ struct AuthenticatedMcp {
     token_id: i32,
 }
 
-/// Why a token is unusable. Revocation and expiry both stop it, but the
+/// Why a token is unusable. Revocation, expiry and an owner who no longer
+/// holds an active account under the token's role all stop it, but the
 /// reason has to be distinguishable to write a meaningful audit summary. It
 /// must never leak into the HTTP response, which is always the same 401.
 enum Denial {
     Revoked,
     Expired,
+    OwnerInactive,
 }
 
-fn denial_reason(token: &laysi_store::ApiToken, at: DateTime<Utc>) -> Option<Denial> {
+fn denial_reason(
+    token: &laysi_store::ApiToken,
+    owner_active: bool,
+    at: DateTime<Utc>,
+) -> Option<Denial> {
     if token.revoked_at.is_some() {
         Some(Denial::Revoked)
     } else if token.is_expired(at) {
         Some(Denial::Expired)
+    } else if !owner_active {
+        Some(Denial::OwnerInactive)
     } else {
         None
     }
 }
 
 /// Rejections whose reason is worth recording in the audit (revoked,
-/// expired). A missing or mismatched hash is a random probe with no
-/// trustworthy identity to attribute, and is not recorded.
+/// expired, owner account gone or moved to another role). A missing or
+/// mismatched hash is a random probe with no trustworthy identity to
+/// attribute, and is not recorded.
 async fn audit_denied_token(
     store: &laysi_store::Store,
     token: &laysi_store::ApiToken,
@@ -130,6 +140,7 @@ async fn audit_denied_token(
     let reason = match denial {
         Denial::Revoked => "已撤銷",
         Denial::Expired => "已過期",
+        Denial::OwnerInactive => "擁有者的帳號已停用、刪除或變更角色",
     };
     let summary = format!(
         "MCP 認證被拒絕 · Token「{}」（{}…）{reason}",
@@ -161,14 +172,14 @@ async fn authenticate_mcp(
 ) -> Result<AuthenticatedMcp, McpAuthError> {
     let secret = bearer(headers).ok_or(McpAuthError::Unauthorized)?;
     let token_hash = laysi_store::token_hash(secret);
-    let token = store
+    let (token, owner_active) = store
         .token_by_hash(&token_hash)
         .await
         .map_err(McpAuthError::Store)?
-        .filter(|token| token.kind == "mcp")
+        .filter(|(token, _)| token.kind == "mcp")
         .ok_or(McpAuthError::Unauthorized)?;
 
-    if let Some(denial) = denial_reason(&token, Utc::now()) {
+    if let Some(denial) = denial_reason(&token, owner_active, Utc::now()) {
         audit_denied_token(
             store,
             &token,
@@ -179,8 +190,9 @@ async fn authenticate_mcp(
         return Err(McpAuthError::Unauthorized);
     }
 
-    // If the token is revoked immediately after being read back, the update
-    // returns false and this call must be rejected as well.
+    // If the token is revoked, or its owner's account suspended or deleted,
+    // immediately after being read back, the update returns false and this
+    // call must be rejected as well.
     if !store
         .touch_api_token_used(token.id)
         .await
@@ -198,7 +210,7 @@ fn auth_error(error: McpAuthError, headers: &HeaderMap) -> Response {
     let (status, message) = match error {
         McpAuthError::Unauthorized => (
             StatusCode::UNAUTHORIZED,
-            "MCP Bearer token 無效、類型不符、已撤銷或已過期",
+            "MCP Bearer token 無效、類型不符、已撤銷、已過期，或擁有者的帳號已停用",
         ),
         McpAuthError::Store(error) => {
             tracing::error!(%error, "MCP token lookup failed");
@@ -494,6 +506,7 @@ mod tests {
                 rotate_days: None,
                 expiry_note: "測試結束即撤銷",
                 owner_employee_id: None,
+                owner_user_id: None,
             })
             .await
             .expect("應可簽發測試 MCP token");
@@ -574,6 +587,7 @@ mod tests {
                 rotate_days: Some(1),
                 expiry_note: "測試用：1 天後過期",
                 owner_employee_id: None,
+                owner_user_id: None,
             })
             .await
             .expect("應可簽發測試 MCP token");
@@ -642,19 +656,19 @@ mod tests {
     }
 
     #[test]
-    fn denial_reason_distinguishes_revoked_from_expired() {
+    fn denial_reason_distinguishes_revoked_expired_and_a_closed_account() {
         let live = sample_token(false, None, 0);
-        assert!(denial_reason(&live, Utc::now()).is_none());
+        assert!(denial_reason(&live, true, Utc::now()).is_none());
 
         let revoked = sample_token(true, None, 0);
         assert!(matches!(
-            denial_reason(&revoked, Utc::now()),
+            denial_reason(&revoked, true, Utc::now()),
             Some(Denial::Revoked)
         ));
 
         let expired = sample_token(false, Some(1), 3);
         assert!(matches!(
-            denial_reason(&expired, Utc::now()),
+            denial_reason(&expired, true, Utc::now()),
             Some(Denial::Expired)
         ));
 
@@ -663,8 +677,16 @@ mod tests {
         // decision while expiry is only a rotation deadline passing.
         let both = sample_token(true, Some(1), 3);
         assert!(matches!(
-            denial_reason(&both, Utc::now()),
+            denial_reason(&both, true, Utc::now()),
             Some(Denial::Revoked)
+        ));
+
+        // An owner whose account was suspended or deleted stops a token that
+        // nobody revoked and that has not reached its rotation deadline.
+        let orphaned = sample_token(false, None, 0);
+        assert!(matches!(
+            denial_reason(&orphaned, false, Utc::now()),
+            Some(Denial::OwnerInactive)
         ));
     }
 

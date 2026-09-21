@@ -1482,6 +1482,7 @@ impl Operation for IssueMyApiToken {
                 rotate_days: i.rotate_days,
                 expiry_note: &expiry_note,
                 owner_employee_id: Some(employee.id),
+                owner_user_id: None,
             })
             .await?;
 

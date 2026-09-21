@@ -512,6 +512,9 @@ pub async fn token(
             rotate_days: None,
             expiry_note: "未設定輪替週期",
             owner_employee_id: user.employee_id,
+            // The account, not only the employee: the bootstrap `admin` has
+            // no roster row, and without this its connector would outlive it.
+            owner_user_id: Some(user.id),
         })
         .await;
     let issued = match issued {

@@ -495,7 +495,8 @@ BLAKE3 比對，但**一律收員工編號、不收自由的文件編號**，並
 
 **變更角色是獨立操作**：`change_user_role` 拒絕呼叫者自己的帳號（那是唯一
 會多出權限的方向；建帳號時本來就指定得了任何角色）、拒絕清空最後一個啟用中的系統
-管理員，並在同一個交易撤銷該帳號的登入 session 與本人核發的 MCP Token——`dispatch`
+管理員，並在同一個交易撤銷該帳號的登入 session、該帳號授權的連接器與本人核發的
+MCP Token——`dispatch`
 每次現查角色，但 `api_token.actor_role` 是核發當下的快照，不撤等於舊角色永遠叫得動。
 呼叫者的鍵是 `OpCtx.username`（`actor` 是顯示名稱、會同名），MCP Token 沒有登入
 名稱，所以那條路一律拒絕。
@@ -513,8 +514,8 @@ CSV 的小公司永遠只看得到「未指定」那一行部門損益。
 
 **離職與關掉存取是同一件事**：`update_employee` 把狀態改成 `left` 時，同一個交易接著
 停用他的登入帳號、撤銷未過期的 session，並撤銷 `owner_employee_id` 指向他的 MCP
-Token。三件事要一起做——session 查詢帶 `u.status = 'active'`，但 MCP Token 不讀那一欄，
-生效日之後也沒有任何排程回頭檢查，留著的登入就是永久有效的登入。唯一的例外是最後一個
+Token。三件事要一起做——session 與自助 Token 都要求帳號啟用中（`token_by_hash` 另比
+角色），但那只在停用期間成立，日後以同一角色回任兩者就一起回來。唯一的例外是最後一個
 啟用中的系統管理員：沒有任何操作能把角色給出去，停用它等於誰也打不開帳號管理，那次
 更新直接拒絕並要求先建另一個管理員帳號。`update_employee` 以 `closed_access` 回報
 關掉了什麼，畫面照實說；`list_user_accounts` 另回連結員工的在職狀態，帳號管理不必跳到
@@ -1007,8 +1008,10 @@ CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_
 
 **用 MCP 不是主管特權**：`issue_my_api_token` 不收 `actor`／
 `actor_role`，一律取自 session，所以那把 Token 能做的事與本人完全相同。所有權的鍵
-是 `api_token.owner_employee_id`（`actor` 是顯示名稱、會同名，不能當鍵），只有自助
-核發會寫入；`revoke_my_api_token` 把它寫進 `WHERE`，別人的 id 是「查無此列」。
+是 `api_token.owner_employee_id`（`actor` 是顯示名稱、會同名，不能當鍵），自助核發與
+OAuth 會寫入；`revoke_my_api_token` 把它寫進 `WHERE`，別人的 id 是「查無此列」。
+OAuth 另寫 `owner_user_id`：`admin` 沒有員工主檔，只記員工編號的話，它的連接器在帳號
+停用後仍然有效。`/mcp` 每次認證由 `token_owner_active!` 核對擁有者的帳號與角色。
 同一欄也是 `mcp::token_identity` 取得 `employee_id` 的唯一來源——不從姓名猜，
 老闆代發的 Token 沒有 owner，自助操作對它一律回「尚未連結員工編號」。五個唯讀自助
 工具因此才對 AI 打開；寫入類與薪資明細維持關閉。

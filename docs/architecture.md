@@ -826,8 +826,9 @@ Rust 那側的 `bootstrap_open()` 只是為了給出比違反約束更好的錯�
 變更與善後在同一個交易裡。`dispatch` 每次現查 `user_account.role_code`，所以角色
 本身立刻生效，但有兩樣東西不跟著走：瀏覽器手上的 `permissions` 是登入時拿的，而
 `api_token.actor_role` 是核發當下的快照。前者留著會讓畫面畫出叫不動的入口，後者
-留著就是舊角色永久有效，所以 session 全部撤銷、`owner_employee_id` 指向本人的
-Token 一併撤銷，操作回報各撤了幾個。
+留著就是舊角色永久有效，所以 session 全部撤銷、`owner_user_id` 指向這個帳號或
+`owner_employee_id` 指向本人的 Token 一併撤銷，操作回報各撤了幾個。只看員工編號會漏掉
+沒有員工主檔的帳號（`admin`）授權的連接器：角色不符時它被擋下，改回原角色它又能用。
 
 ### 兩道風險底線：負責人與系統管理員
 
@@ -907,12 +908,44 @@ JSON-RPC params 都不能覆寫；成功驗證後呼叫 `touch_api_token_used` �
 `last_used_at`。撤銷若剛好發生在查詢與更新之間，更新會回 false，本次呼叫仍
 回 401。
 
+**自助與連接器 Token 跟著擁有者的帳號走。** `token_by_hash` 同一道查詢回傳
+`owner_active`，條件寫在 `token_owner_active!` 一處，`touch_api_token_used` 接受那一刻
+再判斷一次：
+
+- `owner_user_id` 不為 NULL（OAuth 連接器）：那一個帳號要啟用中、且 `role_code` 等於
+  Token 的 `actor_role`。刪掉的帳號 id 對不到任何列，同名重建也接不回來。
+- 否則 `owner_employee_id` 不為 NULL（自助核發）：該員工底下要有一個啟用中、角色相同的
+  帳號。
+- 兩者都是 NULL（系統管理員以安裝本身名義核發）：不綁定到人，不受任何帳號影響。
+
+停用與刪除帳號都只寫 `user_account`、不碰 `api_token`，所以判斷放在讀取端，與
+`session_by_hash` 帶 `u.status = 'active'` 同一個做法——下一條會停用帳號的路不必自己
+記得撤銷。角色也要相符，因為 `/mcp` 以 `actor_role` 這份核發當下的快照行事，而
+`user_account.employee_id` 不唯一：同一個人之後以另一個角色重建帳號，不能讓舊 Token
+帶著原角色回來。**連接器要另記帳號**，因為 OAuth 可以從沒有員工主檔的帳號出發——
+初始化建的 `admin` 就是——只記員工編號的話，它的連接器看起來與安裝本身的 Token 一樣，
+帳號停用了它還在。`owner_user_id` 刻意不設外鍵：`ON DELETE SET NULL` 會把 Token 變成
+安裝本身的，`CASCADE` 會刪掉清單上還看得到的那一列。這一欄加上之前授權的連接器推不回
+是哪個帳號（列上只有會同名的顯示名稱，以及可能有多個帳號的員工），留在員工那條規則上
+會跟著同一個人之後的任何帳號回來，所以升級時依 `oauth_token` 稽核認出來、全部撤銷，
+每個連接器重新授權一次。稽核的保存天數調短之後會被清掉，寫入也不保證成功，所以長得像
+連接器的 Token（MCP、沒有員工編號、`scope` 為「與本人相同」、沒有輪替天數、建立者等於
+代表對象——那正是會被當成安裝本身 Token 的那一種）另外處理：稽核裡找得到核發它的那一筆
+`issue_api_token`（摘要寫著名稱與前綴，格式從那個操作存在起沒變過）就留著，找不到就撤銷。
+預設保存五年，所以在預設設定下不會撤到任何一組公司 Token；自助核發與安全與營運頁核發
+的形狀本來就不同。帶員工編號而稽核已經不在的舊連接器留在員工那條規則上，權限不會超過
+那個人現在的角色。
+
+在帳號管理停用後再啟用，Token 跟著恢復，與 session 相同。離職（`close_access`）與
+變更角色（`change_user_role`）不靠這條判斷，兩者在同一個交易裡直接撤銷，回任或改回
+原角色都不會恢復。
+
 **Token 會過期，不只能撤銷。** `rotate_days` 有值時，`created_at +
 rotate_days` 之後即強制失效（`ApiToken::is_expired`），不必等人手動撤銷。這與清單
 畫面上「距離下次輪替還有幾天」的提醒（以 `last_used_at` 估算）是兩件事：一個決定
-Token 還能不能用，一個只是提醒該換了。撤銷與過期的原因會
+Token 還能不能用，一個只是提醒該換了。撤銷、過期與擁有者帳號不再相符三種原因會
 分別寫進稽核摘要（`mcp_auth` 這筆），但**對外的 HTTP 回應一律是同一句 401**，
-不讓探測者從回應內容反推出這把 token 是撤銷還是過期。
+不讓探測者從回應內容反推出這把 token 是哪一種。
 `list_api_tokens` 同時回傳 `expires_at`／`expired` 與既有的
 `rotate_due_on`／`overdue`，兩組數字不要混用。
 
@@ -1614,9 +1647,9 @@ ruleset 的上限比較。
 
 **離職與關掉存取是同一件事（`close_access`）**。`update_employee` 把狀態改成 `left`
 時，同一個交易接著把他的登入帳號停用、撤銷未過期的 session，並撤銷
-`api_token.owner_employee_id` 指向他的 MCP Token。三件事必須一起做：session 查詢雖然
-帶 `u.status = 'active'`，但 MCP Token 不讀那一欄，而生效日之後也沒有任何排程回頭
-檢查，所以留著的登入就是永久有效的登入。唯一的例外是**最後一個啟用中的系統管理員**
+`api_token.owner_employee_id` 指向他的 MCP Token。三件事必須一起做：session 與自助
+Token 雖然都要求帳號啟用中，但那只在帳號停用期間成立——日後以同一角色回任，兩者就一起
+回來，而只是被擋著的憑證也不會留下存取在哪一刻結束的紀錄。唯一的例外是**最後一個啟用中的系統管理員**
 ——沒有任何操作能把角色給出去，停用它等於誰也打不開帳號管理，因此那次更新直接拒絕並
 要求先建立另一個管理員帳號。`update_employee` 以 `closed_access` 回報實際關掉了什麼，
 畫面照實說出來；`list_user_accounts` 另外回連結員工的在職狀態，讓帳號管理不必跳到
