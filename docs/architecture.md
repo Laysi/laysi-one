@@ -2209,7 +2209,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | POST | `/v1/auth/login` | 帳密登入並設定 session cookie；失敗訊息不區分帳號或密碼 |
 | POST | `/v1/auth/logout` | 撤銷目前 session 並清除 cookie |
 | GET | `/v1/auth/me` | 目前登入帳號；未登入回 401 |
-| POST | `/v1/auth/change-password` | 更新 Argon2id 雜湊並清除 `must_change_password`；`current_password` 只在強制變更以外的呼叫才驗 |
+| POST | `/v1/auth/change-password` | 更新 Argon2id 雜湊並清除 `must_change_password`，同一交易撤銷該帳號其他登入工作階段（呼叫者自己的保留）；`current_password` 只在強制變更以外的呼叫才驗 |
 | POST | `/v1/auth/bootstrap` | 安裝完全沒有帳號時建立第一個帳號（角色固定 `admin`）並直接簽發 session |
 | GET | `/v1/auth/oauth/start` | 啟用時建立 PKCE 流程並以 302 前往 discovery 的 authorization endpoint；`return_to` 只收同意畫面的網址 |
 | GET | `/v1/auth/oauth/callback` | 後端交換授權碼、驗證 id_token、建立 session，再以 302 回 `return_to` 或 `/` |
@@ -2535,6 +2535,12 @@ header 不能共用；`SYSTEM_NAV` 是第四棵樹但不是分頁（見下）。
 SSO 帳號變成密碼帳號，繞過身分提供者的多因素；自己的帳號則是畫面上不給按——重設會
 把自己登出，而密碼視窗會隨著跳回登入頁一起消失，何況真的忘記自己的密碼時根本進不
 到這個畫面。
+
+**自行變更密碼同樣結束其他登入工作階段，但留下自己這一個。** 自己換密碼最常見的理由
+正是懷疑密碼被別人知道，不撤就讓對方繼續登入到閒置逾時為止，而對方只要持續點擊就續得
+下去。與重設的分界在執行的人是不是帳號本人：本人按下變更，把自己也登出沒有意義。
+MCP Token 不在範圍內——它有自己的撤銷畫面，日常換一次密碼就弄壞每一個連接器。稽核摘要
+寫出結束了幾個工作階段。
 
 **初始密碼用一個必須按過才會消失的視窗。** 它只在建立那一次的回應裡出現，資料庫只留
 Argon2 雜湊，錯過了就只能從 shell 跑 `laysi-admin reset-password`。原本它是清單上方的
