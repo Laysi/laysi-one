@@ -131,8 +131,21 @@ jobs:
       # Pinned to a commit rather than to @v1: this step is handed AI_API_KEY,
       # and a tag moves. Changing version is an edit here, not a push in
       # another repository.
+      #
+      # Take the sha a tag over there points at. The previous pin was a commit
+      # that later releases rewrote away, and its action.yml held an unquoted
+      # `Name: value` inside a description, which is not a mapping -- the
+      # runner read the manifest as empty and reported `Unexpected type ''
+      # encountered while reading 'action manifest root'`. A tagged commit is
+      # one the other repository has run its own workflows against.
+      #
+      # continue-on-error covers what the action cannot cover itself: a
+      # manifest that fails to load fails the step, and without this the tag
+      # ends up with images on ghcr and no page to download them from. The
+      # next step then falls back to the commit list.
       - id: changes
-        uses: Laysi/release-notes-action@8d17418991d32477e394d048a04143610865b057  # v1.2.0
+        continue-on-error: true
+        uses: Laysi/release-notes-action@ad6ed96c1975be6724225d3c18132e08ad474070  # v1.3.0
         with:
           tag: ${{ github.ref_name }}
           tag-pattern: v*
