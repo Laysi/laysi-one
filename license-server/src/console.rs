@@ -210,19 +210,24 @@ pub async fn login_form(State(s): State<Shared>, headers: HeaderMap) -> Response
     if actor(&s, &headers).await.is_some() {
         return Redirect::to("/licenses").into_response();
     }
+    login_page("使用經銷商帳號登入。").into_response()
+}
+
+fn login_page(lede: &str) -> Html<String> {
     page(
         "登入",
         None,
-        r#"<h1>登入</h1><p class="lede">使用經銷商帳號登入。</p>
+        &format!(
+            r#"<h1>登入</h1><p class="lede">{lede}</p>
         <form class="card" method="post" action="/login" style="max-width:420px">
           <div class="grid" style="grid-template-columns:1fr">
             <label>電子郵件<input name="email" type="email" autocomplete="username" required></label>
             <label>密碼<input name="password" type="password" autocomplete="current-password" required></label>
           </div>
           <div class="actions"><button>登入</button></div>
-        </form>"#,
+        </form>"#
+        ),
     )
-    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -236,6 +241,13 @@ pub async fn login(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    if !s.login_rate_limiter.allow(&auth::login_bucket(&form.email)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            login_page("登入嘗試過於頻繁，請一分鐘後再試。"),
+        )
+            .into_response();
+    }
     match auth::login(&s.pool, &form.email, &form.password).await {
         Ok(Some(session)) => (
             [(
@@ -245,19 +257,7 @@ pub async fn login(
             Redirect::to("/licenses"),
         )
             .into_response(),
-        Ok(None) => page(
-            "登入",
-            None,
-            r#"<h1>登入</h1><p class="lede">電子郵件或密碼不正確，請再試一次。</p>
-            <form class="card" method="post" action="/login" style="max-width:420px">
-              <div class="grid" style="grid-template-columns:1fr">
-                <label>電子郵件<input name="email" type="email" required></label>
-                <label>密碼<input name="password" type="password" required></label>
-              </div>
-              <div class="actions"><button>登入</button></div>
-            </form>"#,
-        )
-        .into_response(),
+        Ok(None) => login_page("電子郵件或密碼不正確，請再試一次。").into_response(),
         Err(error) => fail(error),
     }
 }

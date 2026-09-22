@@ -29,6 +29,7 @@ mod check;
 mod console;
 mod db;
 mod mail;
+mod ratelimit;
 mod statement;
 mod token;
 
@@ -47,6 +48,7 @@ pub struct State {
     /// `None` when SMTP is not configured; the console then shows generated
     /// passwords on screen instead of mailing them.
     pub mailer: Option<mail::Mailer>,
+    pub login_rate_limiter: ratelimit::RateLimiter,
 }
 
 impl State {
@@ -136,7 +138,11 @@ async fn main() -> Result<()> {
         pool,
         signing_key: signing_key()?,
         mailer,
+        login_rate_limiter: ratelimit::RateLimiter::new(auth::LOGIN_ATTEMPTS_PER_MINUTE),
     });
+    // Built now rather than on the first unknown address, which would
+    // otherwise answer slower than every one after it.
+    std::sync::LazyLock::force(&auth::DUMMY_PASSWORD_HASH);
     tracing::info!(
         public_key = %hex::encode(state.signing_key.verifying_key().to_bytes()),
         "signing key loaded"

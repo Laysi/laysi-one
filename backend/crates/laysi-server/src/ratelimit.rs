@@ -7,6 +7,9 @@
 //! enough. The cost is that a restart clears the counts and that several
 //! replicas would each count separately; moving to shared storage is a
 //! problem for the day horizontal scaling actually happens.
+//!
+//! `license-server/src/ratelimit.rs` is a copy of this file for console
+//! sign-in; a fix here belongs there too.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
