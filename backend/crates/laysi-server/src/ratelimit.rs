@@ -28,16 +28,33 @@ enum Allowance {
     Live(fn() -> u32),
 }
 
-/// How many buckets may be held before the stale ones are swept.
+/// The most buckets the map holds.
 ///
 /// The key is the caller's choice and login's is the submitted login name, so
-/// without a sweep an attacker naming a different account on every attempt
-/// leaves one entry per attempt in memory for the life of the process. A
-/// bucket from an earlier minute holds a count that its next use would reset,
-/// so dropping it changes no decision. Only keys seen within the current
-/// minute survive a sweep, which means the map is bounded by real traffic per
-/// minute rather than by this number.
+/// an attacker naming a different account on every attempt adds one entry per
+/// attempt. At this size the map first drops buckets from earlier minutes,
+/// which changes no decision: their next use would reset the count anyway. If
+/// the current minute alone fills it, the bucket with the lowest count goes.
+/// Refusing the new key instead would lock out every login name not yet seen
+/// this minute. A flooded name holds a count of one while the account being
+/// guessed holds the limit, so the flood evicts its own buckets first.
+///
+/// Eviction can still reset a bucket, but never cheaply. To evict the account
+/// being guessed at count c, a flood has to lift every other bucket to c
+/// first: about c × `MAX_BUCKETS` login attempts, and every one the limiter
+/// admits, up to the limit per name, costs an Argon2id verification. The next
+/// minute resets that bucket for free, so eviction only buys an attacker more
+/// than the limit per minute at a volume that has already exhausted the CPU.
+/// A bounded map that refuses nobody cannot also promise never to reset.
 const MAX_BUCKETS: usize = 10_000;
+
+/// The longest key stored, in bytes.
+///
+/// Login's key arrives in the request body, so its length is bounded only by
+/// the body limit. Longer keys are cut at a character boundary; two names that
+/// share this prefix then share a bucket, which is stricter, not looser. An
+/// ASCII email address is at most 254 bytes and never reaches the cut.
+const MAX_KEY_BYTES: usize = 256;
 
 /// Fixed-window (per minute) counter. The bucket key is the caller's choice:
 /// `/mcp` counts per token id, login counts per login name.
@@ -74,17 +91,34 @@ impl RateLimiter {
     /// Record a call and report whether it is still within the allowance.
     /// `true` allows, `false` should be blocked.
     pub fn allow(&self, key: &str) -> bool {
+        self.allow_in(key, current_window())
+    }
+
+    fn allow_in(&self, key: &str, window: i64) -> bool {
         let limit_per_minute = self.limit_per_minute();
         if limit_per_minute == 0 {
             return true;
         }
-        let window = current_window();
+        let mut end = key.len().min(MAX_KEY_BYTES);
+        while !key.is_char_boundary(end) {
+            end -= 1;
+        }
+        let key = &key[..end];
         // A poisoned lock (another thread panicking while holding it) must not
         // break the rate limiter: a possibly incomplete count is better than
         // taking down /mcp entirely.
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        if buckets.len() >= MAX_BUCKETS {
+        if !buckets.contains_key(key) && buckets.len() >= MAX_BUCKETS {
             buckets.retain(|_, b| b.window == window);
+            if buckets.len() >= MAX_BUCKETS {
+                let lightest = buckets
+                    .iter()
+                    .min_by_key(|(_, b)| b.count)
+                    .map(|(k, _)| k.clone());
+                if let Some(lightest) = lightest {
+                    buckets.remove(&lightest);
+                }
+            }
         }
         let bucket = buckets
             .entry(key.to_string())
@@ -156,6 +190,44 @@ mod tests {
         assert!(limiter.allow("新"));
         let buckets = limiter.buckets.lock().expect("測試中的鎖不會被毒化");
         assert_eq!(buckets.len(), 1, "上一分鐘的桶應被清掉，只留這一次的");
+    }
+
+    #[test]
+    fn distinct_keys_within_one_minute_stop_at_the_cap() {
+        let limiter = RateLimiter::new(3);
+        for _ in 0..4 {
+            limiter.allow_in("被猜", 7);
+        }
+        for i in 0..MAX_BUCKETS + 100 {
+            limiter.allow_in(&format!("名 {i}"), 7);
+        }
+        assert_eq!(
+            limiter.buckets.lock().expect("測試中的鎖不會被毒化").len(),
+            MAX_BUCKETS
+        );
+        assert!(!limiter.allow_in("被猜", 7), "灌名稱不能把被猜的帳號歸零");
+        assert!(limiter.allow_in("新", 7), "表滿時新的鍵仍要收得進來");
+    }
+
+    #[test]
+    fn a_long_key_is_stored_cut_at_a_character_boundary() {
+        let limiter = RateLimiter::new(1);
+        let long = "帳".repeat(1_000);
+        assert!(limiter.allow_in(&long, 7));
+        {
+            let buckets = limiter.buckets.lock().expect("測試中的鎖不會被毒化");
+            let stored = buckets.keys().next().expect("應存下一個桶");
+            assert_eq!(
+                stored.len(),
+                MAX_KEY_BYTES / 3 * 3,
+                "三位元組的字不能被切開"
+            );
+            assert!(long.starts_with(stored.as_str()));
+        }
+        assert!(
+            !limiter.allow_in(&format!("{long}另一個"), 7),
+            "開頭相同的長鍵併進同一個桶"
+        );
     }
 
     #[test]
