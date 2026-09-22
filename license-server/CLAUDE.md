@@ -94,6 +94,10 @@ docker compose exec app laysi-one-license public-key              # 編進產品
   這台伺服器的資料表沒有第二個寫入者。
 - 查詢一律執行期 `sqlx::query`，編譯不需要資料庫。動態拼接的 SQL 只拼
   `Actor::scope_sql()` 的 `i32`，其餘一律 bind。
+- **登入以送出的地址分桶限速**（每分鐘 10 次，trim 並轉小寫，與查詢的 `lower()` 同一個
+  比對），沒有帳號的地址也對 `DUMMY_PASSWORD_HASH` 跑一次 Argon2id。`src/ratelimit.rs`
+  是產品 `laysi-server/src/ratelimit.rs` 的副本，**產品那份改了要抄過來**——兩個
+  workspace 只共用 `laysi-license-token`。
 - 不新增需要人自己想一個值的環境變數：資料庫密碼與簽章金鑰由 compose 的 `secrets`
   服務產生進資料卷，**產生過就不再產生**（換簽章金鑰等於作廢所有已發出的授權檔）。
 
