@@ -1418,17 +1418,13 @@ impl Operation for ChangeUserRole {
 
         // The only escalation this operation could add is upward on the
         // caller's own account: everything else an administrator can already
-        // do by creating an account with that role. `actor` is a display name
-        // and collides, so the login name is the key; an MCP token has none
-        // and therefore cannot be told apart from the account it is editing.
-        let Some(caller) = ctx.username.as_deref() else {
-            return Err(OpError::BadInput("請以本人的登入帳號進行角色變更".into()));
-        };
-        if caller == current.username {
-            return Err(OpError::BadInput(
-                "不能變更自己的角色，請由另一個系統管理員帳號變更".into(),
-            ));
-        }
+        // do by creating an account with that role.
+        refuse_own_account(
+            ctx.username.as_deref(),
+            &current.username,
+            "請以本人的登入帳號進行角色變更",
+            "不能變更自己的角色，請由另一個系統管理員帳號變更",
+        )?;
 
         let role_code = i.role_code.trim();
         let roles = ctx.store.roles().await?;
@@ -1511,6 +1507,22 @@ impl Operation for ChangeUserRole {
     }
 }
 
+/// Refuses an edit to the caller's own account. `actor` is a display name and
+/// collides, so the login name is the key; an MCP token has none and
+/// therefore cannot be told apart from the account it is editing.
+fn refuse_own_account(
+    caller: Option<&str>,
+    target: &str,
+    no_login: &str,
+    own: &str,
+) -> Result<(), OpError> {
+    match caller {
+        None => Err(OpError::BadInput(no_login.into())),
+        Some(c) if c == target => Err(OpError::BadInput(own.into())),
+        Some(_) => Ok(()),
+    }
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct ResetUserPasswordInput {
     /// Login name of the account that needs a new password.
@@ -1531,7 +1543,7 @@ impl Operation for ResetUserPassword {
         Risk::AdminOnly
     }
     fn summary(&self) -> &'static str {
-        "為忘記密碼的人重新產生一組臨時密碼。舊密碼與該帳號目前的登入工作階段立刻失效，新密碼僅在本次回應出現一次，本人首次登入必須變更。只用外部帳號登入的帳號不適用。"
+        "為忘記密碼的人重新產生一組臨時密碼。舊密碼與該帳號目前的登入工作階段立刻失效，新密碼僅在本次回應出現一次，本人首次登入必須變更。只用外部帳號登入的帳號不適用，也不能重設自己的密碼。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ResetUserPasswordInput>()
@@ -1549,6 +1561,15 @@ impl Operation for ResetUserPassword {
         let Some(user) = ctx.store.user_by_username(username).await? else {
             return Err(OpError::BadInput(format!("查無登入名稱「{username}」")));
         };
+        // A session holder resetting their own account skips the current
+        // password that changing it asks for, and ends every session of the
+        // real holder on the way.
+        refuse_own_account(
+            ctx.username.as_deref(),
+            &user.username,
+            "請以本人的登入帳號重設密碼",
+            "不能重設自己的密碼，請由另一個系統管理員帳號重設",
+        )?;
         // Giving a password to an account that has none would turn an
         // identity-provider login into a password login, which is the one
         // thing clearing the hash was for.
@@ -2355,6 +2376,17 @@ mod tests {
         assert!(known.contains("get_balance_sheet"));
         assert!(known.contains("set_role_permission"));
         assert!(!known.contains("approve_expense"));
+    }
+
+    #[test]
+    fn an_account_cannot_be_edited_by_its_own_session_or_by_a_token() {
+        let own = refuse_own_account(Some("qa-admin"), "qa-admin", "token", "own");
+        assert!(matches!(own, Err(OpError::BadInput(m)) if m == "own"));
+
+        let token = refuse_own_account(None, "qa-admin", "token", "own");
+        assert!(matches!(token, Err(OpError::BadInput(m)) if m == "token"));
+
+        assert!(refuse_own_account(Some("admin"), "qa-admin", "token", "own").is_ok());
     }
 
     #[test]
