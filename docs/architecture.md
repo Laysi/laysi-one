@@ -2058,9 +2058,13 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 `decide_punch_correction` 與自動通過的 `submit_punch_correction` 同樣由
 `punch_in_tx` 的回傳值填它。
 
-**人資直接補登與員工申請經核准，在畫面上是兩個標籤。** 判準不是比對兩個顯示名稱
-（兩個人可以同名），而是 `decided_by = created_by` 且不為空——人資補登的那一列，
-兩個欄位是同一次呼叫裡的同一個人。ops 以 `hr_entered` 回給畫面，「出勤與休假」的
+**人資直接補登與員工申請經核准，在畫面上是兩個標籤。** 判準是
+`punch_correction.hr_entered`，只有 `correct_punch` 的寫入路徑寫 `true`。原本由
+`decided_by = created_by` 推導，而兩欄存的都是顯示名稱：`owner_self_decide` 開著時
+負責人核准本人的申請，或核准的人與申請人同名，兩欄都相等，那一列就被標成人資補登。
+哪一條路寫的是要保存五年的紀錄本身，所以寫入時記下，不事後推導；既有列由 migration
+依「兩欄相等且 `decided_at = created_at`」回填——人資補登在同一道 INSERT 寫兩個時刻，
+核准一定在另一個交易。ops 以 `hr_entered` 回給畫面，「出勤與休假」的
 那一段因此叫**補登紀錄**而不是補登申請。
 
 **整條鏈掛在它改的那一天上，不只掛在一張全公司的清單上。** 一格可以更正很多次，

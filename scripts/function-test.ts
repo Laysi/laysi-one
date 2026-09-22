@@ -643,6 +643,72 @@ async function main() {
       return `${check.failures[0].message} → 修正後通過`;
     });
 
+    await check("H12", "補登紀錄只把人資直接補登標成人資補登", async () => {
+      // created_by and decided_by hold display names, so an owner deciding
+      // their own request, or anyone deciding a namesake's, writes the same
+      // name twice without HR having entered anything.
+      const target = await must("create_employee", { name: "測試補登對象", hired_on: "2026-01-01" });
+      await must("correct_punch", {
+        emp_no: target.employee.emp_no, punched_on: TODAY, kind: "in", at: "09:00", note: "人資補登",
+      });
+
+      const namesake = await must("create_employee", { name: "測試負責人", hired_on: "2026-01-01" });
+      const issued = await must("create_employee_login", {
+        emp_no: namesake.employee.emp_no, email: "namesake@test.local",
+      });
+      await login("namesake@test.local", issued.temporary_password);
+      const changed = await fetch(`${BASE}/v1/auth/change-password`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ new_password: "Function-Namesake-2026" }),
+      });
+      expect(changed.status === 200, `變更密碼 HTTP ${changed.status}`);
+      const set = (changed.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
+      if (set) cookie = set;
+      const theirs = await must("submit_my_punch_correction", {
+        punched_on: TODAY, kind: "in", at: "09:00", reason: "同名申請",
+      });
+
+      const asAdmin = async (settings: Record<string, string>) => {
+        await login("admin", ADMIN_PASSWORD);
+        for (const [code, value] of Object.entries(settings)) {
+          await must("update_company_setting", { code, value });
+        }
+        await login("boss@test.local", BOSS_PASSWORD);
+      };
+      let own: any;
+      let auto: any;
+      await asAdmin({ owner_self_decide: "可自行核決" });
+      try {
+        own = await must("submit_my_punch_correction", {
+          punched_on: TODAY, kind: "in", at: "09:00", reason: "負責人自行核准",
+        });
+        await must("decide_punch_correction", { id: own.correction.id, approve: true });
+        await must("decide_punch_correction", { id: theirs.correction.id, approve: true });
+        await asAdmin({ owner_self_decide: "由他人簽核", punch_correction_policy: "自動通過" });
+        auto = await must("submit_my_punch_correction", {
+          punched_on: TODAY, kind: "out", at: "18:00", reason: "自動通過",
+        });
+      } finally {
+        await asAdmin({ owner_self_decide: "由他人簽核", punch_correction_policy: "人資審核" });
+      }
+
+      const rows = (await must("list_punch_corrections", { include_done: true })).corrections;
+      const byId = (id: number) => rows.find((c: any) => c.id === id);
+      const hr = rows.find((c: any) => c.emp_no === target.employee.emp_no);
+      expectEq(hr.hr_entered, true, "人資直接補登");
+      for (const [id, what] of [[own.correction.id, "負責人自行核准本人申請"], [theirs.correction.id, "核准同名員工的申請"]]) {
+        const row = byId(id);
+        expectEq(row.status, "approved", `${what}的狀態`);
+        expectEq(row.decided_by, row.created_by, `${what}的兩個名字應相同`);
+        expectEq(row.hr_entered, false, what);
+      }
+      const passed = byId(auto.correction.id);
+      expectEq(passed.status, "approved", "自動通過的狀態");
+      expectEq(passed.hr_entered, false, "自動通過");
+      return `人資補登 1 筆；自行核准、同名核准與自動通過都不是人資補登`;
+    });
+
     console.log("\nA 固定資產");
     let assetVoucher = "";
     await check("A1", "取得成本填未稅，營業稅另拆到進項稅額", async () => {
