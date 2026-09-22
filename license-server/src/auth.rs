@@ -10,7 +10,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::http::HeaderMap;
 use sqlx::{PgPool, Row};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::Semaphore;
 
 /// Name of the session cookie.
@@ -57,18 +57,33 @@ fn password_matches(plain: &str, stored: &str) -> bool {
 /// installation; on unbounded blocking threads it would hold 19 MiB for each
 /// of up to 512 of them. One per core keeps the rest of the server answering
 /// while sign-in queues.
-static VERIFY_SLOTS: LazyLock<Semaphore> =
-    LazyLock::new(|| Semaphore::new(std::thread::available_parallelism().map_or(1, |n| n.get())));
+///
+/// The slot travels with the blocking task rather than the request: a client
+/// that disconnects drops the request, not the verification already running,
+/// and a slot released on disconnect would let disconnecting clients run any
+/// number of them.
+static VERIFY_SLOTS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    Arc::new(Semaphore::new(
+        std::thread::available_parallelism().map_or(1, |n| n.get()),
+    ))
+});
 
 async fn verify(plain: &str, stored: &str) -> Result<bool> {
-    let _slot = VERIFY_SLOTS
-        .acquire()
+    verify_in(&VERIFY_SLOTS, plain, stored).await
+}
+
+async fn verify_in(slots: &Arc<Semaphore>, plain: &str, stored: &str) -> Result<bool> {
+    let slot = Arc::clone(slots)
+        .acquire_owned()
         .await
         .context("waiting for a password verification slot")?;
     let (plain, stored) = (plain.to_owned(), stored.to_owned());
-    tokio::task::spawn_blocking(move || password_matches(&plain, &stored))
-        .await
-        .context("verifying a password")
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        password_matches(&plain, &stored)
+    })
+    .await
+    .context("verifying a password")
 }
 
 /// Sign-in attempts per minute for one address, the product's number.
@@ -225,6 +240,25 @@ mod tests {
         let hash = hash_password("正確的密碼").expect("應雜湊得出來");
         assert!(verify("正確的密碼", &hash).await.expect("應驗得完"));
         assert!(!verify("錯的密碼", &hash).await.expect("應驗得完"));
+    }
+
+    /// A client that disconnects drops the request, not the verification
+    /// already running on a blocking thread.
+    #[tokio::test]
+    async fn a_cancelled_request_keeps_its_slot_until_the_verification_ends() {
+        let slots = Arc::new(Semaphore::new(1));
+        let hash = hash_password("正確的密碼").expect("應雜湊得出來");
+
+        let running = Arc::clone(&slots);
+        let request = tokio::spawn(async move { verify_in(&running, "正確的密碼", &hash).await });
+        tokio::task::yield_now().await;
+        assert_eq!(slots.available_permits(), 0, "驗證開始後名額應被佔用");
+
+        request.abort();
+        assert!(request.await.is_err(), "請求應已被取消");
+        assert_eq!(slots.available_permits(), 0, "驗證還在跑，名額不能先還");
+
+        let _slot = slots.acquire().await.expect("驗證結束後名額應回來");
     }
 
     #[test]
