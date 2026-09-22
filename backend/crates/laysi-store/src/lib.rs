@@ -6505,7 +6505,7 @@ impl Store {
                     c.decided_by,
                     COALESCE(r.name, c.decided_role) AS decided_role,
                     c.decided_at, c.decision_note, c.replaced_at,
-                    c.created_at, c.created_by,
+                    c.created_at, c.created_by, c.hr_entered,
                     EXISTS (SELECT 1 FROM attendance_punch p
                              WHERE p.employee_id = c.employee_id
                                AND p.punched_on = c.punched_on
@@ -8782,6 +8782,10 @@ pub struct PunchCorrection {
     pub replaced_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
+    /// HR wrote the punch directly rather than deciding a request. Stored,
+    /// because the names in `created_by` and `decided_by` also match when an
+    /// owner approves their own request.
+    pub hr_entered: bool,
     /// Whether the day already holds an arrival punch. A departure may not be
     /// written without one, so a caller that draws an approve button needs to
     /// know before the transaction refuses it.
@@ -9808,8 +9812,8 @@ async fn log_punch_correction(
         "INSERT INTO punch_correction
            (employee_id, punched_on, kind, punched_at, reason, status,
             decided_by, decided_role, decided_at, decision_note,
-            replaced_at, created_by)
-         VALUES ($1,$2,$3,$4,$5,'approved',$6,$7,now(),'',$8,$6)",
+            replaced_at, created_by, hr_entered)
+         VALUES ($1,$2,$3,$4,$5,'approved',$6,$7,now(),'',$8,$6,true)",
     )
     .bind(p.employee_id)
     .bind(p.punched_on)
@@ -9915,6 +9919,7 @@ fn row_to_punch_correction(r: &PgRow) -> PunchCorrection {
         replaced_at: r.get("replaced_at"),
         created_at: r.get("created_at"),
         created_by: r.get("created_by"),
+        hr_entered: r.get("hr_entered"),
         day_has_in: r.get("day_has_in"),
     }
 }

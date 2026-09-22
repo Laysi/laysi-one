@@ -966,8 +966,8 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 人資的 `correct_punch` 因此也寫一列 `punch_correction`，寫入當下即為已核准——不寫等於
 一次更正之後，原本的時間在系統裡哪裡都不存在，而出勤紀錄要保存五年。`record_punch`
 的第二個參數是 `correcting: Option<&str>`（更正者的角色），會覆蓋的那一次就是要記錄的
-那一次。人資直接補登與員工申請經核准的判準是 `decided_by = created_by` 且不為空，
-不是比對顯示名稱。**一格可以更正很多次，所以整條鏈要掛在它改的那一天上**：逐日明細的
+那一次。人資直接補登與員工申請經核准的判準是 `punch_correction.hr_entered`，寫入時
+記下；不要改回由 `decided_by = created_by` 推導——負責人自行核准本人的申請時兩者也相等。**一格可以更正很多次，所以整條鏈要掛在它改的那一天上**：逐日明細的
 狀態欄是「補登紀錄 N 筆」，按下去展開 `components/PunchTrail`（由舊到新，原時刻 →
 新時刻、寫的人、日期、事由），人資與員工兩邊同一個元件。畫面取 `list_punch_corrections`
 一律 `include_done: true`，「含已決定」在前端過濾——分兩次取會讓其中一邊看到半條鏈。

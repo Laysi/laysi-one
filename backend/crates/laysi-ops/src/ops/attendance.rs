@@ -1257,10 +1257,7 @@ pub(crate) fn punch_correction_json(c: &PunchCorrection, offset: FixedOffset) ->
         "replaced_at": c
             .replaced_at
             .map(|at| business_time(at, offset).format(PUNCH_TIME).to_string()),
-        // HR entering a punch directly decides its own row, so the two names
-        // are the same actor from the same call. Comparing display names of
-        // two different people would not be safe; this is one call.
-        "hr_entered": !c.decided_by.is_empty() && c.decided_by == c.created_by,
+        "hr_entered": c.hr_entered,
         "created_by": c.created_by,
         "created_at": c.created_at,
     })
