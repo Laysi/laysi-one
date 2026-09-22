@@ -445,6 +445,11 @@ SQL 會讓三張表對「什麼算已過帳」與日期怎麼比各有一套定�
 `HttpOnly; SameSite=Strict; Path=/`，`Secure` 由 `SESSION_COOKIE_SECURE`
 控制，本機 HTTP 可關閉，正式 HTTPS 部署必須開啟。
 
+**Argon2id 驗證同時最多核心數個**（`auth.rs` 的 `VERIFY_SLOTS`）：查無帳號也對固定
+雜湊驗一次，所以任何登入名稱都走得到這一步，而以名稱分桶的限流擋不到每次換一個名稱的
+灌量。沒有上限時每次驗證在一條 blocking thread 上佔 19 MiB，灌 100 個就到 1.9 GB；
+有上限之後排隊的只有登入。
+
 session 同時受兩個可調上限限制：`SESSION_IDLE_MINUTES` 以 `last_seen_at` 判斷
 滑動閒置時間，每次成功使用都更新；`SESSION_ABSOLUTE_HOURS` 在建立時寫入
 `expires_at`，即使持續使用也不能越過。撤銷、任一種到期或帳號停權都回 401。

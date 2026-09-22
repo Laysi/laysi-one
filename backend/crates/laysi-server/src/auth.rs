@@ -15,7 +15,8 @@ use laysi_server::password;
 use laysi_store::{CreateSession, StoreError, UserAccount, UserSession};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Semaphore;
 
 const SESSION_COOKIE_NAME: &str = "laysi_session";
 pub(crate) const MIN_PASSWORD_CHARS: usize = 8;
@@ -356,19 +357,54 @@ fn login_failure_response(_reason: LoginFailure) -> Response {
     )
 }
 
+/// How many Argon2id verifications run at once.
+///
+/// Login verifies every attempt, against `dummy_password_hash` when the name
+/// has no account, so a flood of made-up names is verification work the rate
+/// limit does not see. Unbounded, each would hold 19 MiB on one of up to 512
+/// blocking threads. One per core keeps memory flat while sign-in queues.
+///
+/// The slot travels with the blocking task rather than the request: a client
+/// that disconnects drops the request, not the verification already running,
+/// and a slot released on disconnect would let disconnecting clients run any
+/// number of them.
+static VERIFY_SLOTS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    Arc::new(Semaphore::new(
+        std::thread::available_parallelism().map_or(1, |n| n.get()),
+    ))
+});
+
 // The error is the response to send; see `issue_session`.
 #[allow(clippy::result_large_err)]
 async fn password_matches(password: String, encoded: String) -> Result<bool, Response> {
-    tokio::task::spawn_blocking(move || password::verify_password(&password, &encoded))
+    verify_in(&VERIFY_SLOTS, password, encoded).await
+}
+
+#[allow(clippy::result_large_err)]
+async fn verify_in(
+    slots: &Arc<Semaphore>,
+    password: String,
+    encoded: String,
+) -> Result<bool, Response> {
+    let slot = Arc::clone(slots)
+        .acquire_owned()
         .await
-        .map_err(|error| {
-            tracing::error!(%error, "the password verification task did not finish");
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "password_worker_error",
-                "目前無法驗證密碼，請稍後再試",
-            )
-        })
+        .map_err(verification_failed)?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        password::verify_password(&password, &encoded)
+    })
+    .await
+    .map_err(verification_failed)
+}
+
+fn verification_failed(error: impl std::fmt::Display) -> Response {
+    tracing::error!(%error, "the password verification task did not finish");
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "password_worker_error",
+        "目前無法驗證密碼，請稍後再試",
+    )
 }
 
 /// Login attempts per minute for one login name.
@@ -839,6 +875,47 @@ mod tests {
     use axum::http::HeaderValue;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::Row;
+
+    /// Held for longer than a verification takes, so a verification that
+    /// skipped the slot would have finished by the check.
+    #[tokio::test]
+    async fn a_verification_waits_for_a_free_slot() {
+        let slots = Arc::new(Semaphore::new(1));
+        let encoded = password::hash_password("正確的密碼").expect("應可產生密碼雜湊");
+        let held = slots.acquire().await.expect("名額不會被關閉");
+
+        let waiting = Arc::clone(&slots);
+        let pending =
+            tokio::spawn(async move { verify_in(&waiting, "正確的密碼".into(), encoded).await });
+        tokio::task::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_millis(500)))
+            .await
+            .expect("等待不會失敗");
+        assert!(!pending.is_finished(), "名額用完時要等");
+
+        drop(held);
+        let verified = pending.await.expect("驗證任務應完成");
+        assert!(matches!(verified, Ok(true)), "有名額之後照常驗證");
+    }
+
+    /// A client that disconnects drops the request, not the verification
+    /// already running on a blocking thread.
+    #[tokio::test]
+    async fn a_cancelled_request_keeps_its_slot_until_the_verification_ends() {
+        let slots = Arc::new(Semaphore::new(1));
+        let encoded = password::hash_password("正確的密碼").expect("應可產生密碼雜湊");
+
+        let running = Arc::clone(&slots);
+        let request =
+            tokio::spawn(async move { verify_in(&running, "正確的密碼".into(), encoded).await });
+        tokio::task::yield_now().await;
+        assert_eq!(slots.available_permits(), 0, "驗證開始後名額應被佔用");
+
+        request.abort();
+        assert!(request.await.is_err(), "請求應已被取消");
+        assert_eq!(slots.available_permits(), 0, "驗證還在跑，名額不能先還");
+
+        let _slot = slots.acquire().await.expect("驗證結束後名額應回來");
+    }
 
     fn test_state() -> Shared {
         let pool = PgPoolOptions::new()
