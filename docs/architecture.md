@@ -1342,7 +1342,7 @@ MCP 這一項開著（`needs_confirm`）：草稿本來就是 AI 寫的，讓它
 | `create_user_account` | AdminOnly | `{ username, display_name, email?, role_code, employee_no? }` | `{ user, temporary_password }`；密碼只顯示這一次，`must_change_password = true` |
 | `update_user_account` | AdminOnly | `{ username, display_name?, email?, status?, employee_no? }` | `{ user, changed[] }`；**改不到 `role_code` 與密碼**，`employee_no: ""` 解除連結 |
 | `change_user_role` | AdminOnly | `{ username, role_code, confirm }` | `{ user, revoked_sessions, revoked_tokens }`；拒絕呼叫者自己的帳號與最後一個啟用中的管理員 |
-| `reset_user_password` | AdminOnly | `{ username, confirm: true }` | `{ user, temporary_password, revoked_sessions }`；舊密碼與該帳號所有登入立刻失效，只用外部帳號登入的帳號拒絕 |
+| `reset_user_password` | AdminOnly | `{ username, confirm: true }` | `{ user, temporary_password, revoked_sessions }`；舊密碼與該帳號所有登入立刻失效；拒絕呼叫者自己的帳號與只用外部帳號登入的帳號 |
 | `delete_user_account` | AdminOnly | `{ username, confirm: true }` | `{ user, remaining }`；session 與外部身分連帶刪除，最後一個帳號與最後一個啟用中的管理員擋下 |
 | `list_user_accounts` | AdminOnly | `{}` | `accounts[]`：登入名稱、角色、連結員工與其在職狀態、帳號狀態、`must_change_password`、`has_password`、最後登入；**無密碼雜湊** |
 | `list_approval_rules` | ReadOnly | `{}` | `steps[]`、`enforced: true` |
@@ -2539,9 +2539,11 @@ header 不能共用；`SYSTEM_NAV` 是第四棵樹但不是分頁（見下）。
 舊密碼開的 session 繼續活著，等於沒換。
 
 兩個拒絕：`password_hash IS NULL` 的帳號只用外部身分登入，發一組密碼給它等於把
-SSO 帳號變成密碼帳號，繞過身分提供者的多因素；自己的帳號則是畫面上不給按——重設會
-把自己登出，而密碼視窗會隨著跳回登入頁一起消失，何況真的忘記自己的密碼時根本進不
-到這個畫面。
+SSO 帳號變成密碼帳號，繞過身分提供者的多因素；自己的帳號由伺服器拒絕，比對的鍵與
+`change_user_role` 相同（`OpCtx.username`，MCP Token 一律拒絕）——拿到別人 session 的
+人對那個帳號本身重設，就跳過了自行變更密碼要求的目前密碼，還順手把本人的每一個
+session 登出。畫面上同樣不給按：重設會把自己登出，而密碼視窗會隨著跳回登入頁一起
+消失，何況真的忘記自己的密碼時根本進不到這個畫面。
 
 **自行變更密碼同樣結束其他登入工作階段，但留下自己這一個。** 自己換密碼最常見的理由
 正是懷疑密碼被別人知道，不撤就讓對方繼續登入到閒置逾時為止，而對方只要持續點擊就續得

@@ -263,7 +263,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'create_user_account', risk: 'admin_only', riskLabel: '限系統管理員', summary: "建立一個登入帳號並指定角色。密碼由系統產生，僅在本次回應出現一次，本人首次登入必須變更；改用外部登入時不產生密碼。員工編號查無對應的人時會一併建立員工主檔，留空則自動配號。" },
   { name: 'update_user_account', risk: 'admin_only', riskLabel: '限系統管理員', summary: "改一個登入帳號的顯示名稱、電子郵件、啟用狀態與連結的員工。員工編號查無對應的人時會一併建立員工主檔。角色請用變更角色的操作，密碼只能由本人變更。" },
   { name: 'change_user_role', risk: 'admin_only', riskLabel: '限系統管理員', summary: "變更一個登入帳號的角色。該帳號目前的登入工作階段與本人核發的 MCP Token 立刻失效，本人重新登入後才有新的權限。不能變更自己的角色。" },
-  { name: 'reset_user_password', risk: 'admin_only', riskLabel: '限系統管理員', summary: "為忘記密碼的人重新產生一組臨時密碼。舊密碼與該帳號目前的登入工作階段立刻失效，新密碼僅在本次回應出現一次，本人首次登入必須變更。只用外部帳號登入的帳號不適用。" },
+  { name: 'reset_user_password', risk: 'admin_only', riskLabel: '限系統管理員', summary: "為忘記密碼的人重新產生一組臨時密碼。舊密碼與該帳號目前的登入工作階段立刻失效，新密碼僅在本次回應出現一次，本人首次登入必須變更。只用外部帳號登入的帳號不適用，也不能重設自己的密碼。" },
   { name: 'unlink_user_identity', risk: 'admin_only', riskLabel: '限系統管理員', summary: "解除一個登入帳號的外部帳號連結。該帳號的登入工作階段立刻失效，之後只能用密碼登入。沒有密碼的帳號無法解除連結，請改為停用。" },
   { name: 'delete_user_account', risk: 'admin_only', riskLabel: '限系統管理員', summary: "刪除一個登入帳號及其登入工作階段。無法復原，稽核紀錄上的既有紀錄不受影響。連著外部帳號的要先解除連結；最後一個帳號與最後一個啟用中的系統管理員不能刪除。" },
   { name: 'list_user_accounts', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀登入帳號清單：登入名稱、角色、連結的員工、外部帳號、狀態與最後登入時間。密碼與密碼雜湊不在回應內，也無法取回。" },
