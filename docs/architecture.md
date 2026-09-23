@@ -2098,7 +2098,8 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 |---|---|---|---|
 | `get_my_home` | ReadOnly | `{}` | 本人基本資料、年資、本月出勤、特休餘額、送出的單走到哪 |
 | `list_my_payslips` | ReadOnly | `{}` | **只有本人的**薪資單 |
-| `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`，以及算時數用的 `schedule` |
+| `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`、`schedule`，以及表單預設日期 `next_workday`（今天起第一個工作日，依工作日曆） |
+| `preview_leave` | ReadOnly | `{ from_at, to_at }` | `{ hours, days, off_days }`；與 `request_leave` 共用 `leave_worth`，送出前顯示的就是會存下的數字 |
 | `request_leave` | NeedsConfirm | `{ kind, from_at, to_at, reason? }` | `{ request, schedule }`，編號 `LV{西元年月}-{三碼}`；時數與天數由後端算 |
 | `list_my_overtime_requests` | ReadOnly | `{}` | 本人加班單、本月已核准時數、上限與尚可申請時數、`day_types`、`calendar`（日別與星期推得的不同的日期，畫面據以顯示加班日） |
 | `submit_my_overtime_request` | NeedsConfirm | `{ from_at, to_at, reason? }` | `{ request }`，編號 `OT{西元年月}-{三碼}`；時數為區間長度扣掉休息時間，日別由工作日曆決定 |
@@ -2106,13 +2107,19 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | `submit_my_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, pay_method?, memo? }` | `{ claim }`，編號 `EX{西元年月}-{三碼}` |
 | `attach_my_expense_receipt` | NeedsConfirm | `{ claim_no, file_name, content_base64 }` | `{ receipt, receipts }`，收據進 RustFS |
 
+**休假時數畫面不自己算。** 休假申請原本在 TS 裡重寫一份 `leave_seconds()`：沒扣
+休息時間、週六週日寫死，於是有午休的公司每一張整天假都是畫面 9 小時、存下 8 小時，
+跨到國定假日的假畫面多算一整天。補齊那兩項等於在瀏覽器裡維護第二份工作日曆的解讀，
+所以改成欄位一變就叫 `preview_leave`。代價是每次試算都留一筆稽核；它只在起訖都填好
+且結束晚於開始時才叫。
+
 **這個模組的授權不靠 `Risk`，靠輸入形狀。** `list_payslips` 是 `BossOnly`，
 但員工本人必須看得到自己的薪資單，而他不是老闆。作法是：**自助操作一律不接受
 任何指定對象的參數**，對象由已驗證 session 的 `ctx.employee_id` 決定。沒有欄位可
 以填，就沒有辦法填別人的名字；這比在查詢裡加過濾條件更難寫錯。
 
 `ops/selfservice.rs` 的 `no_self_service_input_can_select_another_employee`
-測試把十四個操作的 `Input` 屬性集合**逐字釘死**（`request_leave` 只有
+測試把每一個自助操作的 `Input` 屬性集合**逐字釘死**（`request_leave` 只有
 `kind`／`from_at`／`to_at`／`reason`，`submit_my_overtime_request` 只有
 `from_at`／`to_at`／`reason`——日別由工作日曆決定，申請人填不進來，`submit_my_expense_claim` 只有
 `title`／`amount`／`spent_on`／`pay_method`／`memo`，`punch_clock` 只有

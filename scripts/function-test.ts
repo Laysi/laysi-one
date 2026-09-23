@@ -905,6 +905,32 @@ async function main() {
       return r.error!.message;
     });
 
+    await check("P6", "休假試算的時數與天數等於送出後存下的值", async () => {
+      await login("admin", ADMIN_PASSWORD);
+      try {
+        await must("update_company_setting", { code: "break_start", value: "12:00" });
+        await must("update_company_setting", { code: "break_end", value: "13:00" });
+      } finally {
+        await login("boss@test.local", BOSS_PASSWORD);
+      }
+      await must("set_work_calendar_day", { on_date: "2026-12-02", kind: "holiday", name: "測試假日" });
+      const ranges: [string, string, number, number][] = [
+        ["2026-12-01T11:00:00", "2026-12-01T14:00:00", 200, 25],
+        ["2026-12-02T09:00:00", "2026-12-03T18:00:00", 800, 100],
+      ];
+      const notes: string[] = [];
+      for (const [from_at, to_at, hours, days] of ranges) {
+        const preview = await must("preview_leave", { from_at, to_at });
+        expectEq(money(preview.hours), hours, `${from_at} 試算時數`);
+        expectEq(money(preview.days), days, `${from_at} 試算天數`);
+        const sent = await must("request_leave", { kind: "annual", from_at, to_at });
+        expectEq(money(sent.request.hours), money(preview.hours), `${from_at} 存下的時數`);
+        expectEq(money(sent.request.days), money(preview.days), `${from_at} 存下的天數`);
+        notes.push(`${preview.hours} 小時／${preview.days} 日`);
+      }
+      return notes.join(" · ");
+    });
+
     console.log("\nZ 收尾");
     await check("Z1", "所有寫入之後試算表仍然平衡", async () => {
       const tb = await must("get_trial_balance", { as_of: TODAY });

@@ -2265,6 +2265,7 @@ export const myLeaveList = z.object({
   requests: z.array(myLeaveRequest),
   leave_kinds: z.array(z.object({ kind: z.string(), label: z.string() })),
   schedule: workSchedule,
+  next_workday: z.string(),
   pending_count: z.number(),
   annual_leave: myAnnualLeave,
   scope_note: z.string(),
@@ -2418,6 +2419,13 @@ export const myLeaveResult = z.object({
   scope_note: z.string(),
 });
 export type MyLeaveResult = z.infer<typeof myLeaveResult>;
+
+export const leavePreview = z.object({
+  hours: z.string(),
+  days: z.string(),
+  off_days: z.number(),
+});
+export type LeavePreview = z.infer<typeof leavePreview>;
 
 export const myExpenseClaim = expenseClaim.extend({
   receipts: z.array(expenseReceipt),
