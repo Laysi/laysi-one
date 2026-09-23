@@ -147,6 +147,7 @@ government_share = "0.10"
 | `depreciation` | `methods`、`useful_lives` |
 | `overtime` | `monthly_hours=240` `monthly_max_hours=46`、`day_types` 陣列：`{code, label, max_hours, bands[{up_to_hours?, multiplier}]}` 依勞基法第 24 條 |
 | `owner_insurance` | `health_employer_share=0` `health_employee_share=1.00` `health_government_share=0` `pension_employer_rate=0` |
+| `leave_pay` | 每個假別一節：`ratio`（工資給付比例）；病假另有 `yearly_days=30` `beyond_ratio=0`，生理假 `separate_days=3`，產假 `min_service_months=6` `short_service_ratio=0.5`。依勞工請假規則、性平法第 14 條、勞基法第 50 條 |
 
 驗證基準（**必須寫成單元測試**，數值取自原型的 `ins` / `pay` 區塊）：
 
@@ -1581,7 +1582,7 @@ column，因此不可能與上面的區間不一致。
 | `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額 |
 | `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳 |
-| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票 |
+| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額） |
 | `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
 | `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額 |
 | `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, as_of? }` | 單一級距試算與三份 ruleset；`insured_as = "owner"` 另回 `owner_ruleset` |
@@ -1649,6 +1650,21 @@ ruleset 的上限比較。
 `basis` 記 `rate`：稅額本來就是由給付日的 ruleset 以扣繳率現算，存一份等於同一個問題
 有兩個答案，而 `withholding_record` 的 CHECK 也正是為此只在 `table` 時要求稅額。
 對帳因此改看所得代號而非 `basis`——依扣繳率算出來的紀錄一樣是薪資所得。
+
+**計薪讀已核准的休假單，給付比例在 `leave_pay`。** 原本 `compute_one` 只按曆日比例與
+打卡工時算，事假、病假照發全薪，而時薪員工的特休與病假一毛不給。現在每張已准的單
+依各日的上班時間比例分攤到它碰到的每一天——分攤的是單上存下的時數與天數，送出當下
+就定了——再由 `laysi_regulation::leave_paid_days` 依各日適用的 `leave_pay` 回答那一天
+付了幾天的工資。月薪制扣掉沒付的那一份，一日是月薪除以當月曆日，與到職當月按曆日
+比例計薪同一套；時薪制加上付了的那一份時數。每個假別各自四捨五入成一筆，寫進薪資單
+備註，所以備註加得起來等於本薪的變動。
+**病假的每年 30 日折半與生理假的併入按曆年算**（使用者決定），從 1/1 起逐日累計，所以
+`run_payroll` 讀當年 1/1 起的休假單，不只是本期的。產假看請假當天的年資。
+**`attendance_checks` 只列不扣**：曠職可能是漏打卡、待簽核的單可能被駁回、兼職排班日
+遇國定假日要有約定排班才知道（#3），三者都要有人看過，而自動扣錯人比晚一期補發更糟。
+**新領域要到得了既有安裝**：`seed_regulations()` 補寫沒有任何版本的領域，並以 feed 的
+同一個名稱記進 `reg_update`；不然升級後第一次計薪就停在「查無 leave_pay」，要等管理員
+按「檢查法規更新」。
 
 **名冊回傳底薪與三個投保級距。** 原本不回，於是全系統沒有一頁看得到某個人現在的
 本薪：調薪要憑記憶，編輯抽屜也無法把「留空＝不動」的那個「原值」顯示出來。這不是
@@ -2822,9 +2838,9 @@ offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），�
 - **`ON CONFLICT (domain, version) DO NOTHING`**。管理員搶先自己建過同一版就不動它。
 - **一個資料庫只套用一次**。記錄列與 ruleset 同一個交易，先寫記錄再寫版本，所以兩台
   伺服器同時更新時第二台會擋在主鍵上、然後看到零列。刪掉的版本不會在下一次更新回來——
-  這正是 `seed_regulations()` 的「只在表空時寫」要守的性質，改用一次性的記錄之後不必
-  再要求整張表是空的。**唯一的缺口是出廠版本**：記住的是修法，而出廠那一批由
-  `seed_regulations()` 寫入時不留記錄，所以在第一次更新之前刪掉的出廠版本會回來一次。
+  這正是 `seed_regulations()` 的「只寫還沒有任何版本的領域」要守的性質；它現在也以同一個
+  名稱記錄寫過的出廠版本。**唯一的缺口是請假工資之前的出廠版本**：當時的
+  `seed_regulations()` 寫入時不留記錄，所以在第一次更新之前刪掉的那些會回來一次。
 - **`file` 一旦發布就不能改**。它是 `reg_update` 的鍵；換一個名字等於要每個安裝再套用
   一次，包括刻意把那一版刪掉的那些。它帶著 `.sql` 尾綴，那是更新走 `include_str!` 那
   幾版留下的檔名，留著才不會對已經收過的安裝再送一次。
@@ -2948,7 +2964,7 @@ BLAKE3，認得出是不是同一台機器，認不出那是誰。
 得知。
 
 真正沒有對外連線的安裝本來也撐不住這個產品：`refresh_regulations` 與
-`refresh_work_calendar` 都取不到，`seed_regulations()` 只在表空時寫，於是費率永遠停在出廠
+`refresh_work_calendar` 都取不到，`seed_regulations()` 只補沒有任何版本的領域，於是費率永遠停在出廠
 映像那一版而畫面上沒有任何跡象——一個算錯勞健保又報錯扣繳的安裝，比一個過期的安裝糟。
 遠端連接器（`/mcp` 的 OAuth）同樣要對得到外面。授權要撤銷得掉、費率要跟得上，兩件事指向
 同一個前提。

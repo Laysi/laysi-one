@@ -533,24 +533,32 @@ impl Store {
         Ok(row.and_then(|r| r.try_get::<Option<i64>, _>("v").ok().flatten()))
     }
 
-    /// Fill an empty `reg_ruleset` with the factory set.
+    /// Write the factory set for every domain the table holds no version of.
     ///
-    /// Only when it is empty. The table is the authority from the first boot
-    /// onwards: a corrected rate has to survive the next start, and so does a
-    /// deleted version -- seeding row by row would put a superseded version
-    /// back the moment anything reloaded. A newly published year is added as a
-    /// version on the 法規版本 screen, or as a migration. Returns how many rows
-    /// were written.
+    /// A domain that holds anything is left alone. The table is the authority
+    /// from the first boot onwards: a corrected rate has to survive the next
+    /// start, and so does a deleted version -- seeding row by row would put a
+    /// superseded version back the moment anything reloaded.
+    ///
+    /// A domain with no version at all is one this database has never had,
+    /// because `delete_regulation` refuses a domain's last version: on a fresh
+    /// install that is every domain, and on an upgrade it is a domain the new
+    /// release brings. Each write is claimed in `reg_update` under the name
+    /// the published feed gives the same file (`scripts/regulation-manifest.ts`:
+    /// effective date and file name, and the file is named after its domain),
+    /// so the feed does not deliver it twice and a deletion after this stays
+    /// deleted. Returns how many rows were written.
     pub async fn seed_regulations(&self) -> Result<u64> {
-        let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reg_ruleset")
-            .fetch_one(&self.pool)
+        let present: Vec<String> = sqlx::query_scalar("SELECT DISTINCT domain FROM reg_ruleset")
+            .fetch_all(&self.pool)
             .await?;
-        if existing > 0 {
-            return Ok(0);
-        }
         let mut n = 0;
         for rs in laysi_regulation::seed() {
-            n += self.write_regulation(&rs, false).await?;
+            if present.contains(&rs.domain) {
+                continue;
+            }
+            let file = format!("{}_{}.sql", rs.effective_from, rs.domain);
+            n += u64::from(self.apply_regulation_update(&file, &rs).await?);
         }
         Ok(n)
     }
@@ -10747,10 +10755,10 @@ mod tests {
             "刪掉唯一一版之後應該算不出來，而不是回退到出廠值"
         );
 
-        // Put the factory row back. `seed_regulations` only writes while the
-        // table is empty, so a deleted version stays deleted -- which is the
-        // property above, and which leaves the next run of this test one row
-        // short of the count it opens with.
+        // Put the factory row back. `seed_regulations` does not write a
+        // domain it has written before, so a deleted version stays deleted --
+        // which is the property above, and which leaves the next run of this
+        // test one row short of the count it opens with.
         let factory = laysi_regulation::seed()
             .into_iter()
             .find(|r| r.domain == "labor_insurance")

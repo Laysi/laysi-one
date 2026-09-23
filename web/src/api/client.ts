@@ -1886,6 +1886,16 @@ export const payrollRunResult = z.object({
   voucher: voucher,
   skipped: z.array(z.object({ emp_no: z.string(), name: z.string(), reason: z.string() })),
   warnings: z.array(z.object({ emp_no: z.string(), name: z.string(), issue: z.string() })),
+  attendance_checks: z.array(
+    z.object({
+      emp_no: z.string(),
+      name: z.string(),
+      absent_dates: z.array(z.string()),
+      open_dates: z.array(z.string()),
+      pending_leaves: z.array(z.string()),
+      holiday_dates: z.array(z.string()),
+    }),
+  ),
   deduction_breakdown: z.object({ labor_employee: z.string(), health_employee: z.string(), income_tax: z.string() }),
   withholding: z.object({
     income_code: z.string(),
