@@ -6054,13 +6054,35 @@ impl Store {
         include_done: bool,
         limit: i64,
     ) -> Result<Vec<LeaveRequest>> {
-        self.leave_requests_filtered(include_done, limit, None)
+        self.leave_requests_filtered(include_done, limit, None, None)
             .await
     }
 
     /// All leave requests for one employee, including decided history.
     pub async fn leave_requests_by_employee(&self, employee_id: i32) -> Result<Vec<LeaveRequest>> {
-        self.leave_requests_filtered(true, i64::MAX, Some(employee_id))
+        self.leave_requests_filtered(true, i64::MAX, Some(employee_id), None)
+            .await
+    }
+
+    /// How many leave requests are waiting for a decision, company-wide.
+    pub async fn pending_leave_count(&self) -> Result<i64> {
+        Ok(
+            sqlx::query("SELECT count(*) AS n FROM leave_request WHERE status = 'pending'")
+                .fetch_one(&self.pool)
+                .await?
+                .get("n"),
+        )
+    }
+
+    /// Leave requests for one employee, or touching any date of a span, or
+    /// both. A request crossing a month boundary belongs to both months.
+    pub async fn leave_requests_matching(
+        &self,
+        include_done: bool,
+        employee_id: Option<i32>,
+        span: Option<(NaiveDate, NaiveDate)>,
+    ) -> Result<Vec<LeaveRequest>> {
+        self.leave_requests_filtered(include_done, i64::MAX, employee_id, span)
             .await
     }
 
@@ -6069,6 +6091,7 @@ impl Store {
         include_done: bool,
         limit: i64,
         employee_id: Option<i32>,
+        span: Option<(NaiveDate, NaiveDate)>,
     ) -> Result<Vec<LeaveRequest>> {
         Ok(sqlx::query(
             "SELECT l.id, l.leave_no, l.employee_id, e.emp_no, e.name,
@@ -6084,12 +6107,16 @@ impl Store {
                LEFT JOIN role r            ON r.code = l.decided_role
               WHERE ($1 OR l.status = 'pending')
                 AND ($3::int IS NULL OR l.employee_id = $3)
+                AND ($4::date IS NULL OR l.to_on >= $4)
+                AND ($5::date IS NULL OR l.from_on <= $5)
               ORDER BY l.from_on DESC, l.id DESC
               LIMIT $2",
         )
         .bind(include_done)
         .bind(limit)
         .bind(employee_id)
+        .bind(span.map(|(from, _)| from))
+        .bind(span.map(|(_, to)| to))
         .fetch_all(&self.pool)
         .await?
         .iter()

@@ -14,6 +14,7 @@ import {
   type PunchDay,
   type WorkSchedule,
 } from '../api/client';
+import { DayMarks } from '../components/DayMarks';
 import { PunchTrail } from '../components/PunchTrail';
 import { TimeField } from '../components/TimeField';
 
@@ -365,7 +366,10 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
           <div className="stat-card__kicker">{monthLabel} 遲到</div>
           <div className="stat-card__value num">{s.late_days ?? '—'}</div>
           <div className="stat-card__note num">
-            {s.late_days == null ? '未設定上班時間' : `日 · 未打下班 ${s.open_days} 日`}
+            {s.late_days == null
+              ? '未設定上班時間'
+              : `日 · 未打下班 ${s.open_days} 日` +
+                (s.absent_days > 0 ? ` · 曠職 ${s.absent_days} 日` : '')}
           </div>
         </div>
       </div>
@@ -415,8 +419,8 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
               {data.days.map((d) => {
                 const tag = dayTag(d);
                 const trail = byDay.get(d.date) ?? [];
-                const rest = d.weekday === '六' || d.weekday === '日';
                 const blank = !d.in_at && !d.out_at;
+                const rest = !d.works;
                 return (
                   <Fragment key={d.date}>
                     <tr
@@ -427,11 +431,19 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
                       <td className="num cell-nowrap">
                         {d.date.slice(5)}
                         <span className="cell-hint">（{d.weekday}）</span>
+                        {d.day_name && (
+                          <span className="cell-hint cell-hint--block">{d.day_name}</span>
+                        )}
                       </td>
-                      <td className="num align-right">{slotCell(d, 'in')}</td>
-                      <td className="num align-right">{slotCell(d, 'out')}</td>
+                      <td className="num align-right">
+                        {rest && blank ? '—' : slotCell(d, 'in')}
+                      </td>
+                      <td className="num align-right">
+                        {rest && blank ? '—' : slotCell(d, 'out')}
+                      </td>
                       <td className="num align-right">{d.worked_hours ?? '—'}</td>
                       <td>
+                        <DayMarks day={d} />
                         {tag && <span className={tag.className}>{tag.label}</span>}
                         {d.over_overtime_limit && (
                           <span className="tag tag--alarm tag--static">

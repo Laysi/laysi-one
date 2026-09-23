@@ -16,6 +16,7 @@ import {
   type PunchCorrectionList,
 } from '../api/client';
 import { DateField } from '../components/DateField';
+import { DayMarks } from '../components/DayMarks';
 import { PunchTrail } from '../components/PunchTrail';
 import { useCurrentUser } from '../auth';
 import { RulesetNote } from '../components/RulesetNote';
@@ -69,23 +70,25 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       live = false;
     };
     setError(null);
-    Promise.all([
-      callOp('list_leave_requests', { include_done: includeDone }, undefined, leaveRequestList),
-      callOp(
-        'list_attendance_punches',
-        {
-          ...(month ? { month } : {}),
-          ...(picked ? { emp_no: picked } : {}),
-        },
-        undefined,
-        attendancePunchList,
-      ),
-    ])
-      .then(([l, p]) => {
-        if (!live) return;
-        setLeave(l);
-        setPunches(p);
-      })
+    const who = picked ? { emp_no: picked } : {};
+    callOp(
+      'list_attendance_punches',
+      { ...(month ? { month } : {}), ...who },
+      undefined,
+      attendancePunchList,
+    )
+      .then((p) =>
+        callOp(
+          'list_leave_requests',
+          { include_done: includeDone, month: p.month, ...who },
+          undefined,
+          leaveRequestList,
+        ).then((l) => {
+          if (!live) return;
+          setLeave(l);
+          setPunches(p);
+        }),
+      )
       .catch((e: Error) => live && setError(e.message));
     return () => running.current?.();
   }, [month, includeDone, picked]);
@@ -263,7 +266,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
               </button>
             ))}
             <span className="spacer" />
-            <span className="section-note">{punches.rows.length} 人有打卡紀錄</span>
+            <span className="section-note">{punches.rows.length} 人</span>
           </div>
 
           {punches && (
@@ -291,6 +294,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       <th className="align-right">時數</th>
                       <th className="align-right">遲到</th>
                       <th className="align-right">未打下班</th>
+                      <th className="align-right">曠職</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -326,12 +330,13 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                         <td className="num align-right">{r.summary.worked_hours}</td>
                         <td className="num align-right">{r.summary.late_days ?? '—'}</td>
                         <td className="num align-right">{r.summary.open_days}</td>
+                        <td className="num align-right">{r.summary.absent_days}</td>
                       </tr>
                     ))}
                     {punches.rows.length === 0 && (
                       <tr>
-                        <td colSpan={5} className="cell-muted">
-                          {punches.month} 尚無打卡紀錄。員工可於「我的 · 打卡」自行打卡。
+                        <td colSpan={6} className="cell-muted">
+                          {punches.month} 沒有在職員工。
                         </td>
                       </tr>
                     )}
@@ -343,7 +348,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                 <div className="split-columns split-columns--wide-left">
                   <section>
                     <h3 className="section-title">
-                      {punches.employee?.name} 的逐日打卡
+                      {punches.employee?.name} 的逐日出勤
                     </h3>
                     <div className="table-scroll">
                       <table className="table">
@@ -361,15 +366,29 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                             const trail = dayTrail(d.date);
                             return (
                               <Fragment key={d.date}>
-                                <tr className={d.open ? 'row--pending' : undefined}>
+                                <tr
+                                  className={
+                                    d.open
+                                      ? 'row--pending'
+                                      : !d.works && !d.in_at && !d.out_at
+                                        ? 'row--rest'
+                                        : undefined
+                                  }
+                                >
                                   <td className="num cell-nowrap">
                                     {d.date.slice(5)}
                                     <span className="cell-hint">（{d.weekday}）</span>
+                                    {d.day_name && (
+                                      <span className="cell-hint cell-hint--block">
+                                        {d.day_name}
+                                      </span>
+                                    )}
                                   </td>
                                   <td className="num align-right">{d.in_at ?? '—'}</td>
                                   <td className="num align-right">{d.out_at ?? '—'}</td>
                                   <td className="num align-right">{d.worked_hours ?? '—'}</td>
                                   <td>
+                                    <DayMarks day={d} />
                                     {d.open && (
                                       <span className="tag tag--warn tag--static">未打下班</span>
                                     )}
@@ -764,7 +783,10 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
             </>
           )}
 
-          <h3 className="section-title section-title--spaced">休假單</h3>
+          <h3 className="section-title section-title--spaced">
+            休假單 · {punches.month}
+            {picked && punches.employee && ` · ${punches.employee.name}`}
+          </h3>
           <div className="toolbar">
             <button
               className={`chip${includeDone ? ' chip--on' : ''}`}
@@ -773,7 +795,10 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
               併同顯示已核准與已駁回
             </button>
             <span className="spacer" />
-            <span className="section-note">{leave.pending_count} 張待簽核</span>
+            <span className="section-note">
+              {leave.pending_count} 張待簽核
+              {leave.other_pending > 0 && ` · 未列出的還有 ${leave.other_pending} 張`}
+            </span>
           </div>
 
           <div className="table-scroll">
@@ -860,7 +885,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                 {leave.requests.length === 0 && (
                   <tr>
                     <td colSpan={6} className="cell-muted">
-                      沒有待簽核休假單。
+                      {includeDone ? '本月沒有休假單。' : '本月沒有待簽核的休假單。'}
                     </td>
                   </tr>
                 )}

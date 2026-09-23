@@ -60,6 +60,17 @@ fn valid_month(month: &str) -> bool {
     chrono::NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").is_ok()
 }
 
+/// The first and last date of a month already checked by [`valid_month`].
+pub(crate) fn month_span(month: &str) -> (NaiveDate, NaiveDate) {
+    let start = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
+        .expect("呼叫前已經以 valid_month 檢查過");
+    let end = start
+        .checked_add_months(Months::new(1))
+        .and_then(|next| next.pred_opt())
+        .unwrap_or(start);
+    (start, end)
+}
+
 // Clock-in records
 
 /// The two things a punch can be.
@@ -494,6 +505,7 @@ impl OvertimeLimits {
 }
 
 /// One working day of one person, built from that day's punches.
+#[derive(Default)]
 pub(crate) struct PunchDay {
     pub date: NaiveDate,
     pub arrived: Option<NaiveDateTime>,
@@ -501,6 +513,77 @@ pub(crate) struct PunchDay {
     pub arrived_source: Option<String>,
     pub left_source: Option<String>,
     pub note: String,
+    /// Leave requests, pending or approved, that cover part of this date.
+    /// Filled by [`mark_days`]; empty for a day read on its own.
+    pub leaves: Vec<DayLeave>,
+    /// A working day with no punch and no leave on file, once it is over.
+    pub absent: bool,
+}
+
+/// The part of one leave request that falls on one date.
+pub(crate) struct DayLeave {
+    pub leave_no: String,
+    pub kind: String,
+    pub status: String,
+    /// Working seconds of the request on this date, or `None` without both
+    /// work times.
+    pub seconds: Option<i64>,
+}
+
+/// Employment types absence is not judged for. A part timer works the days
+/// agreed with them, and the roster does not record which those are, so every
+/// other weekday would read as a missed day.
+//
+// ponytail: part timers are skipped wholesale until #3 records agreed working
+// days; then absence can be judged against those instead.
+const NO_ABSENCE_JUDGED: &[&str] = &["part_time"];
+
+/// Whether a missing day counts as absence for this person under this
+/// schedule. Without a start time the company has not said when a day
+/// begins, which is the same reason lateness is not judged then.
+pub(crate) fn judges_absence(schedule: &WorkSchedule, employment_type: &str) -> bool {
+    schedule.starts_at.is_some() && !NO_ABSENCE_JUDGED.contains(&employment_type)
+}
+
+/// Attach leave to each day and mark the days nobody accounted for.
+///
+/// `leaves` are one person's requests; rejected ones are ignored. A day is
+/// absent when the calendar calls it a working day, it ended before `today`,
+/// and it has neither a punch nor a leave request. A request still waiting
+/// for a decision counts: whether it will be granted is a question for the
+/// approver, and calling the day absent in the meantime answers it for them.
+pub(crate) fn mark_days(
+    days: &mut [PunchDay],
+    leaves: &[&LeaveRequest],
+    schedule: &WorkSchedule,
+    judge_absence: bool,
+    today: NaiveDate,
+) {
+    for day in days.iter_mut() {
+        let (open, close) = (
+            day.date.and_time(NaiveTime::MIN),
+            day.date.and_time(NaiveTime::MIN) + chrono::Duration::days(1),
+        );
+        day.leaves = leaves
+            .iter()
+            .filter(|l| l.status != "rejected" && l.from_at < close && l.to_at > open)
+            .map(|l| DayLeave {
+                leave_no: l.leave_no.clone(),
+                kind: l.kind.clone(),
+                status: l.status.clone(),
+                seconds: schedule.leave_seconds(l.from_at.max(open), l.to_at.min(close)),
+            })
+            // A range across a weekend or a holiday takes nothing from those
+            // dates, and printing it there reads as leave taken on a day off.
+            .filter(|l| l.seconds != Some(0))
+            .collect();
+        day.absent = judge_absence
+            && day.date < today
+            && schedule.day_kind(day.date).works()
+            && day.arrived.is_none()
+            && day.left.is_none()
+            && day.leaves.is_empty();
+    }
 }
 
 impl PunchDay {
@@ -526,9 +609,23 @@ impl PunchDay {
             .left
             .and_then(|l| schedule.overtime_seconds(self.arrived, l));
         let day_type = limits.day_type(schedule, self.date);
+        let kind = schedule.day_kind(self.date);
         json!({
             "date": self.date,
             "weekday": weekday_label(self.date),
+            "day_kind": kind.code(),
+            "day_type_label": kind.label(),
+            "day_name": schedule.day_name(self.date),
+            "works": kind.works(),
+            "leaves": self.leaves.iter().map(|l| json!({
+                "leave_no": l.leave_no,
+                "kind": l.kind,
+                "kind_label": leave_kind_label(&l.kind),
+                "status": l.status,
+                "status_label": leave_status_label(&l.status),
+                "hours": l.seconds.map(|s| hours(s).to_string()),
+            })).collect::<Vec<_>>(),
+            "absent": self.absent,
             "in_at": clock(self.arrived),
             "out_at": clock(self.left),
             "in_source": self.arrived_source,
@@ -544,7 +641,6 @@ impl PunchDay {
                 .expected_end(self.date, self.arrived)
                 .map(|t| t.format(PUNCH_TIME).to_string()),
             "overtime_seconds": overtime,
-            "day_type_label": day_type.map(|t| t.label.clone()),
             "overtime_limit_hours": day_type.map(|t| t.max_hours.normalize().to_string()),
             "over_overtime_limit": overtime.is_some_and(|s| limits.over_daily(schedule, self.date, s)),
             "note": self.note,
@@ -580,11 +676,7 @@ pub(crate) fn punch_days(punches: &[AttendancePunch], offset: FixedOffset) -> Ve
         if days.last().map(|d| d.date) != Some(punch.punched_on) {
             days.push(PunchDay {
                 date: punch.punched_on,
-                arrived: None,
-                left: None,
-                arrived_source: None,
-                left_source: None,
-                note: String::new(),
+                ..Default::default()
             });
         }
         let day = days.last_mut().expect("剛才推入了一天");
@@ -630,11 +722,7 @@ pub(crate) fn month_days(
         while date <= stop {
             by_date.entry(date).or_insert_with(|| PunchDay {
                 date,
-                arrived: None,
-                left: None,
-                arrived_source: None,
-                left_source: None,
-                note: String::new(),
+                ..Default::default()
             });
             match date.succ_opt() {
                 Some(next) => date = next,
@@ -656,6 +744,8 @@ pub(crate) struct PunchSummary {
     pub late_days: Option<i64>,
     pub overtime_seconds: Option<i64>,
     pub manual_days: i64,
+    /// Working days with no punch and no leave, as [`mark_days`] judged them.
+    pub absent_days: i64,
     /// Days whose overtime is past what that kind of day allows.
     pub over_limit_days: i64,
     /// Whether the month's overtime is past the monthly ceiling.
@@ -693,6 +783,7 @@ pub(crate) fn summarise(
                     || d.left_source.as_deref() == Some("manual")
             })
             .count() as i64,
+        absent_days: days.iter().filter(|d| d.absent).count() as i64,
         over_limit_days: days
             .iter()
             .filter(|d| overtime(d).is_some_and(|s| limits.over_daily(schedule, d.date, s)))
@@ -714,6 +805,7 @@ impl PunchSummary {
             "overtime_seconds": self.overtime_seconds,
             "overtime_hours": self.overtime_seconds.map(|s| hours(s).to_string()),
             "manual_days": self.manual_days,
+            "absent_days": self.absent_days,
             "over_limit_days": self.over_limit_days,
             "over_monthly_limit": self.over_monthly_limit,
             "monthly_max_hours": self.monthly_max_hours.normalize().to_string(),
@@ -871,36 +963,53 @@ impl Operation for ListAttendancePunches {
             Some(emp_no) => Some(ctx.store.employee(emp_no).await?),
         };
 
+        let (start, end) = month_span(&month);
         let schedule = WorkSchedule::load(ctx).await?;
         let limits = OvertimeLimits::resolve(ctx.today)?;
-        let punches = ctx
+        let only_id = only.as_ref().map(|e| e.id);
+        let punches = ctx.store.punches(&month, only_id).await?;
+        let leaves = ctx
             .store
-            .punches(&month, only.as_ref().map(|e| e.id))
+            .leave_requests_matching(true, only_id, Some((start, end)))
             .await?;
+        // The real date, as for the punches themselves: a day is only missed
+        // once it is over, and `LAYSI_TODAY` does not move the clock.
+        let today = business_time(Utc::now(), ctx.offset).date();
 
-        // One bucket per person, keyed by employee rather than by name:
-        // display names collide.
-        let mut by_employee: BTreeMap<i32, Vec<AttendancePunch>> = BTreeMap::new();
-        for punch in punches {
-            by_employee
-                .entry(punch.employee_id)
-                .or_default()
-                .push(punch);
-        }
+        // Everybody employed during the month, not only those who punched:
+        // somebody who never clocked in is the row this screen exists for.
+        let staff = ctx
+            .store
+            .employees(true, None)
+            .await?
+            .into_iter()
+            .filter(|e| only_id.is_none_or(|id| id == e.id))
+            .filter(|e| {
+                (e.hired_on <= end && e.left_on.is_none_or(|left| left >= start))
+                    || punches.iter().any(|p| p.employee_id == e.id)
+            });
 
         let mut rows = Vec::new();
         let mut detail = Value::Null;
-        for (employee_id, punches) in &by_employee {
-            let days = punch_days(punches, ctx.offset);
-            let summary = summarise(&days, &schedule, &limits);
-            let first = &punches[0];
+        for e in staff {
+            let theirs: Vec<AttendancePunch> = punches
+                .iter()
+                .filter(|p| p.employee_id == e.id)
+                .cloned()
+                .collect();
+            let last = e.left_on.map_or(today, |left| left.min(today));
+            let mut days = month_days(punch_days(&theirs, ctx.offset), &month, e.hired_on, last);
+            let requests: Vec<&LeaveRequest> =
+                leaves.iter().filter(|l| l.employee_id == e.id).collect();
+            let judge = judges_absence(&schedule, &e.employment_type);
+            mark_days(&mut days, &requests, &schedule, judge, today);
             rows.push(json!({
-                "emp_no": first.emp_no,
-                "name": first.name,
-                "dept_label": first.dept_label,
-                "summary": summary.json(),
+                "emp_no": e.emp_no,
+                "name": e.name,
+                "dept_label": e.dept_label,
+                "summary": summarise(&days, &schedule, &limits).json(),
             }));
-            if only.as_ref().is_some_and(|e| e.id == *employee_id) {
+            if only_id == Some(e.id) {
                 detail = json!(days
                     .iter()
                     .map(|d| d.json(&schedule, &limits))
@@ -908,12 +1017,11 @@ impl Operation for ListAttendancePunches {
             }
         }
 
-        let open_days: i64 = rows
-            .iter()
-            .filter_map(|r| r["summary"]["open_days"].as_i64())
-            .sum();
+        let total =
+            |key: &str| -> i64 { rows.iter().filter_map(|r| r["summary"][key].as_i64()).sum() };
+        let (open_days, absent_days) = (total("open_days"), total("absent_days"));
         let summary = format!(
-            "讀 {month} 打卡 · {} 人有紀錄 · {open_days} 天只打上班沒打下班",
+            "讀 {month} 出勤 · {} 人 · {open_days} 天只打上班沒打下班 · {absent_days} 天沒有打卡也沒有休假",
             rows.len()
         );
 
@@ -926,6 +1034,7 @@ impl Operation for ListAttendancePunches {
                 "employee": only.as_ref().map(|e| json!({ "emp_no": e.emp_no, "name": e.name })),
                 "days": detail,
                 "open_days": open_days,
+                "absent_days": absent_days,
             }),
             summary,
         ))
@@ -1054,6 +1163,12 @@ pub struct ListLeaveRequestsInput {
     /// Maximum rows. Omit for no additional limit.
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Month (YYYY-MM). Only requests touching that month; omit for all.
+    #[serde(default)]
+    pub month: Option<String>,
+    /// Employee number. Only that person's requests; omit for everybody.
+    #[serde(default)]
+    pub emp_no: Option<String>,
 }
 
 #[async_trait]
@@ -1080,10 +1195,34 @@ impl Operation for ListLeaveRequests {
             return Err(OpError::BadInput("查詢筆數要大於零".into()));
         }
 
-        let requests = ctx
-            .store
-            .leave_requests(i.include_done, i.limit.unwrap_or(DEFAULT_LEAVE_LIMIT))
-            .await?;
+        if let Some(month) = i.month.as_deref().filter(|m| !valid_month(m)) {
+            return Err(OpError::BadInput(format!(
+                "月份要寫成 YYYY-MM，收到的是「{month}」"
+            )));
+        }
+        let only = match &i.emp_no {
+            None => None,
+            Some(emp_no) => Some(ctx.store.employee(emp_no).await?.id),
+        };
+        let mut requests = match (i.month.as_deref(), only) {
+            (None, None) => {
+                ctx.store
+                    .leave_requests(i.include_done, i.limit.unwrap_or(DEFAULT_LEAVE_LIMIT))
+                    .await?
+            }
+            (month, _) => {
+                ctx.store
+                    .leave_requests_matching(i.include_done, only, month.map(month_span))
+                    .await?
+            }
+        };
+        if let Some(limit) = i.limit {
+            requests.truncate(limit as usize);
+        }
+        // Narrowing to a month must not hide a request waiting for a
+        // decision: this list is where it gets one.
+        let listed_pending = requests.iter().filter(|r| r.status == "pending").count() as i64;
+        let other_pending = (ctx.store.pending_leave_count().await? - listed_pending).max(0);
         let staff = ctx.store.employees(true, None).await?;
         let rs = laysi_regulation::resolve("annual_leave", ctx.today)?;
         let taken = ctx.store.annual_leave_taken(ctx.today.year()).await?;
@@ -1153,6 +1292,7 @@ impl Operation for ListLeaveRequests {
             json!({
                 "requests": rows,
                 "pending_count": pending,
+                "other_pending": other_pending,
                 "annual_leave_balances": annual_balances,
                 "annual_leave_year": ctx.today.year(),
                 "annual_leave_ruleset": ruleset_json(rs),
@@ -2292,5 +2432,163 @@ mod tests {
         let after = annual_entitlement_for_service(&changed, months).unwrap();
 
         assert_ne!(before, after);
+    }
+
+    fn leave(no: &str, kind: &str, status: &str, from: &str, to: &str) -> LeaveRequest {
+        let at = |v: &str| NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M").unwrap();
+        let (from_at, to_at) = (at(from), at(to));
+        LeaveRequest {
+            leave_no: no.into(),
+            employee_id: 1,
+            emp_no: "E003".into(),
+            name: "黃柏叡".into(),
+            dept_label: None,
+            kind: kind.into(),
+            from_at,
+            to_at,
+            from_on: from_at.date(),
+            to_on: to_at.date(),
+            hours: Money::ZERO,
+            days: Money::ZERO,
+            reason: String::new(),
+            status: status.into(),
+            decided_by: String::new(),
+            decided_role: String::new(),
+            decided_at: None,
+            decision_note: String::new(),
+            created_at: Utc::now(),
+            created_by: String::new(),
+        }
+    }
+
+    /// Absence is a working day that is over, with neither a punch nor a
+    /// leave request that has not been turned down.
+    #[test]
+    fn a_missed_day_is_a_working_day_with_nothing_on_file() {
+        let on = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+        let mut sched = schedule(Some("09:00"), Some("17:00"), 0);
+        sched.break_start = NaiveTime::from_hms_opt(12, 0, 0);
+        sched.break_end = NaiveTime::from_hms_opt(13, 0, 0);
+        sched
+            .calendar
+            .insert(on("2026-06-19"), (DayKind::Holiday, "端午節".into()));
+        let punched = punch_days(
+            &[
+                punch("2026-06-15", "in", "08:55", "self"),
+                punch("2026-06-15", "out", "17:05", "self"),
+            ],
+            tz(),
+        );
+        let requests = [
+            leave(
+                "LV1",
+                "personal",
+                "approved",
+                "2026-06-17T13:00",
+                "2026-06-17T17:00",
+            ),
+            leave(
+                "LV2",
+                "sick",
+                "pending",
+                "2026-06-18T09:00",
+                "2026-06-18T17:00",
+            ),
+            leave(
+                "LV3",
+                "sick",
+                "rejected",
+                "2026-06-16T09:00",
+                "2026-06-16T17:00",
+            ),
+            leave(
+                "LV4",
+                "annual",
+                "approved",
+                "2026-06-23T13:00",
+                "2026-06-24T12:00",
+            ),
+            leave(
+                "LV5",
+                "annual",
+                "approved",
+                "2026-06-19T09:00",
+                "2026-06-21T17:00",
+            ),
+        ];
+        let mut days = month_days(punched, "2026-06", on("2026-06-15"), on("2026-06-24"));
+        mark_days(
+            &mut days,
+            &requests.iter().collect::<Vec<_>>(),
+            &sched,
+            true,
+            on("2026-06-24"),
+        );
+        let absent: Vec<String> = days
+            .iter()
+            .filter(|d| d.absent)
+            .map(|d| d.date.to_string())
+            .collect();
+
+        // 06-16 has only a rejected request and 06-22 nothing at all; the
+        // holiday, the weekend and today are not missed days.
+        assert_eq!(absent, ["2026-06-16", "2026-06-22"]);
+        let hours_on = |d: &str| {
+            days.iter()
+                .find(|day| day.date == on(d))
+                .unwrap()
+                .leaves
+                .iter()
+                .map(|l| (l.leave_no.clone(), l.seconds))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hours_on("2026-06-17"), [("LV1".into(), Some(4 * 3600))]);
+        assert_eq!(hours_on("2026-06-18"), [("LV2".into(), Some(7 * 3600))]);
+        assert_eq!(hours_on("2026-06-23"), [("LV4".into(), Some(4 * 3600))]);
+        assert_eq!(hours_on("2026-06-24"), [("LV4".into(), Some(3 * 3600))]);
+        assert!(hours_on("2026-06-16").is_empty(), "駁回的單不算請假");
+        for off in ["2026-06-19", "2026-06-20", "2026-06-21"] {
+            assert!(hours_on(off).is_empty(), "{off} 不是工作日，休假單不佔那天");
+        }
+
+        mark_days(&mut days, &[], &sched, false, on("2026-06-24"));
+        assert!(days.iter().all(|d| !d.absent), "不判定時一天都不算曠職");
+    }
+
+    #[test]
+    fn absence_needs_a_start_time_and_is_not_judged_for_part_timers() {
+        let office = schedule(Some("09:00"), Some("17:00"), 0);
+        assert!(judges_absence(&office, "full_time"));
+        assert!(judges_absence(&office, "contract"));
+        assert!(!judges_absence(&office, "part_time"));
+        assert!(!judges_absence(
+            &schedule(None, Some("17:00"), 0),
+            "full_time"
+        ));
+    }
+
+    /// The label a screen prints is the kind of day, not the overtime price:
+    /// a Sunday is a regular leave day and a holiday is named.
+    #[test]
+    fn a_day_is_labelled_by_its_kind_and_named_by_the_calendar() {
+        let on = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+        let mut sched = schedule(Some("09:00"), Some("17:00"), 0);
+        sched
+            .calendar
+            .insert(on("2026-06-19"), (DayKind::Holiday, "端午節".into()));
+        let limits = OvertimeLimits::resolve(on("2026-06-19")).unwrap();
+        let json_of = |d: &str| {
+            PunchDay {
+                date: on(d),
+                ..Default::default()
+            }
+            .json(&sched, &limits)
+        };
+        assert_eq!(json_of("2026-06-21")["day_type_label"], "例假");
+        assert_eq!(json_of("2026-06-20")["day_type_label"], "休息日");
+        assert_eq!(json_of("2026-06-19")["day_type_label"], "國定假日");
+        assert_eq!(json_of("2026-06-19")["day_name"], "端午節");
+        assert_eq!(json_of("2026-06-19")["works"], false);
+        assert_eq!(json_of("2026-06-18")["works"], true);
     }
 }

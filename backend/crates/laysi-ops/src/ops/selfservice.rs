@@ -34,10 +34,10 @@
 //! two numbers on the request cannot disagree with the range above them.
 
 use crate::ops::attendance::{
-    business_instant, correction_auto_approves, leave_kind_label, leave_status_label, month_days,
-    overtime_json, punch_correction_json, punch_correction_status_label, punch_days,
-    punch_kind_label, summarise, valid_leave_kind, OvertimeLimits, WorkSchedule, LEAVE_KINDS,
-    PUNCH_KINDS, PUNCH_TIME,
+    business_instant, correction_auto_approves, judges_absence, leave_kind_label,
+    leave_status_label, mark_days, month_days, month_span, overtime_json, punch_correction_json,
+    punch_correction_status_label, punch_days, punch_kind_label, summarise, valid_leave_kind,
+    OvertimeLimits, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
@@ -1418,17 +1418,28 @@ impl Operation for ListMyPunches {
             ctx.offset,
         );
         let limits = OvertimeLimits::resolve(ctx.today)?;
-        let stats = summarise(&punched, &schedule, &limits);
 
         let local_today = laysi_domain::business_time(Utc::now(), ctx.offset).date();
         // Days without a punch are rows too: they are the ones a correction is
         // asked for, and the screen offers the correction on the day itself.
-        let days = month_days(
+        let mut days = month_days(
             punched,
             &month,
             employee.hired_on,
             employee.left_on.unwrap_or(local_today).min(local_today),
         );
+        let leaves = ctx
+            .store
+            .leave_requests_matching(true, Some(employee.id), Some(month_span(&month)))
+            .await?;
+        mark_days(
+            &mut days,
+            &leaves.iter().collect::<Vec<_>>(),
+            &schedule,
+            judges_absence(&schedule, &employee.employment_type),
+            local_today,
+        );
+        let stats = summarise(&days, &schedule, &limits);
 
         // The card at the top is always about today, so browsing an earlier
         // month must not answer "what next" from a month today is not in.
