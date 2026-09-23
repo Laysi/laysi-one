@@ -1432,11 +1432,19 @@ impl Operation for ListMyPunches {
             .store
             .leave_requests_matching(true, Some(employee.id), Some(month_span(&month)))
             .await?;
+        let awaiting: Vec<NaiveDate> = ctx
+            .store
+            .punch_corrections(false, Some(employee.id))
+            .await?
+            .iter()
+            .map(|c| c.punched_on)
+            .collect();
         mark_days(
             &mut days,
             &leaves.iter().collect::<Vec<_>>(),
+            &awaiting,
             &schedule,
-            judges_absence(&schedule, &employee.employment_type),
+            judges_absence(&schedule, &employee.employment_type, &employee.insured_as),
             local_today,
         );
         let stats = summarise(&days, &schedule, &limits);

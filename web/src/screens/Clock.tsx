@@ -435,12 +435,8 @@ export function Clock({ onToast, reloadKey, onChanged }: Props) {
                           <span className="cell-hint cell-hint--block">{d.day_name}</span>
                         )}
                       </td>
-                      <td className="num align-right">
-                        {rest && blank ? '—' : slotCell(d, 'in')}
-                      </td>
-                      <td className="num align-right">
-                        {rest && blank ? '—' : slotCell(d, 'out')}
-                      </td>
+                      <td className="num align-right">{slotCell(d, 'in')}</td>
+                      <td className="num align-right">{slotCell(d, 'out')}</td>
                       <td className="num align-right">{d.worked_hours ?? '—'}</td>
                       <td>
                         <DayMarks day={d} />

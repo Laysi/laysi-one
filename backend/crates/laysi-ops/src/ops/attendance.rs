@@ -17,7 +17,7 @@
 //! layer. Whether the request is still pending is decided by the store during
 //! the update, so two managers acting at once cannot both win.
 
-use crate::ops::employees::{service_months, BASIS_HOURLY};
+use crate::ops::employees::{service_months, BASIS_HOURLY, INSURED_OWNER};
 use crate::ops::insurance::ruleset_json;
 use crate::ops::settings::{deciding_as, own_request_refusal};
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
@@ -540,21 +540,30 @@ const NO_ABSENCE_JUDGED: &[&str] = &["part_time"];
 
 /// Whether a missing day counts as absence for this person under this
 /// schedule. Without a start time the company has not said when a day
-/// begins, which is the same reason lateness is not judged then.
-pub(crate) fn judges_absence(schedule: &WorkSchedule, employment_type: &str) -> bool {
-    schedule.starts_at.is_some() && !NO_ABSENCE_JUDGED.contains(&employment_type)
+/// begins, which is the same reason lateness is not judged then. An owner
+/// insured as one is the employer, not someone whose attendance is kept.
+pub(crate) fn judges_absence(
+    schedule: &WorkSchedule,
+    employment_type: &str,
+    insured_as: &str,
+) -> bool {
+    schedule.starts_at.is_some()
+        && !NO_ABSENCE_JUDGED.contains(&employment_type)
+        && insured_as != INSURED_OWNER
 }
 
 /// Attach leave to each day and mark the days nobody accounted for.
 ///
 /// `leaves` are one person's requests; rejected ones are ignored. A day is
 /// absent when the calendar calls it a working day, it ended before `today`,
-/// and it has neither a punch nor a leave request. A request still waiting
-/// for a decision counts: whether it will be granted is a question for the
-/// approver, and calling the day absent in the meantime answers it for them.
+/// and it has neither a punch, a leave request, nor a punch correction under
+/// review (`awaiting_fix`). A request still waiting for a decision counts:
+/// whether it will be granted is a question for the approver, and calling
+/// the day absent in the meantime answers it for them.
 pub(crate) fn mark_days(
     days: &mut [PunchDay],
     leaves: &[&LeaveRequest],
+    awaiting_fix: &[NaiveDate],
     schedule: &WorkSchedule,
     judge_absence: bool,
     today: NaiveDate,
@@ -582,7 +591,8 @@ pub(crate) fn mark_days(
             && schedule.day_kind(day.date).works()
             && day.arrived.is_none()
             && day.left.is_none()
-            && day.leaves.is_empty();
+            && day.leaves.is_empty()
+            && !awaiting_fix.contains(&day.date);
     }
 }
 
@@ -972,6 +982,8 @@ impl Operation for ListAttendancePunches {
             .store
             .leave_requests_matching(true, only_id, Some((start, end)))
             .await?;
+        // Only the ones under review: a handful company-wide at any time.
+        let awaiting = ctx.store.punch_corrections(false, only_id).await?;
         // The real date, as for the punches themselves: a day is only missed
         // once it is over, and `LAYSI_TODAY` does not move the clock.
         let today = business_time(Utc::now(), ctx.offset).date();
@@ -1001,8 +1013,13 @@ impl Operation for ListAttendancePunches {
             let mut days = month_days(punch_days(&theirs, ctx.offset), &month, e.hired_on, last);
             let requests: Vec<&LeaveRequest> =
                 leaves.iter().filter(|l| l.employee_id == e.id).collect();
-            let judge = judges_absence(&schedule, &e.employment_type);
-            mark_days(&mut days, &requests, &schedule, judge, today);
+            let fixes: Vec<NaiveDate> = awaiting
+                .iter()
+                .filter(|c| c.employee_id == e.id)
+                .map(|c| c.punched_on)
+                .collect();
+            let judge = judges_absence(&schedule, &e.employment_type, &e.insured_as);
+            mark_days(&mut days, &requests, &fixes, &schedule, judge, today);
             rows.push(json!({
                 "emp_no": e.emp_no,
                 "name": e.name,
@@ -1875,6 +1892,7 @@ impl Operation for DecidePunchCorrection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::employees::INSURED_EMPLOYEE;
     use std::collections::BTreeSet;
 
     /// The offset the tests are written against. The numbers below are wall
@@ -2517,22 +2535,29 @@ mod tests {
             ),
         ];
         let mut days = month_days(punched, "2026-06", on("2026-06-15"), on("2026-06-24"));
+        let requests = requests.iter().collect::<Vec<_>>();
+        let absent = |days: &[PunchDay]| -> Vec<String> {
+            days.iter()
+                .filter(|d| d.absent)
+                .map(|d| d.date.to_string())
+                .collect()
+        };
+        mark_days(&mut days, &requests, &[], &sched, true, on("2026-06-24"));
+
+        // 06-16 has only a rejected request and 06-22 nothing at all; the
+        // holiday, the weekend and today are not missed days.
+        assert_eq!(absent(&days), ["2026-06-16", "2026-06-22"]);
+
+        // A correction under review is the person saying they were there.
         mark_days(
             &mut days,
-            &requests.iter().collect::<Vec<_>>(),
+            &requests,
+            &[on("2026-06-22")],
             &sched,
             true,
             on("2026-06-24"),
         );
-        let absent: Vec<String> = days
-            .iter()
-            .filter(|d| d.absent)
-            .map(|d| d.date.to_string())
-            .collect();
-
-        // 06-16 has only a rejected request and 06-22 nothing at all; the
-        // holiday, the weekend and today are not missed days.
-        assert_eq!(absent, ["2026-06-16", "2026-06-22"]);
+        assert_eq!(absent(&days), ["2026-06-16"]);
         let hours_on = |d: &str| {
             days.iter()
                 .find(|day| day.date == on(d))
@@ -2551,20 +2576,19 @@ mod tests {
             assert!(hours_on(off).is_empty(), "{off} 不是工作日，休假單不佔那天");
         }
 
-        mark_days(&mut days, &[], &sched, false, on("2026-06-24"));
+        mark_days(&mut days, &[], &[], &sched, false, on("2026-06-24"));
         assert!(days.iter().all(|d| !d.absent), "不判定時一天都不算曠職");
     }
 
     #[test]
-    fn absence_needs_a_start_time_and_is_not_judged_for_part_timers() {
+    fn absence_is_not_judged_without_a_start_time_for_part_timers_or_owners() {
         let office = schedule(Some("09:00"), Some("17:00"), 0);
-        assert!(judges_absence(&office, "full_time"));
-        assert!(judges_absence(&office, "contract"));
-        assert!(!judges_absence(&office, "part_time"));
-        assert!(!judges_absence(
-            &schedule(None, Some("17:00"), 0),
-            "full_time"
-        ));
+        assert!(judges_absence(&office, "full_time", INSURED_EMPLOYEE));
+        assert!(judges_absence(&office, "contract", INSURED_EMPLOYEE));
+        assert!(!judges_absence(&office, "part_time", INSURED_EMPLOYEE));
+        assert!(!judges_absence(&office, "full_time", INSURED_OWNER));
+        let no_start = schedule(None, Some("17:00"), 0);
+        assert!(!judges_absence(&no_start, "full_time", INSURED_EMPLOYEE));
     }
 
     /// The label a screen prints is the kind of day, not the overtime price:
