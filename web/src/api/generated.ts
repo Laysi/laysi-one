@@ -89,6 +89,7 @@ export type OpName =
   | 'get_my_home'
   | 'list_my_payslips'
   | 'list_my_leave_requests'
+  | 'preview_leave'
   | 'request_leave'
   | 'list_my_overtime_requests'
   | 'submit_my_overtime_request'
@@ -237,7 +238,8 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_my_home', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前呼叫者本人的員工首頁：基本資料（不含身分證字號，銀行帳戶僅留尾碼）、年資、本月出勤、特休餘額，以及本人送出的休假與報支的目前關卡。無任何參數可指定他人。" },
   { name: 'list_my_payslips', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前登入帳號所連結員工本人的全部薪資單：應發、代扣、實發與公司負擔。輸入不含員工欄位，對象僅由登入身分決定，不會回傳他人的薪資單。" },
   { name: 'list_my_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人的全部休假單與本年度特休額度、已休、剩餘。額度由查詢日適用的特休規則與年資現算，不逐人設定。" },
-  { name: 'request_leave', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出待簽核休假單。收起訖時刻，時數與天數依公司上下班時間計算，週六與週日不計入。申請人與建立者都由登入身分決定，輸入不能指定他人。" },
+  { name: 'preview_leave', risk: 'read_only', riskLabel: '唯讀', summary: "試算一段休假區間的時數與天數，結果與送出休假單時存下的數字相同。依上下班時間、休息時間與工作日曆計算。" },
+  { name: 'request_leave', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出待簽核休假單。收起訖時刻，時數與天數依上下班時間、休息時間與工作日曆計算，非工作日不計入。申請人與建立者都由登入身分決定，輸入不能指定他人。" },
   { name: 'list_my_overtime_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀本人送出的加班申請與本月已核准時數。加班費依加班日適用的加班規則現算；輸入不含可指定他人的欄位。" },
   { name: 'submit_my_overtime_request', risk: 'needs_confirm', riskLabel: '需人確認', summary: "以目前登入帳號所連結的員工身分送出加班申請。時數為起訖時刻的長度扣掉休息時間，一日與每月上限來自加班規則；核准後才列入薪資。申請人與建立者都由登入身分決定，輸入不能指定他人。" },
   { name: 'list_my_expense_claims', risk: 'read_only', riskLabel: '唯讀', summary: "讀目前呼叫者本人送出的費用報支單，包含各關卡的產生原因、已簽核人員、目前關卡與最終產生的傳票。輸入不含申請人或其他人員欄位。" },
@@ -376,6 +378,7 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'get_my_home': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_my_payslips': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'list_my_leave_requests': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
+  'preview_leave': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"from_at":{"description":"When the leave would start, in local wall-clock time.","format":"partial-date-time","type":"string"},"to_at":{"description":"When it would end.","format":"partial-date-time","type":"string"}},"required":["from_at","to_at"],"title":"PreviewLeaveInput","type":"object"},
   'request_leave': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"from_at":{"description":"When the leave starts, in local wall-clock time, `2026-08-25T13:30:00`.","format":"partial-date-time","type":"string"},"kind":{"description":"Leave type. Valid values match the CHECK on `leave_request.kind`.","type":"string"},"reason":{"default":null,"description":"Reason for the request.","type":["string","null"]},"to_at":{"description":"When the leave ends. Hours and days are derived from the range and the\ncompany's working window, so neither is accepted as input.","format":"partial-date-time","type":"string"}},"required":["kind","from_at","to_at"],"title":"RequestLeaveInput","type":"object"},
   'list_my_overtime_requests': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'submit_my_overtime_request': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"from_at":{"description":"When the overtime starts, in local wall-clock time,\n`2026-08-25T18:00:00`.","format":"partial-date-time","type":"string"},"reason":{"default":null,"description":"Why the work is needed.","type":["string","null"]},"to_at":{"description":"When it ends. The hours are the length of the range less the break;\nnothing else is accepted, so the request cannot claim more than it\ncovers.","format":"partial-date-time","type":"string"}},"required":["from_at","to_at"],"title":"SubmitMyOvertimeRequestInput","type":"object"},

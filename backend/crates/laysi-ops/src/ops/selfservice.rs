@@ -68,6 +68,7 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(GetMyHome),
         Box::new(ListMyPayslips),
         Box::new(ListMyLeaveRequests),
+        Box::new(PreviewLeave),
         Box::new(RequestLeave),
         Box::new(ListMyOvertimeRequests),
         Box::new(SubmitMyOvertimeRequest),
@@ -428,6 +429,7 @@ impl Operation for ListMyLeaveRequests {
         let employee = actor_employee(ctx).await?;
         let requests = ctx.store.leave_requests_by_employee(employee.id).await?;
         let (annual_rs, annual_balance) = my_annual_leave(ctx, &employee).await?;
+        let schedule = WorkSchedule::load(ctx).await?;
         let pending = requests
             .iter()
             .filter(|request| request.status == "pending")
@@ -450,7 +452,8 @@ impl Operation for ListMyLeaveRequests {
                     .map(leave_request_json)
                     .collect::<Vec<_>>(),
                 "leave_kinds": leave_kinds_json(),
-                "schedule": WorkSchedule::load(ctx).await?.json(),
+                "schedule": schedule.json(),
+                "next_workday": next_workday(&schedule, ctx.today),
                 "pending_count": pending,
                 "annual_leave": annual_leave_json(
                     ctx.today.year(),
@@ -465,6 +468,124 @@ impl Operation for ListMyLeaveRequests {
 }
 
 // Submitting a leave request
+
+struct LeaveWorth {
+    hours: Money,
+    days: Money,
+    /// Dates the range covers that are not working days.
+    off_days: usize,
+}
+
+/// A system bound on one request, not a statutory figure.
+const MAX_LEAVE_SPAN_DAYS: i64 = 366;
+
+/// What a leave range is worth. `request_leave` stores the hours and days and
+/// `preview_leave` shows them before sending, so the two come from this one
+/// function and the screen cannot promise a number the request does not keep.
+fn leave_worth(
+    schedule: &WorkSchedule,
+    from: NaiveDateTime,
+    to: NaiveDateTime,
+) -> Result<LeaveWorth, OpError> {
+    if to <= from {
+        return Err(OpError::BadInput("休假結束時刻要晚於開始時刻".into()));
+    }
+    // The work below walks the range one date at a time, and `preview_leave`
+    // is open to AI, so a range spanning millennia would hold a worker.
+    if (to.date() - from.date()).num_days() > MAX_LEAVE_SPAN_DAYS {
+        return Err(OpError::BadInput(format!(
+            "一張休假單最長 {MAX_LEAVE_SPAN_DAYS} 天，請分成幾張送出"
+        )));
+    }
+    let (Some(seconds), Some(daily), Some(start), Some(end)) = (
+        schedule.leave_seconds(from, to),
+        schedule.daily_seconds(),
+        schedule.starts_at,
+        schedule.ends_at,
+    ) else {
+        return Err(OpError::BadInput(
+            "休假時數依上下班時間計算，請系統管理員在基礎設定填寫上班時間與下班時間".into(),
+        ));
+    };
+    // A range ending at midnight does not reach into the next date.
+    let last = (to - chrono::Duration::seconds(1)).date();
+    let dates = from.date().iter_days().take_while(|d| *d <= last);
+    let off_days = dates.filter(|d| !schedule.day_kind(*d).works()).count();
+    if seconds == 0 {
+        let touched = (last - from.date()).num_days() as usize + 1;
+        return Err(OpError::BadInput(if off_days == touched {
+            "所選日期都不是工作日，請改選工作日".into()
+        } else {
+            format!(
+                "所選時段落在上班時間之外，請改選 {} 至 {} 之間的區間",
+                start.format("%H:%M"),
+                end.format("%H:%M")
+            )
+        }));
+    }
+    Ok(LeaveWorth {
+        hours: (Money::from(seconds) / Money::from(3600)).round_dp(2),
+        days: (Money::from(seconds) / Money::from(daily)).round_dp(2),
+        off_days,
+    })
+}
+
+/// Today, or the first working day after it: where a new request starts.
+fn next_workday(schedule: &WorkSchedule, from: NaiveDate) -> NaiveDate {
+    from.iter_days()
+        .find(|d| schedule.day_kind(*d).works())
+        .unwrap_or(from)
+}
+
+struct PreviewLeave;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PreviewLeaveInput {
+    /// When the leave would start, in local wall-clock time.
+    pub from_at: NaiveDateTime,
+    /// When it would end.
+    pub to_at: NaiveDateTime,
+}
+
+#[async_trait]
+impl Operation for PreviewLeave {
+    fn name(&self) -> &'static str {
+        "preview_leave"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::ReadOnly
+    }
+
+    fn summary(&self) -> &'static str {
+        "試算一段休假區間的時數與天數，結果與送出休假單時存下的數字相同。依上下班時間、休息時間與工作日曆計算。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<PreviewLeaveInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: PreviewLeaveInput = parse(input)?;
+        let schedule = WorkSchedule::load(ctx).await?;
+        let worth = leave_worth(&schedule, i.from_at, i.to_at)?;
+        let summary = format!(
+            "試算休假 {} 到 {} · {} 小時（{} 日）",
+            i.from_at.format("%Y-%m-%d %H:%M"),
+            i.to_at.format("%Y-%m-%d %H:%M"),
+            worth.hours.normalize(),
+            worth.days.normalize()
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "hours": worth.hours.to_string(),
+                "days": worth.days.to_string(),
+                "off_days": worth.off_days,
+            }),
+            summary,
+        ))
+    }
+}
 
 struct RequestLeave;
 
@@ -493,7 +614,7 @@ impl Operation for RequestLeave {
     }
 
     fn summary(&self) -> &'static str {
-        "以目前登入帳號所連結的員工身分送出待簽核休假單。收起訖時刻，時數與天數依公司上下班時間計算，週六與週日不計入。申請人與建立者都由登入身分決定，輸入不能指定他人。"
+        "以目前登入帳號所連結的員工身分送出待簽核休假單。收起訖時刻，時數與天數依上下班時間、休息時間與工作日曆計算，非工作日不計入。申請人與建立者都由登入身分決定，輸入不能指定他人。"
     }
 
     fn input_schema(&self) -> Value {
@@ -513,26 +634,8 @@ impl Operation for RequestLeave {
                 i.kind
             )));
         }
-        if i.to_at <= i.from_at {
-            return Err(OpError::BadInput("休假結束時刻要晚於開始時刻".into()));
-        }
-
         let schedule = WorkSchedule::load(ctx).await?;
-        let (Some(seconds), Some(daily)) = (
-            schedule.leave_seconds(i.from_at, i.to_at),
-            schedule.daily_seconds(),
-        ) else {
-            return Err(OpError::BadInput(
-                "休假時數依上下班時間計算，請系統管理員在基礎設定填寫上班時間與下班時間".into(),
-            ));
-        };
-        if seconds == 0 {
-            return Err(OpError::BadInput(
-                "所選時段落在上班時間之外，請改選上班時間內的區間".into(),
-            ));
-        }
-        let hours = (Money::from(seconds) / Money::from(3600)).round_dp(2);
-        let days = (Money::from(seconds) / Money::from(daily)).round_dp(2);
+        let LeaveWorth { hours, days, .. } = leave_worth(&schedule, i.from_at, i.to_at)?;
 
         let employee = actor_employee(ctx).await?;
         let request = ctx
@@ -565,7 +668,7 @@ impl Operation for RequestLeave {
                 "request": leave_request_json(&request),
                 "status": "pending",
                 "schedule": schedule.json(),
-                "hours_source": "起訖時刻落在上下班時間內的部分，週六與週日不計入；天數等於時數除以一天的上班時數。",
+                "hours_source": "起訖時刻落在上下班時間內、扣掉休息時間的部分，工作日曆上的非工作日不計入；天數等於時數除以一天的上班時數。",
                 "scope_note": "employee_id 由已驗證 session 的 ctx.employee_id 決定，created_by 來自同一個登入身分。",
             }),
             summary,
@@ -1948,6 +2051,61 @@ mod tests {
     }
 
     #[test]
+    fn leave_worth_leaves_out_the_break_and_days_off() {
+        use crate::ops::attendance::DayKind;
+        use chrono::NaiveTime;
+
+        let at = |day: u32, h: u32| {
+            NaiveDate::from_ymd_opt(2026, 9, day)
+                .unwrap()
+                .and_hms_opt(h, 0, 0)
+                .unwrap()
+        };
+        let holiday = NaiveDate::from_ymd_opt(2026, 9, 25).unwrap();
+        let schedule = WorkSchedule {
+            starts_at: NaiveTime::from_hms_opt(9, 0, 0),
+            ends_at: NaiveTime::from_hms_opt(18, 0, 0),
+            grace_minutes: 0,
+            grace_stated: false,
+            flex_minutes: 0,
+            break_start: NaiveTime::from_hms_opt(12, 0, 0),
+            break_end: NaiveTime::from_hms_opt(13, 0, 0),
+            calendar: BTreeMap::from([(holiday, (DayKind::Holiday, "中秋節".into()))]),
+        };
+        let worth = |from, to| {
+            let w = leave_worth(&schedule, from, to).unwrap();
+            (w.hours, w.days, w.off_days)
+        };
+        let n = |s: &str| s.parse::<Money>().unwrap();
+
+        assert_eq!(worth(at(24, 9), at(24, 18)), (n("8"), n("1"), 0), "整天");
+        assert_eq!(
+            worth(at(24, 11), at(24, 14)),
+            (n("2"), n("0.25"), 0),
+            "跨午休"
+        );
+        assert_eq!(
+            worth(at(24, 9), at(25, 18)),
+            (n("8"), n("1"), 1),
+            "週四到中秋節"
+        );
+        assert_eq!(
+            worth(at(25, 9), at(28, 18)),
+            (n("8"), n("1"), 3),
+            "中秋節、週六、週日都不計"
+        );
+        assert_eq!(worth(at(24, 9), at(25, 0)).2, 0, "結束在午夜，不算進下一天");
+        assert!(leave_worth(&schedule, at(26, 9), at(27, 18)).is_err());
+        assert!(leave_worth(&schedule, at(24, 18), at(24, 9)).is_err());
+        let far = NaiveDate::from_ymd_opt(262_000, 1, 1)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        assert!(leave_worth(&schedule, at(24, 9), far).is_err(), "區間過長");
+        assert_eq!(next_workday(&schedule, holiday), at(28, 0).date());
+    }
+
+    #[test]
     fn committed_overtime_hours_counts_pending_and_drops_rejected() {
         let one = |status: &str, hours: &str| OvertimeRequest {
             request_no: "OT2608-001".into(),
@@ -2038,6 +2196,7 @@ mod tests {
             ("get_my_home", BTreeSet::new()),
             ("list_my_payslips", BTreeSet::new()),
             ("list_my_leave_requests", BTreeSet::new()),
+            ("preview_leave", BTreeSet::from(["from_at", "to_at"])),
             (
                 "request_leave",
                 BTreeSet::from(["kind", "from_at", "to_at", "reason"]),

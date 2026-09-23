@@ -934,6 +934,7 @@ mod tests {
         include_str!("../../../migrations/0007_license.sql"),
         include_str!("../../../migrations/0008_update_voucher.sql"),
         include_str!("../../../migrations/0010_notice_push_test.sql"),
+        include_str!("../../../migrations/0014_preview_leave.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the

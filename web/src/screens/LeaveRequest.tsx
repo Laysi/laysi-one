@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  businessToday,
   callOp,
+  leavePreview,
   myLeaveList,
   myLeaveResult,
   OpFailed,
   trimDecimal,
   wallSpan,
+  type LeavePreview,
   type MyLeaveList,
   type MyLeaveResult,
 } from '../api/client';
@@ -22,62 +23,6 @@ interface Props {
   onChanged: () => void;
 }
 
-const DAY_MS = 86400000;
-
-function dayStart(day: string): number {
-  const [y, m, d] = day.split('-').map(Number);
-  return Date.UTC(y ?? 2000, (m ?? 1) - 1, d ?? 1);
-}
-
-function minutesOf(time: string): number {
-  const [h, m] = time.split(':').map(Number);
-  return (h ?? 0) * 60 + (m ?? 0);
-}
-
-function weekend(at: number): boolean {
-  const day = new Date(at).getUTCDay();
-  return day === 0 || day === 6;
-}
-
-function dayFlags(fromDay: string, toDay: string): { weekend: boolean; workday: boolean } {
-  const flags = { weekend: false, workday: false };
-  for (let at = dayStart(fromDay); at <= dayStart(toDay); at += DAY_MS) {
-    if (weekend(at)) flags.weekend = true;
-    else flags.workday = true;
-  }
-  return flags;
-}
-
-function nextWorkday(day: string): string {
-  let at = dayStart(day);
-  while (weekend(at)) at += DAY_MS;
-  return new Date(at).toISOString().slice(0, 10);
-}
-
-function workingMinutes(
-  fromDay: string,
-  fromTime: string,
-  toDay: string,
-  toTime: string,
-  start: string,
-  end: string,
-): number {
-  const from = dayStart(fromDay) / 60000 + minutesOf(fromTime);
-  const to = dayStart(toDay) / 60000 + minutesOf(toTime);
-  let total = 0;
-  for (let at = dayStart(fromDay); at <= dayStart(toDay); at += DAY_MS) {
-    if (weekend(at)) continue;
-    const open = Math.max(at / 60000 + minutesOf(start), from);
-    const close = Math.min(at / 60000 + minutesOf(end), to);
-    total += Math.max(0, close - open);
-  }
-  return total;
-}
-
-function round2(v: number): string {
-  return trimDecimal((Math.round(v * 100) / 100).toFixed(2));
-}
-
 export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   const [data, setData] = useState<MyLeaveList | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +36,8 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   const [toDay, setToDay] = useState('');
   const [toTime, setToTime] = useState('');
   const [reason, setReason] = useState('');
+  const [preview, setPreview] = useState<LeavePreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const running = useRef<(() => void) | null>(null);
 
@@ -105,9 +52,8 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
       .then((d) => {
         if (!live) return;
         setData(d);
-        const today = nextWorkday(businessToday());
-        setFromDay((v) => v || today);
-        setToDay((v) => v || today);
+        setFromDay((v) => v || d.next_workday);
+        setToDay((v) => v || d.next_workday);
         setFromTime((v) => v || d.schedule.work_start || '');
         setToTime((v) => v || d.schedule.work_end || '');
       })
@@ -116,6 +62,23 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   }, []);
 
   useEffect(load, [load, reloadKey]);
+
+  const fromAt = fromDay && fromTime ? `${fromDay}T${fromTime}:00` : '';
+  const toAt = toDay && toTime ? `${toDay}T${toTime}:00` : '';
+  const ordered = fromAt !== '' && toAt !== '' && fromAt < toAt;
+
+  useEffect(() => {
+    setPreview(null);
+    setPreviewError(null);
+    if (!ordered) return;
+    let live = true;
+    callOp('preview_leave', { from_at: fromAt, to_at: toAt }, undefined, leavePreview)
+      .then((p) => live && setPreview(p))
+      .catch((e) => live && setPreviewError(e instanceof OpFailed ? e.error.message : String(e)));
+    return () => {
+      live = false;
+    };
+  }, [fromAt, toAt, ordered]);
 
   if (error) {
     return (
@@ -131,21 +94,7 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
   const al = data.annual_leave;
   const workStart = data.schedule.work_start;
   const workEnd = data.schedule.work_end;
-  const filled =
-    kind !== '' && fromDay !== '' && fromTime !== '' && toDay !== '' && toTime !== '';
-  const ordered =
-    filled &&
-    dayStart(fromDay) / 60000 + minutesOf(fromTime) <
-      dayStart(toDay) / 60000 + minutesOf(toTime);
-  const minutes =
-    ordered && workStart && workEnd
-      ? workingMinutes(fromDay, fromTime, toDay, toTime, workStart, workEnd)
-      : 0;
-  const dailyMinutes = workStart && workEnd ? minutesOf(workEnd) - minutesOf(workStart) : 0;
-  const hours = minutes / 60;
-  const days = dailyMinutes > 0 ? minutes / dailyMinutes : 0;
-  const span = ordered ? dayFlags(fromDay, toDay) : null;
-  const ready = ordered && minutes > 0;
+  const ready = kind !== '' && ordered && preview !== null;
   const kindLabel = data.leave_kinds.find((o) => o.kind === kind)?.label ?? kind;
 
   async function submit() {
@@ -156,8 +105,8 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
                         'request_leave',
                         {
             kind,
-            from_at: `${fromDay}T${fromTime}:00`,
-            to_at: `${toDay}T${toTime}:00`,
+            from_at: fromAt,
+            to_at: toAt,
             ...(reason.trim() ? { reason: reason.trim() } : {}),
           },
                         `申請${kindLabel}，${fromDay} ${fromTime} 至 ${toDay} ${toTime}`,
@@ -263,21 +212,19 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
                 />
               </label>
 
-              {filled && !ordered && (
+              {fromAt && toAt && !ordered && (
                 <p className="state-note state-note--error">結束時刻要晚於開始時刻。</p>
               )}
-              {ordered && minutes === 0 && (
-                <p className="state-note state-note--error">
-                  {span && !span.workday
-                    ? '所選日期都是週六或週日，請改選平日。'
-                    : `所選時段落在上班時間之外，請改選 ${workStart} 至 ${workEnd} 之間的區間。`}
-                </p>
-              )}
-              {ready && (
+              {previewError && <p className="state-note state-note--error">{previewError}</p>}
+              {preview && (
                 <p className="form-note">
-                  共 <span className="num">{round2(hours)}</span> 小時，等於{' '}
-                  <span className="num">{round2(days)}</span> 日。
-                  {span?.weekend && '週六與週日不計入。'}
+                  共 <span className="num">{trimDecimal(preview.hours)}</span> 小時，等於{' '}
+                  <span className="num">{trimDecimal(preview.days)}</span> 日。
+                  {preview.off_days > 0 && (
+                    <>
+                      非工作日 <span className="num">{preview.off_days}</span> 天不計入。
+                    </>
+                  )}
                 </p>
               )}
 
