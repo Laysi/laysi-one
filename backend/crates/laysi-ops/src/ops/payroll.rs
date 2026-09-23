@@ -39,14 +39,14 @@
 //! not individuals). Both read the same table; the difference is whether
 //! `dispatch` stops the caller. The filter is not written into the query.
 
-use crate::ops::attendance::{ordinary_hourly_wage, punch_days, WorkSchedule};
+use crate::ops::attendance::{ordinary_hourly_wage, punch_days, PunchDay, WorkSchedule};
 #[cfg(test)]
 use crate::ops::employees::INSURED_EMPLOYEE;
 use crate::ops::employees::{pay_basis_label, BASIS_HOURLY, BASIS_MONTHLY};
 use crate::ops::insurance::{percent, premiums_on, ruleset_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::{FixedOffset, NaiveDate};
+use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
 use laysi_domain::Money;
 use laysi_regulation::Ruleset;
 use laysi_store::{Employee, NewPayslip};
@@ -146,25 +146,52 @@ fn salary_withholding_rate(rs: &Ruleset) -> Result<(Money, String, String), OpEr
     ))
 }
 
-/// Hours one person's punches record in the period, breaks taken out.
-///
-/// Only complete days count: a day clocked in and never out has no length,
-/// and guessing one would put money on it. That day is a missed punch, and
-/// the correction flow exists to fix it before payroll runs.
-fn worked_hours_of(
+/// One person's punch days in the period.
+fn punch_days_of(
     punches: &[laysi_store::AttendancePunch],
-    schedule: &WorkSchedule,
     employee_id: i32,
     offset: FixedOffset,
-) -> Money {
+) -> Vec<PunchDay> {
     let mine: Vec<_> = punches
         .iter()
         .filter(|p| p.employee_id == employee_id)
         .cloned()
         .collect();
-    let seconds: i64 = punch_days(&mine, offset)
+    punch_days(&mine, offset)
+}
+
+/// Hours an hourly worker is paid at the plain rate: punched time, breaks
+/// taken out, less the part of it that approved overtime covers. The art. 24
+/// multipliers already include the ordinary wage for those hours, so leaving
+/// them in would pay them twice. Only the overlap comes out: overtime worked
+/// after punching out, or on a day with a missed punch, was never in the
+/// punched time.
+///
+/// Only complete days count: a day clocked in and never out has no length,
+/// and guessing one would put money on it. That day is a missed punch, and
+/// the correction flow exists to fix it before payroll runs.
+fn ordinary_hours(
+    days: &[PunchDay],
+    schedule: &WorkSchedule,
+    overtime: &[(NaiveDateTime, NaiveDateTime)],
+) -> Money {
+    let seconds: i64 = days
         .iter()
-        .filter_map(|d| d.worked_seconds(schedule))
+        .filter_map(|d| {
+            let worked = d.worked_seconds(schedule)?;
+            let (arrived, left) = (d.arrived?, d.left?);
+            let covered: i64 = overtime
+                .iter()
+                .map(|&(from, to)| {
+                    let (start, end) = (from.max(arrived), to.min(left));
+                    match end > start {
+                        true => (end - start).num_seconds() - schedule.break_seconds(start, end),
+                        false => 0,
+                    }
+                })
+                .sum();
+            Some((worked - covered).max(0))
+        })
         .sum();
     Decimal::from(seconds) / Decimal::from(3600)
 }
@@ -212,7 +239,7 @@ async fn compute_one(
     to: NaiveDate,
     pay_on: NaiveDate,
     overtime: Money,
-    worked_hours: Money,
+    plain_hours: Money,
 ) -> Result<Computed, OpError> {
     let month_days = Decimal::from((to - from).num_days() + 1);
     let days = Decimal::from(paid_days(e, from, to));
@@ -236,12 +263,13 @@ async fn compute_one(
         )));
     }
 
-    // Hourly pay is the rate times the hours the punches record; a monthly
-    // salary is prorated by calendar day, so a full month gives days ==
-    // month_days and a ratio of 1. Proration does not apply to hourly pay:
+    // Hourly pay is the rate times the punched hours outside approved
+    // overtime (see `ordinary_hours`); a monthly salary is prorated by
+    // calendar day, so a full month gives days == month_days and a ratio of
+    // 1. Proration does not apply to hourly pay:
     // the hours already say how much of the period was worked.
     let base = match hourly {
-        true => to_dollars(e.base_salary * worked_hours),
+        true => to_dollars(e.base_salary * plain_hours),
         false => to_dollars(e.base_salary * days / month_days),
     };
     let gross = base + overtime;
@@ -280,7 +308,7 @@ async fn compute_one(
         laysi_regulation::minimum_wage_shortfall(min_rs, e.base_salary, &e.pay_basis)?;
 
     let note = match (hourly, days < month_days) {
-        (true, _) => format!("時薪制，本期出勤 {} 小時", worked_hours.normalize()),
+        (true, _) => format!("時薪制，本期正常工時 {} 小時", plain_hours.normalize()),
         (false, true) => format!("在職 {days}／{month_days} 日，按曆日比例計薪"),
         (false, false) => String::new(),
     };
@@ -666,7 +694,13 @@ impl Operation for RunPayroll {
         // each day worked.
         let approved_overtime = ctx.store.approved_overtime(from, to).await?;
         let mut overtime_by_employee: BTreeMap<i32, (Money, Money)> = BTreeMap::new();
+        let mut overtime_spans: BTreeMap<i32, Vec<(NaiveDateTime, NaiveDateTime)>> =
+            BTreeMap::new();
         for o in &approved_overtime {
+            overtime_spans
+                .entry(o.employee_id)
+                .or_default()
+                .push((o.from_at, o.to_at));
             let rs = laysi_regulation::resolve("overtime", o.worked_on)?;
             let worker = staff.iter().find(|e| e.id == o.employee_id);
             let salary = worker.map(|e| e.base_salary).unwrap_or(Money::ZERO);
@@ -719,10 +753,10 @@ impl Operation for RunPayroll {
                 .map(|(_, pay)| *pay)
                 .unwrap_or(Money::ZERO);
 
-            let worked_hours = worked_hours_of(&punches, &schedule, e.id, ctx.offset);
+            let days = punch_days_of(&punches, e.id, ctx.offset);
             // An hourly worker with nothing clocked has no pay to compute.
             // A payslip of zero would read as an amount somebody worked out.
-            if e.pay_basis == BASIS_HOURLY && worked_hours.is_zero() {
+            if e.pay_basis == BASIS_HOURLY && ordinary_hours(&days, &schedule, &[]).is_zero() {
                 skipped.push(json!({
                     "emp_no": e.emp_no,
                     "name": e.name,
@@ -731,7 +765,9 @@ impl Operation for RunPayroll {
                 continue;
             }
 
-            let c = compute_one(ctx, e, from, to, pay_on, overtime, worked_hours).await?;
+            let spans = overtime_spans.get(&e.id).map(Vec::as_slice).unwrap_or(&[]);
+            let plain = ordinary_hours(&days, &schedule, spans);
+            let c = compute_one(ctx, e, from, to, pay_on, overtime, plain).await?;
             if let Some(floor) = c.below_minimum {
                 warnings.push(json!({
                     "emp_no": e.emp_no,
@@ -1084,6 +1120,19 @@ mod tests {
         );
     }
 
+    fn no_schedule() -> WorkSchedule {
+        WorkSchedule {
+            starts_at: None,
+            ends_at: None,
+            grace_minutes: 0,
+            grace_stated: false,
+            flex_minutes: 0,
+            break_start: None,
+            break_end: None,
+            calendar: BTreeMap::new(),
+        }
+    }
+
     /// Hours are counted per person. The punch rows arrive ordered by employee
     /// and then by date, so a run that ignored the employee would fold two
     /// people's punches on the same date into one day and pay one of them
@@ -1093,7 +1142,6 @@ mod tests {
         use crate::ops::attendance::business_instant;
         use chrono::NaiveTime;
         use laysi_store::AttendancePunch;
-        use std::collections::BTreeMap;
 
         let tz = laysi_domain::default_business_offset();
         let day = d(2026, 8, 3);
@@ -1112,15 +1160,9 @@ mod tests {
             note: String::new(),
             created_by: "測試員工".into(),
         };
-        let schedule = WorkSchedule {
-            starts_at: None,
-            ends_at: None,
-            grace_minutes: 0,
-            grace_stated: false,
-            flex_minutes: 0,
-            break_start: None,
-            break_end: None,
-            calendar: BTreeMap::new(),
+        let schedule = no_schedule();
+        let hours = |p: &[AttendancePunch], id: i32| {
+            ordinary_hours(&punch_days_of(p, id, tz), &schedule, &[])
         };
 
         // Ordered by employee, then date, exactly as the query returns them.
@@ -1130,18 +1172,14 @@ mod tests {
             punch(2, "in", "14:00"),
             punch(2, "out", "18:30"),
         ];
-        assert_eq!(worked_hours_of(&punches, &schedule, 1, tz), n("4"));
-        assert_eq!(worked_hours_of(&punches, &schedule, 2, tz), n("4.5"));
-        assert_eq!(
-            worked_hours_of(&punches, &schedule, 3, tz),
-            Money::ZERO,
-            "沒有打卡的人是 0 小時"
-        );
+        assert_eq!(hours(&punches, 1), n("4"));
+        assert_eq!(hours(&punches, 2), n("4.5"));
+        assert_eq!(hours(&punches, 3), Money::ZERO, "沒有打卡的人是 0 小時");
 
         // A day clocked in and never out has no length, so it earns nothing
         // until the correction is made.
         let open = vec![punch(1, "in", "09:00")];
-        assert_eq!(worked_hours_of(&open, &schedule, 1, tz), Money::ZERO);
+        assert_eq!(hours(&open, 1), Money::ZERO);
     }
 
     /// The two bases reach the ordinary hourly wage differently: an hourly
@@ -1163,6 +1201,79 @@ mod tests {
             laysi_regulation::overtime_pay(rs, n("200"), "weekday", n("2")).unwrap(),
             n("536"),
             "200 × 1.34 × 2"
+        );
+    }
+
+    /// Approved overtime already carries the ordinary wage in its art. 24
+    /// multiplier, so the plain rate pays only the punched time it does not
+    /// cover.
+    #[test]
+    fn approved_overtime_is_not_paid_again_at_the_hourly_rate() {
+        use chrono::NaiveTime;
+
+        let rs = laysi_regulation::resolve("overtime", d(2026, 8, 12)).unwrap();
+        let schedule = no_schedule();
+        let at = |day: u32, t: &str| {
+            d(2026, 8, day).and_time(NaiveTime::parse_from_str(t, "%H:%M").unwrap())
+        };
+        let punched = |day: u32, from: &str, to: &str| PunchDay {
+            date: d(2026, 8, day),
+            arrived: Some(at(day, from)),
+            left: Some(at(day, to)),
+            arrived_source: None,
+            left_source: None,
+            note: String::new(),
+        };
+        let rate = n("200");
+
+        // Punched 13:00 to 20:00 with 17:00 to 20:00 approved.
+        let plain = ordinary_hours(
+            &[punched(12, "13:00", "20:00")],
+            &schedule,
+            &[(at(12, "17:00"), at(12, "20:00"))],
+        );
+        let overtime = laysi_regulation::overtime_pay(rs, rate, "weekday", n("3")).unwrap();
+        assert_eq!(plain, n("4"));
+        assert_eq!(overtime, n("870"), "200 × (2 × 1.34 + 1 × 1.67)");
+        assert_eq!(to_dollars(rate * plain) + overtime, n("1670"));
+
+        // Punched out at 18:00 and stayed until 20:00: the overtime was never
+        // in the punched time.
+        assert_eq!(
+            ordinary_hours(
+                &[punched(12, "09:00", "18:00")],
+                &schedule,
+                &[(at(12, "18:00"), at(12, "20:00"))],
+            ),
+            n("9"),
+            "打下班卡之後的加班不得從本薪扣"
+        );
+
+        // Overtime on a day with a missed punch comes out of no other day.
+        assert_eq!(
+            ordinary_hours(
+                &[punched(12, "13:00", "20:00")],
+                &schedule,
+                &[(at(13, "17:00"), at(13, "20:00"))],
+            ),
+            n("7"),
+            "漏打卡那天的加班不得扣到別天"
+        );
+
+        // A whole rest day approved as overtime: the break is in neither the
+        // punched time nor the part of it the overtime covers.
+        let with_break = WorkSchedule {
+            break_start: NaiveTime::from_hms_opt(12, 0, 0),
+            break_end: NaiveTime::from_hms_opt(13, 0, 0),
+            ..no_schedule()
+        };
+        assert_eq!(
+            ordinary_hours(
+                &[punched(15, "09:00", "18:00")],
+                &with_break,
+                &[(at(15, "09:00"), at(15, "18:00"))],
+            ),
+            Money::ZERO
         );
     }
 }

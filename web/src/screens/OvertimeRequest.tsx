@@ -29,6 +29,23 @@ function stamp(day: string, time: string): number {
   return Date.UTC(y ?? 2000, (m ?? 1) - 1, d ?? 1) / 60000 + (hh ?? 0) * 60 + (mm ?? 0);
 }
 
+function clockMinutes(t: string | null): number | null {
+  if (!t) return null;
+  const [hh, mm] = t.split(':').map(Number);
+  return (hh ?? 0) * 60 + (mm ?? 0);
+}
+
+function breakMinutes(from: number, to: number, start: string | null, end: string | null): number {
+  const s = clockMinutes(start);
+  const e = clockMinutes(end);
+  if (s === null || e === null || e <= s) return 0;
+  let total = 0;
+  for (let day = Math.floor(from / 1440) * 1440; day < to; day += 1440) {
+    total += Math.max(0, Math.min(day + e, to) - Math.max(day + s, from));
+  }
+  return total;
+}
+
 function restDay(day: string): boolean {
   const [y, m, d] = day.split('-').map(Number);
   const weekday = new Date(Date.UTC(y ?? 2000, (m ?? 1) - 1, d ?? 1)).getUTCDay();
@@ -90,14 +107,20 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
   if (!data) return <p className="state-note">讀取中…</p>;
 
   const filled = fromDay !== '' && fromTime !== '' && toDay !== '' && toTime !== '';
-  const ordered = filled && stamp(fromDay, fromTime) < stamp(toDay, toTime);
-  const hours = ordered ? (stamp(toDay, toTime) - stamp(fromDay, fromTime)) / 60 : 0;
+  const from = stamp(fromDay, fromTime);
+  const to = stamp(toDay, toTime);
+  const ordered = filled && from < to;
+  const rest = ordered
+    ? breakMinutes(from, to, data.schedule.break_start, data.schedule.break_end)
+    : 0;
+  const hours = ordered ? (to - from - rest) / 60 : 0;
+  const onlyBreak = ordered && hours <= 0;
   const picked = data.day_types.find((t) => t.code === dayType);
   const dailyMax = picked ? Number(picked.max_hours) : 0;
   const overDaily = ordered && dailyMax > 0 && hours > dailyMax;
   const monthLeft = Number(data.month_hours_left);
   const overMonthly = ordered && fromDay.slice(0, 7) === data.month && hours > monthLeft;
-  const ready = ordered && !overDaily && !overMonthly;
+  const ready = ordered && !onlyBreak && !overDaily && !overMonthly;
 
   async function submit() {
     setBusy(true);
@@ -211,6 +234,11 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
             {filled && !ordered && (
               <p className="state-note state-note--error">結束時刻要晚於開始時刻。</p>
             )}
+            {onlyBreak && (
+              <p className="state-note state-note--error">
+                所選時段都在休息時間內，請改填實際加班的時段。
+              </p>
+            )}
             {overDaily && picked && (
               <p className="state-note state-note--error">
                 {picked.label}加班一天最多 {trimDecimal(picked.max_hours)} 小時，本次為{' '}
@@ -225,7 +253,13 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
             )}
             {ready && (
               <p className="form-note">
-                共 <span className="num">{round2(hours)}</span> 小時。
+                共 <span className="num">{round2(hours)}</span> 小時
+                {rest > 0 && (
+                  <>
+                    ，已扣休息 <span className="num">{round2(rest / 60)}</span> 小時
+                  </>
+                )}
+                。
               </p>
             )}
 
