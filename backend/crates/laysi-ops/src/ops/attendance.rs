@@ -251,6 +251,20 @@ impl WorkSchedule {
         self.day_kind(day).overtime_code()
     }
 
+    /// The calendar dates priced differently from their day of the week, so
+    /// a screen can show the day type before the request is sent.
+    pub fn overtime_exceptions(&self) -> Vec<Value> {
+        self.calendar
+            .iter()
+            .filter(|(day, (kind, _))| {
+                kind.overtime_code() != default_day_kind(**day).overtime_code()
+            })
+            .map(|(day, (kind, name))| {
+                json!({ "date": day, "day_type": kind.overtime_code(), "name": name })
+            })
+            .collect()
+    }
+
     pub fn flexible(&self) -> bool {
         self.flex_minutes > 0
     }
@@ -1813,6 +1827,24 @@ mod tests {
             "補行上班的星期六請假要扣"
         );
         assert_eq!(sched.overtime_day_type(on("2026-02-21")), "weekday");
+
+        // 2026-10-10 is a Saturday, priced as a rest day either way.
+        sched
+            .calendar
+            .insert(on("2026-10-10"), (DayKind::Holiday, "國慶日".into()));
+        let codes: Vec<(String, String)> = sched
+            .overtime_exceptions()
+            .iter()
+            .map(|e| (e["date"].to_string(), e["day_type"].to_string()))
+            .collect();
+        assert_eq!(
+            codes,
+            [
+                ("\"2026-02-21\"".into(), "\"weekday\"".into()),
+                ("\"2026-06-19\"".into(), "\"rest_day\"".into()),
+            ],
+            "只列出日別與星期幾推得的不同的日期"
+        );
     }
 
     /// Nothing was asked of anyone on a day off, so the whole of the

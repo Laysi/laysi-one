@@ -1950,7 +1950,7 @@ ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日�
 上限（平日 4 小時、休息日 12 小時）與每月 46 小時都在 `overtime.toml` 裡，
 `OvertimeLimits` 只是把它們取出來比對——`ops/attendance.rs` 沒有寫下任何一個數字，
 換一份規則檔，同一天的判定就跟著換。日的種類與加班申請同一套判斷
-（`default_overtime_day_type`，週六與週日為休息日）。
+（`WorkSchedule::overtime_day_type()`，由工作日曆決定）。
 
 三處同時說：逐日明細標「加班超過 N 小時」、當月摘要接一句引一次第 32 條再列事實，
 法遵檢核表多一項「打卡推算的延長工時」。**違法與「還沒對上」不是同一種輕重**，所以
@@ -2100,8 +2100,8 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | `list_my_payslips` | ReadOnly | `{}` | **只有本人的**薪資單 |
 | `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`，以及算時數用的 `schedule` |
 | `request_leave` | NeedsConfirm | `{ kind, from_at, to_at, reason? }` | `{ request, schedule }`，編號 `LV{西元年月}-{三碼}`；時數與天數由後端算 |
-| `list_my_overtime_requests` | ReadOnly | `{}` | 本人加班單、本月已核准時數、上限與尚可申請時數、`day_types` |
-| `submit_my_overtime_request` | NeedsConfirm | `{ from_at, to_at, day_type?, reason? }` | `{ request }`，編號 `OT{西元年月}-{三碼}`；時數為區間長度扣掉休息時間 |
+| `list_my_overtime_requests` | ReadOnly | `{}` | 本人加班單、本月已核准時數、上限與尚可申請時數、`day_types`、`calendar`（日別與星期推得的不同的日期，畫面據以顯示加班日） |
+| `submit_my_overtime_request` | NeedsConfirm | `{ from_at, to_at, reason? }` | `{ request }`，編號 `OT{西元年月}-{三碼}`；時數為區間長度扣掉休息時間，日別由工作日曆決定 |
 | `list_my_expense_claims` | ReadOnly | `{}` | 本人送出的報支與逐關進度 |
 | `submit_my_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, pay_method?, memo? }` | `{ claim }`，編號 `EX{西元年月}-{三碼}` |
 | `attach_my_expense_receipt` | NeedsConfirm | `{ claim_no, file_name, content_base64 }` | `{ receipt, receipts }`，收據進 RustFS |
@@ -2114,8 +2114,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 `ops/selfservice.rs` 的 `no_self_service_input_can_select_another_employee`
 測試把十四個操作的 `Input` 屬性集合**逐字釘死**（`request_leave` 只有
 `kind`／`from_at`／`to_at`／`reason`，`submit_my_overtime_request` 只有
-`from_at`／`to_at`／`day_type`／`reason`——`day_type` 指的是哪一種日子、
-合法值由規則庫決定，不是人，`submit_my_expense_claim` 只有
+`from_at`／`to_at`／`reason`——日別由工作日曆決定，申請人填不進來，`submit_my_expense_claim` 只有
 `title`／`amount`／`spent_on`／`pay_method`／`memo`，`punch_clock` 只有
 `kind`／`note`，`list_my_punches` 只有 `month`——那是期別不是人——其餘四個是
 空集合），另加一份

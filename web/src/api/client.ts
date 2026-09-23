@@ -2372,6 +2372,7 @@ export const myOvertimeList = z.object({
   month_hours_left: z.string(),
   day_types: z.array(overtimeDayType),
   schedule: workSchedule,
+  calendar: z.array(z.object({ date: z.string(), day_type: z.string(), name: z.string() })),
   ruleset: rulesetRef,
   scope_note: z.string(),
 });
