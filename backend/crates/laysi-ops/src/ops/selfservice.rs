@@ -575,6 +575,18 @@ impl Operation for RequestLeave {
 
 // My overtime
 
+/// Hours an overtime request covers: the length of the range less the break
+/// inside it. The break is not working time on a rest day any more than on a
+/// weekday, and a whole rest day is one request across it.
+fn requested_overtime_hours(
+    schedule: &WorkSchedule,
+    from: NaiveDateTime,
+    to: NaiveDateTime,
+) -> Money {
+    let seconds = (to - from).num_seconds() - schedule.break_seconds(from, to);
+    (Money::from(seconds) / Money::from(3600)).round_dp(2)
+}
+
 /// What the monthly ceiling in the overtime ruleset is measured against:
 /// everything not rejected. A pending request is already spoken for, so
 /// counting only the approved ones would offer hours the next submission
@@ -673,8 +685,9 @@ pub struct SubmitMyOvertimeRequestInput {
     /// When the overtime starts, in local wall-clock time,
     /// `2026-08-25T18:00:00`.
     pub from_at: NaiveDateTime,
-    /// When it ends. The hours are the length of the range; nothing else is
-    /// accepted, so the request cannot claim more than it covers.
+    /// When it ends. The hours are the length of the range less the break;
+    /// nothing else is accepted, so the request cannot claim more than it
+    /// covers.
     pub to_at: NaiveDateTime,
     /// Which kind of day to price it at, as listed by the overtime ruleset.
     /// Omitted takes the day of the week: Saturday and Sunday are rest days.
@@ -696,7 +709,7 @@ impl Operation for SubmitMyOvertimeRequest {
     }
 
     fn summary(&self) -> &'static str {
-        "以目前登入帳號所連結的員工身分送出加班申請。時數為起訖時刻的長度，一日與每月上限來自加班規則；核准後才列入薪資。申請人與建立者都由登入身分決定，輸入不能指定他人。"
+        "以目前登入帳號所連結的員工身分送出加班申請。時數為起訖時刻的長度扣掉休息時間，一日與每月上限來自加班規則；核准後才列入薪資。申請人與建立者都由登入身分決定，輸入不能指定他人。"
     }
 
     fn input_schema(&self) -> Value {
@@ -709,12 +722,16 @@ impl Operation for SubmitMyOvertimeRequest {
             return Err(OpError::BadInput("加班結束時刻要晚於開始時刻".into()));
         }
         let worked_on = i.from_at.date();
-        let hours =
-            (Money::from((i.to_at - i.from_at).num_seconds()) / Money::from(3600)).round_dp(2);
+        let schedule = WorkSchedule::load(ctx).await?;
+        let hours = requested_overtime_hours(&schedule, i.from_at, i.to_at);
+        if hours <= Money::ZERO {
+            return Err(OpError::BadInput(
+                "所選時段都在休息時間內，請改填實際加班的時段".into(),
+            ));
+        }
 
         let rs = laysi_regulation::resolve("overtime", worked_on)?;
         let day_types = laysi_regulation::overtime_day_types(rs)?;
-        let schedule = WorkSchedule::load(ctx).await?;
         let code = i
             .day_type
             .clone()
@@ -1903,6 +1920,40 @@ mod tests {
     /// The monthly ceiling counts pending requests, so the hours a second
     /// request may still claim are not the approved ones alone. Counting only
     /// approved hours would let the screen offer hours the submission refuses.
+    #[test]
+    fn requested_overtime_leaves_the_break_out() {
+        use chrono::{NaiveDate, NaiveTime};
+
+        let at = |day: u32, h: u32| {
+            NaiveDate::from_ymd_opt(2026, 7, day)
+                .unwrap()
+                .and_hms_opt(h, 0, 0)
+                .unwrap()
+        };
+        let schedule = WorkSchedule {
+            starts_at: NaiveTime::from_hms_opt(9, 0, 0),
+            ends_at: NaiveTime::from_hms_opt(17, 0, 0),
+            grace_minutes: 0,
+            grace_stated: false,
+            flex_minutes: 0,
+            break_start: NaiveTime::from_hms_opt(12, 0, 0),
+            break_end: NaiveTime::from_hms_opt(13, 0, 0),
+            calendar: BTreeMap::new(),
+        };
+        let hours = |from, to| requested_overtime_hours(&schedule, from, to);
+        assert_eq!(
+            hours(at(11, 9), at(11, 18)),
+            Money::from(8),
+            "週六整天扣掉午休"
+        );
+        assert_eq!(
+            hours(at(7, 17), at(7, 20)),
+            Money::from(3),
+            "下班後的加班沒有午休可扣"
+        );
+        assert_eq!(hours(at(11, 12), at(11, 13)), Money::ZERO, "整段都在午休");
+    }
+
     #[test]
     fn committed_overtime_hours_counts_pending_and_drops_rejected() {
         let one = |status: &str, hours: &str| OvertimeRequest {

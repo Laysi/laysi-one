@@ -867,7 +867,7 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 不是時數級距，payload 沒有那個形狀。
 
 **加班要先申請再核准，加班費由規則庫算**：`submit_my_overtime_request` 收起訖
-時刻，時數等於區間長度；`decide_overtime_request` 核准後，`run_payroll` 依 `overtime.toml`
+時刻，時數等於區間長度扣掉休息時間；`decide_overtime_request` 核准後，`run_payroll` 依 `overtime.toml`
 的倍數與「月薪 ÷ `monthly_hours`」算出金額，**倍數與時數上限都不在 Rust 裡**。加班費
 **不存欄位**——它是時數乘一個有生效日的倍數，存下來等於凍結一個修法有權回頭改的數字，
 與扣繳稅額同一條理由。平日申請的時段不得與上下班時間重疊（那段時間月薪已經給付），

@@ -1536,7 +1536,7 @@ column，因此不可能與上面的區間不一致。
 - **`insured_as`（`employee`／`owner`）決定套哪一組分擔比率**。見上文
   「負責人投保是獨立 domain」。
 
-時薪制的三個後果：
+時薪制的四個後果：
 
 1. **工時只採完整的打卡日**（`PunchDay::worked_seconds`，休息時間已扣除）。只打上班
    沒打下班的那一天長度不明，猜一個等於在上面掛錢；那是漏打卡，補登流程負責。
@@ -1545,6 +1545,12 @@ column，因此不可能與上面的區間不一致。
 3. **加班費以本人的時薪計價**：`ordinary_hourly_wage` 對月薪制除以 `monthly_hours`，
    對時薪制直接回傳本人時薪。少了這一步，時薪員工的加班費會被除以 240，一小時加班
    反而比一小時正常工時便宜。
+4. **本薪扣掉核准加班與打卡時段重疊的部分**（`ordinary_hours`）：第 24 條的
+   1.34／1.67 已經含那一倍本薪，而打卡涵蓋加班時段，不扣就付兩次。只扣重疊，不扣
+   加班時數：打了下班卡才留下來加班、或那天漏打卡，加班都不在打卡工時裡，照時數扣
+   會把別的時段的本薪扣掉。重疊裡的休息時間也不扣，它本來就不在打卡工時裡。另一種
+   做法是加班費只付加給（倍率減 1），合計相同，但薪資單的加班費欄會對不上法定倍率，
+   漏打卡的那天加班只拿到加給、低於法定。
 
 **最低工資的下限跟著 `pay_basis` 走**：`minimum_wage` 的 `monthly` 與 `hourly`
 是兩個並列的下限，互不涵蓋。時薪拿去比月薪下限必定不合格，月薪拿去比時薪下限則永遠
@@ -1961,7 +1967,7 @@ ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日�
 薪資單上的 `overtime` 直接抄後者。只用本系統的公司因此永遠發不出加班費，而且
 **沒有任何人核准過任何一次加班**——勞基法第 32 條把雇主的同意當成加班合法的前提。
 
-申請就是那份同意，形狀與休假單相同：牆上時鐘的起訖時刻，時數等於區間長度，
+申請就是那份同意，形狀與休假單相同：牆上時鐘的起訖時刻，時數等於區間長度扣掉休息時間，
 待簽核到有人決定。`worked_on` 由 `from_at` 推導（generated column），所以一張單
 屬於哪個月不是另一個可以填成別的值的欄位。
 
@@ -2095,7 +2101,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`，以及算時數用的 `schedule` |
 | `request_leave` | NeedsConfirm | `{ kind, from_at, to_at, reason? }` | `{ request, schedule }`，編號 `LV{西元年月}-{三碼}`；時數與天數由後端算 |
 | `list_my_overtime_requests` | ReadOnly | `{}` | 本人加班單、本月已核准時數、上限與尚可申請時數、`day_types` |
-| `submit_my_overtime_request` | NeedsConfirm | `{ from_at, to_at, day_type?, reason? }` | `{ request }`，編號 `OT{西元年月}-{三碼}`；時數為區間長度 |
+| `submit_my_overtime_request` | NeedsConfirm | `{ from_at, to_at, day_type?, reason? }` | `{ request }`，編號 `OT{西元年月}-{三碼}`；時數為區間長度扣掉休息時間 |
 | `list_my_expense_claims` | ReadOnly | `{}` | 本人送出的報支與逐關進度 |
 | `submit_my_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, pay_method?, memo? }` | `{ claim }`，編號 `EX{西元年月}-{三碼}` |
 | `attach_my_expense_receipt` | NeedsConfirm | `{ claim_no, file_name, content_base64 }` | `{ receipt, receipts }`，收據進 RustFS |
