@@ -67,7 +67,6 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
   const [fromTime, setFromTime] = useState('');
   const [toDay, setToDay] = useState('');
   const [toTime, setToTime] = useState('');
-  const [dayType, setDayType] = useState('');
   const [reason, setReason] = useState('');
 
   const running = useRef<(() => void) | null>(null);
@@ -87,7 +86,6 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
         setFromDay((v) => v || today);
         setToDay((v) => v || today);
         setFromTime((v) => v || d.schedule.work_end || '18:00');
-        setDayType((v) => v || (restDay(today) ? 'rest_day' : 'weekday'));
       })
       .catch((e) => live && setError(e instanceof OpFailed ? e.error.message : String(e)));
     return () => running.current?.();
@@ -115,6 +113,8 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
     : 0;
   const hours = ordered ? (to - from - rest) / 60 : 0;
   const onlyBreak = ordered && hours <= 0;
+  const special = data.calendar.find((c) => c.date === fromDay);
+  const dayType = special?.day_type ?? (restDay(fromDay) ? 'rest_day' : 'weekday');
   const picked = data.day_types.find((t) => t.code === dayType);
   const dailyMax = picked ? Number(picked.max_hours) : 0;
   const overDaily = ordered && dailyMax > 0 && hours > dailyMax;
@@ -131,7 +131,6 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
                         {
             from_at: `${fromDay}T${fromTime}:00`,
             to_at: `${toDay}T${toTime}:00`,
-            day_type: dayType,
             ...(reason.trim() ? { reason: reason.trim() } : {}),
           },
                         `申請加班，${fromDay} ${fromTime} 至 ${toDay} ${toTime}`,
@@ -187,7 +186,6 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
                   onChange={(v) => {
                     setFromDay(v);
                     if (toDay === '' || toDay < v) setToDay(v);
-                    setDayType(restDay(v) ? 'rest_day' : 'weekday');
                   }}
                 />
               </label>
@@ -206,20 +204,13 @@ export function OvertimeRequest({ onToast, onGo, reloadKey, onChanged }: Props) 
               <TimeField label="結束時間" value={toTime} onChange={setToTime} />
             </div>
 
-            <label className="field">
+            <div className="field">
               加班日
-              <select
-                className="input"
-                value={dayType}
-                onChange={(e) => setDayType(e.target.value)}
-              >
-                {data.day_types.map((t) => (
-                  <option key={t.code} value={t.code}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+              <span className="field__fixed">
+                {picked?.label}
+                {special?.name && ` · ${special.name}`}
+              </span>
+            </div>
 
             <label className="field">
               事由

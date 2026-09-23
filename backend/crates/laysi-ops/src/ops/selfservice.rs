@@ -642,6 +642,7 @@ impl Operation for ListMyOvertimeRequests {
             .sum();
         let pending = requests.iter().filter(|o| o.status == "pending").count();
         let left = (ceiling - committed_overtime_hours(&this_month)).max(Money::ZERO);
+        let schedule = WorkSchedule::load(ctx).await?;
 
         let summary = format!(
             "讀{}的加班申請 · {} 張（{pending} 張等簽）· {month} 已核准 {} 小時",
@@ -669,7 +670,8 @@ impl Operation for ListMyOvertimeRequests {
                         "max_hours": t.max_hours.normalize().to_string(),
                     }))
                     .collect::<Vec<_>>(),
-                "schedule": WorkSchedule::load(ctx).await?.json(),
+                "schedule": schedule.json(),
+                "calendar": schedule.overtime_exceptions(),
                 "ruleset": ruleset_json(rs),
                 "scope_note": "僅查詢已驗證 session 的 ctx.employee_id；輸入不含可指定他人的欄位。",
             }),
@@ -689,10 +691,6 @@ pub struct SubmitMyOvertimeRequestInput {
     /// nothing else is accepted, so the request cannot claim more than it
     /// covers.
     pub to_at: NaiveDateTime,
-    /// Which kind of day to price it at, as listed by the overtime ruleset.
-    /// Omitted takes the day of the week: Saturday and Sunday are rest days.
-    #[serde(default)]
-    pub day_type: Option<String>,
     /// Why the work is needed.
     #[serde(default)]
     pub reason: Option<String>,
@@ -732,28 +730,15 @@ impl Operation for SubmitMyOvertimeRequest {
 
         let rs = laysi_regulation::resolve("overtime", worked_on)?;
         let day_types = laysi_regulation::overtime_day_types(rs)?;
-        let code = i
-            .day_type
-            .clone()
-            .unwrap_or_else(|| schedule.overtime_day_type(worked_on).to_string());
+        // The work calendar decides the day type, never the requester: a
+        // weekday priced as a rest day skips the working-hours check below
+        // and pays hours the salary already covers.
+        let code = schedule.overtime_day_type(worked_on);
         let Some(day_type) = day_types.iter().find(|t| t.code == code) else {
-            let names = day_types
-                .iter()
-                .map(|t| t.label.as_str())
-                .collect::<Vec<_>>()
-                .join("、");
             return Err(OpError::BadInput(format!(
-                "加班日的種類要填{names}其中一項"
+                "加班規則沒有 {worked_on} 適用的日別，請系統管理員到「法規版本」補上"
             )));
         };
-        if hours > day_type.max_hours {
-            return Err(OpError::BadInput(format!(
-                "{}加班一天最多 {} 小時，這張單是 {} 小時，請分成多天申請",
-                day_type.label,
-                day_type.max_hours.normalize(),
-                hours.normalize()
-            )));
-        }
 
         // Normal working hours are already paid by the salary, so a weekday
         // request that overlaps them would be paid twice. Without a stated
@@ -773,6 +758,14 @@ impl Operation for SubmitMyOvertimeRequest {
                     .ends_at
                     .map(|t| t.format("%H:%M").to_string())
                     .unwrap_or_default(),
+            )));
+        }
+        if hours > day_type.max_hours {
+            return Err(OpError::BadInput(format!(
+                "{}加班一天最多 {} 小時，這張單是 {} 小時，請分成多天申請",
+                day_type.label,
+                day_type.max_hours.normalize(),
+                hours.normalize()
             )));
         }
 
@@ -797,7 +790,7 @@ impl Operation for SubmitMyOvertimeRequest {
             .store
             .create_overtime_request(NewOvertimeRequest {
                 employee_id: employee.id,
-                day_type: &code,
+                day_type: code,
                 from_at: i.from_at,
                 to_at: i.to_at,
                 hours,
@@ -2050,12 +2043,12 @@ mod tests {
                 BTreeSet::from(["kind", "from_at", "to_at", "reason"]),
             ),
             ("list_my_overtime_requests", BTreeSet::new()),
-            // `day_type` names a kind of calendar day, not a person, and the
-            // ruleset decides which values exist. The hours are the length of
-            // the range, so there is no field to inflate them with either.
+            // The hours are the length of the range and the day type comes
+            // from the work calendar, so there is no field to inflate the pay
+            // with either.
             (
                 "submit_my_overtime_request",
-                BTreeSet::from(["from_at", "to_at", "day_type", "reason"]),
+                BTreeSet::from(["from_at", "to_at", "reason"]),
             ),
             ("list_my_expense_claims", BTreeSet::new()),
             (
