@@ -350,9 +350,7 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                           <span className="cell-hint cell-hint--block num">
                             {s.emp_no} · {s.dept_label ?? '未指定'} · {s.title}
                           </span>
-                          {s.prorated && (
-                            <span className="cell-hint cell-hint--block">{s.note}</span>
-                          )}
+                          {s.note && <span className="cell-hint cell-hint--block">{s.note}</span>}
                           {!s.recompute_matches && (
                             <span className="tag tag--bad tag--static">
                               重算結果與儲存值不符
@@ -473,6 +471,28 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                       {result.warnings.map((w) => (
                         <span className="step-chip" key={w.emp_no}>
                           {w.name}（{w.emp_no}）：{w.issue}
+                        </span>
+                      ))}
+                    </p>
+                  )}
+                  {result.attendance_checks.length > 0 && (
+                    <p className="recon recon--off">
+                      下列出勤未計入本期金額，請確認後再過帳：
+                      {result.attendance_checks.map((c) => (
+                        <span className="step-chip" key={c.emp_no}>
+                          {c.name}（{c.emp_no}）：
+                          {[
+                            c.absent_dates.length > 0 &&
+                              `曠職 ${c.absent_dates.map((d) => d.slice(5)).join('、')}`,
+                            c.open_dates.length > 0 &&
+                              `未打下班 ${c.open_dates.map((d) => d.slice(5)).join('、')}`,
+                            c.pending_leaves.length > 0 &&
+                              `休假單待簽核 ${c.pending_leaves.join('、')}`,
+                            c.holiday_dates.length > 0 &&
+                              `國定假日 ${c.holiday_dates.map((d) => d.slice(5)).join('、')} 的工資`,
+                          ]
+                            .filter(Boolean)
+                            .join('；')}
                         </span>
                       ))}
                     </p>

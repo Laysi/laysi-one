@@ -20,6 +20,13 @@
 //! request are not paid: an approval is the only record that the overtime
 //! was agreed to.
 //!
+//! Approved leave moves the base by the `leave_pay` ruleset, resolved on each
+//! day of leave: a monthly salary loses the share a kind of leave does not
+//! pay, an hourly wage gains the share it does. Nothing else is deducted.
+//! Days with no punch and no leave, missing departures, pending requests and
+//! a part timer's public holidays are listed for somebody to look at, and
+//! change no amount.
+//!
 //! The payroll voucher has three parts and is created unposted:
 //!
 //! ```text
@@ -39,17 +46,21 @@
 //! not individuals). Both read the same table; the difference is whether
 //! `dispatch` stops the caller. The filter is not written into the query.
 
-use crate::ops::attendance::{ordinary_hourly_wage, punch_days, PunchDay, WorkSchedule};
+use crate::ops::attendance::{
+    default_day_kind, judges_absence, leave_kind_label, mark_days, month_days,
+    ordinary_hourly_wage, punch_days, DayKind, PunchDay, WorkSchedule,
+};
 #[cfg(test)]
 use crate::ops::employees::INSURED_EMPLOYEE;
-use crate::ops::employees::{pay_basis_label, BASIS_HOURLY, BASIS_MONTHLY};
+use crate::ops::employees::{pay_basis_label, service_months, BASIS_HOURLY, BASIS_MONTHLY};
 use crate::ops::insurance::{percent, premiums_on, ruleset_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
+use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use laysi_domain::business_time;
 use laysi_domain::Money;
-use laysi_regulation::Ruleset;
-use laysi_store::{Employee, NewPayslip};
+use laysi_regulation::{LeaveDay, Ruleset};
+use laysi_store::{Employee, LeaveRequest, NewPayslip};
 use rust_decimal::{Decimal, RoundingStrategy};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -218,6 +229,155 @@ fn in_service(e: &Employee, from: NaiveDate, to: NaiveDate) -> bool {
     e.hired_on <= to && e.left_on.is_none_or(|d| d >= from)
 }
 
+/// The period being paid, as the attendance checks need it.
+struct Period<'a> {
+    name: &'a str,
+    from: NaiveDate,
+    to: NaiveDate,
+    /// The real date: a day is only missed once it is over.
+    today: NaiveDate,
+    schedule: &'a WorkSchedule,
+}
+
+/// One kind of approved leave inside the period, and what it pays.
+#[derive(Default)]
+struct LeaveTotal {
+    days: Money,
+    paid_days: Money,
+    hours: Money,
+    paid_hours: Money,
+}
+
+/// Approved leave inside the period, by kind, priced by `leave_pay`.
+///
+/// `requests` must reach back to 1 January: sickness leave's yearly allowance
+/// is counted from then. Each request is split over its dates in proportion
+/// to the working time on each, but its stored hours and days are what gets
+/// split -- they were settled when it was sent, and a later change to the
+/// working window must not restate an approved request.
+fn leave_in_period(
+    e: &Employee,
+    requests: &[&LeaveRequest],
+    schedule: &WorkSchedule,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<BTreeMap<String, LeaveTotal>, OpError> {
+    // Days before 1 January are in the split -- a request's stored total
+    // covers them -- but never priced: they belong to last year's payroll,
+    // and last year may have no ruleset in this database at all.
+    let year_start = NaiveDate::from_ymd_opt(from.year(), 1, 1).unwrap_or(from);
+    let mut days: Vec<(LeaveDay, Money)> = Vec::new();
+    for l in requests.iter().filter(|l| l.status == "approved") {
+        let dates: Vec<NaiveDate> = l
+            .from_on
+            .iter_days()
+            .take_while(|d| *d <= l.to_on)
+            .collect();
+        let seconds: Vec<i64> = dates
+            .iter()
+            .map(|date| {
+                let open = date.and_time(NaiveTime::MIN);
+                let close = open + chrono::Duration::days(1);
+                schedule
+                    .leave_seconds(l.from_at.max(open), l.to_at.min(close))
+                    .unwrap_or(0)
+            })
+            .collect();
+        let total: i64 = seconds.iter().sum();
+        for (i, date) in dates.iter().enumerate() {
+            // Without a working window to split by, the whole request sits
+            // on its first date: the stored total is still right.
+            let share = match total > 0 {
+                true => Decimal::from(seconds[i]) / Decimal::from(total),
+                false if i == 0 => Decimal::ONE,
+                false => Decimal::ZERO,
+            };
+            if share.is_zero() || *date > to || *date < year_start {
+                continue;
+            }
+            days.push((
+                LeaveDay {
+                    date: *date,
+                    kind: l.kind.clone(),
+                    days: l.days * share,
+                    service_months: service_months(e.hired_on, *date),
+                },
+                l.hours * share,
+            ));
+        }
+    }
+    days.sort_by_key(|(d, _)| d.date);
+    let (leave_days, hours): (Vec<LeaveDay>, Vec<Money>) = days.into_iter().unzip();
+    let paid = laysi_regulation::leave_paid_days(&leave_days)?;
+
+    let first = e.hired_on.max(from);
+    let last = e.left_on.map_or(to, |left| left.min(to));
+    let mut totals: BTreeMap<String, LeaveTotal> = BTreeMap::new();
+    for ((day, hours), paid) in leave_days.iter().zip(hours).zip(paid) {
+        if day.date < first || day.date > last {
+            continue;
+        }
+        let t = totals.entry(day.kind.clone()).or_default();
+        t.days += day.days;
+        t.paid_days += paid;
+        t.hours += hours;
+        if !day.days.is_zero() {
+            t.paid_hours += hours * paid / day.days;
+        }
+    }
+    Ok(totals)
+}
+
+/// Days that need somebody to look at them before the period is paid. None of
+/// them changes an amount: an absence may be a forgotten punch, a pending
+/// request may still be refused, and a public holiday on a part timer's
+/// agreed day needs the agreement the roster does not record.
+fn attendance_check(
+    e: &Employee,
+    p: &Period,
+    punched: Vec<PunchDay>,
+    requests: &[&LeaveRequest],
+    awaiting_fix: &[NaiveDate],
+) -> Option<Value> {
+    let (schedule, from, to, today) = (p.schedule, p.from, p.to, p.today);
+    let last = e.left_on.map_or(today, |left| left.min(today));
+    let mut days = month_days(punched, p.name, e.hired_on, last);
+    let judge = judges_absence(schedule, &e.employment_type, &e.insured_as);
+    mark_days(&mut days, requests, awaiting_fix, schedule, judge, today);
+    let absent: Vec<NaiveDate> = days.iter().filter(|d| d.absent).map(|d| d.date).collect();
+    let open: Vec<NaiveDate> = days.iter().filter(|d| d.open()).map(|d| d.date).collect();
+    let pending: Vec<&str> = requests
+        .iter()
+        .filter(|l| l.status == "pending" && l.to_on >= from && l.from_on <= to)
+        .map(|l| l.leave_no.as_str())
+        .collect();
+    let holidays: Vec<NaiveDate> = match e.pay_basis == BASIS_HOURLY {
+        true => schedule
+            .calendar
+            .iter()
+            .filter(|(date, (kind, _))| {
+                **date >= e.hired_on.max(from)
+                    && **date <= last.min(to)
+                    && *kind == DayKind::Holiday
+                    && default_day_kind(**date).works()
+            })
+            .map(|(date, _)| *date)
+            .collect(),
+        false => Vec::new(),
+    };
+    if absent.is_empty() && open.is_empty() && pending.is_empty() && holidays.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "emp_no": e.emp_no,
+        "name": e.name,
+        "absent_dates": absent,
+        "open_dates": open,
+        "pending_leaves": pending,
+        "holiday_dates": holidays,
+    }))
+}
+
 /// A computed payslip together with the rule versions used to produce it.
 struct Computed {
     slip: NewPayslip,
@@ -232,14 +392,14 @@ struct Computed {
 
 /// Compute one person's pay for the period. Premiums and withholding rates
 /// all come from the ruleset.
-async fn compute_one(
-    _ctx: &OpCtx,
+fn compute_one(
     e: &Employee,
     from: NaiveDate,
     to: NaiveDate,
     pay_on: NaiveDate,
     overtime: Money,
     plain_hours: Money,
+    leave: &BTreeMap<String, LeaveTotal>,
 ) -> Result<Computed, OpError> {
     let month_days = Decimal::from((to - from).num_days() + 1);
     let days = Decimal::from(paid_days(e, from, to));
@@ -268,10 +428,33 @@ async fn compute_one(
     // calendar day, so a full month gives days == month_days and a ratio of
     // 1. Proration does not apply to hourly pay:
     // the hours already say how much of the period was worked.
+    //
+    // Leave then moves it by the share `leave_pay` does not pay: a monthly
+    // salary loses that share of a day, a day being the salary over the
+    // month's calendar days as in the proration; an hourly wage gains the
+    // share it does pay of the hours on leave. One amount per kind, rounded
+    // on its own, so the note adds up to the payslip.
+    let leave_amounts: Vec<(&str, Money, Money)> = leave
+        .iter()
+        .map(|(kind, t)| match hourly {
+            true => (
+                kind.as_str(),
+                t.hours,
+                to_dollars(e.base_salary * t.paid_hours),
+            ),
+            false => (
+                kind.as_str(),
+                t.days,
+                -to_dollars(e.base_salary * (t.days - t.paid_days) / month_days),
+            ),
+        })
+        .filter(|(_, _, amount)| !amount.is_zero())
+        .collect();
     let base = match hourly {
         true => to_dollars(e.base_salary * plain_hours),
         false => to_dollars(e.base_salary * days / month_days),
-    };
+    } + leave_amounts.iter().map(|(_, _, a)| *a).sum::<Money>();
+    let base = base.max(Money::ZERO);
     let gross = base + overtime;
 
     // Premiums resolve on the period end: the version in force for this period.
@@ -307,11 +490,37 @@ async fn compute_one(
     let below_minimum =
         laysi_regulation::minimum_wage_shortfall(min_rs, e.base_salary, &e.pay_basis)?;
 
-    let note = match (hourly, days < month_days) {
-        (true, _) => format!("時薪制，本期正常工時 {} 小時", plain_hours.normalize()),
+    let mut note = match (hourly, days < month_days) {
+        (true, _) => format!(
+            "時薪制，本期正常工時 {} 小時",
+            plain_hours.round_dp(2).normalize()
+        ),
         (false, true) => format!("在職 {days}／{month_days} 日，按曆日比例計薪"),
         (false, false) => String::new(),
     };
+    let leave_note: Vec<String> = leave_amounts
+        .iter()
+        .map(|(kind, qty, amount)| match hourly {
+            true => format!(
+                "{} {} 小時計 {}",
+                leave_kind_label(kind),
+                qty.round_dp(2).normalize(),
+                money(*amount)
+            ),
+            false => format!(
+                "{} {} 日扣 {}",
+                leave_kind_label(kind),
+                qty.round_dp(2).normalize(),
+                money(amount.abs())
+            ),
+        })
+        .collect();
+    if !leave_note.is_empty() {
+        if !note.is_empty() {
+            note.push('；');
+        }
+        note.push_str(&leave_note.join("、"));
+    }
 
     Ok(Computed {
         slip: NewPayslip {
@@ -690,6 +899,23 @@ impl Operation for RunPayroll {
         let punches = ctx.store.punches(&period, None).await?;
         let schedule = WorkSchedule::load(ctx).await?;
 
+        // Leave from 1 January: sickness leave's yearly allowance is counted
+        // from then. Pending requests come along for the checks only.
+        let year_start = NaiveDate::from_ymd_opt(from.year(), 1, 1).unwrap_or(from);
+        let leaves = ctx
+            .store
+            .leave_requests_matching(true, None, Some((year_start, to)))
+            .await?;
+        let awaiting = ctx.store.punch_corrections(false, None).await?;
+        let checking = Period {
+            name: &period,
+            from,
+            to,
+            today: business_time(Utc::now(), ctx.offset).date(),
+            schedule: &schedule,
+        };
+        let mut attendance_checks: Vec<Value> = Vec::new();
+
         // Approved overtime for the period, priced by the ruleset in force on
         // each day worked.
         let approved_overtime = ctx.store.approved_overtime(from, to).await?;
@@ -754,9 +980,30 @@ impl Operation for RunPayroll {
                 .unwrap_or(Money::ZERO);
 
             let days = punch_days_of(&punches, e.id, ctx.offset);
-            // An hourly worker with nothing clocked has no pay to compute.
-            // A payslip of zero would read as an amount somebody worked out.
-            if e.pay_basis == BASIS_HOURLY && ordinary_hours(&days, &schedule, &[]).is_zero() {
+            let requests: Vec<&LeaveRequest> =
+                leaves.iter().filter(|l| l.employee_id == e.id).collect();
+            let fixes: Vec<NaiveDate> = awaiting
+                .iter()
+                .filter(|c| c.employee_id == e.id)
+                .map(|c| c.punched_on)
+                .collect();
+            attendance_checks.extend(attendance_check(
+                e,
+                &checking,
+                punch_days_of(&punches, e.id, ctx.offset),
+                &requests,
+                &fixes,
+            ));
+            let leave = leave_in_period(e, &requests, &schedule, from, to)?;
+
+            // An hourly worker with nothing clocked and no paid leave has no
+            // pay to compute. A payslip of zero would read as an amount
+            // somebody worked out.
+            let paid_leave = leave.values().any(|t| !t.paid_hours.is_zero());
+            if e.pay_basis == BASIS_HOURLY
+                && ordinary_hours(&days, &schedule, &[]).is_zero()
+                && !paid_leave
+            {
                 skipped.push(json!({
                     "emp_no": e.emp_no,
                     "name": e.name,
@@ -767,7 +1014,7 @@ impl Operation for RunPayroll {
 
             let spans = overtime_spans.get(&e.id).map(Vec::as_slice).unwrap_or(&[]);
             let plain = ordinary_hours(&days, &schedule, spans);
-            let c = compute_one(ctx, e, from, to, pay_on, overtime, plain).await?;
+            let c = compute_one(e, from, to, pay_on, overtime, plain, &leave)?;
             if let Some(floor) = c.below_minimum {
                 warnings.push(json!({
                     "emp_no": e.emp_no,
@@ -876,6 +1123,7 @@ impl Operation for RunPayroll {
                 // Below minimum wage does not block the run — people still have to
                 // be paid — but it must be visible.
                 "warnings": warnings,
+                "attendance_checks": attendance_checks,
                 "deduction_breakdown": {
                     "labor_employee": labor_ee.to_string(),
                     "health_employee": health_ee.to_string(),
@@ -1272,6 +1520,166 @@ mod tests {
                 &[(at(15, "09:00"), at(15, "18:00"))],
             ),
             Money::ZERO
+        );
+    }
+
+    fn office() -> WorkSchedule {
+        let t = |h| NaiveTime::from_hms_opt(h, 0, 0);
+        let mut s = no_schedule();
+        (s.starts_at, s.ends_at, s.break_start, s.break_end) = (t(9), t(17), t(12), t(13));
+        s.calendar
+            .insert(d(2026, 5, 1), (DayKind::Holiday, "勞動節".into()));
+        s
+    }
+
+    fn leave(
+        no: &str,
+        kind: &str,
+        status: &str,
+        from: &str,
+        to: &str,
+        hours: &str,
+    ) -> LeaveRequest {
+        let at = |v: &str| NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M").unwrap();
+        LeaveRequest {
+            leave_no: no.into(),
+            employee_id: 1,
+            emp_no: "TEST-001".into(),
+            name: "測試員工".into(),
+            dept_label: None,
+            kind: kind.into(),
+            from_at: at(from),
+            to_at: at(to),
+            from_on: at(from).date(),
+            to_on: at(to).date(),
+            hours: n(hours),
+            days: n(hours) / n("7"),
+            reason: String::new(),
+            status: status.into(),
+            decided_by: String::new(),
+            decided_role: String::new(),
+            decided_at: None,
+            decision_note: String::new(),
+            created_at: Utc::now(),
+            created_by: String::new(),
+        }
+    }
+
+    /// The case #101 was opened on: May, a personal leave day that started in
+    /// April and two days of sickness leave. A day is the salary over the
+    /// month's 31 calendar days; personal leave pays none of it, sickness
+    /// leave half. A request still waiting for a decision pays nothing yet.
+    #[test]
+    fn a_monthly_salary_loses_the_share_its_leave_does_not_pay() {
+        let mut e = emp(d(2026, 4, 15), None);
+        e.base_salary = n("42000");
+        let requests = [
+            leave(
+                "LV1",
+                "personal",
+                "approved",
+                "2026-04-30T09:00",
+                "2026-05-04T17:00",
+                "14",
+            ),
+            leave(
+                "LV2",
+                "sick",
+                "approved",
+                "2026-05-26T09:00",
+                "2026-05-27T17:00",
+                "14",
+            ),
+            leave(
+                "LV3",
+                "personal",
+                "pending",
+                "2026-05-20T09:00",
+                "2026-05-20T17:00",
+                "7",
+            ),
+        ];
+        let requests: Vec<&LeaveRequest> = requests.iter().collect();
+        let (from, to) = (d(2026, 5, 1), d(2026, 5, 31));
+        let leave = leave_in_period(&e, &requests, &office(), from, to).unwrap();
+        assert_eq!(
+            leave["personal"].days,
+            n("1"),
+            "四月那一天不算進五月，勞動節與週末不佔"
+        );
+        assert_eq!(leave["personal"].paid_days, n("0"));
+        assert_eq!(leave["sick"].paid_days, n("1"));
+
+        let c = compute_one(
+            &e,
+            from,
+            to,
+            d(2026, 6, 5),
+            Money::ZERO,
+            Money::ZERO,
+            &leave,
+        )
+        .unwrap();
+        assert_eq!(c.slip.base_salary, n("39290"), "42,000 − 1,355 − 1,355");
+        assert_eq!(c.slip.note, "事假 1 日扣 1,355、病假 2 日扣 1,355");
+    }
+
+    /// A request that starts in December is split over all its dates, but only
+    /// January's are priced: December belongs to last year's payroll, and this
+    /// database has no ruleset for it.
+    #[test]
+    fn a_request_from_last_year_prices_only_this_years_days() {
+        let e = emp(d(2025, 3, 3), None);
+        let requests = [leave(
+            "LV5",
+            "annual",
+            "approved",
+            "2025-12-29T09:00",
+            "2026-01-02T17:00",
+            "35",
+        )];
+        let requests: Vec<&LeaveRequest> = requests.iter().collect();
+        let leave = leave_in_period(&e, &requests, &office(), d(2026, 1, 1), d(2026, 1, 31))
+            .expect("去年的日子不該讓整期計薪失敗");
+        assert_eq!(leave["annual"].days, n("2"), "五天裡落在一月的兩天");
+        assert_eq!(leave["annual"].paid_days, n("2"));
+    }
+
+    /// An hourly wage is paid on hours, so leave adds the share it pays of the
+    /// hours on leave rather than taking anything away.
+    #[test]
+    fn an_hourly_wage_gains_the_share_its_leave_pays() {
+        let mut e = emp(d(2026, 5, 4), None);
+        (e.pay_basis, e.base_salary) = (BASIS_HOURLY.into(), n("200"));
+        let requests = [leave(
+            "LV4",
+            "sick",
+            "approved",
+            "2026-05-27T13:00",
+            "2026-05-27T17:00",
+            "4",
+        )];
+        let requests: Vec<&LeaveRequest> = requests.iter().collect();
+        let (from, to) = (d(2026, 5, 1), d(2026, 5, 31));
+        let leave = leave_in_period(&e, &requests, &office(), from, to).unwrap();
+        let c = compute_one(
+            &e,
+            from,
+            to,
+            d(2026, 6, 5),
+            Money::ZERO,
+            n("40.644722"),
+            &leave,
+        )
+        .unwrap();
+        assert_eq!(
+            c.slip.base_salary,
+            n("8529"),
+            "200 × 40.64 小時 + 病假 4 小時折半 400"
+        );
+        assert_eq!(
+            c.slip.note,
+            "時薪制，本期正常工時 40.64 小時；病假 4 小時計 400"
         );
     }
 }

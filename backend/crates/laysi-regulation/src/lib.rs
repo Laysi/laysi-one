@@ -24,8 +24,8 @@
 //!
 //! This crate stays synchronous and knows nothing about SQL: the server
 //! reads `reg_ruleset` at boot and after every edit and hands the rows to
-//! [`install`]. [`seed`] is the factory set shipped with the image, written
-//! once into an empty table and never again.
+//! [`install`]. [`seed`] is the factory set shipped with the image, written for
+//! each domain the table holds no version of and never again for that domain.
 //!
 //! Updating regulation end to end: save a ruleset with a later
 //! `effective_from`. Results for earlier dates are unchanged and later dates
@@ -81,6 +81,10 @@ const SOURCES: &[(&str, &str)] = &[
         "2026/owner_insurance.toml",
         include_str!("../../../regulation/2026/owner_insurance.toml"),
     ),
+    (
+        "2026/leave_pay.toml",
+        include_str!("../../../regulation/2026/leave_pay.toml"),
+    ),
 ];
 
 /// Regulation domains the system knows. A rule file's `domain` must be one
@@ -96,6 +100,7 @@ pub const DOMAINS: &[&str] = &[
     "depreciation",
     "overtime",
     "owner_insurance",
+    "leave_pay",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -142,6 +147,16 @@ pub enum RegulationError {
         value: String,
     },
 
+    #[error("法規 {domain}/{version} 的欄位「{key}」要介於 {min} 到 {max}，收到 {value}")]
+    OutOfRange {
+        domain: String,
+        version: String,
+        key: String,
+        value: Decimal,
+        min: Decimal,
+        max: Decimal,
+    },
+
     #[error("這個計算子需要 {expected} 的規則，收到的卻是 {found}")]
     WrongDomain {
         expected: &'static str,
@@ -160,9 +175,10 @@ fn sorted(mut v: Vec<Ruleset>) -> Vec<Ruleset> {
 
 /// The factory set shipped with the image, parsed from the embedded files.
 ///
-/// The server writes these into `reg_ruleset` only while that table is empty.
-/// From the first boot onwards the table answers, so a corrected rate and a
-/// deleted version both survive the next start.
+/// The server writes a domain's versions into `reg_ruleset` only while the
+/// table holds none for that domain: a new install, or a domain a new release
+/// brings. From then on the table answers, so a corrected rate and a deleted
+/// version both survive the next start.
 pub fn seed() -> Vec<Ruleset> {
     sorted(
         SOURCES
@@ -601,6 +617,132 @@ pub fn overtime_pay(
     Ok(to_dollars(pay))
 }
 
+/// What one kind of leave pays, as the `leave_pay` ruleset states it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeavePay {
+    /// Share of the ordinary wage paid for a day of this leave.
+    pub ratio: Money,
+    /// Days a calendar year paid at `ratio`, and the share paid beyond them.
+    pub yearly: Option<(Money, Money)>,
+    /// Days a calendar year that stand apart before the rest count towards
+    /// sickness leave's yearly days.
+    pub separate_days: Option<Money>,
+    /// Months of service before `ratio` applies, and the share paid before.
+    pub short_service: Option<(u32, Money)>,
+}
+
+/// The kind of leave whose yearly days other leave can count towards.
+const SICK: &str = "sick";
+
+/// The `leave_pay` rule for one kind of leave. A kind the ruleset does not
+/// list is an error, not unpaid: that would be the system deciding a wage.
+pub fn leave_pay(rs: &Ruleset, kind: &str) -> Result<LeavePay, RegulationError> {
+    rs.expect_domain("leave_pay")?;
+    let node = rs
+        .payload
+        .get(kind)
+        .ok_or_else(|| RegulationError::MissingField {
+            domain: rs.domain.clone(),
+            version: rs.version.clone(),
+            key: kind.to_string(),
+        })?;
+    // A share is of one day's wage and a count is of days or months: outside
+    // these bounds payroll would take more than a day, or pay for more hours
+    // than were on leave.
+    let bounded = |key: &str, max: Option<Money>| -> Result<Money, RegulationError> {
+        let value = field(rs, node, key)?;
+        if value < Money::ZERO || max.is_some_and(|max| value > max) {
+            return Err(RegulationError::OutOfRange {
+                domain: rs.domain.clone(),
+                version: rs.version.clone(),
+                key: format!("{kind}.{key}"),
+                value,
+                min: Money::ZERO,
+                max: max.unwrap_or(Money::MAX),
+            });
+        }
+        Ok(value)
+    };
+    let share = |key: &str| bounded(key, Some(Money::ONE));
+    let count = |key: &str| match node.get(key) {
+        Some(_) => bounded(key, None).map(Some),
+        None => Ok(None),
+    };
+    let yearly = match count("yearly_days")? {
+        Some(days) => Some((days, share("beyond_ratio")?)),
+        None => None,
+    };
+    let short_service = match count("min_service_months")? {
+        Some(months) => Some((
+            months.trunc().try_into().unwrap_or(u32::MAX),
+            share("short_service_ratio")?,
+        )),
+        None => None,
+    };
+    Ok(LeavePay {
+        ratio: share("ratio")?,
+        yearly,
+        separate_days: count("separate_days")?,
+        short_service,
+    })
+}
+
+/// One date's share of an approved leave request.
+#[derive(Debug, Clone)]
+pub struct LeaveDay {
+    pub date: NaiveDate,
+    pub kind: String,
+    /// Working days of the request that fall on this date.
+    pub days: Money,
+    /// Completed months of service on this date.
+    pub service_months: u32,
+}
+
+/// Days of wage paid for each leave day, in the order given.
+///
+/// `days` must be in date order and cover the calendar year up to the last
+/// date that matters: sickness leave's yearly allowance is counted from
+/// 1 January, so a day in June is only priced right knowing February. Each
+/// date resolves the ruleset in force on it.
+pub fn leave_paid_days(days: &[LeaveDay]) -> Result<Vec<Money>, RegulationError> {
+    use chrono::Datelike;
+    use std::collections::HashMap;
+
+    let mut year = None;
+    // Days used this year against a yearly allowance, and days set apart.
+    let mut used: HashMap<&str, Money> = HashMap::new();
+    let mut apart: HashMap<&str, Money> = HashMap::new();
+    let mut paid = Vec::with_capacity(days.len());
+    for day in days {
+        if year != Some(day.date.year()) {
+            year = Some(day.date.year());
+            used.clear();
+            apart.clear();
+        }
+        let rule = leave_pay(resolve("leave_pay", day.date)?, &day.kind)?;
+        let ratio = match rule.short_service {
+            Some((months, short)) if day.service_months < months => short,
+            _ => rule.ratio,
+        };
+        paid.push(match rule.yearly {
+            Some((allowance, beyond)) => {
+                let so_far = used.entry(day.kind.as_str()).or_default();
+                let within = day.days.min((allowance - *so_far).max(Money::ZERO));
+                *so_far += day.days;
+                within * ratio + (day.days - within) * beyond
+            }
+            None => day.days * ratio,
+        });
+        if let Some(separate) = rule.separate_days {
+            let set_apart = apart.entry(day.kind.as_str()).or_default();
+            let here = day.days.min((separate - *set_apart).max(Money::ZERO));
+            *set_apart += here;
+            *used.entry(SICK).or_default() += day.days - here;
+        }
+    }
+    Ok(paid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,5 +979,105 @@ mod tests {
             assert!(!rs.source_note.is_empty(), "{} 沒有標註法源", rs.domain);
             assert!(rs.payload.is_object(), "{} 的規則內容不是物件", rs.domain);
         }
+    }
+
+    fn leave(date: NaiveDate, kind: &str, days: Decimal) -> LeaveDay {
+        LeaveDay {
+            date,
+            kind: kind.into(),
+            days,
+            service_months: 12,
+        }
+    }
+
+    /// Personal leave is unpaid, annual and bereavement leave paid in full,
+    /// and sickness leave half paid until its yearly days run out.
+    #[test]
+    fn leave_pays_its_statutory_share_and_sickness_leave_runs_out() {
+        let days = [
+            leave(d(2026, 5, 4), "personal", dec!(1)),
+            leave(d(2026, 5, 5), "annual", dec!(1)),
+            leave(d(2026, 5, 6), "bereavement", dec!(0.5)),
+            leave(d(2026, 5, 26), "sick", dec!(29.5)),
+            leave(d(2026, 6, 1), "sick", dec!(1)),
+            leave(d(2026, 6, 2), "sick", dec!(1)),
+            leave(d(2027, 1, 4), "sick", dec!(1)),
+        ];
+        let paid = leave_paid_days(&days).unwrap();
+        assert_eq!(paid[0], dec!(0), "事假不給薪");
+        assert_eq!(paid[1], dec!(1), "特休照給");
+        assert_eq!(paid[2], dec!(0.5), "喪假照給");
+        assert_eq!(paid[3], dec!(14.75), "三十日內折半");
+        assert_eq!(
+            paid[4],
+            dec!(0.25),
+            "跨過第三十日的那一天，半天折半、半天不給"
+        );
+        assert_eq!(paid[5], dec!(0), "超過三十日不給");
+        assert_eq!(paid[6], dec!(0.5), "新的一年重新起算");
+    }
+
+    /// Menstrual leave is half paid throughout; past its separate days it
+    /// uses up sickness leave's yearly days.
+    #[test]
+    fn menstrual_leave_past_its_separate_days_counts_towards_sickness_leave() {
+        let mut days: Vec<LeaveDay> = (1..=5)
+            .map(|m| leave(d(2026, m, 5), "menstrual", dec!(1)))
+            .collect();
+        days.push(leave(d(2026, 6, 1), "sick", dec!(29)));
+        days.push(leave(d(2026, 7, 1), "sick", dec!(1)));
+        let paid = leave_paid_days(&days).unwrap();
+        assert!(paid[..5].iter().all(|p| *p == dec!(0.5)), "生理假一律減半");
+        assert_eq!(
+            paid[5],
+            dec!(14),
+            "第 4、5 次生理假已用掉兩天病假額度，剩 28 天折半"
+        );
+        assert_eq!(paid[6], dec!(0), "病假額度已滿");
+    }
+
+    #[test]
+    fn maternity_leave_is_half_paid_before_six_months_of_service() {
+        let mut short = leave(d(2026, 5, 4), "maternity", dec!(1));
+        short.service_months = 5;
+        let long = leave(d(2026, 5, 4), "maternity", dec!(1));
+        assert_eq!(leave_paid_days(&[short]).unwrap(), [dec!(0.5)]);
+        assert_eq!(leave_paid_days(&[long]).unwrap(), [dec!(1)]);
+    }
+
+    #[test]
+    fn a_leave_kind_the_ruleset_does_not_list_is_an_error() {
+        assert!(leave_paid_days(&[leave(d(2026, 5, 4), "sabbatical", dec!(1))]).is_err());
+    }
+
+    /// A share is of one day's wage: outside 0 to 1 payroll would take more
+    /// than a day or pay for more hours than were on leave.
+    #[test]
+    fn a_leave_share_outside_zero_to_one_is_refused() {
+        let factory = seed()
+            .into_iter()
+            .find(|r| r.domain == "leave_pay")
+            .expect("出廠版本應有請假工資");
+        for bad in ["1.5", "-0.5"] {
+            let mut rs = factory.clone();
+            rs.payload["sick"]["ratio"] = bad.into();
+            assert!(
+                matches!(
+                    leave_pay(&rs, "sick"),
+                    Err(RegulationError::OutOfRange { .. })
+                ),
+                "比例 {bad} 應被擋下"
+            );
+        }
+        let mut negative = factory.clone();
+        negative.payload["sick"]["yearly_days"] = "-1".into();
+        assert!(leave_pay(&negative, "sick").is_err(), "日數不能是負的");
+        let mut full = factory;
+        full.payload["sick"]["ratio"] = "1".into();
+        assert_eq!(
+            leave_pay(&full, "sick").unwrap().ratio,
+            dec!(1),
+            "病假全薪在範圍內"
+        );
     }
 }

@@ -52,6 +52,7 @@ fn domain_label(domain: &str) -> &'static str {
         "depreciation" => "固定資產折舊",
         "overtime" => "延長工時",
         "owner_insurance" => "負責人投保",
+        "leave_pay" => "請假工資",
         other => {
             debug_assert!(false, "法規領域 {other} 沒有顯示名稱");
             "其他"
@@ -109,6 +110,20 @@ const FIELDS: &[(&str, &str)] = &[
     ("multiplier", "倍數"),
     ("bands", "時數級距"),
     ("day_types", "日別"),
+    ("annual", "特休"),
+    ("personal", "事假"),
+    ("sick", "病假"),
+    ("menstrual", "生理假"),
+    ("official", "公假"),
+    ("marriage", "婚假"),
+    ("bereavement", "喪假"),
+    ("maternity", "產假"),
+    ("ratio", "工資給付比例"),
+    ("yearly_days", "每年日數上限"),
+    ("beyond_ratio", "超過上限的給付比例"),
+    ("separate_days", "不併入病假的日數"),
+    ("min_service_months", "工資照給所需年資（月）"),
+    ("short_service_ratio", "年資未滿時的給付比例"),
     ("note", "說明"),
 ];
 
@@ -293,6 +308,13 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
         "annual_leave" => {
             laysi_regulation::annual_leave_days(rs, 132)?;
             rs.decimal("settlement.carry_over_months")?;
+        }
+        "leave_pay" => {
+            // Every kind a request can carry must be priced: a kind the
+            // payload forgot would stop payroll on the first such request.
+            for kind in super::attendance::LEAVE_KINDS {
+                laysi_regulation::leave_pay(rs, kind)?;
+            }
         }
         "overtime" => {
             let types = laysi_regulation::overtime_day_types(rs)?;
@@ -703,5 +725,29 @@ mod tests {
         for domain in laysi_regulation::DOMAINS {
             assert_ne!(domain_label(domain), "其他", "{domain} 沒有顯示名稱");
         }
+    }
+
+    /// Every kind of leave a request can carry must be priced before a
+    /// version saves: a missing one would stop payroll on the first such
+    /// request, weeks later.
+    #[test]
+    fn a_leave_pay_version_missing_a_kind_does_not_save() {
+        let factory = laysi_regulation::seed()
+            .into_iter()
+            .find(|r| r.domain == "leave_pay")
+            .expect("出廠版本應有請假工資");
+        assert!(probe(&factory).is_ok());
+        let mut missing = factory.clone();
+        missing.payload.as_object_mut().unwrap().remove("maternity");
+        assert!(probe(&missing).is_err(), "少了產假應存不進去");
+        let mut half = factory;
+        half.payload["sick"]
+            .as_object_mut()
+            .unwrap()
+            .remove("beyond_ratio");
+        assert!(
+            probe(&half).is_err(),
+            "有每年上限卻沒有超過後的比例應存不進去"
+        );
     }
 }

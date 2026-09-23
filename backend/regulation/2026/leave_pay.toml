@@ -1,0 +1,50 @@
+# Wages on leave
+#
+# The share of the ordinary wage paid for a day of each kind of leave. For a
+# monthly salary the unpaid share is deducted, a day being the month's salary
+# divided by its calendar days; for an hourly wage the paid share of the hours
+# on leave is added.
+#
+# Ordinary sickness leave (勞工請假規則 art. 4): half pay for the first
+# `yearly_days` in a calendar year, `beyond_ratio` after that.
+#
+# Menstrual leave (性別平等工作法 art. 14): half pay throughout; the first
+# `separate_days` in a year stand apart, the rest count towards sickness
+# leave's yearly days.
+#
+# Maternity leave (勞動基準法 art. 50): full pay after `min_service_months`,
+# `short_service_ratio` before.
+
+domain = "leave_pay"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "勞工請假規則第 2 至 4 條、第 7 條、第 8 條；性別平等工作法第 14 條；勞動基準法第 38 條、第 50 條"
+
+[payload.annual]
+ratio = "1"
+
+[payload.personal]
+ratio = "0"
+
+[payload.sick]
+ratio = "0.5"
+yearly_days = "30"
+beyond_ratio = "0"
+
+[payload.menstrual]
+ratio = "0.5"
+separate_days = "3"
+
+[payload.official]
+ratio = "1"
+
+[payload.marriage]
+ratio = "1"
+
+[payload.bereavement]
+ratio = "1"
+
+[payload.maternity]
+ratio = "1"
+min_service_months = "6"
+short_service_ratio = "0.5"
