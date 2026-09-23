@@ -1777,6 +1777,7 @@ export type LeaveBalanceRow = z.infer<typeof leaveBalanceRow>;
 export const leaveRequestList = z.object({
   requests: z.array(leaveRequestRow),
   pending_count: z.number(),
+  other_pending: z.number(),
   annual_leave_balances: z.array(leaveBalanceRow),
   annual_leave_year: z.number(),
   annual_leave_ruleset: rulesetRef,
@@ -2451,9 +2452,24 @@ export const attachReceiptResult = z.object({
 });
 export type AttachReceiptResult = z.infer<typeof attachReceiptResult>;
 
+export const dayLeave = z.object({
+  leave_no: z.string(),
+  kind: z.string(),
+  kind_label: z.string(),
+  status: z.string(),
+  status_label: z.string(),
+  hours: z.string().nullable(),
+});
+export type DayLeave = z.infer<typeof dayLeave>;
+
 export const punchDay = z.object({
   date: z.string(),
   weekday: z.string(),
+  day_kind: z.string(),
+  day_name: z.string().nullable(),
+  works: z.boolean(),
+  leaves: z.array(dayLeave),
+  absent: z.boolean(),
   in_at: z.string().nullable(),
   out_at: z.string().nullable(),
   in_source: z.string().nullable(),
@@ -2483,6 +2499,7 @@ export const punchSummary = z.object({
   overtime_seconds: z.number().nullable(),
   overtime_hours: z.string().nullable(),
   manual_days: z.number(),
+  absent_days: z.number(),
   over_limit_days: z.number(),
   over_monthly_limit: z.boolean(),
   monthly_max_hours: z.string(),
@@ -2582,6 +2599,7 @@ export const attendancePunchList = z.object({
   employee: z.object({ emp_no: z.string(), name: z.string() }).nullable(),
   days: z.array(punchDay).nullable(),
   open_days: z.number(),
+  absent_days: z.number(),
 });
 export type AttendancePunchList = z.infer<typeof attendancePunchList>;
 

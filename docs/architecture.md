@@ -1575,7 +1575,7 @@ column，因此不可能與上面的區間不一致。
 | `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
 | `get_employee_document` | ReadOnly | `{ emp_no, doc_no, version?, include_content? }` | 重算雜湊比對；不屬於這位員工的編號回查無此附件 |
 | `create_employee_login` | NeedsConfirm | `{ emp_no, email }` | 角色固定一般職員；`{ username, role_name, temporary_password }` |
-| `list_leave_requests` | ReadOnly | `{ include_done?, limit? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度 |
+| `list_leave_requests` | ReadOnly | `{ include_done?, limit?, month?, emp_no? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度；帶 `month`／`emp_no` 只回碰到該月或該員的單，`other_pending` 是沒列出的待簽核張數 |
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
 | `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
@@ -1844,8 +1844,8 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `punch_clock` | NeedsConfirm | `{ kind, note? }` | 本人上／下班卡，時間取伺服器時鐘 |
-| `list_my_punches` | ReadOnly | `{ month? }` | 本人逐日明細（該月每一天）與月統計 |
-| `list_attendance_punches` | ReadOnly | `{ month?, emp_no? }` | 全公司逐人統計；帶 `emp_no` 另附逐日明細 |
+| `list_my_punches` | ReadOnly | `{ month? }` | 本人逐日明細（該月每一天，帶日別、休假與曠職）與月統計 |
+| `list_attendance_punches` | ReadOnly | `{ month?, emp_no? }` | 該月在職每一人的統計（含曠職天數）；帶 `emp_no` 另附該月每一天的明細 |
 | `correct_punch` | NeedsConfirm | `{ emp_no, punched_on, kind, at, note? }` | 補登，`source = manual`；同一交易在 `punch_correction` 留一列已核准的紀錄 |
 | `submit_my_punch_correction` | NeedsConfirm | `{ punched_on, kind, at, reason? }` | 本人送出補登申請；公司設定為自動通過時同一交易寫入打卡 |
 | `list_my_punch_corrections` | ReadOnly | `{}` | 本人送出過的補登申請與狀態 |
@@ -2041,6 +2041,22 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 `month_days` 在它之上補齊空白日，範圍以到職日與今天為界（離職日更早時以離職日
 為界），空白日不影響 `summarise` 的任何一個數字。日期範圍不再由申請表單的日期欄
 決定，所以畫面改以月份前後翻——少了它，月份一換就補不了上個月最後一天。
+
+**每一天都說得出它是什麼：出勤、請假、非工作日或曠職**（`mark_days`）。原本員工端的
+曠職日、端午節與已准事假是三列一模一樣的空白，人資端的明細則直接沒有那一天。
+`mark_days` 在 `month_days` 之上掛上碰到該日的休假單（待簽核與已核准，駁回的不算）與
+該日的請假時數，並標出曠職：工作日曆說是工作日、已經過完、沒有任何打卡、也沒有休假單。
+**待簽核的單與審核中的補登也擋掉曠職**——准不准是簽核的人要回答的問題，先標曠職等於
+替他回答；送了補登就是本人說那天有到。
+**「今天」是真的時鐘**，與打卡同一條理由（`LAYSI_TODAY` 不移動時鐘）。三個情況不判定：
+沒有上班時間（與遲到同一條前提）；兼職——系統沒有約定排班（#3），非排班日會全部
+被算成曠職；以負責人身分投保的人（`insured_as = owner`）——那是雇主，不是出勤管理的對象。
+**非工作日的空白列仍然按得動補登**：週六加班卻上下班都忘了打卡，本人唯一的路就是那一格。`list_attendance_punches` 因此改成列出該月每一位在職員工，不只是有打卡的
+人：整個月都沒打卡的人正是這一頁要看到的那一列。
+`day_type_label` 是日別（例假、國定假日、天災停班），不是加班計價的分類——後者把
+所有非工作日都算休息日，印在明細上就是把端午節寫成休息日。
+人資頁的休假單清單跟著上方的月份與員工走，縮小範圍時用 `other_pending` 說出沒列出的
+待簽核張數：那張清單是簽核的地方，篩掉一張等簽的單等於讓它沒有人簽。
 
 **今天那一列不從查詢的月份推導。** `next_kind` 是打卡鈕要顯示上班還是下班，
 翻到過去的月份時那個月裡沒有今天，只看查詢結果會回頭要人再打一次上班卡。

@@ -1220,9 +1220,7 @@ mod tests {
             date: d(2026, 8, day),
             arrived: Some(at(day, from)),
             left: Some(at(day, to)),
-            arrived_source: None,
-            left_source: None,
-            note: String::new(),
+            ..Default::default()
         };
         let rate = n("200");
 
