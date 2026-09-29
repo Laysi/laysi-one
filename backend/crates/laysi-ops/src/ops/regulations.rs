@@ -44,6 +44,7 @@ fn domain_label(domain: &str) -> &'static str {
     match domain {
         "labor_insurance" => "勞工保險",
         "health_insurance" => "全民健康保險",
+        "health_dependents" => "健保眷屬計費",
         "pension" => "勞工退休金",
         "vat" => "營業稅",
         "minimum_wage" => "最低工資",
@@ -73,6 +74,7 @@ const FIELDS: &[(&str, &str)] = &[
     ("premium_rate", "普通事故保險費率"),
     ("rate", "費率"),
     ("avg_dependents", "平均眷口數"),
+    ("max_counted", "眷屬計費口數上限"),
     ("employer_rate", "雇主提繳率"),
     ("employer_share", "雇主負擔比率"),
     ("employee_share", "員工負擔比率"),
@@ -287,7 +289,11 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
             laysi_regulation::labor_insurance(rs, one)?;
         }
         "health_insurance" => {
-            laysi_regulation::health_insurance(rs, one)?;
+            let dependents = laysi_regulation::resolve("health_dependents", rs.effective_from)?;
+            laysi_regulation::health_insurance(rs, dependents, one, 1)?;
+        }
+        "health_dependents" => {
+            laysi_regulation::charged_dependents(rs, 1)?;
         }
         "pension" => {
             laysi_regulation::pension(rs, one)?;
@@ -302,7 +308,8 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
         }
         "owner_insurance" => {
             let health = laysi_regulation::resolve("health_insurance", rs.effective_from)?;
-            laysi_regulation::health_insurance_owner(health, rs, one)?;
+            let dependents = laysi_regulation::resolve("health_dependents", rs.effective_from)?;
+            laysi_regulation::health_insurance_owner(health, rs, dependents, one, 1)?;
             laysi_regulation::pension_owner(rs, one)?;
         }
         "annual_leave" => {
@@ -718,6 +725,29 @@ mod tests {
         )
         .expect("沒有終止日的版本應解得開");
         assert_eq!(feed.updates[0].effective_to, None);
+    }
+
+    /// A cap that is not a whole number of people does not save: payroll would
+    /// stop on the first employee with a dependant.
+    #[test]
+    fn a_dependant_cap_that_is_not_a_whole_number_does_not_save() {
+        let factory = laysi_regulation::seed()
+            .into_iter()
+            .find(|r| r.domain == "health_dependents")
+            .expect("出廠版本應有健保眷屬計費");
+        assert!(probe(&factory).is_ok());
+        for bad in ["2.5", "-1", ""] {
+            let mut rs = factory.clone();
+            rs.payload["max_counted"] = bad.into();
+            assert!(probe(&rs).is_err(), "上限「{bad}」應存不進去");
+        }
+        let mut missing = factory;
+        missing
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("max_counted");
+        assert!(probe(&missing).is_err(), "少了上限應存不進去");
     }
 
     #[test]

@@ -1,0 +1,23 @@
+# National health insurance dependants charged to the insured person
+#
+# National Health Insurance Act art. 18 para. 2: a dependant's premium is paid
+# by the insured person, and more than three dependants are charged as three.
+# The premium is computed per head at the insured person's own amount, so each
+# dependant costs exactly what the insured person does.
+#
+# A domain of its own rather than a key in `health_insurance`: adding it there
+# would need a version dated the same day as the one in force, and `resolve()`
+# takes the latest `effective_from`, so two versions of one day would be
+# decided by the order the database returns them in.
+#
+# In force since the amended Act took effect on 2013-01-01, so any period an
+# installation may recompute is covered.
+
+domain = "health_dependents"
+version = "2013.1"
+effective_from = "2013-01-01"
+source_note = "全民健康保險法第 18 條第 2 項；眷屬超過三口者以三口計"
+
+[payload]
+# Dependants charged at most; the rest are covered at no extra premium.
+max_counted = "3"

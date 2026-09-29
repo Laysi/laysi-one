@@ -150,7 +150,14 @@ export function MyPayslips({ reloadKey }: Props) {
                   <span className="num">{money(shown.deductions.labor_insurance)}</span>
                 </div>
                 <div className="doc-row doc-row--sub">
-                  <span>健保自付</span>
+                  <span>
+                    健保自付
+                    {shown.health_dependents_charged > 0 && (
+                      <>
+                        （眷屬 <span className="num">{shown.health_dependents_charged}</span> 口）
+                      </>
+                    )}
+                  </span>
                   <span className="num">{money(shown.deductions.health_insurance)}</span>
                 </div>
                 <div className="doc-row doc-row--sub">

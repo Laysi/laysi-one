@@ -42,6 +42,10 @@ pub type Money = Decimal;
 /// domain here; a newly published year is added as a version on the screen.
 const SOURCES: &[(&str, &str)] = &[
     (
+        "2013/health_dependents.toml",
+        include_str!("../../../regulation/2013/health_dependents.toml"),
+    ),
+    (
         "2026/labor_insurance.toml",
         include_str!("../../../regulation/2026/labor_insurance.toml"),
     ),
@@ -92,6 +96,7 @@ const SOURCES: &[(&str, &str)] = &[
 pub const DOMAINS: &[&str] = &[
     "labor_insurance",
     "health_insurance",
+    "health_dependents",
     "pension",
     "vat",
     "minimum_wage",
@@ -330,15 +335,51 @@ pub fn labor_insurance(
     })
 }
 
+/// How many of `covered` dependants are charged a premium, after the
+/// `health_dependents` cap.
+///
+/// The cap must be a whole number of people; a fraction or a negative count
+/// is refused rather than rounded, since either would price a person who is
+/// not there.
+pub fn charged_dependents(rs: &Ruleset, covered: u32) -> Result<u32, RegulationError> {
+    rs.expect_domain("health_dependents")?;
+    let key = "max_counted";
+    let max = rs.decimal(key)?;
+    let whole = max
+        .fract()
+        .is_zero()
+        .then(|| u32::try_from(max.trunc().mantissa()).ok())
+        .flatten()
+        .ok_or_else(|| RegulationError::BadNumber {
+            domain: rs.domain.clone(),
+            version: rs.version.clone(),
+            key: key.to_string(),
+            value: max.to_string(),
+        })?;
+    Ok(covered.min(whole))
+}
+
+/// The insured person plus the dependants charged with them.
+fn heads(dependents_rs: &Ruleset, covered: u32) -> Result<Money, RegulationError> {
+    Ok(Money::from(charged_dependents(dependents_rs, covered)?) + Money::ONE)
+}
+
 /// National health insurance ordinary premium.
 ///
 /// The employer share is multiplied by the average number of dependants
 /// across all insured persons rather than this employee's actual
 /// dependants, because the law apportions it that way. A single employee's
 /// employer share therefore exceeds twice their own contribution.
+///
+/// The employee pays for themselves and for each dependant covered with
+/// them, up to the `health_dependents` cap. Each head costs the employee's
+/// own premium rounded to the dollar: the bureau prices every person and adds
+/// them up, and rounding the product instead drifts a dollar on the tail.
 pub fn health_insurance(
     rs: &Ruleset,
+    dependents_rs: &Ruleset,
     insured_salary: Money,
+    covered_dependents: u32,
 ) -> Result<Contribution, RegulationError> {
     rs.expect_domain("health_insurance")?;
     let premium = insured_salary * rs.decimal("rate")?;
@@ -346,7 +387,8 @@ pub fn health_insurance(
         employer: to_dollars(
             premium * rs.decimal("employer_share")? * rs.decimal("avg_dependents")?,
         ),
-        employee: to_dollars(premium * rs.decimal("employee_share")?),
+        employee: to_dollars(premium * rs.decimal("employee_share")?)
+            * heads(dependents_rs, covered_dependents)?,
         government: to_dollars(premium * rs.decimal("government_share")?),
     })
 }
@@ -356,18 +398,22 @@ pub fn health_insurance(
 /// The rate is the same one everybody pays, so it comes from the health
 /// insurance ruleset; only the split differs, and that comes from
 /// `owner_insurance`. The average-dependants multiplier is not applied,
-/// because it scales an employer share this split does not have.
+/// because it scales an employer share this split does not have. Dependants
+/// are charged per head to the owner as they are to an employee.
 pub fn health_insurance_owner(
     health_rs: &Ruleset,
     owner_rs: &Ruleset,
+    dependents_rs: &Ruleset,
     insured_salary: Money,
+    covered_dependents: u32,
 ) -> Result<Contribution, RegulationError> {
     health_rs.expect_domain("health_insurance")?;
     owner_rs.expect_domain("owner_insurance")?;
     let premium = insured_salary * health_rs.decimal("rate")?;
     Ok(Contribution {
         employer: to_dollars(premium * owner_rs.decimal("health_employer_share")?),
-        employee: to_dollars(premium * owner_rs.decimal("health_employee_share")?),
+        employee: to_dollars(premium * owner_rs.decimal("health_employee_share")?)
+            * heads(dependents_rs, covered_dependents)?,
         government: to_dollars(premium * owner_rs.decimal("health_government_share")?),
     })
 }
@@ -818,7 +864,8 @@ mod tests {
     #[test]
     fn health_insurance_matches_the_prototype() {
         let rs = resolve("health_insurance", d(2026, 7, 25)).unwrap();
-        let c = health_insurance(rs, dec!(53000)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let c = health_insurance(rs, deps, dec!(53000), 0).unwrap();
         assert_eq!(c.employer, dec!(2647), "公司負擔健保（含平均眷口 1.61）");
         assert_eq!(c.employee, dec!(822), "員工自付健保");
     }
@@ -913,9 +960,10 @@ mod tests {
     fn an_owner_pays_the_whole_health_premium_and_gets_no_pension() {
         let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
         let owner = resolve("owner_insurance", d(2026, 7, 25)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
 
-        let staff = health_insurance(health, dec!(53000)).unwrap();
-        let boss = health_insurance_owner(health, owner, dec!(53000)).unwrap();
+        let staff = health_insurance(health, deps, dec!(53000), 0).unwrap();
+        let boss = health_insurance_owner(health, owner, deps, dec!(53000), 0).unwrap();
         assert_eq!(boss.employer, Money::ZERO, "雇主身分沒有公司負擔那一半");
         assert_eq!(boss.government, Money::ZERO, "政府不補助");
         assert_eq!(boss.employee, dec!(2740), "53000 × 5.17% 全額自付");
@@ -923,6 +971,74 @@ mod tests {
 
         assert_eq!(pension_owner(owner, dec!(53000)).unwrap(), Money::ZERO);
         assert!(pension_owner(health, dec!(53000)).is_err(), "領域要對得上");
+    }
+
+    /// The employee pays one rounded head for themselves and one for each
+    /// dependant, up to the cap; the employer share stays on the average.
+    #[test]
+    fn dependants_are_charged_per_head_up_to_the_cap() {
+        let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let one = health_insurance(health, deps, dec!(53000), 0).unwrap();
+        for (covered, times) in [(0, 1), (1, 2), (3, 4), (4, 4)] {
+            let c = health_insurance(health, deps, dec!(53000), covered).unwrap();
+            assert_eq!(
+                c.employee,
+                one.employee * Money::from(times),
+                "眷口 {covered} 應為本人一口的 {times} 倍"
+            );
+            assert_eq!(c.employer, one.employer, "公司負擔仍依平均眷口數");
+            assert_eq!(c.government, one.government);
+        }
+
+        // Rounded per head: 45,800 x 5.17% x 30% = 710.358, so three heads are
+        // 710 x 3 = 2,130 rather than 2,131.074 rounded to 2,131.
+        let odd = health_insurance(health, deps, dec!(45800), 2).unwrap();
+        assert_eq!(odd.employee, dec!(2130));
+    }
+
+    /// The cap is read from the ruleset: lower it and the same dependants cost
+    /// less, without a character of this file changing.
+    #[test]
+    fn the_dependant_cap_comes_from_the_ruleset() {
+        let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let one = health_insurance(health, deps, dec!(53000), 0).unwrap();
+        let mut two = deps.clone();
+        two.payload["max_counted"] = "2".into();
+        assert_eq!(
+            health_insurance(health, &two, dec!(53000), 3)
+                .unwrap()
+                .employee,
+            one.employee * dec!(3)
+        );
+        for bad in ["2.5", "-1", "abc"] {
+            let mut rs = deps.clone();
+            rs.payload["max_counted"] = bad.into();
+            assert!(charged_dependents(&rs, 1).is_err(), "上限 {bad} 應被擋下");
+        }
+        // Trailing zeros are the same whole number; the scale must not leak
+        // into the count and turn three into thirty.
+        for whole in ["3.0", "3.00"] {
+            let mut rs = deps.clone();
+            rs.payload["max_counted"] = whole.into();
+            assert_eq!(charged_dependents(&rs, 40).unwrap(), 3, "上限 {whole}");
+        }
+        assert!(charged_dependents(health, 1).is_err(), "領域要對得上");
+    }
+
+    /// An owner insured as the employer pays for their dependants too, at the
+    /// full per-head premium they pay for themselves.
+    #[test]
+    fn an_owner_pays_for_each_dependant_too() {
+        let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
+        let owner = resolve("owner_insurance", d(2026, 7, 25)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let alone = health_insurance_owner(health, owner, deps, dec!(53000), 0).unwrap();
+        let with_two = health_insurance_owner(health, owner, deps, dec!(53000), 2).unwrap();
+        assert_eq!(with_two.employee, alone.employee * dec!(3));
+        assert_eq!(with_two.employee, dec!(8220), "2,740 x 3");
+        assert_eq!(with_two.employer, Money::ZERO);
     }
 
     #[test]

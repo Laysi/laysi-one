@@ -16,17 +16,19 @@
 //! The employer's health insurance share exceeds twice the employee's because
 //! the law apportions it by the average number of dependants across all
 //! insured persons, not by this employee's actual dependants. The screen must
-//! say so.
+//! say so. The employee's own share is the other way round: one premium for
+//! themselves and one for each dependant covered at the end of the month, up
+//! to the `health_dependents` cap.
 
 #[cfg(test)]
 use crate::ops::employees::BASIS_MONTHLY;
 use crate::ops::employees::{insured_as_label, INSURED_EMPLOYEE, INSURED_OWNER};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{Datelike, Months, NaiveDate};
 use laysi_domain::Money;
-use laysi_regulation::{Contribution, Ruleset};
-use laysi_store::Employee;
+use laysi_regulation::{Contribution, RegulationError, Ruleset};
+use laysi_store::{Employee, EmployeeDependent, Payslip};
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -51,12 +53,18 @@ pub(crate) struct Premiums {
     pub labor: Contribution,
     pub health: Contribution,
     pub pension: Money,
+    /// Dependants covered with the insured person, before the cap.
+    pub health_dependents: u32,
+    /// Dependants the employee share was charged for, after the cap.
+    pub health_dependents_charged: u32,
     /// Labour insurance salary actually charged, after the ceiling.
     pub labor_base: Money,
     /// The filed bracket exceeded the rule ceiling, so the ceiling was used.
     pub labor_capped: bool,
     pub labor_rs: &'static Ruleset,
     pub health_rs: &'static Ruleset,
+    /// The cap on dependants charged to the insured person.
+    pub dependents_rs: &'static Ruleset,
     pub pension_rs: &'static Ruleset,
     /// The owner shares that priced health and pension, when the person is
     /// insured as the employer. `None` for everybody else.
@@ -88,18 +96,43 @@ impl Premiums {
 /// contributed for them; both figures come from the `owner_insurance`
 /// ruleset, so neither share appears here. Labour insurance is the same
 /// split either way, which is why only two of the three change.
+///
+/// `dependents` is how many dependants are covered with the person, as
+/// [`covered_dependents`] counts them; the cap is applied by the calculator.
 pub(crate) fn premiums_on(
     as_of: NaiveDate,
     insured_as: &str,
     labor_insured: Money,
     health_insured: Money,
     pension_wage: Money,
+    dependents: u32,
 ) -> Result<Premiums, OpError> {
-    let labor_rs = laysi_regulation::resolve("labor_insurance", as_of)?;
-    let health_rs = laysi_regulation::resolve("health_insurance", as_of)?;
-    let pension_rs = laysi_regulation::resolve("pension", as_of)?;
+    premiums_under(
+        |domain| laysi_regulation::resolve(domain, as_of),
+        insured_as,
+        labor_insured,
+        health_insured,
+        pension_wage,
+        dependents,
+    )
+}
+
+/// [`premiums_on`] with the rules looked up by `resolve`, so a test can take
+/// one domain away and see the computation refuse.
+fn premiums_under(
+    resolve: impl Fn(&str) -> Result<&'static Ruleset, RegulationError>,
+    insured_as: &str,
+    labor_insured: Money,
+    health_insured: Money,
+    pension_wage: Money,
+    dependents: u32,
+) -> Result<Premiums, OpError> {
+    let labor_rs = resolve("labor_insurance")?;
+    let health_rs = resolve("health_insurance")?;
+    let dependents_rs = resolve("health_dependents")?;
+    let pension_rs = resolve("pension")?;
     let owner_rs = match insured_as == INSURED_OWNER {
-        true => Some(laysi_regulation::resolve("owner_insurance", as_of)?),
+        true => Some(resolve("owner_insurance")?),
         false => None,
     };
 
@@ -107,11 +140,22 @@ pub(crate) fn premiums_on(
     Ok(Premiums {
         labor: laysi_regulation::labor_insurance(labor_rs, labor_insured)?,
         health: match owner_rs {
-            Some(owner) => {
-                laysi_regulation::health_insurance_owner(health_rs, owner, health_insured)?
-            }
-            None => laysi_regulation::health_insurance(health_rs, health_insured)?,
+            Some(owner) => laysi_regulation::health_insurance_owner(
+                health_rs,
+                owner,
+                dependents_rs,
+                health_insured,
+                dependents,
+            )?,
+            None => laysi_regulation::health_insurance(
+                health_rs,
+                dependents_rs,
+                health_insured,
+                dependents,
+            )?,
         },
+        health_dependents: dependents,
+        health_dependents_charged: laysi_regulation::charged_dependents(dependents_rs, dependents)?,
         pension: match owner_rs {
             Some(owner) => laysi_regulation::pension_owner(owner, pension_wage)?,
             None => laysi_regulation::pension(pension_rs, pension_wage)?,
@@ -120,9 +164,66 @@ pub(crate) fn premiums_on(
         labor_capped: labor_insured > cap,
         labor_rs,
         health_rs,
+        dependents_rs,
         pension_rs,
         owner_rs,
     })
+}
+
+/// Dependants covered on `period_end`, the last day of the month being
+/// charged.
+///
+/// The premium is by the month and is owed for whoever is covered at its end,
+/// so a dependant enrolled after that day waits for the next month, and one
+/// whose last day of cover falls before it is not charged. The last day of
+/// cover is inclusive: cover that ends on the last day of the month still
+/// covers that month.
+pub(crate) fn covered_dependents(dependents: &[EmployeeDependent], period_end: NaiveDate) -> u32 {
+    let n = dependents
+        .iter()
+        .filter(|d| {
+            d.health_enrolled_from
+                .is_some_and(|from| from <= period_end)
+                && d.health_enrolled_until
+                    .is_none_or(|until| until >= period_end)
+        })
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Dependants a stored payslip charged the employee for: its stored count
+/// under the cap in force on the last day of its period.
+pub(crate) fn charged_on_slip(slip: &Payslip) -> Result<u32, OpError> {
+    let first =
+        NaiveDate::parse_from_str(&format!("{}-01", slip.period), "%Y-%m-%d").map_err(|_| {
+            OpError::BadInput(format!("期別要寫成 YYYY-MM，收到的是「{}」", slip.period))
+        })?;
+    let rs = laysi_regulation::resolve("health_dependents", month_end(first))?;
+    Ok(laysi_regulation::charged_dependents(
+        rs,
+        slip.health_dependents.max(0) as u32,
+    )?)
+}
+
+/// The day the insurance summary resolves `domain` on.
+///
+/// Dependants are counted on the last day of the month, so the cap on them is
+/// resolved on that day too, as payroll resolves it on the period end: a cap
+/// amended mid-month would otherwise give the row one answer and the payslip
+/// another. The other rules stay on `as_of`.
+fn summary_rules_on(domain: &str, as_of: NaiveDate) -> NaiveDate {
+    match domain {
+        "health_dependents" => month_end(as_of),
+        _ => as_of,
+    }
+}
+
+/// The last day of the month `day` falls in.
+pub(crate) fn month_end(day: NaiveDate) -> NaiveDate {
+    day.with_day(1)
+        .and_then(|first| first.checked_add_months(Months::new(1)))
+        .and_then(|next| next.pred_opt())
+        .unwrap_or(day)
 }
 
 /// Which of the three filed brackets one person has no figure for. The three
@@ -262,6 +363,9 @@ impl Operation for GetInsuranceSummary {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: crate::AsOfInput = parse(input)?;
         let as_of = i.as_of.unwrap_or(ctx.today);
+        // Dependants are counted on the last day of the month, the day payroll
+        // charges them on, so a row agrees with that month's payslip.
+        let dependents_on = month_end(as_of);
         let staff = ctx.store.employees(false, None).await?;
 
         let mut rows = Vec::with_capacity(staff.len());
@@ -275,14 +379,17 @@ impl Operation for GetInsuranceSummary {
         let mut sets: Option<(Value, Value, Value)> = None;
         let mut owner_set: Option<Value> = None;
 
+        let resolve =
+            |domain: &str| laysi_regulation::resolve(domain, summary_rules_on(domain, as_of));
         for e in &staff {
             let missing = missing_brackets(e);
-            let p = premiums_on(
-                as_of,
+            let p = premiums_under(
+                resolve,
                 &e.insured_as,
                 e.labor_insured_salary,
                 e.health_insured_salary,
                 e.pension_wage,
+                covered_dependents(&e.dependents, dependents_on),
             )?;
             if owner_set.is_none() {
                 owner_set = p.owner_rs.map(ruleset_json);
@@ -331,6 +438,8 @@ impl Operation for GetInsuranceSummary {
                 "health_insured_salary": e.health_insured_salary.to_string(),
                 "health_employer": p.health.employer.to_string(),
                 "health_employee": p.health.employee.to_string(),
+                "health_dependents": p.health_dependents,
+                "health_dependents_charged": p.health_dependents_charged,
                 "pension_wage": e.pension_wage.to_string(),
                 "pension_employer": p.pension.to_string(),
                 "employer_total": p.employer_total().to_string(),
@@ -342,7 +451,7 @@ impl Operation for GetInsuranceSummary {
         let (labor_set, health_set, pension_set) = match sets {
             Some(s) => s,
             None => {
-                let p = premiums_on(as_of, "", Money::ZERO, Money::ZERO, Money::ZERO)?;
+                let p = premiums_on(as_of, "", Money::ZERO, Money::ZERO, Money::ZERO, 0)?;
                 (
                     ruleset_json(p.labor_rs),
                     ruleset_json(p.health_rs),
@@ -353,6 +462,7 @@ impl Operation for GetInsuranceSummary {
 
         let labor_rs = laysi_regulation::resolve("labor_insurance", as_of)?;
         let health_rs = laysi_regulation::resolve("health_insurance", as_of)?;
+        let dependents_rs = resolve("health_dependents")?;
         let pension_rs = laysi_regulation::resolve("pension", as_of)?;
         let cap = labor_rs.decimal("max_insured_salary")?;
         let avg = health_rs.decimal("avg_dependents")?;
@@ -394,6 +504,25 @@ impl Operation for GetInsuranceSummary {
                 "version": pension_rs.version,
             },
         ]);
+
+        // Only when somebody has a dependant covered, for the same reason as
+        // the owner paragraph below.
+        let with_dependents = rows
+            .iter()
+            .filter(|r| r["health_dependents"].as_u64().is_some_and(|n| n > 0))
+            .count();
+        if with_dependents > 0 {
+            notes.as_array_mut().expect("剛才建的是陣列").push(json!({
+                "title": "健保眷屬由員工逐口負擔",
+                "body": format!(
+                    "{with_dependents} 位員工有在保眷屬：自付額按本人加 {dependents_on} 在保的眷屬逐口計算，超過 {} 口以 {} 口計。",
+                    dependents_rs.decimal("max_counted")?,
+                    dependents_rs.decimal("max_counted")?,
+                ),
+                "source": dependents_rs.source_note,
+                "version": dependents_rs.version,
+            }));
+        }
 
         // Only when somebody on the roster is insured that way. A page where
         // nobody is has no use for the paragraph.
@@ -445,6 +574,7 @@ impl Operation for GetInsuranceSummary {
         Ok(OpOutcome::new(
             json!({
                 "as_of": as_of,
+                "dependents_on": dependents_on,
                 "rows": rows,
                 "headcount": rows.len(),
                 "capped_count": capped,
@@ -462,6 +592,7 @@ impl Operation for GetInsuranceSummary {
                 "rulesets": {
                     "labor": labor_set,
                     "health": health_set,
+                    "dependents": ruleset_json(dependents_rs),
                     "pension": pension_set,
                     "owner": owner_set,
                 },
@@ -498,6 +629,11 @@ pub struct ComputeInsuranceInput {
     /// has no pension contributed for them. Defaults to `employee`.
     #[serde(default)]
     pub insured_as: Option<String>,
+    /// Dependants covered by this person's health insurance. Each one adds
+    /// the person's own premium to what they pay, up to the rule cap.
+    /// Defaults to none.
+    #[serde(default)]
+    pub dependents: Option<u32>,
     /// Date whose rules apply (YYYY-MM-DD). Defaults to today.
     #[serde(default)]
     pub as_of: Option<NaiveDate>,
@@ -530,7 +666,14 @@ impl Operation for ComputeInsurance {
         }
         let health = i.health_insured_salary.unwrap_or(i.insured_salary);
         let pension_wage = i.pension_wage.unwrap_or(health);
-        let p = premiums_on(as_of, insured_as, i.insured_salary, health, pension_wage)?;
+        let p = premiums_on(
+            as_of,
+            insured_as,
+            i.insured_salary,
+            health,
+            pension_wage,
+            i.dependents.unwrap_or(0),
+        )?;
 
         let summary = format!(
             "試算保費 · {} · 勞保級距 {} 健保級距 {} · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）本人自付 {} · 依勞保 {}、健保 {}、勞退 {} 規則",
@@ -568,6 +711,9 @@ impl Operation for ComputeInsurance {
                     "employer": p.health.employer.to_string(),
                     "employee": p.health.employee.to_string(),
                     "government": p.health.government.to_string(),
+                    "dependents": p.health_dependents,
+                    "dependents_charged": p.health_dependents_charged,
+                    "dependents_ruleset": ruleset_json(p.dependents_rs),
                     "rate_percent": percent(p.health_rs.decimal("rate")?),
                     // Not applied to an owner: it scales an employer share
                     // their split does not have.
@@ -623,6 +769,7 @@ mod tests {
             n("45800"),
             n("53000"),
             n("53000"),
+            0,
         )
         .unwrap();
         assert_eq!(p.labor.employer, n("3527"), "公司負擔勞保");
@@ -650,6 +797,7 @@ mod tests {
             n("45800"),
             n("53000"),
             n("53000"),
+            0,
         )
         .unwrap();
         let boss = premiums_on(
@@ -658,6 +806,7 @@ mod tests {
             n("45800"),
             n("53000"),
             n("53000"),
+            0,
         )
         .unwrap();
 
@@ -693,6 +842,7 @@ mod tests {
             n("120000"),
             n("53000"),
             n("53000"),
+            0,
         )
         .unwrap();
         let at_cap = premiums_on(
@@ -701,6 +851,7 @@ mod tests {
             n("45800"),
             n("53000"),
             n("53000"),
+            0,
         )
         .unwrap();
         assert_eq!(capped.labor, at_cap.labor);
@@ -746,7 +897,8 @@ mod tests {
         let hbase = laysi_regulation::resolve("health_insurance", d(2026, 7, 26)).unwrap();
         let mut hnext = hbase.clone();
         hnext.payload["rate"] = json!("0.055");
-        let h = laysi_regulation::health_insurance(&hnext, n("53000")).unwrap();
+        let deps = laysi_regulation::resolve("health_dependents", d(2026, 7, 26)).unwrap();
+        let h = laysi_regulation::health_insurance(&hnext, deps, n("53000"), 0).unwrap();
         // 53,000 × 0.055 × 0.60 × 1.61 = 2,815.89 → 2,816
         assert_eq!(h.employer, n("2816"));
         assert_ne!(h.employer, n("2647"));
@@ -854,6 +1006,129 @@ mod tests {
         assert_eq!(m.labels(), vec!["勞保投保薪資"]);
     }
 
+    fn dependant(from: Option<NaiveDate>, until: Option<NaiveDate>) -> EmployeeDependent {
+        EmployeeDependent {
+            id: 1,
+            name: "測試眷屬".into(),
+            relation: "child".into(),
+            id_no: String::new(),
+            birthday: None,
+            health_enrolled_from: from,
+            health_enrolled_until: until,
+            tax_dependent: false,
+        }
+    }
+
+    /// Whoever is covered on the last day of the month is charged for it.
+    #[test]
+    fn dependants_are_counted_on_the_last_day_of_the_month() {
+        let end = d(2026, 9, 30);
+        let list = [
+            dependant(Some(d(2026, 1, 1)), None),
+            dependant(Some(d(2026, 1, 1)), Some(d(2026, 9, 30))),
+            dependant(Some(d(2026, 1, 1)), Some(d(2026, 9, 29))),
+            dependant(Some(d(2026, 9, 30)), None),
+            dependant(Some(d(2026, 10, 1)), None),
+            dependant(None, None),
+        ];
+        assert_eq!(
+            covered_dependents(&list, end),
+            3,
+            "月底仍在保、月底當天退保與月底當天加保的三位"
+        );
+        assert_eq!(covered_dependents(&list[2..3], end), 0, "退保日早於期末日");
+        assert_eq!(covered_dependents(&list[4..5], end), 0, "加保日晚於期末日");
+        assert_eq!(covered_dependents(&list[5..], end), 0, "沒有依附健保");
+        assert_eq!(month_end(d(2026, 2, 10)), d(2026, 2, 28));
+        assert_eq!(month_end(d(2026, 12, 31)), d(2026, 12, 31));
+    }
+
+    /// The summary counts dependants at the end of the month, so it takes the
+    /// cap from that day as payroll does; every other rule stays on the date
+    /// asked for.
+    #[test]
+    fn the_summary_takes_the_dependant_cap_from_the_end_of_the_month() {
+        let mid = d(2026, 9, 10);
+        assert_eq!(summary_rules_on("health_dependents", mid), d(2026, 9, 30));
+        for domain in [
+            "labor_insurance",
+            "health_insurance",
+            "pension",
+            "owner_insurance",
+        ] {
+            assert_eq!(summary_rules_on(domain, mid), mid, "{domain}");
+        }
+    }
+
+    /// Two dependants make the deduction three heads, for an employee and for
+    /// an owner alike; the employer share does not move.
+    #[test]
+    fn dependants_are_charged_to_the_insured_person() {
+        let alone = premiums_on(
+            d(2026, 7, 26),
+            INSURED_EMPLOYEE,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+            0,
+        )
+        .unwrap();
+        let with_two = premiums_on(
+            d(2026, 7, 26),
+            INSURED_EMPLOYEE,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+            2,
+        )
+        .unwrap();
+        assert_eq!(with_two.health.employee, n("2466"), "822 × 3");
+        assert_eq!(with_two.health.employer, alone.health.employer);
+        assert_eq!(with_two.health_dependents_charged, 2);
+
+        let five = premiums_on(
+            d(2026, 7, 26),
+            INSURED_OWNER,
+            n("45800"),
+            n("53000"),
+            n("53000"),
+            5,
+        )
+        .unwrap();
+        assert_eq!(
+            five.health.employee,
+            n("10960"),
+            "2,740 × 4，超過上限以上限計"
+        );
+        assert_eq!(five.health_dependents, 5);
+        assert_eq!(five.health_dependents_charged, 3);
+    }
+
+    /// Without a dependant cap in force the premium is refused, for somebody
+    /// with no dependants as well: charging only the person would be a guess
+    /// that the list is empty.
+    #[test]
+    fn no_dependant_cap_is_refused_never_taken_as_nobody() {
+        let as_of = d(2026, 7, 26);
+        let without = |domain: &str| match domain {
+            "health_dependents" => Err(RegulationError::NotFound {
+                domain: domain.into(),
+                as_of,
+            }),
+            other => laysi_regulation::resolve(other, as_of),
+        };
+        for (who, covered) in [
+            (INSURED_EMPLOYEE, 0),
+            (INSURED_EMPLOYEE, 2),
+            (INSURED_OWNER, 1),
+        ] {
+            let err = premiums_under(without, who, n("45800"), n("53000"), n("53000"), covered)
+                .unwrap_err();
+            assert!(matches!(err, OpError::Regulation(_)), "{who} {covered}");
+            assert!(err.to_string().contains("health_dependents"), "{err}");
+        }
+    }
+
     /// No applicable version is an error; premiums are never computed from a
     /// guessed rate.
     #[test]
@@ -864,6 +1139,7 @@ mod tests {
             n("45800"),
             n("53000"),
             n("53000"),
+            0,
         )
         .unwrap_err();
         assert!(matches!(err, OpError::Regulation(_)));

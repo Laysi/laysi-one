@@ -139,6 +139,7 @@ government_share = "0.10"
 |---|---|
 | `labor_insurance` | `max_insured_salary` `premium_rate` `employer_share` `employee_share` `government_share` |
 | `health_insurance` | `rate=0.0517` `employer_share=0.60` `employee_share=0.30` `avg_dependents=1.61` |
+| `health_dependents` | `max_counted=3`（健保法第 18 條第 2 項，2013-01-01 起） |
 | `pension` | `employer_rate=0.06` |
 | `vat` | `rate=0.05` `period_months=2` |
 | `minimum_wage` | `monthly=29500` `hourly=196` |
@@ -168,12 +169,16 @@ pub fn all() -> &'static [Ruleset];
 
 pub struct Contribution { pub employer: Money, pub employee: Money, pub government: Money }
 pub fn labor_insurance(rs: &Ruleset, insured_salary: Money) -> Result<Contribution, RegulationError>;
-pub fn health_insurance(rs: &Ruleset, insured_salary: Money) -> Result<Contribution, RegulationError>;
+/// 員工自付＝本人一口（先取整）×（1＋min(眷口數, max_counted)）；公司負擔仍乘平均眷口數。
+pub fn health_insurance(rs: &Ruleset, dependents_rs: &Ruleset, insured_salary: Money,
+                        covered_dependents: u32) -> Result<Contribution, RegulationError>;
+pub fn charged_dependents(rs: &Ruleset, covered: u32) -> Result<u32, RegulationError>;
 pub fn pension(rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError>;
 pub fn vat(rs: &Ruleset, net_amount: Money) -> Result<Money, RegulationError>;
 
 /// 負責人身分：費率仍取自 health_insurance，只有分擔比率取自 owner_insurance。
-pub fn health_insurance_owner(health_rs: &Ruleset, owner_rs: &Ruleset, insured_salary: Money)
+pub fn health_insurance_owner(health_rs: &Ruleset, owner_rs: &Ruleset, dependents_rs: &Ruleset,
+                              insured_salary: Money, covered_dependents: u32)
     -> Result<Contribution, RegulationError>;
 pub fn pension_owner(owner_rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError>;
 
@@ -199,6 +204,20 @@ pub fn overtime_pay(rs: &Ruleset, hourly_wage: Money, day_type: &str, hours: Mon
 **勞保沒有負責人節點**：勞保條例第 15 條第 1 款對「實際從事勞動之雇主」與受僱者是
 同一組 70／20／10，抄一份到這裡只會多一個會漂走的副本。
 `premiums_on` 因此只換健保與勞退兩項。
+
+### 健保眷屬的計費上限也是獨立 domain
+
+員工自付額是本人一口加上期末在保的眷屬口數，眷屬超過三口以三口計（健保法第 18 條
+第 2 項）。那個「三」住在 `health_dependents` 的 `max_counted`，理由與負責人投保
+相同：塞進 `health_insurance` 要一個同日生效的新版本。`effective_from` 是修正條文的
+施行日 2013-01-01，比任何安裝可能補算的期間都早——出廠預設的其餘領域從 2026-01-01
+起，而既有安裝可能已經為更早的期間補過版本。
+
+**逐口先取整再相加**：每口是本人那一口四捨五入後的金額，眷屬與本人同額。健保署逐口
+計算，先乘口數再取整在尾數會差一元（45,800 級距兩名眷屬：710 × 3 ＝ 2,130，
+710.358 × 3 取整是 2,131）。公司負擔不看實際眷口，仍乘平均眷口數；負責人以負責人
+身分投保時同樣加計自己的眷屬。**找不到 `health_dependents` 就不計算**，沒有眷屬的人
+也一樣——只算本人等於假設名單是空的。
 
 規則以 `include_str!` 在編譯期嵌入，另外由
 `laysi-store` 寫入 `reg_ruleset` 表供稽核與查詢。
@@ -454,6 +473,18 @@ SQL 會讓三張表對「什麼算已過帳」與日期怎麼比各有一套定�
 要填退保日，關係下拉對它也只列可依附的關係。一顆開關同時代表「更正」與「退保」，
 而退保常見得多——按掉就把加保日一起清掉，補算前期保費與產生退保申報都會少一段。
 真的輸錯了就整筆刪除重登，那是看得見的動作。
+
+**計費的是期末那一天在保的眷屬**：`covered_dependents` 數加保日不晚於期末日、且退保日
+為空或不早於期末日的人。退保日是**最後在保日**（輸入說明寫的就是 last day of cover），
+所以退保日落在月底仍算當月；月中退保不算，月中加保算。薪資作業以期別最後一天、
+勞健保頁以適用日所在月份的最後一天計算，上限也在同一天取規則（`summary_rules_on`；其餘
+規則仍依適用日），兩頁逐人的健保自付因此一致，上限在月中改版也一樣。
+
+**眷口數跟著薪資單存下來**（`payslip.health_dependents`，上限前的人數）：與投保級距同一個
+理由——薪資明細以存下的事實在現行規則下重算比對，事後補登一名眷屬不該讓已算好的
+薪資單自己跟自己對不上。上限是規則，不存；`list_payslips` 與 `list_my_payslips` 回的
+`health_dependents_charged` 是存下的人數套用期末日的上限。回頭補扣走下一期差額或
+作廢重算，不改寫已算好的薪資單。
 
 `dependents` 與 `bank_accounts` 同一族的三態：不帶＝不動、空清單＝清空、給清單＝
 整份取代。身分證字號可以留空（還沒收到），填了就驗檢查碼，同一位員工底下不得重複
@@ -1097,6 +1128,8 @@ employee_bank_account       一人可有多筆；`is_payroll` 標出薪轉的那
 employee_dependent          一人可有多筆；健保依附記加保日與退保日，
                             列報扶養另記 `tax_dependent`。兄弟姊妹與其他
                             親屬不能依附健保（CHECK）
+payslip.health_dependents   該張薪資單健保自付額計入的在保眷屬人數，
+                            上限前；重算以它為準，不重讀名單
 
 ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
              tool_name text, risk text, prompt text null,
@@ -1610,8 +1643,8 @@ column，因此不可能與上面的區間不一致。
 | `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳 |
 | `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額） |
 | `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
-| `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額 |
-| `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, as_of? }` | 單一級距試算與三份 ruleset；`insured_as = "owner"` 另回 `owner_ruleset` |
+| `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距、三項費額與健保眷口數（適用日所在月份的最後一天在保者） |
+| `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, dependents?, as_of? }` | 單一級距試算與三份 ruleset；`insured_as = "owner"` 另回 `owner_ruleset`，`health` 帶 `dependents`／`dependents_charged`／`dependents_ruleset` |
 | `get_hr_compliance` | ReadOnly | `{ as_of? }` | `checks[]`；逐項帶 `checked`、`passed`、ruleset 與差異 |
 | `list_withholding_statements` | BossOnly | `{ year? }` | 逐給付對象年度所得；`table` 稅額缺值保持 `null` |
 

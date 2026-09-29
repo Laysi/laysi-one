@@ -6828,7 +6828,7 @@ impl Store {
                     s.employee_id, e.emp_no, e.name, e.title, e.insured_as, d.label AS dept_label,
                     s.base_salary, s.overtime, s.allowance, s.gross,
                     s.labor_insured_salary, s.health_insured_salary, s.pension_wage,
-                    s.labor_employee, s.health_employee, s.income_tax,
+                    s.labor_employee, s.health_employee, s.health_dependents, s.income_tax,
                     s.labor_employer, s.health_employer, s.pension_employer,
                     s.deduction, s.net, s.paid_days, s.month_days, s.note
                FROM payslip s
@@ -7024,8 +7024,8 @@ impl Store {
                     labor_insured_salary, health_insured_salary, pension_wage,
                     labor_employee, health_employee, income_tax,
                     labor_employer, health_employer, pension_employer,
-                    deduction, net, paid_days, month_days, note)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+                    deduction, net, paid_days, month_days, note, health_dependents)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
             )
             .bind(run_id)
             .bind(s.employee_id)
@@ -7047,6 +7047,7 @@ impl Store {
             .bind(s.paid_days)
             .bind(s.month_days)
             .bind(&s.note)
+            .bind(s.health_dependents)
             .execute(&mut *tx)
             .await?;
 
@@ -9059,6 +9060,10 @@ pub struct Payslip {
     pub pension_wage: Money,
     pub labor_employee: Money,
     pub health_employee: Money,
+    /// Dependants covered on the last day of the period, before the cap.
+    /// Kept with the slip like the brackets, so a later change to the list
+    /// does not move a slip already computed.
+    pub health_dependents: i32,
     pub income_tax: Money,
     pub labor_employer: Money,
     pub health_employer: Money,
@@ -9085,6 +9090,10 @@ pub struct NewPayslip {
     pub pension_wage: Money,
     pub labor_employee: Money,
     pub health_employee: Money,
+    /// Dependants covered on the last day of the period, before the cap.
+    /// Kept with the slip like the brackets, so a later change to the list
+    /// does not move a slip already computed.
+    pub health_dependents: i32,
     pub income_tax: Money,
     pub labor_employer: Money,
     pub health_employer: Money,
@@ -10123,6 +10132,7 @@ fn row_to_payslip(r: &PgRow) -> Payslip {
         pension_wage: r.get("pension_wage"),
         labor_employee: r.get("labor_employee"),
         health_employee: r.get("health_employee"),
+        health_dependents: r.get("health_dependents"),
         income_tax: r.get("income_tax"),
         labor_employer: r.get("labor_employer"),
         health_employer: r.get("health_employer"),

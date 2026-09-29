@@ -1875,6 +1875,8 @@ export const payslipRow = z.object({
   pension_wage: z.string(),
   labor_employee: z.string(),
   health_employee: z.string(),
+  health_dependents: z.number(),
+  health_dependents_charged: z.number(),
   income_tax: z.string(),
   deduction: z.string(),
   net: z.string(),
@@ -1955,6 +1957,8 @@ export const insuranceRow = z.object({
   health_insured_salary: z.string(),
   health_employer: z.string(),
   health_employee: z.string(),
+  health_dependents: z.number(),
+  health_dependents_charged: z.number(),
   pension_wage: z.string(),
   pension_employer: z.string(),
   employer_total: z.string(),
@@ -1983,6 +1987,7 @@ export type InsuranceNote = z.infer<typeof insuranceNote>;
 
 export const insuranceSummary = z.object({
   as_of: z.string(),
+  dependents_on: z.string(),
   rows: z.array(insuranceRow),
   headcount: z.number(),
   capped_count: z.number(),
@@ -2000,6 +2005,7 @@ export const insuranceSummary = z.object({
   rulesets: z.object({
     labor: rulesetRef,
     health: rulesetRef,
+    dependents: rulesetRef,
     pension: rulesetRef,
     owner: rulesetRef.nullable(),
   }),
@@ -2028,6 +2034,9 @@ export const insuranceQuote = z.object({
     employer: z.string(),
     employee: z.string(),
     government: z.string(),
+    dependents: z.number(),
+    dependents_charged: z.number(),
+    dependents_ruleset: rulesetRef,
     rate_percent: z.string(),
     avg_dependents: z.string().nullable(),
     ruleset: rulesetRef,
@@ -2236,6 +2245,8 @@ export const myPayslip = z.object({
     income_tax: z.string(),
     total: z.string(),
   }),
+  health_dependents: z.number(),
+  health_dependents_charged: z.number(),
   net: z.string(),
   employer_contributions: z.object({
     labor_insurance: z.string(),

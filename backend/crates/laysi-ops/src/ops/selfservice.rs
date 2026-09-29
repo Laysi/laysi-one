@@ -42,7 +42,7 @@ use crate::ops::attendance::{
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
 use crate::ops::expenses::{checked_pay_method, claim_json, required_steps};
-use crate::ops::insurance::ruleset_json;
+use crate::ops::insurance::{charged_on_slip, ruleset_json};
 use crate::ops::notices::{history_outcome, missing_notice, notice_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -240,7 +240,7 @@ fn leave_request_json(request: &LeaveRequest) -> Value {
     })
 }
 
-fn payslip_json(slip: &Payslip) -> Value {
+fn payslip_json(slip: &Payslip, dependents_charged: u32) -> Value {
     json!({
         "period": slip.period,
         "pay_on": slip.pay_on,
@@ -254,6 +254,8 @@ fn payslip_json(slip: &Payslip) -> Value {
             "income_tax": slip.income_tax.to_string(),
             "total": slip.deduction.to_string(),
         },
+        "health_dependents": slip.health_dependents,
+        "health_dependents_charged": dependents_charged,
         "net": slip.net.to_string(),
         "employer_contributions": {
             "labor_insurance": slip.labor_employer.to_string(),
@@ -397,7 +399,10 @@ impl Operation for ListMyPayslips {
                     "dept_label": employee.dept_label,
                     "title": employee.title,
                 },
-                "payslips": slips.iter().map(payslip_json).collect::<Vec<_>>(),
+                "payslips": slips
+                    .iter()
+                    .map(|s| Ok(payslip_json(s, charged_on_slip(s)?)))
+                    .collect::<Result<Vec<_>, OpError>>()?,
                 "periods": slips
                     .iter()
                     .map(|slip| slip.period.clone())

@@ -53,7 +53,7 @@ use crate::ops::attendance::{
 #[cfg(test)]
 use crate::ops::employees::INSURED_EMPLOYEE;
 use crate::ops::employees::{pay_basis_label, service_months, BASIS_HOURLY, BASIS_MONTHLY};
-use crate::ops::insurance::{percent, premiums_on, ruleset_json};
+use crate::ops::insurance::{covered_dependents, percent, premiums_on, ruleset_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -458,12 +458,15 @@ fn compute_one(
     let gross = base + overtime;
 
     // Premiums resolve on the period end: the version in force for this period.
+    // Dependants are counted on the same day, the one the month is charged on.
+    let dependents = covered_dependents(&e.dependents, to);
     let p = premiums_on(
         to,
         &e.insured_as,
         e.labor_insured_salary,
         e.health_insured_salary,
         e.pension_wage,
+        dependents,
     )?;
 
     // Withholding resolves on the payment date: the obligation arises then.
@@ -536,6 +539,7 @@ fn compute_one(
             pension_wage: e.pension_wage,
             labor_employee: p.labor.employee,
             health_employee: p.health.employee,
+            health_dependents: dependents as i32,
             income_tax,
             labor_employer: p.labor.employer,
             health_employer: p.health.employer,
@@ -782,6 +786,7 @@ impl Operation for ListPayslips {
                 s.labor_insured_salary,
                 s.health_insured_salary,
                 s.pension_wage,
+                s.health_dependents.max(0) as u32,
             )?;
             let same = p.labor.employee == s.labor_employee
                 && p.labor.employer == s.labor_employer
@@ -804,6 +809,8 @@ impl Operation for ListPayslips {
                 "pension_wage": s.pension_wage.to_string(),
                 "labor_employee": s.labor_employee.to_string(),
                 "health_employee": s.health_employee.to_string(),
+                "health_dependents": s.health_dependents,
+                "health_dependents_charged": p.health_dependents_charged,
                 "income_tax": s.income_tax.to_string(),
                 "deduction": s.deduction.to_string(),
                 "net": s.net.to_string(),
@@ -1253,6 +1260,7 @@ mod tests {
             n("45800"),
             n("53000"),
             n("53000"),
+            0,
         )
         .unwrap();
         assert_eq!(p.labor.employee, n("1008"));

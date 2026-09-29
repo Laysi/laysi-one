@@ -21,6 +21,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
   const [quote, setQuote] = useState<InsuranceQuote | null>(null);
   const [salary, setSalary] = useState('');
   const [insuredAs, setInsuredAs] = useState('employee');
+  const [dependents, setDependents] = useState('0');
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
@@ -44,6 +45,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
                         {
           insured_salary: salary.trim(),
           insured_as: insuredAs,
+          dependents: Number(dependents),
         },
                         undefined,
                         insuranceQuote,
@@ -131,6 +133,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
                   <th className="align-right">勞保級距</th>
                   <th className="align-right">勞保</th>
                   <th className="align-right">健保級距</th>
+                  <th className="align-right">健保眷屬</th>
                   <th className="align-right">健保</th>
                   <th className="align-right">勞退</th>
                   <th className="align-right">公司合計</th>
@@ -180,6 +183,20 @@ export function Insurance({ onToast, reloadKey }: Props) {
                     </td>
                     <td className="num align-right">
                       {r.health_bracket_missing ? '尚未設定' : money(r.health_insured_salary)}
+                    </td>
+                    <td className="num align-right">
+                      {r.health_dependents > 0 ? (
+                        <>
+                          {r.health_dependents} 口
+                          {r.health_dependents_charged < r.health_dependents && (
+                            <span className="cell-hint cell-hint--block num">
+                              以 {r.health_dependents_charged} 口計費
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="cell-muted">—</span>
+                      )}
                     </td>
                     <td className="num align-right">
                       {r.health_bracket_missing ? (
@@ -249,7 +266,22 @@ export function Insurance({ onToast, reloadKey }: Props) {
                   <option value="owner">負責人</option>
                 </select>
               </label>
-              <button className="btn" disabled={busy || !salary.trim()} onClick={() => void compute()}>
+              <label className="field">
+                健保眷屬口數
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={dependents}
+                  onChange={(e) => setDependents(e.target.value)}
+                />
+              </label>
+              <button
+                className="btn"
+                disabled={busy || !salary.trim() || !/^\d+$/.test(dependents)}
+                onClick={() => void compute()}
+              >
                 {busy ? '試算中…' : '試算'}
               </button>
               <p className="form-note">
@@ -288,7 +320,23 @@ export function Insurance({ onToast, reloadKey }: Props) {
                   <span className="num">{money(quote.health.employer)}</span>
                 </div>
                 <div className="doc-row doc-row--sub">
-                  <span>{quote.insured_as === 'owner' ? '本人自付' : '員工自付'}</span>
+                  <span>
+                    {quote.insured_as === 'owner' ? '本人自付' : '員工自付'}
+                    {quote.health.dependents > 0 && (
+                      <>
+                        {quote.health.dependents_charged < quote.health.dependents ? (
+                          <>
+                            （眷屬 <span className="num">{quote.health.dependents}</span> 口以{' '}
+                            <span className="num">{quote.health.dependents_charged}</span> 口計）
+                          </>
+                        ) : (
+                          <>
+                            （眷屬 <span className="num">{quote.health.dependents_charged}</span> 口）
+                          </>
+                        )}
+                      </>
+                    )}
+                  </span>
                   <span className="num">{money(quote.health.employee)}</span>
                 </div>
                 <div className="doc-row">
@@ -311,6 +359,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
             items={[
               { label: '勞保', version: data.rulesets.labor.version },
               { label: '健保', version: data.rulesets.health.version },
+              { label: '健保眷屬計費', version: data.rulesets.dependents.version },
               { label: '勞退', version: data.rulesets.pension.version },
               ...(data.rulesets.owner
                 ? [{ label: '負責人投保', version: data.rulesets.owner.version }]

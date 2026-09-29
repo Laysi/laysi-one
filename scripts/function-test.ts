@@ -611,7 +611,59 @@ async function main() {
       return `健保自付 ${boss.health.employee} · 勞退 ${boss.pension.employer} · 依 ${boss.health.owner_ruleset.version}`;
     });
 
-    await check("H11", "負責人的健保投保金額低於受僱員工最高者會被檢核出來", async () => {
+    await check("H11", "健保自付額加計期末在保的眷屬，每口與本人同額", async () => {
+      const period = TODAY.slice(0, 7);
+      const created = await must("create_employee", {
+        name: "測試有眷屬", hired_on: "2026-01-01", employment_type: "full_time",
+      });
+      const empNo = created.employee.emp_no;
+      // Two covered at the end of the period; one whose cover ended on its
+      // first day and one enrolled from next year are not charged this month.
+      await must("update_employee", {
+        emp_no: empNo, name: "測試有眷屬", hired_on: "2026-01-01",
+        base_salary: "53000", labor_insured_salary: "45800",
+        health_insured_salary: "53000", pension_wage: "53000",
+        dependents: [
+          { name: "測試配偶", relation: "spouse", health_enrolled_from: "2026-01-01" },
+          { name: "測試子女", relation: "child", health_enrolled_from: "2026-01-01" },
+          {
+            name: "測試已退保", relation: "parent",
+            health_enrolled_from: "2026-01-01", health_enrolled_until: `${period}-01`,
+          },
+          {
+            name: "測試明年加保", relation: "grandparent",
+            health_enrolled_from: `${Number(period.slice(0, 4)) + 1}-01-01`,
+          },
+        ],
+      });
+
+      const quote = (dependents: number) =>
+        must("compute_insurance", {
+          insured_salary: "45800", health_insured_salary: "53000", pension_wage: "53000",
+          dependents, as_of: TODAY,
+        });
+      const alone = await quote(0);
+      const withTwo = await quote(2);
+      const head = money(alone.health.employee);
+      expectEq(money(withTwo.health.employee), head * 3, "試算：本人一口 × 3");
+      expectEq(money(withTwo.health.employer), money(alone.health.employer), "公司負擔不隨眷口改變");
+
+      const paid = await must("run_payroll", { period, pay_on: TODAY });
+      expectEq(paid.run.headcount, 1, "只有這一位還沒計薪");
+      const slip = (await must("list_payslips", { period })).rows.find((r: any) => r.emp_no === empNo);
+      expect(slip, "找不到有眷屬員工的薪資單");
+      expectEq(money(slip.health_employee), head * 3, "薪資單健保扣款：本人一口 × 3");
+      expectEq(slip.health_dependents, 2, "薪資單記下的眷口數");
+      expectEq(slip.recompute_matches, true, "以存下的眷口數重算要一致");
+
+      const summary = await must("get_insurance_summary", { as_of: TODAY });
+      const row = summary.rows.find((r: any) => r.emp_no === empNo);
+      expectEq(row.health_dependents, 2, "勞健保畫面的眷口數");
+      expectEq(money(row.health_employee), money(slip.health_employee), "勞健保畫面與薪資單的健保自付");
+      return `${empNo} 健保自付 ${slip.health_employee}（本人一口 ${alone.health.employee}）`;
+    });
+
+    await check("H12", "負責人的健保投保金額低於受僱員工最高者會被檢核出來", async () => {
       const created = await must("create_employee", {
         name: "測試負責人身分", hired_on: "2026-01-01", insured_as: "owner",
       });
@@ -643,7 +695,7 @@ async function main() {
       return `${check.failures[0].message} → 修正後通過`;
     });
 
-    await check("H12", "補登紀錄只把人資直接補登標成人資補登", async () => {
+    await check("H13", "補登紀錄只把人資直接補登標成人資補登", async () => {
       // created_by and decided_by hold display names, so an owner deciding
       // their own request, or anyone deciding a namesake's, writes the same
       // name twice without HR having entered anything.

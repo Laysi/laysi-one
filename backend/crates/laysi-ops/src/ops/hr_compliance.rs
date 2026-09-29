@@ -164,6 +164,7 @@ impl Operation for GetHrCompliance {
             Money::ZERO,
             Money::ZERO,
             Money::ZERO,
+            0,
         )?;
 
         let mut minimum_failures = Vec::new();
@@ -197,12 +198,14 @@ impl Operation for GetHrCompliance {
 
         let mut labor_cap_failures = Vec::new();
         for employee in &staff {
+            // Only the labour ceiling is read here, which dependants do not move.
             let premiums = premiums_on(
                 as_of,
                 &employee.insured_as,
                 employee.labor_insured_salary,
                 employee.health_insured_salary,
                 employee.pension_wage,
+                0,
             )?;
             if premiums.labor_capped {
                 labor_cap_failures.push(json!({
