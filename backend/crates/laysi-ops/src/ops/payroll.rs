@@ -1236,6 +1236,7 @@ mod tests {
             pension_wage: n("53000"),
             id_no: String::new(),
             bank_accounts: Vec::new(),
+            dependents: Vec::new(),
             note: String::new(),
         }
     }

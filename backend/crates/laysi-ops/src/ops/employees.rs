@@ -6,9 +6,10 @@
 //! it is about to replace, and no other page says what someone is paid today.
 //! Monthly payslips stay in `list_payslips` (boss only).
 //!
-//! Over MCP the same operation answers with less: the amounts and the bank
-//! accounts are dropped and the id number is masked. The tool grant already
-//! promises as much, and a model has no filing errand that needs either.
+//! Over MCP the same operation answers with less: the amounts, the bank
+//! accounts and the dependants are dropped and the id number is masked. The
+//! tool grant already promises as much, and a model has no filing errand that
+//! needs any of them.
 //!
 //! Annual leave entitlement is `annual_leave_days(ruleset, service_months)`,
 //! never stored; days taken are summed from `leave_request`.
@@ -47,9 +48,9 @@ fn mask_id_no(id_no: &str) -> String {
 /// Cut a roster row down to what an AI client is granted.
 ///
 /// `id_no` is masked rather than removed so the roster can still answer
-/// whether a number is on file at all. The amounts and the bank accounts go
-/// entirely: they leave the building in whatever the model is talking to, and
-/// nothing an AI is asked about the roster needs them.
+/// whether a number is on file at all. The amounts, the bank accounts and
+/// the dependants go entirely: they leave the building in whatever the model
+/// is talking to, and nothing an AI is asked about the roster needs them.
 fn redact_for_ai(row: &mut Value) {
     let Some(fields) = row.as_object_mut() else {
         return;
@@ -65,6 +66,7 @@ fn redact_for_ai(row: &mut Value) {
         "pension_wage",
         "bank_accounts",
         "birthday",
+        "dependents",
     ] {
         fields.remove(key);
     }
@@ -154,6 +156,36 @@ pub(crate) fn status_label(status: &str) -> &'static str {
         "left" => "已離職",
         _ => "在職",
     }
+}
+
+/// Relations a dependant may have: the stored code, the screen name, and
+/// whether the health insurance act accepts it as a dependant (a spouse,
+/// lineal ascendants, and lineal descendants within the second degree;
+/// 全民健康保險法第 2 條). The same two lists as the table's CHECKs.
+pub(crate) const RELATIONS: &[(&str, &str, bool)] = &[
+    ("spouse", "配偶", true),
+    ("parent", "父母", true),
+    ("grandparent", "祖父母", true),
+    ("child", "子女", true),
+    ("grandchild", "孫子女", true),
+    ("sibling", "兄弟姊妹", false),
+    ("other", "其他", false),
+];
+
+/// A dependant's relation as the screens name it, or `None` for a value
+/// outside [`RELATIONS`].
+pub(crate) fn relation_label(relation: &str) -> Option<&'static str> {
+    RELATIONS
+        .iter()
+        .find(|(code, _, _)| *code == relation)
+        .map(|(_, label, _)| *label)
+}
+
+/// Whether a relation may be covered as a health insurance dependant.
+pub(crate) fn can_join_health_insurance(relation: &str) -> bool {
+    RELATIONS
+        .iter()
+        .any(|(code, _, insurable)| *code == relation && *insurable)
 }
 
 // HR dashboard
@@ -447,6 +479,12 @@ impl Operation for ListEmployees {
                 // brackets: the drawer that edits them has to show what it is
                 // about to replace. Self-service sees only the last digits.
                 "bank_accounts": e.bank_accounts,
+                // Full id numbers for the same reason as the bank accounts.
+                "dependents": e.dependents.iter().map(|d| {
+                    let mut row = json!(d);
+                    row["relation_label"] = json!(relation_label(&d.relation));
+                    row
+                }).collect::<Vec<_>>(),
                 "note": e.note,
             }));
         }
@@ -480,6 +518,17 @@ impl Operation for ListEmployees {
                     .map(|(d, n)| json!({ "label": d, "count": n }))
                     .collect::<Vec<_>>(),
                 "departments": departments,
+                // The drawer's relation picker, and which choices may be
+                // covered by health insurance, so the screen draws no toggle
+                // the write would refuse.
+                "relations": RELATIONS
+                    .iter()
+                    .map(|(code, label, insurable)| json!({
+                        "value": code,
+                        "label": label,
+                        "health_insurable": insurable,
+                    }))
+                    .collect::<Vec<_>>(),
                 "avg_service_months": avg_months,
                 "avg_service_label": service_label(avg_months),
                 "annual_leave_ruleset": crate::ops::insurance::ruleset_json(rs),
@@ -873,6 +922,39 @@ mod tests {
         assert_eq!(service_label(85), "7 年 1 個月");
     }
 
+    /// The relation picker and the health insurance toggle are drawn from
+    /// [`RELATIONS`], and the table enforces the same two lists. If they
+    /// drift, the screen offers a choice the database refuses.
+    #[test]
+    fn relations_agree_with_the_database_checks() {
+        let sql = include_str!("../../../../migrations/0015_employee_dependents.sql");
+        let quoted = |constraint: &str| -> std::collections::BTreeSet<&str> {
+            sql.split_once(constraint)
+                .unwrap_or_else(|| panic!("0015 缺少 {constraint}"))
+                .1
+                .split_once("])))")
+                .unwrap_or_else(|| panic!("{constraint} 沒有結尾"))
+                .0
+                .split('\'')
+                .skip(1)
+                .step_by(2)
+                .collect()
+        };
+        let all: std::collections::BTreeSet<&str> =
+            RELATIONS.iter().map(|(code, _, _)| *code).collect();
+        let uninsurable: std::collections::BTreeSet<&str> = RELATIONS
+            .iter()
+            .filter(|(_, _, insurable)| !insurable)
+            .map(|(code, _, _)| *code)
+            .collect();
+        assert_eq!(quoted("employee_dependent_relation_check"), all);
+        assert_eq!(quoted("employee_dependent_health_relation"), uninsurable);
+        assert!(can_join_health_insurance("child"));
+        assert!(!can_join_health_insurance("sibling"));
+        assert_eq!(relation_label("grandchild"), Some("孫子女"));
+        assert_eq!(relation_label("cousin"), None);
+    }
+
     #[test]
     fn masking_keeps_the_first_three_and_last_two_characters() {
         assert_eq!(mask_id_no("A123456789"), "A12*****89");
@@ -894,6 +976,7 @@ mod tests {
             "pension_wage": "45800",
             "bank_accounts": [{ "bank_name": "第一銀行", "account_no": "12345678901" }],
             "birthday": "1990-05-02",
+            "dependents": [{ "name": "王大明", "relation": "child", "id_no": "A123456789" }],
         });
         redact_for_ai(&mut row);
 
@@ -905,6 +988,7 @@ mod tests {
             "pension_wage",
             "bank_accounts",
             "birthday",
+            "dependents",
         ] {
             assert!(row.get(gone).is_none(), "{gone} 不該留在 AI 讀到的名冊上");
         }

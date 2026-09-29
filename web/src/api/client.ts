@@ -1631,6 +1631,19 @@ export const employeeBankAccountRow = z.object({
 });
 export type EmployeeBankAccountRow = z.infer<typeof employeeBankAccountRow>;
 
+export const employeeDependentRow = z.object({
+  id: z.number(),
+  name: z.string(),
+  relation: z.string(),
+  relation_label: z.string().nullable(),
+  id_no: z.string(),
+  birthday: z.string().nullable(),
+  health_enrolled_from: z.string().nullable(),
+  health_enrolled_until: z.string().nullable(),
+  tax_dependent: z.boolean(),
+});
+export type EmployeeDependentRow = z.infer<typeof employeeDependentRow>;
+
 export const employeeRow = z.object({
   emp_no: z.string(),
   name: z.string(),
@@ -1660,6 +1673,7 @@ export const employeeRow = z.object({
   health_insured_salary: z.string(),
   pension_wage: z.string(),
   bank_accounts: z.array(employeeBankAccountRow),
+  dependents: z.array(employeeDependentRow),
   note: z.string(),
 });
 export type EmployeeRow = z.infer<typeof employeeRow>;
@@ -1671,6 +1685,11 @@ export const employeeList = z.object({
   leaving: z.number(),
   by_dept: z.array(z.object({ label: z.string(), count: z.number() })),
   departments: z.array(dimensionValue),
+  relations: z.array(z.object({
+    value: z.string(),
+    label: z.string(),
+    health_insurable: z.boolean(),
+  })),
   avg_service_months: z.number(),
   avg_service_label: z.string(),
   annual_leave_ruleset: rulesetRef,
@@ -2159,6 +2178,13 @@ export const myProfile = z.object({
     account_masked: z.string(),
     is_payroll: z.boolean(),
     note: z.string(),
+  })),
+  dependents: z.array(z.object({
+    name: z.string(),
+    relation_label: z.string().nullable(),
+    health_enrolled_from: z.string().nullable(),
+    health_enrolled_until: z.string().nullable(),
+    tax_dependent: z.boolean(),
   })),
   privacy_note: z.string(),
 });

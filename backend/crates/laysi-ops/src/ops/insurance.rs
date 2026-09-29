@@ -219,6 +219,7 @@ pub(crate) fn test_employee(
         pension_wage,
         id_no: String::new(),
         bank_accounts: Vec::new(),
+        dependents: Vec::new(),
         note: String::new(),
     }
 }

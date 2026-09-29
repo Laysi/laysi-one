@@ -2084,6 +2084,25 @@ textarea {
   gap: var(--space-lg);
 }
 
+.dependents {
+  margin-bottom: var(--space-4xl);
+}
+
+.dependent {
+  padding: var(--space-xl) 0;
+  border-bottom: var(--rule-width) solid var(--rule-soft);
+}
+
+.dependent .field-grid {
+  margin-bottom: var(--space-lg);
+}
+
+.dependent__toggles {
+  display: flex;
+  gap: var(--space-md);
+  align-items: center;
+}
+
 .entry-input {
   padding: var(--space-md) var(--space-md);
   border: var(--rule-width) solid var(--rule-strong);

@@ -77,6 +77,10 @@ const DUPLICATE_MESSAGES: &[(&str, &str)] = &[
         "一位員工只能有一個薪轉帳戶，請先取消原本的標記。",
     ),
     (
+        "employee_dependent_id_no_idx",
+        "這個身分證字號已經登記在這位員工的眷屬裡。",
+    ),
+    (
         "budget_version_code_account_code_dept_id_key",
         "這個科目在本版預算已經編過了，請改用編輯。",
     ),
@@ -5847,6 +5851,7 @@ impl Store {
         .get("id");
 
         replace_bank_accounts(&mut tx, employee_id, &req).await?;
+        replace_dependents(&mut tx, employee_id, &req).await?;
 
         tx.commit().await?;
         self.employee(&emp_no).await
@@ -5916,6 +5921,7 @@ impl Store {
         .await?;
 
         replace_bank_accounts(&mut tx, employee_id, &req).await?;
+        replace_dependents(&mut tx, employee_id, &req).await?;
 
         let closed = if req.status == "left" && was_left != "left" {
             close_access(&mut tx, employee_id, &name, req.actor, req.keep_active_role).await?
@@ -5954,18 +5960,44 @@ impl Store {
         .iter()
         .map(row_to_employee)
         .collect();
-        self.attach_bank_accounts(&mut staff).await?;
+        self.attach_lists(&mut staff).await?;
         Ok(staff)
     }
 
-    /// Fill in [`Employee::bank_accounts`]. One query for the whole roster: a
-    /// query per person would be one round trip per row on a page that reads
-    /// every employee at once.
-    async fn attach_bank_accounts(&self, staff: &mut [Employee]) -> Result<()> {
+    /// Fill in [`Employee::bank_accounts`] and [`Employee::dependents`]. One
+    /// query per list for the whole roster: a query per person would be one
+    /// round trip per row on a page that reads every employee at once.
+    async fn attach_lists(&self, staff: &mut [Employee]) -> Result<()> {
         if staff.is_empty() {
             return Ok(());
         }
         let ids: Vec<i32> = staff.iter().map(|e| e.id).collect();
+        let dependents = sqlx::query(
+            "SELECT employee_id, id, name, relation, id_no, birthday,
+                    health_enrolled_from, health_enrolled_until, tax_dependent
+               FROM employee_dependent
+              WHERE employee_id = ANY($1)
+              ORDER BY employee_id, id",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await?;
+        for employee in staff.iter_mut() {
+            employee.dependents = dependents
+                .iter()
+                .filter(|r| r.get::<i32, _>("employee_id") == employee.id)
+                .map(|r| EmployeeDependent {
+                    id: r.get("id"),
+                    name: r.get("name"),
+                    relation: r.get("relation"),
+                    id_no: r.get("id_no"),
+                    birthday: r.get("birthday"),
+                    health_enrolled_from: r.get("health_enrolled_from"),
+                    health_enrolled_until: r.get("health_enrolled_until"),
+                    tax_dependent: r.get("tax_dependent"),
+                })
+                .collect();
+        }
         let rows = sqlx::query(
             "SELECT employee_id, id, bank_name, account_no, is_payroll, note
                FROM employee_bank_account
@@ -6011,8 +6043,7 @@ impl Store {
         .ok_or_else(|| StoreError::EmployeeNotFound {
             no: emp_no.to_string(),
         })?;
-        self.attach_bank_accounts(std::slice::from_mut(&mut found))
-            .await?;
+        self.attach_lists(std::slice::from_mut(&mut found)).await?;
         Ok(found)
     }
 
@@ -6036,8 +6067,7 @@ impl Store {
         .as_ref()
         .map(row_to_employee);
         if let Some(employee) = found.as_mut() {
-            self.attach_bank_accounts(std::slice::from_mut(employee))
-                .await?;
+            self.attach_lists(std::slice::from_mut(employee)).await?;
         }
         Ok(found)
     }
@@ -8683,10 +8713,45 @@ pub struct Employee {
     /// Masked. The full national ID does not exist in this system.
     pub id_no: String,
     /// Every account on file, the payroll one first. Loaded by
-    /// `attach_bank_accounts`, so a row read without it holds an empty list
+    /// `attach_lists`, so a row read without it holds an empty list
     /// rather than a wrong one.
     pub bank_accounts: Vec<EmployeeBankAccount>,
+    /// Every dependant on file, in the order they were entered. Loaded with
+    /// the bank accounts.
+    pub dependents: Vec<EmployeeDependent>,
     pub note: String,
+}
+
+/// One dependant of one employee.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmployeeDependent {
+    pub id: i32,
+    pub name: String,
+    /// One of `spouse`, `parent`, `grandparent`, `child`, `grandchild`,
+    /// `sibling`, `other`.
+    pub relation: String,
+    /// Full national ID, stored upper case; blank while it has not been
+    /// collected.
+    pub id_no: String,
+    pub birthday: Option<NaiveDate>,
+    /// Covered by this employee's health insurance from this day. `None`
+    /// means not covered.
+    pub health_enrolled_from: Option<NaiveDate>,
+    /// Last day of cover; `None` while still covered.
+    pub health_enrolled_until: Option<NaiveDate>,
+    /// Claimed by the employee for income tax.
+    pub tax_dependent: bool,
+}
+
+/// One dependant as the caller wants it stored.
+pub struct WriteEmployeeDependent<'a> {
+    pub name: &'a str,
+    pub relation: &'a str,
+    pub id_no: &'a str,
+    pub birthday: Option<NaiveDate>,
+    pub health_enrolled_from: Option<NaiveDate>,
+    pub health_enrolled_until: Option<NaiveDate>,
+    pub tax_dependent: bool,
 }
 
 /// One bank account belonging to one employee.
@@ -8732,6 +8797,8 @@ pub struct WriteEmployee<'a> {
     /// `None` leaves the accounts on file alone; `Some` replaces the whole
     /// set, the same shape the edit drawer sends back.
     pub bank_accounts: Option<&'a [WriteEmployeeBankAccount<'a>]>,
+    /// Same three states as `bank_accounts`.
+    pub dependents: Option<&'a [WriteEmployeeDependent<'a>]>,
     pub note: &'a str,
     pub actor: &'a str,
     /// Role that must keep one active login. Setting a status of `left` closes
@@ -9263,6 +9330,42 @@ async fn replace_bank_accounts(
     Ok(())
 }
 
+/// Replace every dependant on file for one employee, the same three states
+/// and the same delete-then-insert as [`replace_bank_accounts`].
+async fn replace_dependents(
+    tx: &mut Tx<'_>,
+    employee_id: i32,
+    req: &WriteEmployee<'_>,
+) -> Result<()> {
+    let Some(dependents) = req.dependents else {
+        return Ok(());
+    };
+    sqlx::query("DELETE FROM employee_dependent WHERE employee_id = $1")
+        .bind(employee_id)
+        .execute(&mut **tx)
+        .await?;
+    for d in dependents {
+        sqlx::query(
+            "INSERT INTO employee_dependent
+                (employee_id, name, relation, id_no, birthday, health_enrolled_from,
+                 health_enrolled_until, tax_dependent, created_by)
+             VALUES ($1,$2,$3,upper($4),$5,$6,$7,$8,$9)",
+        )
+        .bind(employee_id)
+        .bind(d.name)
+        .bind(d.relation)
+        .bind(d.id_no)
+        .bind(d.birthday)
+        .bind(d.health_enrolled_from)
+        .bind(d.health_enrolled_until)
+        .bind(d.tax_dependent)
+        .bind(req.actor)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 struct InsertArInvoice<'a> {
     invoice_no: &'a str,
     customer: &'a str,
@@ -9655,6 +9758,7 @@ fn row_to_employee(r: &PgRow) -> Employee {
         pension_wage: r.get("pension_wage"),
         id_no: r.get("id_no"),
         bank_accounts: Vec::new(),
+        dependents: Vec::new(),
         note: r.get("note"),
     }
 }
@@ -10886,6 +10990,7 @@ mod tests {
                 pension_wage: None,
                 id_no: "",
                 bank_accounts: None,
+                dependents: None,
                 note: "",
                 actor: "測試",
                 keep_active_role: "admin",
@@ -10986,6 +11091,7 @@ mod tests {
                 pension_wage: None,
                 id_no: "",
                 bank_accounts: accounts,
+                dependents: None,
                 note: "",
                 actor: "測試",
                 keep_active_role: "admin",
@@ -11047,6 +11153,171 @@ mod tests {
             .expect("應查得到員工")
             .expect("員工應存在");
         assert_eq!(by_id.bank_accounts.len(), 1);
+
+        sqlx::query("DELETE FROM employee WHERE emp_no = $1")
+            .bind(&emp_no)
+            .execute(&store.pool)
+            .await
+            .expect("應可清掉測試資料");
+    }
+
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// dependents_replace_as_a_set -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn dependents_replace_as_a_set_and_the_table_refuses_bad_rows() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let emp_no = format!("T{}", &Uuid::new_v4().simple().to_string()[..8]);
+        fn write<'a>(
+            emp_no: &'a str,
+            dependents: Option<&'a [WriteEmployeeDependent<'a>]>,
+        ) -> WriteEmployee<'a> {
+            WriteEmployee {
+                emp_no,
+                name: "眷屬測試",
+                dept_code: None,
+                title: "",
+                employment_type: "full_time",
+                pay_basis: "monthly",
+                insured_as: "employee",
+                birthday: None,
+                hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                left_on: None,
+                status: "active",
+                base_salary: None,
+                labor_insured_salary: None,
+                health_insured_salary: None,
+                pension_wage: None,
+                id_no: "",
+                bank_accounts: None,
+                dependents,
+                note: "",
+                actor: "測試",
+                keep_active_role: "admin",
+            }
+        }
+        fn person<'a>(
+            name: &'a str,
+            relation: &'a str,
+            id_no: &'a str,
+        ) -> WriteEmployeeDependent<'a> {
+            WriteEmployeeDependent {
+                name,
+                relation,
+                id_no,
+                birthday: None,
+                health_enrolled_from: NaiveDate::from_ymd_opt(2026, 1, 1),
+                health_enrolled_until: None,
+                tax_dependent: true,
+            }
+        }
+
+        let created = store
+            .create_employee(write(
+                &emp_no,
+                Some(&[
+                    person("王太太", "spouse", "a223456781"),
+                    person("王小華", "child", ""),
+                ]),
+            ))
+            .await
+            .expect("應可建立員工與眷屬");
+        assert_eq!(created.dependents.len(), 2);
+        assert_eq!(created.dependents[0].name, "王太太");
+        // Stored upper case whatever case it was typed in.
+        assert_eq!(created.dependents[0].id_no, "A223456781");
+
+        // Omitting the list leaves what is on file alone.
+        let untouched = store
+            .update_employee(write(&emp_no, None))
+            .await
+            .expect("應可只更新其他欄位");
+        assert_eq!(untouched.employee.dependents.len(), 2);
+
+        let replaced = store
+            .update_employee(write(&emp_no, Some(&[person("王小華", "child", "")])))
+            .await
+            .expect("應可整份取代");
+        assert_eq!(replaced.employee.dependents.len(), 1);
+        assert_eq!(replaced.employee.dependents[0].relation, "child");
+
+        // The roster and a single read agree.
+        let roster = store
+            .employees(true, Some(&emp_no))
+            .await
+            .expect("應讀得到名冊");
+        assert_eq!(roster[0].dependents.len(), 1);
+
+        let cleared = store
+            .update_employee(write(&emp_no, Some(&[])))
+            .await
+            .expect("空清單應清空眷屬");
+        assert!(cleared.employee.dependents.is_empty());
+
+        // The table is the last line: rows the operation would have refused.
+        let id = cleared.employee.id;
+        for (why, sql) in [
+            (
+                "不在清單內的關係",
+                "INSERT INTO employee_dependent (employee_id, name, relation) VALUES ($1, '甲', 'cousin')",
+            ),
+            (
+                "退保日早於加保日",
+                "INSERT INTO employee_dependent (employee_id, name, relation, health_enrolled_from, health_enrolled_until)
+                 VALUES ($1, '乙', 'child', '2026-07-01', '2026-06-30')",
+            ),
+            (
+                "只有退保日",
+                "INSERT INTO employee_dependent (employee_id, name, relation, health_enrolled_until)
+                 VALUES ($1, '丙', 'child', '2026-06-30')",
+            ),
+            (
+                "兄弟姊妹依附健保",
+                "INSERT INTO employee_dependent (employee_id, name, relation, health_enrolled_from)
+                 VALUES ($1, '丁', 'sibling', '2026-07-01')",
+            ),
+            (
+                "空白姓名",
+                "INSERT INTO employee_dependent (employee_id, name, relation) VALUES ($1, '  ', 'child')",
+            ),
+            (
+                "小寫字號",
+                "INSERT INTO employee_dependent (employee_id, name, relation, id_no) VALUES ($1, '戊', 'child', 'a123456789')",
+            ),
+        ] {
+            let result = sqlx::query(sql).bind(id).execute(&store.pool).await;
+            assert!(result.is_err(), "{why} 應被資料庫擋下");
+        }
+
+        let duplicate = store
+            .update_employee(write(
+                &emp_no,
+                Some(&[
+                    person("王小華", "child", "A123456789"),
+                    person("王小明", "child", "A123456789"),
+                ]),
+            ))
+            .await
+            .expect_err("同一員工重複的字號應被擋下");
+        assert!(
+            duplicate.to_string().contains("已經登記在這位員工的眷屬裡"),
+            "{duplicate}"
+        );
+        // Two blank numbers are two people not collected yet.
+        store
+            .update_employee(write(
+                &emp_no,
+                Some(&[person("王小華", "child", ""), person("王小明", "child", "")]),
+            ))
+            .await
+            .expect("兩筆空白字號應存得進去");
 
         sqlx::query("DELETE FROM employee WHERE emp_no = $1")
             .bind(&emp_no)
@@ -11742,6 +12013,7 @@ mod tests {
                 pension_wage: None,
                 id_no: "",
                 bank_accounts: None,
+                dependents: None,
                 note: "並行配號測試",
                 actor: "測試",
                 keep_active_role: "admin",

@@ -33,7 +33,7 @@ use laysi_domain::Money;
 use laysi_store::{
     CreateBankAccount as StoreCreateBankAccount, CreateDimensionValue as StoreCreateDimensionValue,
     SetApprovalRule as StoreSetApprovalRule, UpdateDimensionValue as StoreUpdateDimensionValue,
-    WriteAccount, WriteEmployee, WriteEmployeeBankAccount,
+    WriteAccount, WriteEmployee, WriteEmployeeBankAccount, WriteEmployeeDependent,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -387,9 +387,40 @@ pub struct EmployeeInput {
     /// file alone; send the whole list to replace them.
     #[serde(default)]
     pub bank_accounts: Option<Vec<EmployeeBankAccountInput>>,
+    /// Every dependant kept for this person. Omit to leave the list on file
+    /// alone; send the whole list to replace it.
+    #[serde(default)]
+    pub dependents: Option<Vec<EmployeeDependentInput>>,
     /// Notes.
     #[serde(default)]
     pub note: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EmployeeDependentInput {
+    /// Full name.
+    pub name: String,
+    /// One of `spouse`, `parent`, `grandparent`, `child`, `grandchild`,
+    /// `sibling`, `other`.
+    pub relation: String,
+    /// National ID with a valid check digit. May be blank while it has not
+    /// been collected.
+    #[serde(default)]
+    pub id_no: String,
+    /// Date of birth.
+    #[serde(default)]
+    pub birthday: Option<NaiveDate>,
+    /// First day covered by this employee's health insurance. Leave empty
+    /// when the person is not covered. Siblings and other relatives cannot be
+    /// covered.
+    #[serde(default)]
+    pub health_enrolled_from: Option<NaiveDate>,
+    /// Last day of cover. Leave empty while still covered.
+    #[serde(default)]
+    pub health_enrolled_until: Option<NaiveDate>,
+    /// Whether the employee claims this person for income tax.
+    #[serde(default)]
+    pub tax_dependent: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -515,6 +546,7 @@ fn validate_new_employee(input: &EmployeeInput) -> Result<(), OpError> {
         ));
     }
     validate_bank_accounts(input)?;
+    validate_dependents(input)?;
     if [
         input.labor_insured_salary,
         input.health_insured_salary,
@@ -545,9 +577,12 @@ fn validate_bank_accounts(input: &EmployeeInput) -> Result<(), OpError> {
                 "銀行帳戶要填銀行名稱與帳號；不再使用的帳戶請整筆刪除".into(),
             ));
         }
+        // A refusal is written to the audit summary as is, where
+        // `redact_for_audit` never looks, so it names the bank and never the
+        // number.
         if seen.contains(&(bank_name, account_no)) {
             return Err(OpError::BadInput(format!(
-                "{bank_name} {account_no} 重複登錄了兩次"
+                "{bank_name} 的同一個帳號重複登錄了兩次"
             )));
         }
         seen.push((bank_name, account_no));
@@ -556,6 +591,88 @@ fn validate_bank_accounts(input: &EmployeeInput) -> Result<(), OpError> {
         return Err(OpError::BadInput("薪轉帳戶只能指定一個".into()));
     }
     Ok(())
+}
+
+/// Reject a dependant the health insurance and tax filings could not use.
+/// Every message names the person, because the drawer may hold several.
+fn validate_dependents(input: &EmployeeInput) -> Result<(), OpError> {
+    let Some(dependents) = &input.dependents else {
+        return Ok(());
+    };
+    // (id number, name) of each dependant checked so far.
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for d in dependents {
+        let name = d.name.trim();
+        if name.is_empty() {
+            return Err(OpError::BadInput(
+                "眷屬要填姓名；不再登記的眷屬請整筆刪除".into(),
+            ));
+        }
+        let Some(relation) = crate::ops::employees::relation_label(&d.relation) else {
+            return Err(OpError::BadInput(format!(
+                "眷屬 {name} 的關係只能是配偶、父母、祖父母、子女、孫子女、兄弟姊妹或其他"
+            )));
+        };
+        let id_no = d.id_no.trim();
+        if !id_no.is_empty() {
+            if !is_valid_id_no(id_no) {
+                return Err(OpError::BadInput(format!(
+                    "眷屬 {name} 的身分證字號要一個英文字母加九碼數字，且檢查碼相符；還沒收到可以留空"
+                )));
+            }
+            // Named by person, never by number, for the same reason as the
+            // bank accounts: the refusal reaches the audit summary unredacted.
+            if let Some((_, first)) = seen.iter().find(|(s, _)| s.eq_ignore_ascii_case(id_no)) {
+                return Err(OpError::BadInput(if *first == name {
+                    format!("眷屬 {name} 登記了兩次，請刪除其中一筆")
+                } else {
+                    format!("眷屬 {first} 與 {name} 的身分證字號相同，請更正其中一位")
+                }));
+            }
+            seen.push((id_no, name));
+        }
+        match (d.health_enrolled_from, d.health_enrolled_until) {
+            (None, Some(_)) => {
+                return Err(OpError::BadInput(format!(
+                    "眷屬 {name} 填了健保退保日，也要填加保日"
+                )));
+            }
+            (Some(from), Some(until)) if until < from => {
+                return Err(OpError::BadInput(format!(
+                    "眷屬 {name} 的健保退保日要在加保日當天或之後"
+                )));
+            }
+            _ => {}
+        }
+        if d.health_enrolled_from.is_some()
+            && !crate::ops::employees::can_join_health_insurance(&d.relation)
+        {
+            return Err(OpError::BadInput(format!(
+                "眷屬 {name}（{relation}）不能依附健保，只能列報扶養"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The dependants as the store writes them, for the same reason as
+/// [`employee_accounts`].
+fn employee_dependents(input: &EmployeeInput) -> Option<Vec<WriteEmployeeDependent<'_>>> {
+    let dependents = input.dependents.as_ref()?;
+    Some(
+        dependents
+            .iter()
+            .map(|d| WriteEmployeeDependent {
+                name: d.name.trim(),
+                relation: d.relation.as_str(),
+                id_no: d.id_no.trim(),
+                birthday: d.birthday,
+                health_enrolled_from: d.health_enrolled_from,
+                health_enrolled_until: d.health_enrolled_until,
+                tax_dependent: d.tax_dependent,
+            })
+            .collect(),
+    )
 }
 
 /// The accounts as the store writes them. Kept out of [`employee_write`]
@@ -583,6 +700,7 @@ fn employee_write<'a>(
     input: &'a EmployeeInput,
     actor: &'a str,
     bank_accounts: Option<&'a [WriteEmployeeBankAccount<'a>]>,
+    dependents: Option<&'a [WriteEmployeeDependent<'a>]>,
 ) -> WriteEmployee<'a> {
     WriteEmployee {
         emp_no: input.emp_no.trim(),
@@ -606,6 +724,7 @@ fn employee_write<'a>(
         pension_wage: input.pension_wage,
         id_no: input.id_no.trim(),
         bank_accounts,
+        dependents,
         note: input.note.trim(),
         actor,
         keep_active_role: crate::ROLE_ADMIN,
@@ -638,9 +757,15 @@ impl Operation for CreateEmployee {
         // from picking the same one.
         validate_new_employee(&input)?;
         let accounts = employee_accounts(&input);
+        let dependents = employee_dependents(&input);
         let employee = ctx
             .store
-            .create_employee(employee_write(&input, &ctx.actor, accounts.as_deref()))
+            .create_employee(employee_write(
+                &input,
+                &ctx.actor,
+                accounts.as_deref(),
+                dependents.as_deref(),
+            ))
             .await?;
         let summary = format!(
             "建立員工 {} {} · 未建立登入帳號",
@@ -678,9 +803,15 @@ impl Operation for UpdateEmployee {
         let input: EmployeeInput = parse(input)?;
         validate_employee(&input)?;
         let accounts = employee_accounts(&input);
+        let dependents = employee_dependents(&input);
         let updated = ctx
             .store
-            .update_employee(employee_write(&input, &ctx.actor, accounts.as_deref()))
+            .update_employee(employee_write(
+                &input,
+                &ctx.actor,
+                accounts.as_deref(),
+                dependents.as_deref(),
+            ))
             .await?;
         let employee = updated.employee;
         let closed = updated.closed;
@@ -1143,6 +1274,7 @@ mod tests {
             pension_wage: None,
             id_no: "A123456789".into(),
             bank_accounts: None,
+            dependents: None,
             note: String::new(),
         }
     }
@@ -1280,6 +1412,8 @@ mod tests {
         assert!(error.to_string().contains("銀行名稱與帳號"));
     }
 
+    /// The refusal is written to the audit summary unredacted, so it must
+    /// say which bank without repeating the number.
     #[test]
     fn the_same_account_cannot_be_listed_twice() {
         let mut input = valid_employee();
@@ -1287,8 +1421,142 @@ mod tests {
             account("玉山銀行", "0012345", true),
             account("玉山銀行", " 0012345 ", false),
         ]);
-        let error = validate_employee(&input).unwrap_err();
-        assert!(error.to_string().contains("重複登錄"));
+        let error = validate_employee(&input).unwrap_err().to_string();
+        assert!(
+            error.contains("玉山銀行") && error.contains("重複登錄"),
+            "{error}"
+        );
+        assert!(!error.contains("0012345"), "錯誤訊息不能印出帳號：{error}");
+    }
+
+    fn dependent(name: &str, relation: &str, id_no: &str) -> EmployeeDependentInput {
+        EmployeeDependentInput {
+            name: name.into(),
+            relation: relation.into(),
+            id_no: id_no.into(),
+            birthday: None,
+            health_enrolled_from: None,
+            health_enrolled_until: None,
+            tax_dependent: false,
+        }
+    }
+
+    fn with_dependents(list: Vec<EmployeeDependentInput>) -> EmployeeInput {
+        let mut input = valid_employee();
+        input.dependents = Some(list);
+        input
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    /// Same three states as the bank accounts: absent leaves the list on file
+    /// alone, an empty list clears it, a list replaces it.
+    #[test]
+    fn dependants_follow_the_three_states() {
+        assert!(employee_dependents(&valid_employee()).is_none());
+        let cleared = with_dependents(vec![]);
+        assert_eq!(employee_dependents(&cleared).unwrap().len(), 0);
+        let one = with_dependents(vec![dependent(" 王小華 ", "child", "")]);
+        let written = employee_dependents(&one).unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].name, "王小華");
+    }
+
+    /// The drawer may hold several people, so the message has to say which
+    /// one is wrong.
+    #[test]
+    fn a_dependants_bad_id_number_is_refused_by_name() {
+        let input = with_dependents(vec![dependent("王小華", "child", "A123456788")]);
+        let error = validate_employee(&input).unwrap_err().to_string();
+        assert!(error.contains("王小華"), "{error}");
+        assert!(error.contains("檢查碼"), "{error}");
+
+        // Not collected yet is not an error, the same as the employee's own.
+        assert!(
+            validate_employee(&with_dependents(vec![dependent("王小華", "child", "")])).is_ok()
+        );
+    }
+
+    /// Named by person and never by number: the refusal reaches the audit
+    /// summary, which `redact_for_audit` does not touch.
+    #[test]
+    fn the_same_dependant_cannot_be_listed_twice() {
+        let input = with_dependents(vec![
+            dependent("王小華", "child", "A123456789"),
+            dependent("王小華", "child", "a123456789"),
+        ]);
+        let error = validate_employee(&input).unwrap_err().to_string();
+        assert!(error.contains("王小華 登記了兩次"), "{error}");
+        assert!(
+            !error.to_ascii_uppercase().contains("A123456789"),
+            "{error}"
+        );
+
+        let input = with_dependents(vec![
+            dependent("王小華", "child", "A123456789"),
+            dependent("王小明", "child", "A123456789"),
+        ]);
+        let error = validate_employee(&input).unwrap_err().to_string();
+        assert!(error.contains("王小華 與 王小明"), "{error}");
+        assert!(
+            !error.contains("A123456789"),
+            "錯誤訊息不能印出字號：{error}"
+        );
+    }
+
+    #[test]
+    fn a_relation_outside_the_list_is_refused() {
+        let input = with_dependents(vec![dependent("王小華", "cousin", "")]);
+        let error = validate_employee(&input).unwrap_err().to_string();
+        assert!(
+            error.contains("王小華") && error.contains("配偶"),
+            "{error}"
+        );
+    }
+
+    /// Cover is a range: an end with no start, or an end before the start,
+    /// cannot be counted month by month.
+    #[test]
+    fn health_cover_needs_a_start_and_an_order() {
+        let mut d = dependent("王小華", "child", "");
+        d.health_enrolled_until = Some(day(2026, 6, 30));
+        let error = validate_employee(&with_dependents(vec![d]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("加保日"), "{error}");
+
+        let mut d = dependent("王小華", "child", "");
+        d.health_enrolled_from = Some(day(2026, 7, 1));
+        d.health_enrolled_until = Some(day(2026, 6, 30));
+        let error = validate_employee(&with_dependents(vec![d]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("當天或之後"), "{error}");
+
+        let mut d = dependent("王小華", "child", "");
+        d.health_enrolled_from = Some(day(2026, 7, 1));
+        d.health_enrolled_until = Some(day(2026, 7, 1));
+        assert!(validate_employee(&with_dependents(vec![d])).is_ok());
+    }
+
+    /// A sibling may be claimed for tax but never covered by health insurance.
+    #[test]
+    fn a_sibling_can_be_claimed_but_not_covered() {
+        let mut d = dependent("王小美", "sibling", "");
+        d.tax_dependent = true;
+        assert!(validate_employee(&with_dependents(vec![d])).is_ok());
+
+        let mut d = dependent("王小美", "sibling", "");
+        d.health_enrolled_from = Some(day(2026, 7, 1));
+        let error = validate_employee(&with_dependents(vec![d]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("王小美") && error.contains("不能依附健保"),
+            "{error}"
+        );
     }
 
     #[test]

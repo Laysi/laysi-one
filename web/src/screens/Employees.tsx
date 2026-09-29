@@ -60,6 +60,18 @@ interface BankAccountForm {
   note: string;
 }
 
+interface DependentForm {
+  name: string;
+  relation: string;
+  id_no: string;
+  birthday: string;
+  covered: boolean;
+  kept: boolean;
+  health_enrolled_from: string;
+  health_enrolled_until: string;
+  tax_dependent: boolean;
+}
+
 interface FormState {
   emp_no: string;
   name: string;
@@ -78,6 +90,7 @@ interface FormState {
   pension_wage: string;
   id_no: string;
   bank_accounts: BankAccountForm[];
+  dependents: DependentForm[];
   note: string;
 }
 
@@ -99,6 +112,7 @@ const EMPTY_FORM: FormState = {
   pension_wage: '',
   id_no: '',
   bank_accounts: [],
+  dependents: [],
   note: '',
 };
 
@@ -205,6 +219,17 @@ export function Employees({
         is_payroll: b.is_payroll,
         note: b.note,
       })),
+      dependents: e.dependents.map((d) => ({
+        name: d.name,
+        relation: d.relation,
+        id_no: d.id_no,
+        birthday: d.birthday ?? '',
+        covered: d.health_enrolled_from !== null,
+        kept: d.health_enrolled_from !== null,
+        health_enrolled_from: d.health_enrolled_from ?? '',
+        health_enrolled_until: d.health_enrolled_until ?? '',
+        tax_dependent: d.tax_dependent,
+      })),
       note: e.note,
     });
     setMissing([]);
@@ -301,6 +326,47 @@ export function Employees({
     setBankAccounts(left.map((b, i) => (orphaned && i === 0 ? { ...b, is_payroll: true } : b)));
   }
 
+  function insurable(relation: string): boolean {
+    return data?.relations.find((r) => r.value === relation)?.health_insurable ?? false;
+  }
+
+  function setDependent(index: number, patch: Partial<DependentForm>) {
+    setForm((f) => ({
+      ...f,
+      dependents: f.dependents.map((d, i) => {
+        if (i !== index) return d;
+        const next = { ...d, ...patch };
+        return next.kept || insurable(next.relation)
+          ? next
+          : { ...next, covered: false, health_enrolled_from: '', health_enrolled_until: '' };
+      }),
+    }));
+  }
+
+  function addDependent() {
+    setForm((f) => ({
+      ...f,
+      dependents: [
+        ...f.dependents,
+        {
+          name: '',
+          relation: data?.relations[0]?.value ?? '',
+          id_no: '',
+          birthday: '',
+          covered: false,
+          kept: false,
+          health_enrolled_from: '',
+          health_enrolled_until: '',
+          tax_dependent: false,
+        },
+      ],
+    }));
+  }
+
+  function removeDependent(index: number) {
+    setForm((f) => ({ ...f, dependents: f.dependents.filter((_, i) => i !== index) }));
+  }
+
   async function save() {
     const blank: string[] = [];
     if (!form.name.trim()) blank.push('name');
@@ -319,6 +385,18 @@ export function Employees({
     );
     if (accounts.some((b) => !b.bank_name.trim() || !b.account_no.trim())) {
       onToast('銀行帳戶要填銀行名稱與帳號；不再使用的帳戶請按 × 刪除');
+      return;
+    }
+    const dependents = form.dependents.filter(
+      (d) => d.name.trim() || d.id_no.trim() || d.birthday || d.covered || d.tax_dependent,
+    );
+    if (dependents.some((d) => !d.name.trim())) {
+      onToast('眷屬要填姓名；不再登記的眷屬請按 × 刪除');
+      return;
+    }
+    const undated = dependents.find((d) => d.covered && !d.health_enrolled_from);
+    if (undated) {
+      onToast(`${undated.name.trim()} 依附健保要填加保日`);
       return;
     }
     setSaving(true);
@@ -342,6 +420,15 @@ export function Employees({
           account_no: b.account_no.trim(),
           is_payroll: b.is_payroll,
           note: b.note.trim(),
+        })),
+        dependents: dependents.map((d) => ({
+          name: d.name.trim(),
+          relation: d.relation,
+          id_no: d.id_no.trim(),
+          birthday: d.birthday || null,
+          health_enrolled_from: d.covered ? d.health_enrolled_from : null,
+          health_enrolled_until: d.covered && d.health_enrolled_until ? d.health_enrolled_until : null,
+          tax_dependent: d.tax_dependent,
         })),
         note: form.note.trim(),
       };
@@ -971,6 +1058,122 @@ export function Employees({
                     </div>
                   ))}
                 </>
+              )}
+
+              <div className="toolbar">
+                <h3 className="section-title">眷屬</h3>
+                <span className="spacer" />
+                <button className="btn btn--compact" onClick={addDependent}>
+                  ＋ 新增眷屬
+                </button>
+              </div>
+
+              {form.dependents.length === 0 ? (
+                <p className="section-note">尚未登記眷屬。</p>
+              ) : (
+                <div className="dependents">
+                  {form.dependents.map((d, i) => (
+                    <div className="dependent" key={i}>
+                      <div className="field-grid">
+                        <label className="field">
+                          姓名
+                          <input
+                            className="input"
+                            value={d.name}
+                            onChange={(e) => setDependent(i, { name: e.target.value })}
+                          />
+                        </label>
+                        <label className="field">
+                          關係
+                          <select
+                            className="input"
+                            value={d.relation}
+                            onChange={(e) => setDependent(i, { relation: e.target.value })}
+                          >
+                            {data?.relations
+                            .filter((r) => !d.kept || r.health_insurable)
+                            .map((r) => (
+                              <option key={r.value} value={r.value}>
+                                {r.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="field">
+                          身分證字號
+                          <input
+                            className="input num"
+                            value={d.id_no}
+                            onChange={(e) => setDependent(i, { id_no: e.target.value })}
+                          />
+                        </label>
+                        <label className="field">
+                          生日
+                          <DateField
+                            className="input"
+                            value={d.birthday}
+                            onChange={(v) => setDependent(i, { birthday: v })}
+                          />
+                        </label>
+                        {d.covered && (
+                          <>
+                            <label className="field">
+                              健保加保日
+                              <DateField
+                                className="input"
+                                value={d.health_enrolled_from}
+                                onChange={(v) => setDependent(i, { health_enrolled_from: v })}
+                              />
+                            </label>
+                            <label className="field">
+                              健保退保日
+                              <DateField
+                                className="input"
+                                value={d.health_enrolled_until}
+                                onChange={(v) => setDependent(i, { health_enrolled_until: v })}
+                              />
+                            </label>
+                          </>
+                        )}
+                      </div>
+                      <div className="dependent__toggles">
+                        {d.kept ? (
+                          <span className="tag">依附健保</span>
+                        ) : (
+                          insurable(d.relation) && (
+                            <button
+                              className={`chip${d.covered ? ' chip--on' : ''}`}
+                              onClick={() =>
+                                setDependent(
+                                  i,
+                                  d.covered
+                                    ? { covered: false, health_enrolled_from: '', health_enrolled_until: '' }
+                                    : { covered: true },
+                                )
+                              }
+                            >
+                              依附健保
+                            </button>
+                          )
+                        )}
+                        <button
+                          className={`chip${d.tax_dependent ? ' chip--on' : ''}`}
+                          onClick={() => setDependent(i, { tax_dependent: !d.tax_dependent })}
+                        >
+                          列報扶養
+                        </button>
+                        <span className="spacer" />
+                        <button
+                          className="btn btn--icon"
+                          onClick={() => removeDependent(i)}
+                          aria-label="刪除本筆眷屬"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
 
               {drawer === 'edit' && canReadDocuments && (

@@ -204,7 +204,16 @@ fn profile_json(employee: &Employee, months: u32) -> Value {
             "is_payroll": account.is_payroll,
             "note": account.note,
         })).collect::<Vec<_>>(),
-        "privacy_note": "不回身分證字號；銀行帳戶只回銀行名稱與尾碼。",
+        // HR keeps this list; the owner reads it to catch what is wrong, so
+        // it carries no id number and no birthday.
+        "dependents": employee.dependents.iter().map(|d| json!({
+            "name": d.name,
+            "relation_label": crate::ops::employees::relation_label(&d.relation),
+            "health_enrolled_from": d.health_enrolled_from,
+            "health_enrolled_until": d.health_enrolled_until,
+            "tax_dependent": d.tax_dependent,
+        })).collect::<Vec<_>>(),
+        "privacy_note": "不回本人與眷屬的身分證字號；銀行帳戶只回銀行名稱與尾碼。",
     })
 }
 

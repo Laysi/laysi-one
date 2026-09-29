@@ -866,6 +866,24 @@ mod tests {
         assert_eq!(redacted["emp_no"], serde_json::json!("E010"));
     }
 
+    /// A dependant's id number sits one array down in `update_employee`'s
+    /// input, and is kept out of the audit table all the same.
+    #[test]
+    fn a_dependants_id_number_is_redacted_inside_the_list() {
+        let redacted = redact_for_audit(&serde_json::json!({
+            "emp_no": "E010",
+            "dependents": [{ "name": "王小華", "relation": "child", "id_no": "A123456789" }],
+        }));
+        assert_eq!(
+            redacted["dependents"][0]["id_no"],
+            serde_json::json!("[已遮蔽]")
+        );
+        assert_eq!(
+            redacted["dependents"][0]["name"],
+            serde_json::json!("王小華")
+        );
+    }
+
     #[test]
     fn registry_holds_every_operation_exactly_once() {
         let r = Registry::new();
