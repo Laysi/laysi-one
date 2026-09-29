@@ -343,14 +343,16 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
 
 ## Commit 前的 Codex 審查
 
-**每一個 commit 都要先過 Codex 審查**：`.githooks/pre-commit` 把暫存區的 diff 交給
-`codex`，第一行不是 `ALLOW:` 就擋下，理由印在 stderr；`codex` 沒裝、沒登入或出錯一樣
-擋下。merge、cherry-pick 與 revert 不審。git 不會自己採用 `core.hooksPath`，**每個
-clone 要跑一次** `git config core.hooksPath .githooks`。
+**每一個 commit 都要先過 Codex 審查**：閘門由 `codex-review` 外掛提供，**repo 裡不放
+hook**。**每個 clone 跑一次** `/codex-review:init`，它寫入 `.githooks/pre-commit` 並設定
+`core.hooksPath`；外掛在啟動時發現沒裝會提示。hook 把暫存區的 diff 交給 `codex`，第一行
+不是 `ALLOW:` 就擋下，理由印在 stderr；`codex` 沒裝、沒登入或出錯一樣擋下。merge、
+cherry-pick 與 revert 不審。
 
 它掛在 git 而不是 Claude Code 的 `PreToolUse` 上：審的是實際的暫存區，不是去猜指令字串，
-所以終端機、其他 agent 與 CI 的 commit 都會經過它。`codex` 在暫存目錄裡跑並清掉每一個
-`GIT_*` 環境變數——在 codex 信任過的專案裡直接叫它，它會把 repo 的 HEAD 重設掉。
+所以同一個 clone 裡終端機與其他 agent 的 commit 都會經過它；**沒跑過 init 的 clone 與 CI
+不審**。`codex` 在暫存目錄裡跑並清掉每一個 `GIT_*` 環境變數——在 codex 信任過的專案裡
+直接叫它，它會把 repo 的 HEAD 重設掉。
 
 commit 之前先跑 `codex-review` 外掛的 skill（`/codex-review:codex-review`），問題在 commit 前就解掉。**被擋下而判斷是誤判時停下來
 交給使用者**，不要用 `--no-verify` 或 `CODEX_GATE_BYPASS=1` 繞過，那兩條是留給人的出口。
