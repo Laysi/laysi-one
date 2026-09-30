@@ -275,6 +275,51 @@ export async function uploadDocumentFile(
   );
 }
 
+export const downloadLink = z.object({
+  download_path: z.string(),
+  expires_at: z.string(),
+});
+export type DownloadLink = z.infer<typeof downloadLink>;
+
+async function downloadFailure(res: Response): Promise<never> {
+  const body: unknown = await res.json().catch(() => null);
+  const error = apiError.safeParse((body as { error?: unknown } | null)?.error);
+  if (error.success) throw new OpFailed(error.data);
+  throw new OpFailed({ code: 'network', message: `伺服器回應異常（HTTP ${res.status}）` });
+}
+
+export async function downloadDocumentFile(
+  doc: { doc_no: string; version_no?: number; file_name: string; content_type: string; byte_size: number },
+  onProgress?: (fraction: number) => void,
+): Promise<void> {
+  const link = await callOp(
+    'get_download_link',
+    { doc_no: doc.doc_no, version: doc.version_no },
+    undefined,
+    downloadLink,
+  );
+  const lost = () => new OpFailed({ code: 'network', message: '下載中斷，請確認網路連線後再試。' });
+  const res = await fetch(link.download_path, { cache: 'no-store' }).catch(() => {
+    throw lost();
+  });
+  if (!res.ok || !res.body) return downloadFailure(res);
+  const total = Number(res.headers.get('content-length')) || doc.byte_size;
+  let received = 0;
+  const counted = res.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        received += chunk.byteLength;
+        if (onProgress && total > 0) onProgress(Math.min(received / total, 1));
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  const blob = await new Response(counted).blob().catch(() => {
+    throw lost();
+  });
+  downloadFile(doc.file_name, blob, doc.content_type || 'application/octet-stream');
+}
+
 export const licenseState = z.object({
   standing: z.string(),
   writes_allowed: z.boolean(),
@@ -1583,15 +1628,6 @@ export type DocumentRow = z.infer<typeof documentRow>;
 
 export const uploadedDocument = z.object({ document: documentRow, new_version: z.boolean() });
 export type UploadedDocument = z.infer<typeof uploadedDocument>;
-
-export const verifiedDocument = z.object({
-  document: documentRow,
-  verified: z.boolean(),
-  checksum_recomputed: z.string(),
-  byte_size_actual: z.number(),
-  content_base64: z.string().nullable(),
-});
-export type VerifiedDocument = z.infer<typeof verifiedDocument>;
 
 export const documentList = z.object({
   documents: z.array(documentRow),

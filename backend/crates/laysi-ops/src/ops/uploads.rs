@@ -19,7 +19,7 @@ use crate::{parse, schema_of, Empty, OpCtx, OpError, OpOutcome, Operation, Risk}
 use async_trait::async_trait;
 use laysi_store::storage::MAX_UPLOAD_BYTES;
 use laysi_store::uploads::NewUploadBatch;
-use laysi_store::UploadHolder;
+use laysi_store::LinkHolder;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -44,8 +44,8 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
 }
 
 /// The holder this call acts as, or the reason it has none.
-pub(crate) fn holder(ctx: &OpCtx) -> Result<UploadHolder, OpError> {
-    ctx.upload_holder()
+pub(crate) fn holder(ctx: &OpCtx) -> Result<LinkHolder, OpError> {
+    ctx.link_holder()
         .ok_or_else(|| OpError::BadInput("上傳連結限登入的帳號或 MCP 連線取得。".into()))
 }
 

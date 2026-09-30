@@ -26,13 +26,22 @@
 //! and therefore passes the operation registry and reaches the audit trail.
 //! A presigned URL, once issued, is a channel around the audit that cannot
 //! be withdrawn.
+//!
+//! A document too large to return inside an operation result goes out
+//! through a download link instead, and the rule above holds for it too: the
+//! link is issued by an operation, used once through the backend, and
+//! [`ObjectStore::spool`] lands the whole object on local disk and checks its
+//! hash before the first byte is sent. Checking while sending would have sent
+//! most of a tampered file by the time the mismatch showed.
 
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, MetadataDirective};
 use aws_sdk_s3::Client;
+use std::path::Path;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Bucket name used when the environment variable is unset.
 const DEFAULT_BUCKET: &str = "laysi-documents";
@@ -62,6 +71,9 @@ pub const PART_BYTES: usize = 8 * 1024 * 1024;
 
 /// How much of the start of a file the type is decided from.
 pub const DETECT_BYTES: usize = 8 * 1024;
+
+/// How much of an object is read at a time while it is hashed.
+const READ_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -99,6 +111,9 @@ pub enum StorageError {
 
     #[error("「{name}」的副檔名與檔案內容不符，請確認檔案沒有損毀，或改用正確的副檔名後再上傳。")]
     ContentMismatch { name: String },
+
+    #[error("暫存檔寫入失敗：{0}")]
+    LocalFile(String),
 }
 
 impl StorageError {
@@ -121,6 +136,15 @@ pub struct StoredObject {
     pub content_type: String,
     /// BLAKE3 as hex, recomputed and compared on retrieval.
     pub checksum: String,
+}
+
+/// A document's bytes on local disk, already checked against its hash.
+pub struct VerifiedFile {
+    /// Positioned at the start. Unlinked when it was created, so the bytes
+    /// leave the disk when this closes, however the request that holds it
+    /// ends.
+    pub file: tokio::fs::File,
+    pub size: u64,
 }
 
 /// Bucket status. `/healthz` uses it to upgrade "is the port open" into
@@ -371,12 +395,8 @@ impl ObjectStore {
         }
     }
 
-    /// Retrieve a file and verify its hash.
-    ///
-    /// `expected` is the hash registered in the database. A mismatch returns
-    /// an error without the content: a tampered document is more dangerous
-    /// than a missing one, because it looks genuine.
-    pub async fn get(&self, key: &str, expected: &str) -> Result<Vec<u8>> {
+    /// The object's body, not yet read.
+    async fn open(&self, key: &str) -> Result<ByteStream> {
         let out = self
             .client
             .get_object()
@@ -397,9 +417,18 @@ impl ObjectStore {
                     }
                 }
             })?;
+        Ok(out.body)
+    }
 
-        let body = out
-            .body
+    /// Retrieve a file and verify its hash.
+    ///
+    /// `expected` is the hash registered in the database. A mismatch returns
+    /// an error without the content: a tampered document is more dangerous
+    /// than a missing one, because it looks genuine.
+    pub async fn get(&self, key: &str, expected: &str) -> Result<Vec<u8>> {
+        let body = self
+            .open(key)
+            .await?
             .collect()
             .await
             .map_err(|e| StorageError::S3 {
@@ -408,15 +437,36 @@ impl ObjectStore {
             })?
             .into_bytes();
 
-        let actual = blake3::hash(&body).to_hex().to_string();
-        if actual != expected {
-            return Err(StorageError::ChecksumMismatch {
-                key: key.to_string(),
-                expected: expected.to_string(),
-                actual,
-            });
-        }
+        compare(key, expected, checksum(&body))?;
         Ok(body.to_vec())
+    }
+
+    /// Recompute an object's hash without holding the object, for a document
+    /// too large to return. `size` is the registered size: reading stops past
+    /// it, since the content can no longer be the registered one. Returns the
+    /// size read.
+    pub async fn verify(&self, key: &str, expected: &str, size: u64) -> Result<u64> {
+        let body = self.open(key).await?.into_async_read();
+        let Some((actual, read)) = hash_through(body, None, size).await? else {
+            return Err(oversized(key, expected, size));
+        };
+        compare(key, expected, actual)?;
+        Ok(read)
+    }
+
+    /// Copy an object into an anonymous file under `dir`, hashing it on the
+    /// way, and hand the file over only if the hash is `expected`. Copying
+    /// stops past the registered `size`, so an object swapped for a larger
+    /// one cannot fill the disk before the mismatch shows.
+    pub async fn spool(
+        &self,
+        key: &str,
+        expected: &str,
+        size: u64,
+        dir: &Path,
+    ) -> Result<VerifiedFile> {
+        let body = self.open(key).await?.into_async_read();
+        spool_verified(body, key, expected, size, dir).await
     }
 
     /// Object count and byte size in the bucket, the only source of the
@@ -569,6 +619,105 @@ impl ObjectStore {
         }
         Ok(aborted)
     }
+}
+
+/// `Ok` only when the recomputed hash is the registered one.
+fn compare(key: &str, expected: &str, actual: String) -> Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(StorageError::ChecksumMismatch {
+            key: key.to_string(),
+            expected: expected.to_string(),
+            actual,
+        })
+    }
+}
+
+/// An object that turned out longer than its registered size: a mismatch,
+/// found before the whole of it was read.
+fn oversized(key: &str, expected: &str, limit: u64) -> StorageError {
+    StorageError::ChecksumMismatch {
+        key: key.to_string(),
+        expected: expected.to_string(),
+        actual: format!("超過登記的 {limit} 位元組"),
+    }
+}
+
+/// Read `body` to the end, hashing it and, when given one, copying it into
+/// `sink`. Returns the hash as hex and the size, or `None` as soon as more
+/// than `limit` bytes have arrived; nothing past `limit` reaches `sink`.
+async fn hash_through<R: AsyncRead + Unpin>(
+    mut body: R,
+    mut sink: Option<&mut tokio::fs::File>,
+    limit: u64,
+) -> Result<Option<(String, u64)>> {
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; READ_BYTES];
+    let mut size = 0u64;
+    loop {
+        let n = body.read(&mut buf).await.map_err(|e| StorageError::S3 {
+            op: "get_object.body",
+            message: e.to_string(),
+        })?;
+        if n == 0 {
+            break;
+        }
+        if size + n as u64 > limit {
+            return Ok(None);
+        }
+        hasher.update(&buf[..n]);
+        if let Some(file) = sink.as_deref_mut() {
+            file.write_all(&buf[..n])
+                .await
+                .map_err(|e| StorageError::LocalFile(e.to_string()))?;
+        }
+        size += n as u64;
+    }
+    if let Some(file) = sink {
+        file.flush()
+            .await
+            .map_err(|e| StorageError::LocalFile(e.to_string()))?;
+    }
+    Ok(Some((hasher.finalize().to_hex().to_string(), size)))
+}
+
+/// A file under `dir` that only the returned handle can reach: created
+/// readable by this user alone, then unlinked at once. The open handle keeps
+/// the bytes, and nothing is left on disk once it closes, whether the request
+/// finished, the client went away or the process died.
+async fn anonymous_file(dir: &Path) -> std::io::Result<tokio::fs::File> {
+    let path = dir.join(format!(".laysi-download-{}", uuid::Uuid::new_v4().simple()));
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(&path).await?;
+    tokio::fs::remove_file(&path).await?;
+    Ok(file)
+}
+
+/// The half of [`ObjectStore::spool`] that does not need a bucket.
+async fn spool_verified<R: AsyncRead + Unpin>(
+    body: R,
+    key: &str,
+    expected: &str,
+    limit: u64,
+    dir: &Path,
+) -> Result<VerifiedFile> {
+    let mut file = anonymous_file(dir)
+        .await
+        .map_err(|e| StorageError::LocalFile(e.to_string()))?;
+    // On a mismatch the file is dropped here, and with it the only way to
+    // its bytes.
+    let Some((actual, size)) = hash_through(body, Some(&mut file), limit).await? else {
+        return Err(oversized(key, expected, limit));
+    };
+    compare(key, expected, actual)?;
+    file.rewind()
+        .await
+        .map_err(|e| StorageError::LocalFile(e.to_string()))?;
+    Ok(VerifiedFile { file, size })
 }
 
 /// Splits a stream of chunks into parts of [`PART_BYTES`], holding at most
@@ -1127,6 +1276,89 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    fn scratch_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "laysi-spool-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&dir).expect("應可建立測試目錄");
+        dir
+    }
+
+    fn entries(dir: &Path) -> usize {
+        std::fs::read_dir(dir).expect("應可讀取測試目錄").count()
+    }
+
+    /// What was spooled is what the bucket sent, and the file is gone from
+    /// the directory while its handle still reads it.
+    #[tokio::test]
+    async fn a_spooled_download_is_the_object_and_leaves_nothing_on_disk() {
+        let dir = scratch_dir();
+        let object: Vec<u8> = (0..3 * READ_BYTES + 17).map(|i| (i % 251) as u8).collect();
+
+        let mut spooled = spool_verified(
+            &object[..],
+            "2609/D2609-001-v1-a.pdf",
+            &checksum(&object),
+            object.len() as u64,
+            &dir,
+        )
+        .await
+        .expect("雜湊相符要交出檔案");
+        assert_eq!(spooled.size, object.len() as u64);
+        assert_eq!(entries(&dir), 0, "暫存檔建立後立刻 unlink");
+
+        let mut back = Vec::new();
+        spooled.file.read_to_end(&mut back).await.unwrap();
+        assert!(back == object, "交出去的要是取回的那一份");
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// A tampered object yields an error and no file: there is nothing left to
+    /// send.
+    #[tokio::test]
+    async fn a_tampered_download_hands_over_nothing() {
+        let dir = scratch_dir();
+        let registered = checksum(b"V2609-018 8420");
+        let outcome = spool_verified(
+            &b"V2609-018 8421"[..],
+            "2609/D2609-002-v1-a.pdf",
+            &registered,
+            14,
+            &dir,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(StorageError::ChecksumMismatch { .. })),
+            "雜湊不符就不交出內容"
+        );
+        assert_eq!(entries(&dir), 0, "不符的內容不留在磁碟上");
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    /// An object swapped for a larger one is refused once it passes the
+    /// registered size, without the rest of it reaching the disk.
+    #[tokio::test]
+    async fn an_object_longer_than_registered_stops_at_the_registered_size() {
+        let dir = scratch_dir();
+        let registered = b"V2609-018 8420";
+        let swapped = vec![b'x'; 4 * READ_BYTES];
+        let outcome = spool_verified(
+            &swapped[..],
+            "2609/D2609-003-v1-a.pdf",
+            &checksum(registered),
+            registered.len() as u64,
+            &dir,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(StorageError::ChecksumMismatch { .. })),
+            "超過登記大小就是內容不符"
+        );
+        assert_eq!(entries(&dir), 0);
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     /// The hash proves "same content", so one differing byte must differ.

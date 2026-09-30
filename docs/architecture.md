@@ -435,7 +435,45 @@ consumed_at IS NULL RETURNING` 標記，同一個檔案存不成兩份文件，�
 不然每一個還沒存成文件的暫存檔都會讓文件對帳差一個數。`max_object_bytes` 回的是連結
 的上限（畫面走連結），`max_inline_bytes` 是 base64 的上限。
 
-**下載還沒有對應的大檔路徑**：`get_document` 仍把內容以 base64 放進 JSON（#119）。
+**下載連結**是同一件事的反方向。`get_document` 以 base64 回內容，上限同樣是 25 MB：
+`include_content` 遇到更大的文件回錯誤、請改用下載連結；不帶內容時照常驗證，並邊讀邊算
+雜湊（`ObjectStore::verify`），不把整份檔案放進記憶體。更大的文件：
+
+1. `get_download_link { doc_no, version }`（`read_only`，與 `get_document` 同屬
+   `manage_documents`，對 AI 開放）寫一列 `download_link`，回一條 5 分鐘、只能用一次的
+   網址。它會寫一列，卻不算寫入（`writes()` 為 false）：授權失效的安裝仍然交得出自己的
+   文件，連結本身不是業務資料。秘密只存 BLAKE3，持有者的規則與上傳連結共用
+   （`links::LinkHolder`、`holder_active!`）。員工附件回查無此文件。
+2. `GET /v1/downloads/{secret}` 驗連結存在、未使用、未到期、持有者仍然有效，先佔一個
+   下載名額（`downloads::DOWNLOAD_SLOTS`）再以單一 `UPDATE … WHERE used_at IS NULL`
+   把連結標成已使用，然後把物件串流到本機暫存檔、同時算 BLAKE3（`ObjectStore::spool`），
+   **相符才開始送出**；不符回 409 與錯誤訊息，body 不含任何檔案內容。回應帶
+   `Content-Disposition: attachment`、`nosniff` 與 `Content-Length`，類型取自
+   `document_version`。
+3. 核發由 `dispatch` 寫稽核；實際下載以持有者的身分寫 `download_file`，成功、雜湊不符
+   與物件遺失各一種結果。
+
+**下載連結不是 presigned URL**。presigned URL 由 RustFS 自己驗簽，發出去之後 api 看不到它
+被用了幾次、被誰用，也撤不回——撤銷 Token 或停用帳號之後照樣有效，而 RustFS 的埠本來就
+沒有對外開。更根本的是它繞過雜湊比對：RustFS 不知道 `document_version.checksum`，被動過
+的物件會原樣送出去。下載連結是資料庫的一列，每一次使用都經過 api、比對雜湊、寫稽核。
+
+**先落地再送**：邊讀邊送的話，雜湊對不上時檔案已經送出大半。暫存檔建立後立刻 unlink，
+只剩開著的 handle 讀得到它，所以用戶端中途斷線或程序結束都不留殘檔；名額在回應送完或
+中斷時才歸還，同時佔用的磁碟空間至多 `DOWNLOAD_SLOTS` 份檔案（8 份、每份至多 90 MB，
+放在 api 容器的暫存目錄，在容器的可寫層上而不是 tmpfs）。等 30 秒還拿不到名額就回 503，
+這時連結還沒用掉，同一條可以再試。**連結在驗證之前就標成已使用**：驗證失敗或物件儲存
+暫時連不上時重新取得一條即可，而兩個同時送出的請求只有一個拿得到內容。`HEAD` 回 405：
+它要跑完整個下載才答得出標頭，還會順便把連結用掉。過期一天的連結由每小時的清除工作
+刪掉，與暫存區同一個排程。複製到暫存檔時讀到超過登記的 `byte_size` 就停下並當作雜湊
+不符：名額限得住同時幾份，限不住每一份多大，被換成更大檔案的物件否則會先寫滿磁碟。
+
+**畫面用 `fetch` 而不是導向連結**（`client.ts` 的 `downloadDocumentFile`，文件管理、
+傳票附件與報支收據共用）：導向的話，雜湊不符時瀏覽器只顯示「下載失敗」，說不出原因；
+`fetch` 讀得到錯誤訊息，也畫得出進度。回應經 `TransformStream` 計數後直接轉成 Blob——
+Blob 由瀏覽器管理，不是舊做法那樣 base64 字串、`atob` 的結果與 `Uint8Array` 三份同時
+放在 JavaScript 記憶體裡。報支收據那顆按鈕因此看 `get_download_link` 而不是
+`get_document` 決定畫不畫。
 
 **沒有 OCR**。`ocr_status` 原本由上傳當下的 MIME 型別推出 `pending` 或
 `not_applicable`，沒有任何判斷讀它，而畫面上那張統計卡與逐列標籤在每一套安裝上
@@ -2341,7 +2379,8 @@ axum 對每個 `Json`／`Bytes` 擷取器有自己的 2 MB 預設，對登入太
 `/healthz` 是公開端點。`/v1/meta`、`/v1/ops*` 必須有
 有效 session；`/mcp` 必須有自己的 Bearer 憑證。認證路由是操作註冊表第一個例外：
 登入若經過 dispatch，就會先被角色權限步驟要求一個尚未取得的身分，形成循環。
-第二個是 `/v1/uploads/{secret}`，授權是上傳連結本身，見〈文件〉一節。
+第二個是 `/v1/uploads/{secret}`，授權是上傳連結本身；第三個是
+`/v1/downloads/{secret}`，授權是下載連結本身。兩者見〈文件〉一節。
 `/v1/auth/bootstrap` 同樣未登入即可呼叫，但守門的是「安裝目前沒有任何帳號」，
 由資料庫的單列表保證，見上文〈網頁初始化〉。
 

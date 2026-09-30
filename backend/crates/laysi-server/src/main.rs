@@ -19,6 +19,9 @@
 //! `/v1/uploads/{secret}` is the second exception: it receives a file as a
 //! file, which is the whole point of an upload link. Issuing the link and
 //! filing what arrived are both operations; see `uploads.rs`.
+//! `/v1/downloads/{secret}` is the third, the same thing the other way: it
+//! sends one document as a file, after the operation that issued the link;
+//! see `downloads.rs`.
 
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -32,6 +35,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 mod auth;
+mod downloads;
 mod mcp;
 mod oauth;
 mod oidc;
@@ -145,6 +149,10 @@ pub struct AppState {
     /// route takes no session, so the link secret is all that stands in the
     /// way and a rate is what keeps guessing at it pointless.
     pub upload_rate_limiter: ratelimit::RateLimiter,
+    /// The same for `/v1/downloads/*`.
+    pub download_rate_limiter: ratelimit::RateLimiter,
+    /// Downloads holding a spooled file; see `downloads::DOWNLOAD_SLOTS`.
+    pub download_slots: Arc<tokio::sync::Semaphore>,
     /// Allowed `Origin` values for `/mcp`, guarding against DNS rebinding. A
     /// request that carries an Origin must match this list; one that does not
     /// (as most AI connectors do not) is allowed. Empty by default.
@@ -394,6 +402,8 @@ async fn main() -> anyhow::Result<()> {
         login_rate_limiter: ratelimit::RateLimiter::new(auth::LOGIN_ATTEMPTS_PER_MINUTE),
         oauth_register_rate_limiter: ratelimit::RateLimiter::new(oauth::REGISTRATIONS_PER_MINUTE),
         upload_rate_limiter: ratelimit::RateLimiter::new(uploads::UPLOADS_PER_MINUTE),
+        download_rate_limiter: ratelimit::RateLimiter::new(downloads::DOWNLOADS_PER_MINUTE),
+        download_slots: Arc::new(tokio::sync::Semaphore::new(downloads::DOWNLOAD_SLOTS)),
         mcp_allowed_origins,
     });
 
@@ -405,8 +415,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(enabled, "external login settings loaded");
     }
 
-    // Staged uploads nobody filed, once an hour, by the process that receives
-    // them. The `mcp` process issues links but never receives a file.
+    // Staged uploads nobody filed and spent download links, once an hour, by
+    // the process that serves both routes. The `mcp` process issues links but
+    // never receives or sends a file.
     if let (true, Some(objects)) = (serve_role.serves_rest(), state.objects.clone()) {
         let store = state.store.clone();
         tokio::spawn(async move {
@@ -418,6 +429,7 @@ async fn main() -> anyhow::Result<()> {
                     chrono::Duration::hours(uploads::STAGED_KEEP_HOURS),
                 )
                 .await;
+                downloads::sweep(&store, chrono::Utc::now()).await;
                 tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
             }
         });
@@ -471,6 +483,10 @@ async fn main() -> anyhow::Result<()> {
                 get(uploads::status)
                     .post(uploads::receive)
                     .layer(DefaultBodyLimit::max(uploads::UPLOAD_BODY_LIMIT)),
+            )
+            .route(
+                "/v1/downloads/{secret}",
+                get(downloads::serve).head(downloads::head_refused),
             )
             .route("/v1/ops", get(list_ops))
             .route(

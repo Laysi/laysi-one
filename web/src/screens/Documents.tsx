@@ -3,11 +3,10 @@ import {
   businessTime,
   callOp,
   documentList,
-  downloadFile,
+  downloadDocumentFile,
   fileSizeLabel,
   OpFailed,
   uploadDocumentFile,
-  verifiedDocument,
   type DocumentList,
   type DocumentRow,
 } from '../api/client';
@@ -24,6 +23,7 @@ export function Documents({ onToast, reloadKey }: Props) {
   const [uploading, setUploading] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [fetching, setFetching] = useState<string | null>(null);
+  const [fetchProgress, setFetchProgress] = useState(0);
   const [openHash, setOpenHash] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
 
@@ -68,22 +68,9 @@ export function Documents({ onToast, reloadKey }: Props) {
 
   async function download(d: DocumentRow) {
     setFetching(d.doc_no);
+    setFetchProgress(0);
     try {
-      const r = await callOp(
-        'get_document',
-        { doc_no: d.doc_no, include_content: true },
-        undefined,
-        verifiedDocument,
-      );
-      if (!r.content_base64) {
-        onToast('檔案儲存沒有回傳內容，請再試一次');
-        return;
-      }
-      downloadFile(
-        d.file_name,
-        Uint8Array.from(atob(r.content_base64), (c) => c.charCodeAt(0)),
-        d.content_type || 'application/octet-stream',
-      );
+      await downloadDocumentFile(d, setFetchProgress);
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -203,7 +190,12 @@ export function Documents({ onToast, reloadKey }: Props) {
                         {' · '}
                         <span className="num">{businessTime(d.uploaded_at)}</span>
                         {d.versions > 1 && ` · 共 ${d.versions} 版`}
-                        {fetching === d.doc_no && ' · 取回中…'}
+                        {fetching === d.doc_no && (
+                          <>
+                            {' · 下載中 '}
+                            <span className="num">{Math.round(fetchProgress * 100)}%</span>
+                          </>
+                        )}
                       </span>
                     </td>
                     <td className="cell-accounts num cell-nowrap">{d.link_ref || '—'}</td>

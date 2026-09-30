@@ -950,6 +950,12 @@ mod tests {
             upload_rate_limiter: crate::ratelimit::RateLimiter::new(
                 crate::uploads::UPLOADS_PER_MINUTE,
             ),
+            download_rate_limiter: crate::ratelimit::RateLimiter::new(
+                crate::downloads::DOWNLOADS_PER_MINUTE,
+            ),
+            download_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                crate::downloads::DOWNLOAD_SLOTS,
+            )),
             mcp_allowed_origins: Vec::new(),
         })
     }

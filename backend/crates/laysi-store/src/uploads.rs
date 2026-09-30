@@ -13,6 +13,7 @@
 //! nothing its holder has lost, whether that is a revoked token or an account
 //! suspended or moved to another role.
 
+use crate::links::LinkHolder;
 use crate::{token_hash, Result, Store};
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
@@ -23,53 +24,9 @@ use uuid::Uuid;
 /// the sweep can treat anything there that no row points at as an orphan.
 pub const STAGING_PREFIX: &str = "staging/";
 
-/// Who a link belongs to: a signed-in account or an MCP token, never both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UploadHolder {
-    Account(i32),
-    Token(i32),
-}
-
-impl UploadHolder {
-    fn columns(self) -> (Option<i32>, Option<i32>) {
-        match self {
-            UploadHolder::Account(id) => (Some(id), None),
-            UploadHolder::Token(id) => (None, Some(id)),
-        }
-    }
-}
-
-/// Whether the holder of batch `b` can still act, in the same terms `/mcp`
-/// and the session check use: an active account under the role the link was
-/// issued to, or a token that is neither revoked nor expired and whose owner
-/// still qualifies.
-macro_rules! holder_active {
-    () => {
-        concat!(
-            "(CASE
-                WHEN b.owner_user_id IS NOT NULL THEN
-                  EXISTS (SELECT 1 FROM user_account u
-                           WHERE u.id = b.owner_user_id
-                             AND u.status = 'active'
-                             AND u.role_code = b.actor_role)
-                ELSE
-                  EXISTS (SELECT 1 FROM api_token t
-                           WHERE t.id = b.owner_token_id
-                             AND t.revoked_at IS NULL
-                             AND t.actor_role = b.actor_role
-                             AND (t.rotate_days IS NULL
-                                  OR now() < t.created_at + make_interval(days => t.rotate_days))
-                             AND ",
-            token_owner_active!(),
-            ")
-              END)"
-        )
-    };
-}
-
 /// A link to be issued.
 pub struct NewUploadBatch<'a> {
-    pub holder: UploadHolder,
+    pub holder: LinkHolder,
     pub actor: &'a str,
     pub actor_role: &'a str,
     /// `ui` or `mcp`.
@@ -82,7 +39,7 @@ pub struct NewUploadBatch<'a> {
 #[derive(Debug, Clone)]
 pub struct UploadBatch {
     pub id: Uuid,
-    pub holder: UploadHolder,
+    pub holder: LinkHolder,
     pub actor: String,
     pub actor_role: String,
     pub channel: String,
@@ -157,18 +114,9 @@ macro_rules! staged_columns {
 }
 
 fn row_to_batch(row: &PgRow, holder_active: bool) -> UploadBatch {
-    let user: Option<i32> = row.get("owner_user_id");
-    let token: Option<i32> = row.get("owner_token_id");
-    let holder = match (user, token) {
-        (Some(id), _) => UploadHolder::Account(id),
-        (None, Some(id)) => UploadHolder::Token(id),
-        // The CHECK constraint rules this out; a row that slipped past it
-        // belongs to nobody, which is what a token id of 0 matches.
-        (None, None) => UploadHolder::Token(0),
-    };
     UploadBatch {
         id: row.get("id"),
-        holder,
+        holder: LinkHolder::from_columns(row.get("owner_user_id"), row.get("owner_token_id")),
         actor: row.get("actor"),
         actor_role: row.get("actor_role"),
         channel: row.get("channel"),
@@ -254,7 +202,7 @@ impl Store {
     pub async fn upload_batch_for(
         &self,
         batch_id: Uuid,
-        holder: UploadHolder,
+        holder: LinkHolder,
     ) -> Result<Option<UploadBatch>> {
         let (user, token) = holder.columns();
         let row = sqlx::query(concat!(
@@ -345,7 +293,7 @@ impl Store {
     pub async fn take_staged_upload(
         &self,
         upload_id: Uuid,
-        holder: UploadHolder,
+        holder: LinkHolder,
     ) -> Result<Option<StagedUpload>> {
         let (user, token) = holder.columns();
         let row = sqlx::query(concat!(
@@ -373,7 +321,7 @@ impl Store {
     pub async fn staged_upload_doc_no(
         &self,
         upload_id: Uuid,
-        holder: UploadHolder,
+        holder: LinkHolder,
     ) -> Result<Option<Option<String>>> {
         let (user, token) = holder.columns();
         let row = sqlx::query(
@@ -502,7 +450,7 @@ mod tests {
         .expect("應可建立測試 Token")
     }
 
-    async fn batch(store: &Store, holder: UploadHolder, max_files: i32) -> IssuedUploadBatch {
+    async fn batch(store: &Store, holder: LinkHolder, max_files: i32) -> IssuedUploadBatch {
         store
             .create_upload_batch(NewUploadBatch {
                 holder,
@@ -538,8 +486,8 @@ mod tests {
     #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
     async fn a_link_takes_only_its_places_and_only_its_holder_files() {
         let store = test_store().await;
-        let mine = UploadHolder::Token(token(&store, "acct").await);
-        let theirs = UploadHolder::Token(token(&store, "acct").await);
+        let mine = LinkHolder::Token(token(&store, "acct").await);
+        let theirs = LinkHolder::Token(token(&store, "acct").await);
 
         let issued = batch(&store, mine, 2).await;
         let found = store
@@ -584,7 +532,7 @@ mod tests {
             "別人的上傳編號是查無此上傳"
         );
         assert!(store
-            .take_staged_upload(file.id, UploadHolder::Account(0))
+            .take_staged_upload(file.id, LinkHolder::Account(0))
             .await
             .unwrap()
             .is_none());
@@ -635,7 +583,7 @@ mod tests {
         let store = test_store().await;
 
         let token_id = token(&store, "acct").await;
-        let issued = batch(&store, UploadHolder::Token(token_id), 1).await;
+        let issued = batch(&store, LinkHolder::Token(token_id), 1).await;
         sqlx::query("UPDATE api_token SET revoked_at = now() WHERE id = $1")
             .bind(token_id)
             .execute(&store.pool)
@@ -649,7 +597,7 @@ mod tests {
         assert!(!found.holder_active, "撤銷 Token 之後連結跟著失效");
 
         let expiring = token(&store, "acct").await;
-        let issued = batch(&store, UploadHolder::Token(expiring), 1).await;
+        let issued = batch(&store, LinkHolder::Token(expiring), 1).await;
         sqlx::query(
             "UPDATE api_token SET rotate_days = 1, created_at = now() - interval '2 days'
               WHERE id = $1",
@@ -668,7 +616,7 @@ mod tests {
         let user = account(&store, "acct").await;
         let issued = store
             .create_upload_batch(NewUploadBatch {
-                holder: UploadHolder::Account(user),
+                holder: LinkHolder::Account(user),
                 actor: "上傳測試",
                 actor_role: "acct",
                 channel: "ui",
@@ -712,7 +660,7 @@ mod tests {
 
         let expired = store
             .create_upload_batch(NewUploadBatch {
-                holder: UploadHolder::Token(token(&store, "acct").await),
+                holder: LinkHolder::Token(token(&store, "acct").await),
                 actor: "上傳測試",
                 actor_role: "acct",
                 channel: "mcp",
@@ -736,7 +684,7 @@ mod tests {
     #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
     async fn what_nobody_filed_is_found_for_removal() {
         let store = test_store().await;
-        let holder = UploadHolder::Token(token(&store, "acct").await);
+        let holder = LinkHolder::Token(token(&store, "acct").await);
         let issued = store
             .create_upload_batch(NewUploadBatch {
                 holder,

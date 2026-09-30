@@ -392,7 +392,7 @@ skill，本節只定政策；兩者衝突時以本節為準（內文格式用下
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
-RustFS 物件儲存，以及 **37 個畫面、138 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、139 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -689,6 +689,14 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 畫面的文件管理與傳票附件也走這條路；base64 的 `content_base64` 保留在 25 MB。
 公開上傳頁 `/upload/{secret}` 在 `main.tsx` 就分流，不經 `App` 與登入，
 **不是導覽畫面**，不計入畫面數量。
+
+**大檔走下載連結**：`get_document` 帶內容限 25 MB，更大的由 `get_download_link` 發一條
+5 分鐘、只能用一次的連結，`GET /v1/downloads/{secret}`（第三個手寫路由）**先把整份檔案
+落到已 unlink 的暫存檔並比對 BLAKE3，相符才開始送出**——邊讀邊送的話，對不上時內容已經
+送出去了。它寫一列連結但 `writes()` 為 false，授權失效的安裝照樣下載得了；名稱因此是
+`get_` 開頭，`reads_are_not_writes_whatever_floor_they_carry` 依命名把關。畫面的文件
+管理、傳票附件與報支收據都走它（`fetch` 成 Blob，錯誤訊息才讀得到）。不發 presigned URL，
+理由在 `docs/architecture.md`。
 
 **人資是一個角色**：`hr` 持有 `view_hr`／`manage_hr`／`view_payroll`／`manage_payroll`／
 `staff_self_service`，剛好開啟人資分頁的八個畫面，財務分頁與系統按鈕都不出現。原本

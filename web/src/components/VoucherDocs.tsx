@@ -3,12 +3,11 @@ import {
   businessTime,
   callOp,
   documentList,
-  downloadFile,
+  downloadDocumentFile,
   fileSizeLabel,
   money,
   OpFailed,
   uploadDocumentFile,
-  verifiedDocument,
   type DocumentRow,
   type Voucher,
 } from '../api/client';
@@ -29,6 +28,7 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
   const [uploading, setUploading] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [fetching, setFetching] = useState<string | null>(null);
+  const [fetchProgress, setFetchProgress] = useState(0);
   const picker = useRef<HTMLInputElement>(null);
 
   const running = useRef<(() => void) | null>(null);
@@ -91,22 +91,9 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
 
   async function download(d: DocumentRow) {
     setFetching(d.doc_no);
+    setFetchProgress(0);
     try {
-      const r = await callOp(
-        'get_document',
-        { doc_no: d.doc_no, include_content: true },
-        undefined,
-        verifiedDocument,
-      );
-      if (!r.content_base64) {
-        onToast('檔案儲存沒有回傳內容，請再試一次');
-        return;
-      }
-      downloadFile(
-        d.file_name,
-        Uint8Array.from(atob(r.content_base64), (c) => c.charCodeAt(0)),
-        d.content_type || 'application/octet-stream',
-      );
+      await downloadDocumentFile(d, setFetchProgress);
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -172,7 +159,12 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
                           {d.uploaded_by} ·{' '}
                           <span className="num">{businessTime(d.uploaded_at)}</span>
                           {d.versions > 1 && ` · 共 ${d.versions} 版`}
-                          {fetching === d.doc_no && ' · 取回中…'}
+                          {fetching === d.doc_no && (
+                          <>
+                            {' · 下載中 '}
+                            <span className="num">{Math.round(fetchProgress * 100)}%</span>
+                          </>
+                        )}
                         </span>
                       </td>
                       <td className="num align-right">{d.size_label}</td>

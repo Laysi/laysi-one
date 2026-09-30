@@ -45,14 +45,23 @@ pub const STAGED_KEEP_HOURS: i64 = 24;
 /// Longest file name kept, in characters. The name is only displayed.
 const MAX_FILE_NAME_CHARS: usize = 200;
 
-/// Every secret `create_upload_batch` issues has this shape.
-fn plausible_secret(secret: &str) -> bool {
-    secret.len() == 69
-        && secret.starts_with("lysu_")
-        && secret[5..].bytes().all(|b| b.is_ascii_hexdigit())
+/// Prefix of every secret `create_upload_batch` issues.
+const SECRET_PREFIX: &str = "lysu_";
+
+/// Whether `secret` has the shape of a link secret with `prefix`: the
+/// prefix, then two simple UUIDs. Anything else is refused before it costs a
+/// query.
+pub(crate) fn plausible_secret(secret: &str, prefix: &str) -> bool {
+    secret.len() == prefix.len() + 64
+        && secret.starts_with(prefix)
+        && secret[prefix.len()..]
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit())
 }
 
-fn fail(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
+/// The error shape of the link routes, the same envelope an operation answers
+/// with.
+pub(crate) fn fail(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
         status,
         [(header::CACHE_CONTROL, "no-store")],
@@ -113,7 +122,7 @@ async fn open_link(
             "查無此上傳連結，請確認網址完整，或重新取得上傳連結。",
         )
     };
-    if !plausible_secret(secret) {
+    if !plausible_secret(secret, SECRET_PREFIX) {
         return Err(Box::new(not_found()));
     }
     let batch = match s.store.upload_batch_by_secret(secret).await {
@@ -552,9 +561,15 @@ mod tests {
             Uuid::new_v4().simple(),
             Uuid::new_v4().simple()
         );
-        assert!(plausible_secret(&issued));
-        assert!(!plausible_secret("lysu_short"));
-        assert!(!plausible_secret(&issued.replace("lysu_", "lys_x")));
-        assert!(!plausible_secret(&format!("{}Z", &issued[..68])));
+        assert!(plausible_secret(&issued, SECRET_PREFIX));
+        assert!(!plausible_secret("lysu_short", SECRET_PREFIX));
+        assert!(!plausible_secret(
+            &issued.replace("lysu_", "lys_x"),
+            SECRET_PREFIX
+        ));
+        assert!(!plausible_secret(
+            &format!("{}Z", &issued[..68]),
+            SECRET_PREFIX
+        ));
     }
 }

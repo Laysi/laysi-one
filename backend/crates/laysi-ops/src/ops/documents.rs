@@ -14,10 +14,15 @@
 //! can store files too. The cost is base64 transport, hence the per-file limit
 //! [`laysi_store::storage::MAX_OBJECT_BYTES`]; larger files need streaming
 //! uploads, not a higher limit.
+//!
+//! The same limit holds on the way out: `get_document` returns content only up
+//! to it, and anything larger goes through `get_download_link`, a one-time
+//! link that `/v1/downloads/{secret}` serves after checking the hash.
 
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::Engine;
+use laysi_store::downloads::NewDownloadLink;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES, MAX_UPLOAD_BYTES};
 use laysi_store::ReserveDocument;
 use schemars::JsonSchema;
@@ -30,8 +35,16 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListDocuments),
         Box::new(UploadDocument),
         Box::new(GetDocument),
+        Box::new(GetDownloadLink),
     ]
 }
+
+/// How long a download link stays usable. Enough for a screen to follow it
+/// at once or for a person to open one pasted into a chat.
+pub const DOWNLOAD_LINK_MINUTES: i64 = 5;
+
+/// Where a download link points. Also mounted by the server under this path.
+pub const DOWNLOAD_ENDPOINT: &str = "/v1/downloads/";
 
 /// Bytes in a gigabyte. A unit conversion, not a setting.
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -564,8 +577,9 @@ pub struct GetDocumentInput {
     /// Revision. Defaults to the latest.
     #[serde(default)]
     pub version: Option<i32>,
-    /// Whether to return the content as base64. Off by default, which only
-    /// verifies the hash.
+    /// Whether to return the content as base64, for documents up to 25 MB.
+    /// Off by default, which only verifies the hash. Larger documents are
+    /// downloaded through `get_download_link`.
     #[serde(default)]
     pub include_content: bool,
 }
@@ -579,7 +593,7 @@ impl Operation for GetDocument {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容。雜湊不符會回報錯誤，不回傳內容。"
+        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容，限 25 MB 以內，更大的文件請取得下載連結。雜湊不符會回報錯誤，不回傳內容。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<GetDocumentInput>()
@@ -590,29 +604,55 @@ impl Operation for GetDocument {
         let objects = ctx.objects()?;
         let doc = ctx.store.document_version(&i.doc_no, i.version).await?;
 
+        if i.include_content && doc.byte_size > MAX_OBJECT_BYTES as i64 {
+            return Err(OpError::BadInput(format!(
+                "{} v{} 有 {}，超過直接回傳內容的上限 {}，請改用下載連結。",
+                doc.doc_no,
+                doc.version_no,
+                human_size(doc.byte_size),
+                human_size(MAX_OBJECT_BYTES as i64)
+            )));
+        }
+
         // Always compared on retrieval. A mismatch is an error: a tampered
         // record is more dangerous than a missing one because it looks
-        // genuine.
-        let body = objects.get(&doc.object_key, &doc.checksum).await?;
-        let recomputed = storage::checksum(&body);
-
-        let content = i
-            .include_content
-            .then(|| base64::engine::general_purpose::STANDARD.encode(&body));
+        // genuine. Without content the object is hashed as it streams past,
+        // so checking a 90 MB document does not hold 90 MB.
+        let (content, size) = if i.include_content {
+            let body = objects.get(&doc.object_key, &doc.checksum).await?;
+            let size = body.len() as u64;
+            (
+                Some(base64::engine::general_purpose::STANDARD.encode(&body)),
+                size,
+            )
+        } else {
+            (
+                None,
+                objects
+                    .verify(
+                        &doc.object_key,
+                        &doc.checksum,
+                        u64::try_from(doc.byte_size).unwrap_or(0),
+                    )
+                    .await?,
+            )
+        };
 
         let summary = format!(
             "取回 {} v{} {} · 雜湊比對相符（{}）",
             doc.doc_no,
             doc.version_no,
             doc.file_name,
-            short_checksum(&recomputed)
+            short_checksum(&doc.checksum)
         );
         Ok(OpOutcome::new(
             json!({
                 "document": document_json(&doc),
-                "verified": recomputed == doc.checksum,
-                "checksum_recomputed": recomputed,
-                "byte_size_actual": body.len(),
+                // Both reads fail rather than return on a mismatch, so reaching
+                // here means the recomputed hash is the registered one.
+                "verified": true,
+                "checksum_recomputed": doc.checksum,
+                "byte_size_actual": size,
                 "content_base64": content,
                 "bucket": objects.bucket(),
             }),
@@ -621,9 +661,110 @@ impl Operation for GetDocument {
     }
 }
 
+// Download links
+
+struct GetDownloadLink;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetDownloadLinkInput {
+    /// Document number, e.g. `D2607-001`.
+    pub doc_no: String,
+    /// Revision. Defaults to the latest.
+    #[serde(default)]
+    pub version: Option<i32>,
+}
+
+#[async_trait]
+impl Operation for GetDownloadLink {
+    fn name(&self) -> &'static str {
+        "get_download_link"
+    }
+    fn risk(&self) -> Risk {
+        // Writes a row, the link, and no business record: an installation
+        // whose licence has lapsed still hands its documents out.
+        Risk::ReadOnly
+    }
+    fn summary(&self) -> &'static str {
+        "取得一份文件的下載連結：5 分鐘內可使用一次，伺服器比對內容雜湊相符後才送出檔案，不限檔案大小。連結交給使用者以瀏覽器開啟，或在程式執行環境裡執行回傳的 curl 指令。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<GetDownloadLinkInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: GetDownloadLinkInput = parse(input)?;
+        let holder = ctx
+            .link_holder()
+            .ok_or_else(|| OpError::BadInput("下載連結限登入的帳號或 MCP 連線取得。".into()))?;
+        // Refused here rather than when the link is followed: a link that can
+        // only fail is worse than no link.
+        ctx.objects()?;
+
+        let doc_no = i.doc_no.trim();
+        let doc = ctx.store.document_version(doc_no, i.version).await?;
+        // Personnel files are reached only through the employee-scoped
+        // operations, and answered as if they did not exist, so the number
+        // alone confirms nothing.
+        if doc.link_type == EMPLOYEE_LINK_TYPE {
+            return Err(laysi_store::StoreError::DocumentNotFound {
+                no: doc_no.to_string(),
+            }
+            .into());
+        }
+
+        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(DOWNLOAD_LINK_MINUTES);
+        let issued = ctx
+            .store
+            .create_download_link(NewDownloadLink {
+                holder,
+                actor: &ctx.actor,
+                actor_role: &ctx.actor_role,
+                channel: ctx.channel.as_db(),
+                doc_no: &doc.doc_no,
+                version_no: doc.version_no,
+                expires_at,
+            })
+            .await?
+            .ok_or_else(|| laysi_store::StoreError::DocumentVersionNotFound {
+                no: doc.doc_no.clone(),
+                version: doc.version_no,
+            })?;
+
+        let base = ctx.public_base.as_deref().unwrap_or("");
+        let path = format!("{DOWNLOAD_ENDPOINT}{}", issued.secret);
+        let url = format!("{base}{path}");
+        Ok(OpOutcome::new(
+            json!({
+                "document": document_json(&doc),
+                "download_url": url,
+                "download_path": path,
+                "curl": format!("curl --fail-with-body -o '<存檔路徑>' '{url}'"),
+                "expires_at": issued.expires_at,
+                "note": "連結只能使用一次；用過或過期之後請重新取得。",
+            }),
+            format!(
+                "取得下載連結 {} v{} {} · {}",
+                doc.doc_no,
+                doc.version_no,
+                doc.file_name,
+                human_size(doc.byte_size)
+            ),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lapsed licence refuses what writes, and the documents are the
+    /// customer's: the link has to stay reachable while nothing else can be
+    /// written.
+    #[test]
+    fn a_download_link_is_not_a_write() {
+        assert!(!GetDownloadLink.writes());
+        assert!(matches!(GetDownloadLink.risk(), Risk::ReadOnly));
+    }
 
     /// The checksum column reads as `a91f…c4e2`. The short form is for
     /// reading; the full value is returned as well.

@@ -287,10 +287,10 @@ impl OpCtx {
     /// files this call may see. An MCP token is its own holder, so a file a
     /// model staged is not visible on its owner's screen, nor the other way
     /// round.
-    pub fn upload_holder(&self) -> Option<laysi_store::UploadHolder> {
+    pub fn link_holder(&self) -> Option<laysi_store::LinkHolder> {
         match (self.channel, self.token_id, self.user_id) {
-            (Channel::Mcp, Some(token), _) => Some(laysi_store::UploadHolder::Token(token)),
-            (Channel::Ui, _, Some(user)) => Some(laysi_store::UploadHolder::Account(user)),
+            (Channel::Mcp, Some(token), _) => Some(laysi_store::LinkHolder::Token(token)),
+            (Channel::Ui, _, Some(user)) => Some(laysi_store::LinkHolder::Account(user)),
             _ => None,
         }
     }
@@ -958,6 +958,7 @@ mod tests {
         include_str!("../../../migrations/0010_notice_push_test.sql"),
         include_str!("../../../migrations/0014_preview_leave.sql"),
         include_str!("../../../migrations/0017_upload_staging.sql"),
+        include_str!("../../../migrations/0018_download_link.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the
