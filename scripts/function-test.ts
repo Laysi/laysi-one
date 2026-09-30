@@ -12,6 +12,7 @@
 // scripts/mcp-role-matrix.ts; both interfaces dispatch through the same
 // registry, so the arithmetic is tested once, here.
 
+import { S3Client } from "bun";
 import { mismatch } from "./response-schemas";
 
 const PG_CONTAINER = process.env.PG_CONTAINER ?? "laysi-one_postgres_1";
@@ -142,16 +143,23 @@ function expectEq(got: unknown, want: unknown, what: string) {
   if (got !== want) throw new Error(`${what}：得到 ${JSON.stringify(got)}，預期 ${JSON.stringify(want)}`);
 }
 
+const RUSTFS = {
+  endpoint: process.env.RUSTFS_ENDPOINT ?? "http://localhost:9000",
+  accessKeyId: process.env.RUSTFS_ACCESS_KEY ?? "laysi",
+  secretAccessKey: process.env.RUSTFS_SECRET_KEY ?? "devsecret-change-me",
+  bucket: `${TEST_DB.replaceAll("_", "-")}-documents`,
+};
+
 async function startServer(): Promise<ReturnType<typeof Bun.spawn>> {
   const proc = Bun.spawn([SERVER_BIN], {
     env: {
       ...process.env,
       DATABASE_URL: `postgres://${PG_USER}:${PG_PASSWORD}@localhost:5432/${TEST_DB}`,
       BIND_ADDR: `127.0.0.1:${PORT}`,
-      RUSTFS_ENDPOINT: process.env.RUSTFS_ENDPOINT ?? "http://localhost:9000",
-      RUSTFS_ACCESS_KEY: process.env.RUSTFS_ACCESS_KEY ?? "laysi",
-      RUSTFS_SECRET_KEY: process.env.RUSTFS_SECRET_KEY ?? "devsecret-change-me",
-      RUSTFS_BUCKET: `${TEST_DB.replaceAll("_", "-")}-documents`,
+      RUSTFS_ENDPOINT: RUSTFS.endpoint,
+      RUSTFS_ACCESS_KEY: RUSTFS.accessKeyId,
+      RUSTFS_SECRET_KEY: RUSTFS.secretAccessKey,
+      RUSTFS_BUCKET: RUSTFS.bucket,
       SETUP_ALLOW_WEB: "true",
       SESSION_COOKIE_SECURE: "false",
       RUST_LOG: "warn",
@@ -929,6 +937,103 @@ async function main() {
         notes.push(`${preview.hours} 小時／${preview.days} 日`);
       }
       return notes.join(" · ");
+    });
+
+    console.log("\nD 文件下載連結");
+    // A file past the 25 MB that base64 carries, sent the way the documents
+    // screen sends it: through an upload link, then back through a download
+    // link.
+    const encode = (text: string) => new TextEncoder().encode(text);
+    const sha256 = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    async function fileThroughLink(bytes: Uint8Array, name: string): Promise<string> {
+      const link = await must("request_upload_link");
+      const form = new FormData();
+      form.append("file", new File([bytes], name, { type: "application/pdf" }));
+      const posted = await (await fetch(BASE + link.upload_path, { method: "POST", body: form })).json();
+      expect(posted.ok, `上傳連結拒收：${JSON.stringify(posted.error)}`);
+      const filed = await must("upload_document", { upload_id: posted.data.upload_id, kind: "other" });
+      return filed.document.doc_no;
+    }
+    const big = new Uint8Array(30 * 1024 * 1024);
+    for (let i = 0; i < big.length; i += 65536) {
+      crypto.getRandomValues(big.subarray(i, Math.min(i + 65536, big.length)));
+    }
+    big.set(encode("%PDF-1.7\n"), 0);
+    let bigNo = "";
+    let tamperedNo = "";
+
+    await check("D1", "超過 25 MB 的文件經下載連結取回，內容與上傳時相同，連結只能用一次", async () => {
+      bigNo = await fileThroughLink(big, "大檔.pdf");
+      const link = await must("get_download_link", { doc_no: bigNo });
+      const res = await fetch(BASE + link.download_path);
+      expectEq(res.status, 200, "HTTP 狀態");
+      const got = new Uint8Array(await res.arrayBuffer());
+      expectEq(got.length, big.length, "位元組數");
+      expectEq(sha256(got), sha256(big), "內容");
+      expectEq(res.headers.get("content-length"), String(big.length), "Content-Length");
+      expectEq(res.headers.get("x-content-type-options"), "nosniff", "nosniff");
+      const disposition = res.headers.get("content-disposition") ?? "";
+      expect(disposition.includes("filename*=UTF-8''%E5%A4%A7%E6%AA%94.pdf"), `檔名：${disposition}`);
+      const again = await fetch(BASE + link.download_path);
+      expectEq(again.status, 410, "同一條連結第二次使用");
+      return `${bigNo} · ${got.length} 位元組`;
+    });
+
+    await check("D2", "過期的下載連結回 410", async () => {
+      const link = await must("get_download_link", { doc_no: bigNo });
+      await psql(TEST_DB, "UPDATE download_link SET expires_at = now() - interval '1 second' WHERE used_at IS NULL");
+      const res = await fetch(BASE + link.download_path);
+      expectEq(res.status, 410, "HTTP 狀態");
+      return (await res.json()).error.message;
+    });
+
+    await check("D3", "超過 25 MB 的文件不以 base64 回傳，只驗證雜湊照常", async () => {
+      const inline = await op("get_document", { doc_no: bigNo, include_content: true });
+      expect(!inline.ok && /下載連結/.test(inline.error?.message ?? ""), `竟然回傳了內容：${JSON.stringify(inline.error)}`);
+      const verified = await op("get_document", { doc_no: bigNo });
+      expect(verified.ok, JSON.stringify(verified.error));
+      expectEq(verified.data.verified, true, "雜湊比對");
+      expectEq(verified.data.byte_size_actual, big.length, "重算的位元組數");
+      return inline.error!.message;
+    });
+
+    await check("D4", "物件被竄改後下載回錯誤，回應不含檔案內容", async () => {
+      tamperedNo = await fileThroughLink(encode("%PDF-1.7\nV2609-018 8420\n"), "收據.pdf");
+      const key = await psql(
+        TEST_DB,
+        `SELECT v.object_key FROM document_version v JOIN document d ON d.id = v.document_id WHERE d.doc_no = '${tamperedNo}'`,
+      );
+      await new S3Client({ ...RUSTFS, region: "us-east-1", virtualHostedStyle: false }).write(
+        key,
+        encode("%PDF-1.7\nV2609-018 8421\n"),
+      );
+      const link = await must("get_download_link", { doc_no: tamperedNo });
+      const res = await fetch(BASE + link.download_path);
+      expectEq(res.status, 409, "HTTP 狀態");
+      expect(res.headers.get("content-type")?.startsWith("application/json"), "錯誤不是 JSON");
+      const text = await res.text();
+      expect(!text.includes("8421") && !text.includes("%PDF"), `回應帶著檔案內容：${text}`);
+      return JSON.parse(text).error.message;
+    });
+
+    await check("D5", "員工附件取不到下載連結", async () => {
+      const r = await op("get_download_link", { doc_no: attachedNo });
+      expect(!r.ok, "竟然取得到員工附件的下載連結");
+      return r.error!.message;
+    });
+
+    await check("D6", "核發與下載各留一筆稽核", async () => {
+      const count = async (doc: string, tool: string, outcome: string) =>
+        Number(
+          await psql(
+            TEST_DB,
+            `SELECT count(*) FROM ai_audit_log WHERE tool_name = '${tool}' AND outcome = '${outcome}' AND params->>'doc_no' = '${doc}'`,
+          ),
+        );
+      expectEq(await count(bigNo, "get_download_link", "ok"), 2, "大檔核發");
+      expectEq(await count(bigNo, "download_file", "ok"), 1, "大檔下載");
+      expectEq(await count(tamperedNo, "download_file", "blocked"), 1, "竄改後的下載");
+      return "核發 2 · 下載 1 · 擋下 1";
     });
 
     console.log("\nZ 收尾");
