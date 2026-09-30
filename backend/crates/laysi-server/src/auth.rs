@@ -117,6 +117,10 @@ pub struct VerifiedIdentity {
     /// Login name, absent when the credential is an MCP token.
     pub username: Option<String>,
     pub employee_id: Option<i32>,
+    /// The account behind a session; absent for an MCP token.
+    pub user_id: Option<i32>,
+    /// The MCP token itself; absent for a session.
+    pub token_id: Option<i32>,
 }
 
 impl VerifiedIdentity {
@@ -126,6 +130,8 @@ impl VerifiedIdentity {
             actor_role: user.role_code.clone(),
             username: Some(user.username.clone()),
             employee_id: user.employee_id,
+            user_id: Some(user.id),
+            token_id: None,
         }
     }
 }
@@ -941,6 +947,9 @@ mod tests {
             setup_rate_limiter: crate::ratelimit::RateLimiter::new(
                 crate::setup::ATTEMPTS_PER_MINUTE,
             ),
+            upload_rate_limiter: crate::ratelimit::RateLimiter::new(
+                crate::uploads::UPLOADS_PER_MINUTE,
+            ),
             mcp_allowed_origins: Vec::new(),
         })
     }
@@ -973,6 +982,8 @@ mod tests {
             actor_role: "acct".into(),
             username: Some("trusted".into()),
             employee_id: Some(7),
+            user_id: Some(7),
+            token_id: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert(

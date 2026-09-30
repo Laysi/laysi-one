@@ -91,6 +91,8 @@ fn token_identity(token: &laysi_store::ApiToken) -> crate::auth::VerifiedIdentit
         // employee is still never guessed from `actor`, which is a display
         // name two people can share.
         employee_id: token.owner_employee_id,
+        user_id: None,
+        token_id: Some(token.id),
     }
 }
 
@@ -340,7 +342,11 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
                      需要填入員工編號或姓名的工具；要知道對方是誰就呼叫 get_my_home。\
                      所有寫入型操作都會留下稽核紀錄；高風險工具預設關閉，被擋下時請把\
                      原因如實告訴使用者，不要嘗試繞過。金額一律是字串形式的十進位數，\
-                     不要轉成浮點數。",
+                     不要轉成浮點數。要把檔案存進系統時，先呼叫 request_upload_link：\
+                     檔案在程式執行環境裡就執行回傳的 curl 指令，一次一個檔案；連線被擋\
+                     就把 upload_page 交給使用者以瀏覽器開啟，等對方說上傳完成。之後以\
+                     list_uploads 取得 upload_id，再帶進 upload_document。不要把檔案轉成\
+                     base64 放進參數。",
             }),
         ),
 
@@ -405,13 +411,14 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
                 .and_then(|p| p.as_str())
                 .map(str::to_string);
 
-            let ctx = crate::ctx_from(
+            let mut ctx = crate::ctx_from(
                 &s,
                 &identity,
                 prompt,
                 laysi_ops::Channel::Mcp,
                 crate::auth::client_ip(&headers),
             );
+            ctx.public_base = Some(crate::oauth::public_base(&headers));
             match s.registry.dispatch(&ctx, name, args).await {
                 Ok(data) => ok(
                     id,

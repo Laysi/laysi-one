@@ -40,7 +40,8 @@ async-trait = "0.1"
 # File content travels as base64 in JSON: uploads go through the operation
 # registry so that they are MCP tools as well.
 base64 = "0.23"
-axum = "0.8"
+# `multipart` for the upload link, the one route that takes a file as a file.
+axum = { version = "0.8", features = ["multipart"] }
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 # Already in the tree through openidconnect, so verifying a licence token

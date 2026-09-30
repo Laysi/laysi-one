@@ -4,10 +4,10 @@ import {
   callOp,
   documentList,
   downloadFile,
+  fileSizeLabel,
   money,
   OpFailed,
-  readAsBase64,
-  uploadedDocument,
+  uploadDocumentFile,
   verifiedDocument,
   type DocumentRow,
   type Voucher,
@@ -27,6 +27,7 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
   const [maxBytes, setMaxBytes] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
   const [fetching, setFetching] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
 
@@ -63,19 +64,19 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
   useEffect(load, [load]);
 
   async function upload(file: File) {
+    if (maxBytes > 0 && file.size > maxBytes) {
+      onToast(`${file.name} 超過 ${fileSizeLabel(maxBytes)}，請壓縮或分成幾個檔案再上傳`);
+      if (picker.current) picker.current.value = '';
+      return;
+    }
     setUploading(file.name);
+    setProgress(0);
     try {
-      const d = await callOp(
-        'upload_document',
-        {
-          file_name: file.name,
-          content_base64: await readAsBase64(file),
-          kind: 'receipt',
-          link_type: 'voucher',
-          link_ref: no,
-        },
+      const d = await uploadDocumentFile(
+        file,
+        { kind: 'receipt', link_type: 'voucher', link_ref: no },
         `把 ${file.name} 附到傳票 ${no}`,
-        uploadedDocument,
+        setProgress,
       );
       onToast(`${d.document.doc_no} ${d.document.version_label} 已附到 ${no}`);
       load();
@@ -180,7 +181,8 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
                   {uploading && (
                     <tr>
                       <td colSpan={2} className="cell-muted">
-                        上傳中… {uploading}
+                        上傳中 <span className="num">{Math.round(progress * 100)}%</span> ·{' '}
+                        {uploading}
                       </td>
                     </tr>
                   )}
@@ -209,7 +211,7 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
             disabled={uploading !== null}
             onClick={() => picker.current?.click()}
           >
-            {uploading ? '上傳中…' : '附上檔案'}
+            {uploading ? `上傳中 ${Math.round(progress * 100)}%` : '附上檔案'}
           </button>
         </div>
       </aside>

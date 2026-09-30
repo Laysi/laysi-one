@@ -4,9 +4,9 @@ import {
   callOp,
   documentList,
   downloadFile,
+  fileSizeLabel,
   OpFailed,
-  readAsBase64,
-  uploadedDocument,
+  uploadDocumentFile,
   verifiedDocument,
   type DocumentList,
   type DocumentRow,
@@ -22,6 +22,7 @@ export function Documents({ onToast, reloadKey }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [uploading, setUploading] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
   const [fetching, setFetching] = useState<string | null>(null);
   const [openHash, setOpenHash] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -44,15 +45,15 @@ export function Documents({ onToast, reloadKey }: Props) {
   useEffect(load, [load, reloadKey]);
 
   async function upload(file: File) {
+    if (data && file.size > data.max_object_bytes) {
+      onToast(`${file.name} 超過 ${fileSizeLabel(data.max_object_bytes)}，請壓縮或分成幾個檔案再上傳`);
+      if (picker.current) picker.current.value = '';
+      return;
+    }
     setUploading(file.name);
+    setProgress(0);
     try {
-      const content = await readAsBase64(file);
-      const d = await callOp(
-                        'upload_document',
-                        { file_name: file.name, content_base64: content, kind: 'receipt' },
-                        `上傳 ${file.name}`,
-                        uploadedDocument,
-                      );
+      const d = await uploadDocumentFile(file, { kind: 'receipt' }, `上傳 ${file.name}`, setProgress);
       onToast(
         `${d.document.doc_no} ${d.document.version_label} 已上傳，內容雜湊 ${d.document.checksum_short}`,
       );
@@ -164,7 +165,7 @@ export function Documents({ onToast, reloadKey }: Props) {
               disabled={uploading !== null}
               onClick={() => picker.current?.click()}
             >
-              {uploading ? '上傳中…' : '上傳檔案'}
+              {uploading ? `上傳中 ${Math.round(progress * 100)}%` : '上傳檔案'}
             </button>
           </div>
 
@@ -182,7 +183,8 @@ export function Documents({ onToast, reloadKey }: Props) {
                 {uploading && (
                   <tr>
                     <td colSpan={4} className="cell-muted">
-                      上傳中… {uploading}
+                      上傳中 <span className="num">{Math.round(progress * 100)}%</span> ·{' '}
+                      {uploading}
                     </td>
                   </tr>
                 )}

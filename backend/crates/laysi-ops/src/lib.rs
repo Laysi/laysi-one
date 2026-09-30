@@ -258,6 +258,15 @@ pub struct OpCtx {
     /// Employee primary key linked to the login. External accountants and MCP
     /// tokens may have none.
     pub employee_id: Option<i32>,
+    /// The account behind a session, `None` for an MCP token and for a
+    /// command on the host.
+    pub user_id: Option<i32>,
+    /// The MCP token the call arrived with, `None` on screen.
+    pub token_id: Option<i32>,
+    /// Scheme and host the request reached this server under, for operations
+    /// that hand out a link. Derived from the request the same way the OAuth
+    /// metadata is, and `None` where there is no request.
+    pub public_base: Option<String>,
     /// What the user actually said to the AI. Without it the audit trail
     /// records the action but not the intent.
     pub prompt: Option<String>,
@@ -274,6 +283,18 @@ pub struct OpCtx {
 }
 
 impl OpCtx {
+    /// Who an upload link issued in this call belongs to, and whose staged
+    /// files this call may see. An MCP token is its own holder, so a file a
+    /// model staged is not visible on its owner's screen, nor the other way
+    /// round.
+    pub fn upload_holder(&self) -> Option<laysi_store::UploadHolder> {
+        match (self.channel, self.token_id, self.user_id) {
+            (Channel::Mcp, Some(token), _) => Some(laysi_store::UploadHolder::Token(token)),
+            (Channel::Ui, _, Some(user)) => Some(laysi_store::UploadHolder::Account(user)),
+            _ => None,
+        }
+    }
+
     /// Object storage, or a clear error when it is not configured.
     pub fn objects(&self) -> Result<&laysi_store::ObjectStore, OpError> {
         self.objects.as_ref().ok_or_else(|| {
@@ -889,6 +910,7 @@ mod tests {
             ops::expenses::ops(),
             ops::budget::ops(),
             ops::documents::ops(),
+            ops::uploads::ops(),
             ops::imports::ops(),
             ops::reports::ops(),
             ops::masters::ops(),
@@ -935,6 +957,7 @@ mod tests {
         include_str!("../../../migrations/0008_update_voucher.sql"),
         include_str!("../../../migrations/0010_notice_push_test.sql"),
         include_str!("../../../migrations/0014_preview_leave.sql"),
+        include_str!("../../../migrations/0017_upload_staging.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the

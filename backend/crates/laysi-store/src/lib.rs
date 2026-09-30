@@ -495,6 +495,11 @@ macro_rules! token_owner_active {
     };
 }
 
+// After `token_owner_active!`: the upload holder check is built on it, and a
+// macro is only visible below its definition.
+pub mod uploads;
+pub use uploads::{StagedUpload, UploadBatch, UploadHolder};
+
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,

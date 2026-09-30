@@ -15,10 +15,12 @@ import {
   ME_NAV,
   SCREEN_PATH,
   SYSTEM_NAV,
+  UPLOAD_PAGE_PATH,
   firstScreen,
   screenForPath,
   screenOp,
   screenTitle,
+  uploadLinkSecret,
   visibleEntries,
   type NavItem,
   type ScreenId,
@@ -83,6 +85,18 @@ ok(
 // The four trees are separate: a finance permission opens no HR screen.
 eq("財務權限不會打開人資畫面", firstScreen(HR_NAV, ["get_dashboard"]), null);
 eq("系統分頁同樣要自己的權限", firstScreen(SYSTEM_NAV, ["get_dashboard"]), null);
+
+// The upload page sits outside every screen: it is opened by whoever holds
+// the link, signed in or not, and no screen path may shadow it.
+const secret = `lysu_${"a1".repeat(32)}`;
+eq("上傳頁的網址取得出連結", uploadLinkSecret(`${UPLOAD_PAGE_PATH}${secret}`), secret);
+eq("上傳頁尾端斜線視為同一個網址", uploadLinkSecret(`${UPLOAD_PAGE_PATH}${secret}/`), secret);
+eq("格式不對的連結不當成上傳頁", uploadLinkSecret(`${UPLOAD_PAGE_PATH}lysu_short`), null);
+eq("其他網址不是上傳頁", uploadLinkSecret("/finance/documents"), null);
+ok(
+  "沒有畫面的網址落在上傳頁底下",
+  ids.every((id) => !SCREEN_PATH[id].startsWith(UPLOAD_PAGE_PATH)),
+);
 
 console.log(failed === 0 ? "\n全部通過" : `\n${failed} 項未通過`);
 process.exit(failed === 0 ? 0 : 1);
