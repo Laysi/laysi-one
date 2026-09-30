@@ -343,16 +343,18 @@ PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那�
 
 ## Commit 前的 Codex 審查
 
-**每一個 commit 都要先過 Codex 審查**：`.githooks/pre-commit` 把暫存區的 diff 交給
-`codex`，第一行不是 `ALLOW:` 就擋下，理由印在 stderr；`codex` 沒裝、沒登入或出錯一樣
-擋下。merge、cherry-pick 與 revert 不審。git 不會自己採用 `core.hooksPath`，**每個
-clone 要跑一次** `git config core.hooksPath .githooks`。
+**每一個 commit 都要先過 Codex 審查**：閘門由 `codex-review` 外掛提供，**repo 裡不放
+hook**。**每個 clone 跑一次** `/codex-review:init`，它寫入 `.githooks/pre-commit` 並設定
+`core.hooksPath`；外掛在啟動時發現沒裝會提示。hook 把暫存區的 diff 交給 `codex`，第一行
+不是 `ALLOW:` 就擋下，理由印在 stderr；`codex` 沒裝、沒登入或出錯一樣擋下。merge、
+cherry-pick 與 revert 不審。
 
 它掛在 git 而不是 Claude Code 的 `PreToolUse` 上：審的是實際的暫存區，不是去猜指令字串，
-所以終端機、其他 agent 與 CI 的 commit 都會經過它。`codex` 在暫存目錄裡跑並清掉每一個
-`GIT_*` 環境變數——在 codex 信任過的專案裡直接叫它，它會把 repo 的 HEAD 重設掉。
+所以同一個 clone 裡終端機與其他 agent 的 commit 都會經過它；**沒跑過 init 的 clone 與 CI
+不審**。`codex` 在暫存目錄裡跑並清掉每一個 `GIT_*` 環境變數——在 codex 信任過的專案裡
+直接叫它，它會把 repo 的 HEAD 重設掉。
 
-commit 之前先跑 `codex-review` skill，問題在 commit 前就解掉。**被擋下而判斷是誤判時停下來
+commit 之前先跑 `codex-review` 外掛的 skill（`/codex-review:codex-review`），問題在 commit 前就解掉。**被擋下而判斷是誤判時停下來
 交給使用者**，不要用 `--no-verify` 或 `CODEX_GATE_BYPASS=1` 繞過，那兩條是留給人的出口。
 本機的 hook 擋不住刻意繞過的人，擋得住的是伺服器端的 branch protection。
 
@@ -361,8 +363,8 @@ commit 之前先跑 `codex-review` skill，問題在 commit 前就解掉。**被
 **看板同步是完成定義的一部分**：開始一項工作、被卡住、PR 或 commit 落地、發現新的待辦或
 技術債，四個時刻都要同步 `Laysi` org 的看板。**工作項一律用 issue**，不用 draft 卡——
 只有 issue 掛得上 sub-issue、label、type 與 PR 連結，尚未成形的純想法才用 draft 暫存。
-操作細節（GitHub MCP payload、欄位現查、gh fallback）在
-`.claude/skills/project-board/SKILL.md`，本節只定政策。
+操作細節（GitHub MCP payload、欄位現查、讀回驗證）走 `github-loop-engineering` 外掛的
+skill，本節只定政策；兩者衝突時以本節為準（內文格式用下方的七段結構，不用外掛的範本）。
 
 - **Triage 與 Todo 的分界**：agent 自行發現或建立的工作項一律停在 **Triage**（AI 產生、
   尚未經人工審核）；**Todo 只放使用者核准過、真正可啟動的工作**。把卡移出 Triage 是
@@ -381,6 +383,11 @@ commit 之前先跑 `codex-review` skill，問題在 commit 前就解掉。**被
   允許 close**，而勾的依據是那一條的驗證跑過了，不是程式碼寫完了。
 - **寫入之後讀回驗證**：GitHub 回 200 只證明它收下請求，不證明看板欄位、auto-add 與
   close 連動產生了預期的結果。close 之後仍要讀回看板確認 Status 是 Done。
+- **MCP 沒有 projects 工具時改用 `gh`**，先回報再改用：`gh project list --owner Laysi`
+  查看板編號，`gh project field-list`／`item-list <編號> --owner Laysi --format json` 現查
+  欄位、選項與項目 id，`gh project item-add` 掛板、`gh project item-edit` 設 Status 與
+  Priority。缺 scope 時請使用者跑 `! gh auth refresh -h github.com -s read:project,project`。
+  id 一律當場讀，不寫進任何文件——換一個看板就全錯。
 
 ## 目前進度
 

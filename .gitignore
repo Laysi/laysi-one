@@ -8,3 +8,4 @@
 /scripts/bun.lock
 
 .claude/settings.local.json
+/.githooks/
