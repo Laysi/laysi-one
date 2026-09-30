@@ -137,7 +137,7 @@ impl Operation for ListDocuments {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。文件的辨識狀態一律為待處理。"
+        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListDocumentsInput>()

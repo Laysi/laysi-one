@@ -195,7 +195,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_department_pl', risk: 'read_only', riskLabel: '唯讀', summary: "讀部門損益：依分錄所屬部門區分的收入與成本費用。未指定部門者列為「未指定」且不分攤，因此各列加總必等於損益表的本期損益。" },
   { name: 'create_budget_version', risk: 'boss_only', riskLabel: '限負責人', summary: "建立一版年度預算。每個年度只能有一版是現行版，指定新的現行版時，原現行版改為非現行。金額另以 set_budget 逐科目設定。" },
   { name: 'set_budget', risk: 'boss_only', riskLabel: '限負責人', summary: "設定某個科目（或某部門）的年度預算金額。僅變更預算數；實際數一律來自總帳，無法於此變更。" },
-  { name: 'list_documents', risk: 'read_only', riskLabel: '唯讀', summary: "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。文件的辨識狀態一律為待處理。" },
+  { name: 'list_documents', risk: 'read_only', riskLabel: '唯讀', summary: "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。" },
   { name: 'upload_document', risk: 'needs_confirm', riskLabel: '需人確認', summary: "存一份文件到物件儲存，並掛到一張單據上。檔案可帶入上傳連結收到的上傳編號，或以 base64 直接傳入（25 MB 以內）。同一個編號再存一次會成為新版本。" },
   { name: 'get_document', risk: 'read_only', riskLabel: '唯讀', summary: "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容，限 25 MB 以內，更大的文件請取得下載連結。雜湊不符會回報錯誤，不回傳內容。" },
   { name: 'get_download_link', risk: 'read_only', riskLabel: '唯讀', summary: "取得一份文件的下載連結：5 分鐘內可使用一次，伺服器比對內容雜湊相符後才送出檔案，不限檔案大小。連結交給使用者以瀏覽器開啟，或在程式執行環境裡執行回傳的 curl 指令。" },
