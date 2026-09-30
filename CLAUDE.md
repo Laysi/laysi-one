@@ -689,6 +689,8 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 畫面的文件管理與傳票附件也走這條路；base64 的 `content_base64` 保留在 25 MB。
 公開上傳頁 `/upload/{secret}` 在 `main.tsx` 就分流，不經 `App` 與登入，
 **不是導覽畫面**，不計入畫面數量。
+**上傳連結只負責傳檔案**：讀內容交給 AI 自己的工具與一起使用的其他 MCP，不要為上傳的
+檔案在伺服器加解析器（理由在 `docs/architecture.md`）。
 
 **大檔走下載連結**：`get_document` 帶內容限 25 MB，更大的由 `get_download_link` 發一條
 5 分鐘、只能用一次的連結，`GET /v1/downloads/{secret}`（第三個手寫路由）**先把整份檔案

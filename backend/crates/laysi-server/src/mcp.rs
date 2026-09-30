@@ -346,7 +346,9 @@ pub async fn handle(State(s): State<Shared>, headers: HeaderMap, body: Bytes) ->
                      檔案在程式執行環境裡就執行回傳的 curl 指令，一次一個檔案；連線被擋\
                      就把 upload_page 交給使用者以瀏覽器開啟，等對方說上傳完成。之後以\
                      list_uploads 取得 upload_id，再帶進 upload_document。不要把檔案轉成\
-                     base64 放進參數。",
+                     base64 放進參數。上傳連結負責傳送與保存檔案，讀取內容請搭配自己的\
+                     工具或其他 MCP；讀不到內容時（例如使用者以瀏覽器上傳），請對方說明\
+                     要掛哪一張單。",
             }),
         ),
 
