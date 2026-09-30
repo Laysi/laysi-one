@@ -697,7 +697,8 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 落到已 unlink 的暫存檔並比對 BLAKE3，相符才開始送出**——邊讀邊送的話，對不上時內容已經
 送出去了。它寫一列連結但 `writes()` 為 false，授權失效的安裝照樣下載得了；名稱因此是
 `get_` 開頭，`reads_are_not_writes_whatever_floor_they_carry` 依命名把關。畫面的文件
-管理、傳票附件與報支收據都走它（`fetch` 成 Blob，錯誤訊息才讀得到）。不發 presigned URL，
+管理、傳票附件與報支收據都走它（`fetch` 成 Blob，錯誤訊息才讀得到）；**對 AI 預設關閉**，
+AI 的上傳流程用不到它。不發 presigned URL，
 理由在 `docs/architecture.md`。
 
 **人資是一個角色**：`hr` 持有 `view_hr`／`manage_hr`／`view_payroll`／`manage_payroll`／

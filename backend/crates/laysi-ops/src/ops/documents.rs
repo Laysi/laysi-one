@@ -579,7 +579,7 @@ pub struct GetDocumentInput {
     pub version: Option<i32>,
     /// Whether to return the content as base64, for documents up to 25 MB.
     /// Off by default, which only verifies the hash. Larger documents are
-    /// downloaded through `get_download_link`.
+    /// downloaded from the documents screen.
     #[serde(default)]
     pub include_content: bool,
 }
@@ -593,7 +593,7 @@ impl Operation for GetDocument {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容，限 25 MB 以內，更大的文件請取得下載連結。雜湊不符會回報錯誤，不回傳內容。"
+        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容，限 25 MB 以內，更大的文件請在「文件管理」畫面下載。雜湊不符會回報錯誤，不回傳內容。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<GetDocumentInput>()
@@ -606,7 +606,7 @@ impl Operation for GetDocument {
 
         if i.include_content && doc.byte_size > MAX_OBJECT_BYTES as i64 {
             return Err(OpError::BadInput(format!(
-                "{} v{} 有 {}，超過直接回傳內容的上限 {}，請改用下載連結。",
+                "{} v{} 有 {}，超過直接回傳內容的上限 {}，請在「文件管理」畫面下載。",
                 doc.doc_no,
                 doc.version_no,
                 human_size(doc.byte_size),

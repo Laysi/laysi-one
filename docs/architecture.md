@@ -443,12 +443,14 @@ consumed_at IS NULL RETURNING` 標記，同一個檔案存不成兩份文件，�
 的上限（畫面走連結），`max_inline_bytes` 是 base64 的上限。
 
 **下載連結**是同一件事的反方向。`get_document` 以 base64 回內容，上限同樣是 25 MB：
-`include_content` 遇到更大的文件回錯誤、請改用下載連結；不帶內容時照常驗證，並邊讀邊算
-雜湊（`ObjectStore::verify`），不把整份檔案放進記憶體。更大的文件：
+`include_content` 遇到更大的文件回錯誤、請使用者到「文件管理」畫面下載；不帶內容時照常
+驗證，並邊讀邊算雜湊（`ObjectStore::verify`），不把整份檔案放進記憶體。更大的文件：
 
 1. `get_download_link { doc_no, version }`（`read_only`，與 `get_document` 同屬
-   `manage_documents`，對 AI 開放）寫一列 `download_link`，回一條 5 分鐘、只能用一次的
-   網址。它會寫一列，卻不算寫入（`writes()` 為 false）：授權失效的安裝仍然交得出自己的
+   `manage_documents`）寫一列 `download_link`，回一條 5 分鐘、只能用一次的網址。**對 AI
+   預設關閉**：它是為了畫面而做的——上傳上限提高到 90 MB 之後，超過 25 MB 的文件得有
+   下載的路——而 AI 的上傳流程用不到它；要讓 AI 取得大檔，由系統管理員在「MCP 與 AI」
+   打開。它會寫一列，卻不算寫入（`writes()` 為 false）：授權失效的安裝仍然交得出自己的
    文件，連結本身不是業務資料。秘密只存 BLAKE3，持有者的規則與上傳連結共用
    （`links::LinkHolder`、`holder_active!`）。員工附件回查無此文件。
 2. `GET /v1/downloads/{secret}` 驗連結存在、未使用、未到期、持有者仍然有效，先佔一個

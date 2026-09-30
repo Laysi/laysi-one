@@ -2,10 +2,10 @@
 -- operation result.
 --
 -- `get_document` returns content as base64 in JSON, which a screen has to
--- decode in memory and a model cannot use past a few megabytes.
--- `get_download_link` hands out a link instead; `GET /v1/downloads/{secret}`
--- fetches the object, checks its BLAKE3 against `document_version`, and only
--- then sends it.
+-- decode in memory. `get_download_link` hands out a link instead;
+-- `GET /v1/downloads/{secret}` fetches the object, checks its BLAKE3 against
+-- `document_version`, and only then sends it. The screens use it; its MCP
+-- switch is seeded off.
 --
 -- A link opens exactly one version of one document, once, for five minutes.
 -- The secret is stored as its BLAKE3 and the holder is an account or an MCP
@@ -46,7 +46,7 @@ ON CONFLICT (code) DO UPDATE
         op_names = EXCLUDED.op_names, sort_order = EXCLUDED.sort_order;
 
 INSERT INTO mcp_tool_grant (tool_name, enabled, risk, note, updated_at) VALUES
-    ('get_download_link', true, 'read_only', '取得一次性的下載連結，檔案驗過內容雜湊才送出。', '2026-09-30 00:00:00+00')
+    ('get_download_link', false, 'read_only', '取得一次性的下載連結，檔案驗過內容雜湊才送出。對 AI 預設關閉。', '2026-09-30 00:00:00+00')
 ON CONFLICT (tool_name) DO UPDATE
     SET enabled = EXCLUDED.enabled, risk = EXCLUDED.risk,
         note = EXCLUDED.note, updated_at = EXCLUDED.updated_at;
