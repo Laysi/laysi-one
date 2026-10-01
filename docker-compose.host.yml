@@ -1,5 +1,5 @@
 # The overlay the one.laysi.io install runs with, on top of
-# docker-compose.prod.yml. Two things the shipped file cannot know:
+# docker-compose.prod.yml. Three things the shipped file cannot know:
 #
 # 1. cloudflared and vaultwarden already share a podman network called `proxy`
 #    on that host. Joining web and mcp to it lets the tunnel reach them by
@@ -12,11 +12,20 @@
 #    it transitively from the rest. The cost is start ordering on an install
 #    with empty volumes: run `podman-compose ... up -d secrets` once first.
 #
+# 3. .github/workflows/deploy.yml waits for the api container by name. The
+#    generated name depends on the compose tool (`laysi-one_api_1` from
+#    podman-compose, `laysi-one-api-1` from docker compose v2). It changed on
+#    the host between two deployments and the wait timed out against a
+#    healthy container, so it is pinned.
+#
 #   podman-compose -f docker-compose.prod.yml -f docker-compose.host.yml up -d
 
 services:
   postgres:
     depends_on: !override []
+
+  api:
+    container_name: laysi-one-api
 
   web:
     container_name: laysi-web
