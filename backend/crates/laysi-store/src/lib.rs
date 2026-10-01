@@ -548,6 +548,14 @@ impl Store {
     /// effective date and file name, and the file is named after its domain),
     /// so the feed does not deliver it twice and a deletion after this stays
     /// deleted. Returns how many rows were written.
+    ///
+    /// The decision is per domain, never "the table holds something". `api`
+    /// and `mcp` boot against the same empty database at once, and the second
+    /// to look would see the rows the first had committed so far, skip, and
+    /// install that half until its next reload. Deciding per domain, a domain
+    /// the other process has claimed but not committed makes this one wait on
+    /// the `reg_update` key, so whatever either process reads afterwards is
+    /// the whole set.
     pub async fn seed_regulations(&self) -> Result<u64> {
         let present: Vec<String> = sqlx::query_scalar("SELECT DISTINCT domain FROM reg_ruleset")
             .fetch_all(&self.pool)
@@ -10768,6 +10776,97 @@ mod tests {
             .await
             .expect("應寫得回去");
         store.reload_regulations().await.expect("應重新載入");
+    }
+
+    /// A database of its own on the `TEST_DATABASE_URL` server, as a first
+    /// boot finds it. The shared test database already holds the factory set,
+    /// so a seeding race cannot be staged there.
+    struct EmptyInstall {
+        admin: PgPool,
+        options: sqlx::postgres::PgConnectOptions,
+        name: String,
+    }
+
+    impl EmptyInstall {
+        async fn new() -> Self {
+            let url =
+                std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+            let base: sqlx::postgres::PgConnectOptions =
+                url.parse().expect("TEST_DATABASE_URL 應是合法的連線字串");
+            let admin = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(base.clone())
+                .await
+                .expect("應可連上測試資料庫");
+            let name = format!("laysi_seed_{}", Uuid::new_v4().simple());
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+                .execute(&admin)
+                .await
+                .expect("應可建立拋棄式資料庫");
+            Self {
+                admin,
+                options: base.database(&name),
+                name,
+            }
+        }
+
+        async fn store(&self) -> Result<Store> {
+            let pool = PgPoolOptions::new()
+                .max_connections(4)
+                .connect_with(self.options.clone())
+                .await?;
+            Ok(Store::from_pool(pool))
+        }
+
+        async fn remove(self) {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE {} WITH (FORCE)",
+                self.name
+            )))
+            .execute(&self.admin)
+            .await
+            .expect("應可刪掉拋棄式資料庫");
+        }
+    }
+
+    fn domains(rulesets: impl IntoIterator<Item = laysi_regulation::Ruleset>) -> Vec<String> {
+        let mut seen: Vec<String> = rulesets.into_iter().map(|r| r.domain).collect();
+        seen.sort();
+        seen.dedup();
+        seen
+    }
+
+    /// What the second process to boot finds while the first is still
+    /// seeding: some domains committed, the rest on their way. Taking those
+    /// rows as a sign that seeding is done installs half the set, and the
+    /// calculators of the other half answer 「查無適用的法規版本」 until the
+    /// next reload.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// a_partly_seeded_table_is_completed -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可建立資料庫的 PostgreSQL"]
+    async fn a_partly_seeded_table_is_completed() {
+        let factory = laysi_regulation::seed();
+        let install = EmptyInstall::new().await;
+        // Every step that can fail runs before the database is dropped, so a
+        // failure leaves nothing behind on the server.
+        let seen = async {
+            let store = install.store().await?;
+            store.migrate().await?;
+            store.write_regulation(&factory[0], false).await?;
+            store.seed_regulations().await?;
+            Ok::<_, StoreError>(domains(store.regulations().await?))
+        }
+        .await;
+        install.remove().await;
+
+        assert_eq!(
+            seen.expect("拋棄式資料庫上的補種應成功"),
+            domains(factory),
+            "表裡已有一部分時，其餘的領域也要補齊"
+        );
     }
 
     /// Run with:
