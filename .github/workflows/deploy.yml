@@ -80,7 +80,7 @@ jobs:
                       echo "DEPLOY_DIR=laysi-one"
                       echo "PROJECT=laysi-one"
                       echo "OVERLAY=docker-compose.host.yml"
-                      echo "API_CONTAINER=laysi-one_api_1"
+                      echo "API_CONTAINER=laysi-one-api"
                       echo "SITE=https://one.laysi.io/"
                   } >> "$GITHUB_ENV"
                   ;;
