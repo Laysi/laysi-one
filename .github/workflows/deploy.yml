@@ -123,8 +123,11 @@ jobs:
           set -eu
           # metadata-action publishes `{{version}}`, which drops the tag's `v`,
           # so release.yml can hand this workflow its own ref_name unchanged
-          # and a person can type either form.
+          # and a person can type either form. An emptied field means what
+          # compose's `${LAYSI_VERSION:-latest}` would make of it, so the tag
+          # the readiness check expects is the one compose runs.
           VERSION=${VERSION#v}
+          VERSION=${VERSION:-latest}
           echo "LAYSI_VERSION=$VERSION" >> "$GITHUB_ENV"
           ssh "$DEPLOY_HOST" "mkdir -p $DEPLOY_DIR"
           scp docker-compose.prod.yml "$OVERLAY" "$DEPLOY_HOST:$DEPLOY_DIR/"
@@ -159,6 +162,17 @@ jobs:
              podman-compose -p $PROJECT -f docker-compose.prod.yml -f $OVERLAY \
              pull api mcp web backup"
 
+      # Read before anything is restarted. The container this deployment
+      # replaces stays up and healthy until it is torn down, so the readiness
+      # check at the end needs its ID to tell it from the one that replaces it.
+      - name: Note the api container being replaced
+        run: |
+          set -eu
+          ps=$(ssh "$DEPLOY_HOST" "$REMOTE_PATH; podman ps -a --format '{{.ID}} {{.Names}}'")
+          id=$(printf '%s\n' "$ps" | awk -v name="$API_CONTAINER" '$2 == name { print $1 }')
+          echo "replacing: ${id:-nothing}"
+          echo "REPLACED_ID=$id" >> "$GITHUB_ENV"
+
       - name: Restart the stack
         if: inputs.target != 'demo'
         run: |
@@ -190,43 +204,82 @@ jobs:
           ssh "$DEPLOY_HOST" "loginctl enable-linger \$(id -un) 2>/dev/null || true; \
             export XDG_RUNTIME_DIR=/run/user/\$(id -u) && \
             systemctl --user daemon-reload && \
-            systemctl --user enable --now laysi-demo-reset.timer && \
-            systemctl --user start --no-block laysi-demo-reset.service"
+            systemctl --user enable --now laysi-demo-reset.timer"
           # Started detached because recreating containers reconfigures the
           # podman bridge cloudflared sits on, which resets this connection --
-          # so wait on the unit rather than the command. Without this the next
-          # step reads yesterday's containers, which are still up and about to
-          # be torn down, and calls a rebuild that has not started yet a
-          # failure.
-          for _ in $(seq 60); do
-              state=$(ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
-                "XDG_RUNTIME_DIR=/run/user/\$(id -u) systemctl --user is-active laysi-demo-reset.service" 2>/dev/null || echo unknown)
-              echo "reset unit: $state"
-              [ "$state" = activating ] || [ "$state" = unknown ] || break
+          # so the unit is polled rather than the command waited on.
+          #
+          # `show` rather than `is-active`, which exits non-zero for every
+          # state but active, `activating` included. A run the timer already
+          # has going is waited out first: a start issued during it merges
+          # into it, and it was started before this deployment's .env. The run
+          # is this deployment's once it is seen activating after the start,
+          # or once the invocation ID has moved on. Unreachable polls are the
+          # bridge reset and are retried.
+          #
+          # The deadline is two TimeoutStartSec and two minutes: the timer's
+          # run, then this one, so a hung rebuild ends as a failure systemd
+          # reports. The loop gives up on the first poll that ends past it.
+          unit="XDG_RUNTIME_DIR=/run/user/\$(id -u) systemctl --user"
+          started='' ran='' finished='' before=''
+          deadline=$(( $(date +%s) + 2 * 900 + 120 ))
+          while :; do
+              props=$(ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
+                "$unit show -p ActiveState -p InvocationID -p Result -p ExecMainCode -p ExecMainStatus \
+                laysi-demo-reset.service" 2>/dev/null) || props=
+              state=$(printf '%s\n' "$props" | sed -n 's/^ActiveState=//p')
+              id=$(printf '%s\n' "$props" | sed -n 's/^InvocationID=//p')
+              echo "reset unit: ${state:-unknown}"
+              case $state in
+                  '') ;;
+                  activating|deactivating)
+                      [ -z "$started" ] || ran=yes ;;
+                  *)
+                      if [ -n "$ran" ] || { [ -n "$started" ] && [ "$id" != "$before" ]; }; then
+                          finished=yes
+                          break
+                      fi
+                      [ -n "$started" ] || before=$id
+                      started=yes
+                      ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
+                        "$unit start --no-block laysi-demo-reset.service" || true ;;
+              esac
+              [ "$(date +%s)" -lt "$deadline" ] || break
               sleep 10
           done
-          ssh "$DEPLOY_HOST" "XDG_RUNTIME_DIR=/run/user/\$(id -u) \
-            systemctl --user is-failed laysi-demo-reset.service >/dev/null && \
-            { journalctl --user -u laysi-demo-reset -n 40 --no-pager; exit 1; } || true"
+          # Inactive is also where a run stopped by hand, or cut short by a host
+          # reboot, ends up. Only a main process that exited with 0 (code 1 is
+          # CLD_EXITED) got through the seeding. `show` prints properties in
+          # its own order, not the order asked for, so lines are matched.
+          clean=$(printf '%s\n' "$props" | grep -cxE 'Result=success|ExecMainCode=1|ExecMainStatus=0') || true
+          if [ -z "$finished" ] || [ "$state" != inactive ] || [ "$clean" != 3 ]; then
+              printf '%s\n' "$props"
+              ssh "$DEPLOY_HOST" "tail -n 40 $DEPLOY_DIR/reset.log" || true
+              echo "the demo rebuild did not complete"
+              exit 1
+          fi
 
+      # Ready means healthy, not the container noted before the restart, and
+      # on the image tag this run deployed. A check on the name and the health
+      # alone is passed by the container being replaced, before anything has
+      # changed.
       - name: Wait for the stack, then check the site
         run: |
           set -eu
           for _ in $(seq 90); do
-              if ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
-                  "$REMOTE_PATH; podman ps --format '{{.Names}} {{.Status}}' | grep -q '$API_CONTAINER Up.*healthy'"; then
-                  ok=yes
-                  break
-              fi
+              ps=$(ssh -o ConnectTimeout=15 "$DEPLOY_HOST" \
+                "$REMOTE_PATH; podman ps --format '{{.ID}} {{.Names}} {{.Image}} {{.Status}}'" 2>/dev/null) || ps=
+              ok=$(printf '%s\n' "$ps" | awk -v name="$API_CONTAINER" -v old="$REPLACED_ID" -v version="$LAYSI_VERSION" '
+                  $2 == name && $1 != old && /\(healthy\)$/ { tag = $3; sub(/.*:/, "", tag); if (tag == version) print "yes" }')
+              [ "$ok" != yes ] || break
               sleep 5
           done
-          # Whichever of the two left a trace: production writes deploy.log,
-          # the demo rebuild runs under systemd and writes to the journal.
+          # Production's restart leaves deploy.log; the demo's rebuild was
+          # checked, and its log printed on failure, by the step before.
           ssh "$DEPLOY_HOST" "$REMOTE_PATH; cd $DEPLOY_DIR && \
-            podman ps -a --format '{{.Names}} | {{.Status}}' | grep laysi; \
-            tail -5 deploy.log 2>/dev/null; \
-            XDG_RUNTIME_DIR=/run/user/\$(id -u) journalctl --user -u laysi-demo-reset -n 20 --no-pager 2>/dev/null" || true
-          [ "${ok:-}" = yes ] || { echo "api never reported healthy"; exit 1; }
+            podman ps -a --format '{{.Names}} | {{.Image}} | {{.Status}}' | grep laysi; \
+            tail -5 deploy.log 2>/dev/null" || true
+          [ "$ok" = yes ] || { echo "$API_CONTAINER never came up healthy on $LAYSI_VERSION"; exit 1; }
           # Retried, because a healthy api is not yet a served page: `web`
           # starts only once api reports healthy, and the tunnel needs a moment
           # to find the container it was just recreated as. One shot here reads
