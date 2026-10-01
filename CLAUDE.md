@@ -392,7 +392,7 @@ skill，本節只定政策；兩者衝突時以本節為準（內文格式用下
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
-RustFS 物件儲存，以及 **37 個畫面、136 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、139 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -677,6 +677,29 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 **文件內容在 RustFS，資料庫只留物件鍵與 BLAKE3**。先配編號、檔案進桶子成功
 才寫資料庫；取回時一定重算雜湊比對，對不上就不交出內容。**沒有 OCR**——`ocr_status`
 整欄已經刪掉，它是由 MIME 型別推出來、沒有任何判斷讀它的常數。
+
+**檔案走上傳連結，不走操作輸入**：base64 放在參數裡，AI 得逐字寫出整份檔案，1 MB
+就超過單次輸出上限。`request_upload_link` 發一條 10 分鐘、20 個檔的連結，檔案
+`POST` 到 `/v1/uploads/{secret}`（`/v1/auth/*` 之外第二個手寫路由，只寫暫存區），
+串流進 `staging/`，再由 `upload_document { upload_id }` 存成文件——**先暫存、不直接
+成為文件**，因為文件刪不掉而 AI 要先讀過才知道掛哪張單。持有者是帳號或 MCP Token
+其中之一，彼此看不到對方的暫存檔；**讀 body 之前先驗持有者仍然有效**，撤銷 Token
+連結跟著死。每檔 90 MB 是 Cloudflare 每請求 100 MB 決定的，不是記憶體；類型由開頭
+的位元組決定，副檔名與內容不符就拒收，認不出的存成 `application/octet-stream`。
+畫面的文件管理與傳票附件也走這條路；base64 的 `content_base64` 保留在 25 MB。
+公開上傳頁 `/upload/{secret}` 在 `main.tsx` 就分流，不經 `App` 與登入，
+**不是導覽畫面**，不計入畫面數量。
+**上傳連結只負責傳檔案**：讀內容交給 AI 自己的工具與一起使用的其他 MCP，不要為上傳的
+檔案在伺服器加解析器（理由在 `docs/architecture.md`）。
+
+**大檔走下載連結**：`get_document` 帶內容限 25 MB，更大的由 `get_download_link` 發一條
+5 分鐘、只能用一次的連結，`GET /v1/downloads/{secret}`（第三個手寫路由）**先把整份檔案
+落到已 unlink 的暫存檔並比對 BLAKE3，相符才開始送出**——邊讀邊送的話，對不上時內容已經
+送出去了。它寫一列連結但 `writes()` 為 false，授權失效的安裝照樣下載得了；名稱因此是
+`get_` 開頭，`reads_are_not_writes_whatever_floor_they_carry` 依命名把關。畫面的文件
+管理、傳票附件與報支收據都走它（`fetch` 成 Blob，錯誤訊息才讀得到）；**對 AI 預設關閉**，
+AI 的上傳流程用不到它。不發 presigned URL，
+理由在 `docs/architecture.md`。
 
 **人資是一個角色**：`hr` 持有 `view_hr`／`manage_hr`／`view_payroll`／`manage_payroll`／
 `staff_self_service`，剛好開啟人資分頁的八個畫面，財務分頁與系統按鈕都不出現。原本

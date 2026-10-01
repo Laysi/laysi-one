@@ -3,11 +3,10 @@ import {
   businessTime,
   callOp,
   documentList,
-  downloadFile,
+  downloadDocumentFile,
+  fileSizeLabel,
   OpFailed,
-  readAsBase64,
-  uploadedDocument,
-  verifiedDocument,
+  uploadDocumentFile,
   type DocumentList,
   type DocumentRow,
 } from '../api/client';
@@ -22,7 +21,9 @@ export function Documents({ onToast, reloadKey }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [uploading, setUploading] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
   const [fetching, setFetching] = useState<string | null>(null);
+  const [fetchProgress, setFetchProgress] = useState(0);
   const [openHash, setOpenHash] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement>(null);
 
@@ -44,15 +45,15 @@ export function Documents({ onToast, reloadKey }: Props) {
   useEffect(load, [load, reloadKey]);
 
   async function upload(file: File) {
+    if (data && file.size > data.max_object_bytes) {
+      onToast(`${file.name} 超過 ${fileSizeLabel(data.max_object_bytes)}，請壓縮或分成幾個檔案再上傳`);
+      if (picker.current) picker.current.value = '';
+      return;
+    }
     setUploading(file.name);
+    setProgress(0);
     try {
-      const content = await readAsBase64(file);
-      const d = await callOp(
-                        'upload_document',
-                        { file_name: file.name, content_base64: content, kind: 'receipt' },
-                        `上傳 ${file.name}`,
-                        uploadedDocument,
-                      );
+      const d = await uploadDocumentFile(file, { kind: 'receipt' }, `上傳 ${file.name}`, setProgress);
       onToast(
         `${d.document.doc_no} ${d.document.version_label} 已上傳，內容雜湊 ${d.document.checksum_short}`,
       );
@@ -67,22 +68,9 @@ export function Documents({ onToast, reloadKey }: Props) {
 
   async function download(d: DocumentRow) {
     setFetching(d.doc_no);
+    setFetchProgress(0);
     try {
-      const r = await callOp(
-        'get_document',
-        { doc_no: d.doc_no, include_content: true },
-        undefined,
-        verifiedDocument,
-      );
-      if (!r.content_base64) {
-        onToast('檔案儲存沒有回傳內容，請再試一次');
-        return;
-      }
-      downloadFile(
-        d.file_name,
-        Uint8Array.from(atob(r.content_base64), (c) => c.charCodeAt(0)),
-        d.content_type || 'application/octet-stream',
-      );
+      await downloadDocumentFile(d, setFetchProgress);
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -164,7 +152,7 @@ export function Documents({ onToast, reloadKey }: Props) {
               disabled={uploading !== null}
               onClick={() => picker.current?.click()}
             >
-              {uploading ? '上傳中…' : '上傳檔案'}
+              {uploading ? `上傳中 ${Math.round(progress * 100)}%` : '上傳檔案'}
             </button>
           </div>
 
@@ -182,7 +170,8 @@ export function Documents({ onToast, reloadKey }: Props) {
                 {uploading && (
                   <tr>
                     <td colSpan={4} className="cell-muted">
-                      上傳中… {uploading}
+                      上傳中 <span className="num">{Math.round(progress * 100)}%</span> ·{' '}
+                      {uploading}
                     </td>
                   </tr>
                 )}
@@ -201,7 +190,12 @@ export function Documents({ onToast, reloadKey }: Props) {
                         {' · '}
                         <span className="num">{businessTime(d.uploaded_at)}</span>
                         {d.versions > 1 && ` · 共 ${d.versions} 版`}
-                        {fetching === d.doc_no && ' · 取回中…'}
+                        {fetching === d.doc_no && (
+                          <>
+                            {' · 下載中 '}
+                            <span className="num">{Math.round(fetchProgress * 100)}%</span>
+                          </>
+                        )}
                       </span>
                     </td>
                     <td className="cell-accounts num cell-nowrap">{d.link_ref || '—'}</td>

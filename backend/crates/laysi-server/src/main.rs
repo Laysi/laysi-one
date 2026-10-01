@@ -15,6 +15,13 @@
 //! by the installation having no accounts instead. The auth endpoints are
 //! therefore listed explicitly here, and everything else still goes through
 //! the registry.
+//!
+//! `/v1/uploads/{secret}` is the second exception: it receives a file as a
+//! file, which is the whole point of an upload link. Issuing the link and
+//! filing what arrived are both operations; see `uploads.rs`.
+//! `/v1/downloads/{secret}` is the third, the same thing the other way: it
+//! sends one document as a file, after the operation that issued the link;
+//! see `downloads.rs`.
 
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -28,11 +35,13 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 mod auth;
+mod downloads;
 mod mcp;
 mod oauth;
 mod oidc;
 mod ratelimit;
 mod setup;
+mod uploads;
 
 /// MCP protocol version. Tied to the shape of `tools/list`; check both when
 /// bumping it.
@@ -136,6 +145,14 @@ pub struct AppState {
     /// administrator preparing anything, which makes a rate the only bound
     /// on it.
     pub oauth_register_rate_limiter: ratelimit::RateLimiter,
+    /// Attempt limit for `/v1/uploads/*`, bucketed by source address. The
+    /// route takes no session, so the link secret is all that stands in the
+    /// way and a rate is what keeps guessing at it pointless.
+    pub upload_rate_limiter: ratelimit::RateLimiter,
+    /// The same for `/v1/downloads/*`.
+    pub download_rate_limiter: ratelimit::RateLimiter,
+    /// Downloads holding a spooled file; see `downloads::DOWNLOAD_SLOTS`.
+    pub download_slots: Arc<tokio::sync::Semaphore>,
     /// Allowed `Origin` values for `/mcp`, guarding against DNS rebinding. A
     /// request that carries an Origin must match this list; one that does not
     /// (as most AI connectors do not) is allowed. Empty by default.
@@ -384,6 +401,9 @@ async fn main() -> anyhow::Result<()> {
         setup_rate_limiter: ratelimit::RateLimiter::new(setup::ATTEMPTS_PER_MINUTE),
         login_rate_limiter: ratelimit::RateLimiter::new(auth::LOGIN_ATTEMPTS_PER_MINUTE),
         oauth_register_rate_limiter: ratelimit::RateLimiter::new(oauth::REGISTRATIONS_PER_MINUTE),
+        upload_rate_limiter: ratelimit::RateLimiter::new(uploads::UPLOADS_PER_MINUTE),
+        download_rate_limiter: ratelimit::RateLimiter::new(downloads::DOWNLOADS_PER_MINUTE),
+        download_slots: Arc::new(tokio::sync::Semaphore::new(downloads::DOWNLOAD_SLOTS)),
         mcp_allowed_origins,
     });
 
@@ -393,6 +413,26 @@ async fn main() -> anyhow::Result<()> {
     if serve_role.serves_rest() {
         let enabled = oidc::current(&state).await.is_some();
         tracing::info!(enabled, "external login settings loaded");
+    }
+
+    // Staged uploads nobody filed and spent download links, once an hour, by
+    // the process that serves both routes. The `mcp` process issues links but
+    // never receives or sends a file.
+    if let (true, Some(objects)) = (serve_role.serves_rest(), state.objects.clone()) {
+        let store = state.store.clone();
+        tokio::spawn(async move {
+            loop {
+                uploads::sweep(
+                    &store,
+                    &objects,
+                    chrono::Utc::now(),
+                    chrono::Duration::hours(uploads::STAGED_KEEP_HOURS),
+                )
+                .await;
+                downloads::sweep(&store, chrono::Utc::now()).await;
+                tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
+            }
+        });
     }
 
     // `/healthz` is mounted in all three roles: the compose healthcheck relies
@@ -438,6 +478,16 @@ async fn main() -> anyhow::Result<()> {
                     .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
             )
             .route("/v1/meta", get(meta))
+            .route(
+                "/v1/uploads/{secret}",
+                get(uploads::status)
+                    .post(uploads::receive)
+                    .layer(DefaultBodyLimit::max(uploads::UPLOAD_BODY_LIMIT)),
+            )
+            .route(
+                "/v1/downloads/{secret}",
+                get(downloads::serve).head(downloads::head_refused),
+            )
             .route("/v1/ops", get(list_ops))
             .route(
                 "/v1/ops/{name}",
@@ -504,6 +554,11 @@ pub fn ctx_from(
         actor_role: identity.actor_role.clone(),
         username: identity.username.clone(),
         employee_id: identity.employee_id,
+        user_id: identity.user_id,
+        token_id: identity.token_id,
+        // Set by the caller that has the request: this function takes no
+        // headers, so nothing a request carries can reach the identity.
+        public_base: None,
         prompt,
         channel,
         client_ip,
@@ -753,13 +808,14 @@ async fn call_op(
     }));
     // Operations from the screen use the Ui channel and are not subject to the
     // AI tool grants.
-    let ctx = ctx_from(
+    let mut ctx = ctx_from(
         &s,
         &verified.identity(),
         body.prompt,
         laysi_ops::Channel::Ui,
         auth::client_ip(&headers),
     );
+    ctx.public_base = Some(oauth::public_base(&headers));
 
     match s.registry.dispatch(&ctx, &name, body.input).await {
         Ok(data) => {

@@ -2398,6 +2398,43 @@ textarea {
   gap: var(--space-lg);
 }
 
+.upload-drop {
+  display: block;
+  width: 100%;
+  margin: 0 0 var(--space-4xl);
+  padding: var(--space-9xl) var(--space-6xl);
+  border: var(--rule-width) dashed var(--rule-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-ink-muted);
+  font: inherit;
+  font-size: var(--text-lg);
+  text-align: center;
+  cursor: pointer;
+}
+
+.upload-drop:hover,
+.upload-drop--over {
+  border-color: var(--color-accent);
+  background: var(--wash-accent-soft);
+  color: var(--color-accent-darkest);
+}
+
+.upload-drop:disabled {
+  cursor: not-allowed;
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--color-neutral-500);
+}
+
+.upload-list {
+  margin-bottom: var(--space-4xl);
+}
+
+.upload-list__failed {
+  color: var(--color-accent-darkest);
+}
+
 .sidebar__setup {
   margin: 0 var(--space-5xl) var(--space-3xl);
   padding: var(--space-xl) var(--space-2xl);

@@ -57,6 +57,7 @@ pub mod security;
 pub mod selfservice;
 pub mod settings;
 pub mod tax;
+pub mod uploads;
 pub mod webhook;
 
 /// Collect every module's operations. Used by `Registry::new()`.
@@ -73,6 +74,7 @@ pub fn all() -> Vec<Box<dyn Operation>> {
     out.extend(expenses::ops());
     out.extend(budget::ops());
     out.extend(documents::ops());
+    out.extend(uploads::ops());
     out.extend(imports::ops());
     out.extend(reports::ops());
     out.extend(masters::ops());

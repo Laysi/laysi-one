@@ -14,11 +14,16 @@
 //! can store files too. The cost is base64 transport, hence the per-file limit
 //! [`laysi_store::storage::MAX_OBJECT_BYTES`]; larger files need streaming
 //! uploads, not a higher limit.
+//!
+//! The same limit holds on the way out: `get_document` returns content only up
+//! to it, and anything larger goes through `get_download_link`, a one-time
+//! link that `/v1/downloads/{secret}` serves after checking the hash.
 
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::Engine;
-use laysi_store::storage::{self, MAX_OBJECT_BYTES};
+use laysi_store::downloads::NewDownloadLink;
+use laysi_store::storage::{self, MAX_OBJECT_BYTES, MAX_UPLOAD_BYTES};
 use laysi_store::ReserveDocument;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -30,15 +35,23 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListDocuments),
         Box::new(UploadDocument),
         Box::new(GetDocument),
+        Box::new(GetDownloadLink),
     ]
 }
+
+/// How long a download link stays usable. Enough for a screen to follow it
+/// at once or for a person to open one pasted into a chat.
+pub const DOWNLOAD_LINK_MINUTES: i64 = 5;
+
+/// Where a download link points. Also mounted by the server under this path.
+pub const DOWNLOAD_ENDPOINT: &str = "/v1/downloads/";
 
 /// Bytes in a gigabyte. A unit conversion, not a setting.
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 const BYTES_PER_MB: f64 = 1024.0 * 1024.0;
 
 /// Human-readable file size.
-pub(crate) fn human_size(bytes: i64) -> String {
+pub fn human_size(bytes: i64) -> String {
     let b = bytes as f64;
     if b >= BYTES_PER_GB {
         format!("{:.1} GB", b / BYTES_PER_GB)
@@ -66,7 +79,7 @@ pub(crate) fn kind_label(kind: &str) -> &'static str {
 
 /// Short form of a hash, e.g. `a91f…c4e2`. The full value is returned
 /// alongside; the short form is only for reading.
-pub(crate) fn short_checksum(sum: &str) -> String {
+pub fn short_checksum(sum: &str) -> String {
     if sum.len() < 12 {
         return sum.to_string();
     }
@@ -124,7 +137,7 @@ impl Operation for ListDocuments {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。文件的辨識狀態一律為待處理。"
+        "讀文件清單：檔名、關聯單據、版次、內容雜湊，以及物件儲存的實際用量。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ListDocumentsInput>()
@@ -151,6 +164,8 @@ impl Operation for ListDocuments {
                         "objects": u.objects,
                         "bytes": u.bytes,
                         "size_label": human_size(u.bytes),
+                        "staged_objects": u.staged_objects,
+                        "staged_bytes": u.staged_bytes,
                     })),
                     None,
                 ),
@@ -184,7 +199,10 @@ impl Operation for ListDocuments {
                 "storage_error": storage_error,
                 // Must be shown on screen, not left in the code.
                 "immutability_note": "稽核封存的文件無法刪除。",
-                "max_object_bytes": MAX_OBJECT_BYTES,
+                // The screen uploads through a link, so its ceiling is the
+                // link's. The base64 input keeps its own, lower one.
+                "max_object_bytes": MAX_UPLOAD_BYTES,
+                "max_inline_bytes": MAX_OBJECT_BYTES,
             }),
             summary,
         ))
@@ -198,9 +216,18 @@ struct UploadDocument;
 #[derive(Deserialize, JsonSchema)]
 pub struct UploadDocumentInput {
     /// File name. Non-ASCII names are kept; the object key is transliterated.
-    pub file_name: String,
-    /// File contents, base64.
-    pub content_base64: String,
+    /// Required with `content_base64`; with `upload_id` it defaults to the
+    /// name the file was uploaded under.
+    #[serde(default)]
+    pub file_name: Option<String>,
+    /// File contents, base64, up to 25 MB. Give this or `upload_id`, not
+    /// both.
+    #[serde(default)]
+    pub content_base64: Option<String>,
+    /// A file received through `request_upload_link`, as listed by
+    /// `list_uploads`. Give this or `content_base64`, not both.
+    #[serde(default)]
+    pub upload_id: Option<uuid::Uuid>,
     /// Display name. Defaults to the file name.
     #[serde(default)]
     pub name: Option<String>,
@@ -264,7 +291,7 @@ impl Operation for UploadDocument {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "上傳一份檔案到物件儲存，並掛到一張單據上。內容以 base64 傳入。同一個編號再上傳一次會存成新版本。"
+        "存一份文件到物件儲存，並掛到一張單據上。檔案可帶入上傳連結收到的上傳編號，或以 base64 直接傳入（25 MB 以內）。同一個編號再存一次會成為新版本。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<UploadDocumentInput>()
@@ -274,19 +301,40 @@ impl Operation for UploadDocument {
         let i: UploadDocumentInput = parse(input)?;
         let objects = ctx.objects()?;
 
-        let body = base64::engine::general_purpose::STANDARD
-            .decode(i.content_base64.trim())
-            .map_err(|e| OpError::BadInput(format!("檔案內容不是合法的 base64：{e}")))?;
-        if body.is_empty() {
-            return Err(OpError::BadInput("檔案是空的".into()));
-        }
-        if body.len() > MAX_OBJECT_BYTES {
-            return Err(OpError::BadInput(format!(
-                "檔案 {} 位元組，超過單檔上限 {}。",
-                body.len(),
-                MAX_OBJECT_BYTES
-            )));
-        }
+        // Where the bytes come from: the input itself, or a file an upload
+        // link already put in the bucket.
+        let source = match (i.content_base64.as_deref(), i.upload_id) {
+            (Some(_), Some(_)) => {
+                return Err(OpError::BadInput("檔案內容與上傳編號請擇一提供。".into()))
+            }
+            (None, None) => {
+                return Err(OpError::BadInput(
+                    "請帶入上傳編號，或以 base64 提供檔案內容。".into(),
+                ))
+            }
+            (Some(content), None) => {
+                let file_name = i
+                    .file_name
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .ok_or_else(|| OpError::BadInput("缺少必填欄位「file_name」".into()))?;
+                let body = base64::engine::general_purpose::STANDARD
+                    .decode(content.trim())
+                    .map_err(|e| OpError::BadInput(format!("檔案內容不是合法的 base64：{e}")))?;
+                if body.is_empty() {
+                    return Err(OpError::BadInput("檔案是空的".into()));
+                }
+                if body.len() > MAX_OBJECT_BYTES {
+                    return Err(OpError::BadInput(format!(
+                        "檔案 {} 位元組，超過單檔上限 {}。更大的檔案請改用上傳連結。",
+                        body.len(),
+                        MAX_OBJECT_BYTES
+                    )));
+                }
+                Source::Inline { file_name, body }
+            }
+            (None, Some(upload_id)) => Source::Staged(upload_id),
+        };
 
         let kind = i.kind.as_deref().unwrap_or("other");
         if !KINDS.contains(&kind) {
@@ -313,44 +361,20 @@ impl Operation for UploadDocument {
             ctx.store.voucher_by_no(link_ref).await?;
         }
 
-        // 1. Allocate the number and revision; the object key needs them.
-        let slot = ctx
-            .store
-            .reserve_document_slot(ReserveDocument {
-                doc_no: i.doc_no.as_deref(),
-                name: i.name.as_deref().unwrap_or(&i.file_name),
-                kind,
-                link_type,
-                link_ref,
-                note: i.note.as_deref().unwrap_or(""),
-                today: ctx.today,
-                actor: &ctx.actor,
-            })
-            .await?;
-
-        // 2. Put the object in the bucket. On failure stop here, so no database
-        //    row points at a file that does not exist.
-        let key = storage::object_key(
-            &ctx.today.format("%y%m").to_string(),
-            &slot.doc_no,
-            slot.version_no,
-            &i.file_name,
-        );
-        let content_type = storage::guess_content_type(&i.file_name);
-        let stored = objects.put(&key, &body, content_type, &i.file_name).await?;
-
-        // 3. Register it. If that fails the object has to go: the number is
-        //    spent either way, but a file nothing points at is invisible and
-        //    counts against storage forever.
-        let doc = match ctx
-            .store
-            .record_document_version(&slot, &stored, &i.file_name, &ctx.actor)
-            .await
-        {
-            Ok(doc) => doc,
-            Err(e) => {
-                objects.discard(&stored.key).await;
-                return Err(e.into());
+        let filing = Filing {
+            doc_no: i.doc_no.as_deref(),
+            name: i.name.as_deref(),
+            kind,
+            link_type,
+            link_ref,
+            note: i.note.as_deref().unwrap_or(""),
+        };
+        let doc = match source {
+            Source::Inline { file_name, body } => {
+                file_inline(ctx, objects, &filing, &file_name, &body).await?
+            }
+            Source::Staged(upload_id) => {
+                file_staged(ctx, objects, &filing, i.file_name.as_deref(), upload_id).await?
             }
         };
 
@@ -378,6 +402,170 @@ impl Operation for UploadDocument {
     }
 }
 
+/// Where a document's bytes come from.
+enum Source {
+    /// Carried in the input as base64.
+    Inline { file_name: String, body: Vec<u8> },
+    /// Already in the bucket, received through an upload link.
+    Staged(uuid::Uuid),
+}
+
+/// Everything about a document except its bytes.
+struct Filing<'a> {
+    doc_no: Option<&'a str>,
+    name: Option<&'a str>,
+    kind: &'a str,
+    link_type: &'a str,
+    link_ref: &'a str,
+    note: &'a str,
+}
+
+/// Allocate the number and revision; the object key needs them.
+async fn reserve(
+    ctx: &OpCtx,
+    filing: &Filing<'_>,
+    file_name: &str,
+) -> Result<laysi_store::DocumentSlot, OpError> {
+    Ok(ctx
+        .store
+        .reserve_document_slot(ReserveDocument {
+            doc_no: filing.doc_no,
+            name: filing.name.unwrap_or(file_name),
+            kind: filing.kind,
+            link_type: filing.link_type,
+            link_ref: filing.link_ref,
+            note: filing.note,
+            today: ctx.today,
+            actor: &ctx.actor,
+        })
+        .await?)
+}
+
+fn document_key(ctx: &OpCtx, slot: &laysi_store::DocumentSlot, file_name: &str) -> String {
+    storage::object_key(
+        &ctx.today.format("%y%m").to_string(),
+        &slot.doc_no,
+        slot.version_no,
+        file_name,
+    )
+}
+
+/// Register an object that is already in the bucket. If that fails the
+/// object has to go: the number is spent either way, but a file nothing
+/// points at is invisible and counts against storage forever.
+async fn record(
+    ctx: &OpCtx,
+    objects: &laysi_store::ObjectStore,
+    slot: &laysi_store::DocumentSlot,
+    stored: &storage::StoredObject,
+    file_name: &str,
+) -> Result<laysi_store::DocumentRow, OpError> {
+    match ctx
+        .store
+        .record_document_version(slot, stored, file_name, &ctx.actor)
+        .await
+    {
+        Ok(doc) => Ok(doc),
+        Err(e) => {
+            objects.discard(&stored.key).await;
+            Err(e.into())
+        }
+    }
+}
+
+/// File bytes carried in the input. The object goes into the bucket before
+/// any row points at it, so a failure stops with nothing to point at a file
+/// that does not exist.
+async fn file_inline(
+    ctx: &OpCtx,
+    objects: &laysi_store::ObjectStore,
+    filing: &Filing<'_>,
+    file_name: &str,
+    body: &[u8],
+) -> Result<laysi_store::DocumentRow, OpError> {
+    let slot = reserve(ctx, filing, file_name).await?;
+    let key = document_key(ctx, &slot, file_name);
+    let content_type = storage::guess_content_type(file_name);
+    let stored = objects.put(&key, body, content_type, file_name).await?;
+    record(ctx, objects, &slot, &stored, file_name).await
+}
+
+/// File a staged upload: copy it to its document key inside the bucket,
+/// register it, then drop the staged copy.
+///
+/// The staged file is taken before anything else, so two calls with the same
+/// id cannot both file it, and put back if the filing fails, so a failure
+/// leaves it where it was for another try. Its type and hash are the ones
+/// recorded when it arrived: the hash was taken over the bytes as they came
+/// in, which is what retrieval will hold the document to.
+async fn file_staged(
+    ctx: &OpCtx,
+    objects: &laysi_store::ObjectStore,
+    filing: &Filing<'_>,
+    rename: Option<&str>,
+    upload_id: uuid::Uuid,
+) -> Result<laysi_store::DocumentRow, OpError> {
+    let holder = super::uploads::holder(ctx)?;
+    let Some(staged) = ctx.store.take_staged_upload(upload_id, holder).await? else {
+        return Err(OpError::BadInput(
+            match ctx.store.staged_upload_doc_no(upload_id, holder).await? {
+                Some(Some(doc_no)) => format!("這個檔案已經存成文件 {doc_no}。"),
+                Some(None) => "這個檔案正在存成文件，請稍後查看文件清單。".into(),
+                None => "查無此上傳編號，或檔案已在收到一天後刪除。請重新上傳。".into(),
+            },
+        ));
+    };
+    let file_name = rename
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or(&staged.file_name)
+        .to_string();
+
+    let filed = async {
+        let slot = reserve(ctx, filing, &file_name).await?;
+        let key = document_key(ctx, &slot, &file_name);
+        objects
+            .copy_to(
+                &staged.object_key,
+                &key,
+                &staged.content_type,
+                &staged.checksum,
+            )
+            .await?;
+        let stored = storage::StoredObject {
+            key,
+            byte_size: staged.byte_size,
+            content_type: staged.content_type.clone(),
+            checksum: staged.checksum.clone(),
+        };
+        record(ctx, objects, &slot, &stored, &file_name).await
+    }
+    .await;
+
+    match filed {
+        Ok(doc) => {
+            // A failure here leaves the staged row taken without a document
+            // number, which the sweep treats as filed; its object is then an
+            // orphan the sweep removes. Neither is worth failing a filing
+            // that has already happened.
+            if let Err(error) = ctx
+                .store
+                .mark_staged_upload_filed(upload_id, &doc.doc_no)
+                .await
+            {
+                tracing::warn!(%error, %upload_id, "could not record which document a staged upload became");
+            }
+            objects.discard(&staged.object_key).await;
+            Ok(doc)
+        }
+        Err(e) => {
+            if let Err(error) = ctx.store.return_staged_upload(upload_id).await {
+                tracing::warn!(%error, %upload_id, "could not put a staged upload back after a failed filing");
+            }
+            Err(e)
+        }
+    }
+}
+
 // Retrieval
 
 struct GetDocument;
@@ -389,8 +577,9 @@ pub struct GetDocumentInput {
     /// Revision. Defaults to the latest.
     #[serde(default)]
     pub version: Option<i32>,
-    /// Whether to return the content as base64. Off by default, which only
-    /// verifies the hash.
+    /// Whether to return the content as base64, for documents up to 25 MB.
+    /// Off by default, which only verifies the hash. Larger documents are
+    /// downloaded from the documents screen.
     #[serde(default)]
     pub include_content: bool,
 }
@@ -404,7 +593,7 @@ impl Operation for GetDocument {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容。雜湊不符會回報錯誤，不回傳內容。"
+        "從物件儲存取回一份文件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容，限 25 MB 以內，更大的文件請在「文件管理」畫面下載。雜湊不符會回報錯誤，不回傳內容。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<GetDocumentInput>()
@@ -415,29 +604,55 @@ impl Operation for GetDocument {
         let objects = ctx.objects()?;
         let doc = ctx.store.document_version(&i.doc_no, i.version).await?;
 
+        if i.include_content && doc.byte_size > MAX_OBJECT_BYTES as i64 {
+            return Err(OpError::BadInput(format!(
+                "{} v{} 有 {}，超過直接回傳內容的上限 {}，請在「文件管理」畫面下載。",
+                doc.doc_no,
+                doc.version_no,
+                human_size(doc.byte_size),
+                human_size(MAX_OBJECT_BYTES as i64)
+            )));
+        }
+
         // Always compared on retrieval. A mismatch is an error: a tampered
         // record is more dangerous than a missing one because it looks
-        // genuine.
-        let body = objects.get(&doc.object_key, &doc.checksum).await?;
-        let recomputed = storage::checksum(&body);
-
-        let content = i
-            .include_content
-            .then(|| base64::engine::general_purpose::STANDARD.encode(&body));
+        // genuine. Without content the object is hashed as it streams past,
+        // so checking a 90 MB document does not hold 90 MB.
+        let (content, size) = if i.include_content {
+            let body = objects.get(&doc.object_key, &doc.checksum).await?;
+            let size = body.len() as u64;
+            (
+                Some(base64::engine::general_purpose::STANDARD.encode(&body)),
+                size,
+            )
+        } else {
+            (
+                None,
+                objects
+                    .verify(
+                        &doc.object_key,
+                        &doc.checksum,
+                        u64::try_from(doc.byte_size).unwrap_or(0),
+                    )
+                    .await?,
+            )
+        };
 
         let summary = format!(
             "取回 {} v{} {} · 雜湊比對相符（{}）",
             doc.doc_no,
             doc.version_no,
             doc.file_name,
-            short_checksum(&recomputed)
+            short_checksum(&doc.checksum)
         );
         Ok(OpOutcome::new(
             json!({
                 "document": document_json(&doc),
-                "verified": recomputed == doc.checksum,
-                "checksum_recomputed": recomputed,
-                "byte_size_actual": body.len(),
+                // Both reads fail rather than return on a mismatch, so reaching
+                // here means the recomputed hash is the registered one.
+                "verified": true,
+                "checksum_recomputed": doc.checksum,
+                "byte_size_actual": size,
                 "content_base64": content,
                 "bucket": objects.bucket(),
             }),
@@ -446,9 +661,110 @@ impl Operation for GetDocument {
     }
 }
 
+// Download links
+
+struct GetDownloadLink;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetDownloadLinkInput {
+    /// Document number, e.g. `D2607-001`.
+    pub doc_no: String,
+    /// Revision. Defaults to the latest.
+    #[serde(default)]
+    pub version: Option<i32>,
+}
+
+#[async_trait]
+impl Operation for GetDownloadLink {
+    fn name(&self) -> &'static str {
+        "get_download_link"
+    }
+    fn risk(&self) -> Risk {
+        // Writes a row, the link, and no business record: an installation
+        // whose licence has lapsed still hands its documents out.
+        Risk::ReadOnly
+    }
+    fn summary(&self) -> &'static str {
+        "取得一份文件的下載連結：5 分鐘內可使用一次，伺服器比對內容雜湊相符後才送出檔案，不限檔案大小。連結交給使用者以瀏覽器開啟，或在程式執行環境裡執行回傳的 curl 指令。"
+    }
+    fn input_schema(&self) -> Value {
+        schema_of::<GetDownloadLinkInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: GetDownloadLinkInput = parse(input)?;
+        let holder = ctx
+            .link_holder()
+            .ok_or_else(|| OpError::BadInput("下載連結限登入的帳號或 MCP 連線取得。".into()))?;
+        // Refused here rather than when the link is followed: a link that can
+        // only fail is worse than no link.
+        ctx.objects()?;
+
+        let doc_no = i.doc_no.trim();
+        let doc = ctx.store.document_version(doc_no, i.version).await?;
+        // Personnel files are reached only through the employee-scoped
+        // operations, and answered as if they did not exist, so the number
+        // alone confirms nothing.
+        if doc.link_type == EMPLOYEE_LINK_TYPE {
+            return Err(laysi_store::StoreError::DocumentNotFound {
+                no: doc_no.to_string(),
+            }
+            .into());
+        }
+
+        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(DOWNLOAD_LINK_MINUTES);
+        let issued = ctx
+            .store
+            .create_download_link(NewDownloadLink {
+                holder,
+                actor: &ctx.actor,
+                actor_role: &ctx.actor_role,
+                channel: ctx.channel.as_db(),
+                doc_no: &doc.doc_no,
+                version_no: doc.version_no,
+                expires_at,
+            })
+            .await?
+            .ok_or_else(|| laysi_store::StoreError::DocumentVersionNotFound {
+                no: doc.doc_no.clone(),
+                version: doc.version_no,
+            })?;
+
+        let base = ctx.public_base.as_deref().unwrap_or("");
+        let path = format!("{DOWNLOAD_ENDPOINT}{}", issued.secret);
+        let url = format!("{base}{path}");
+        Ok(OpOutcome::new(
+            json!({
+                "document": document_json(&doc),
+                "download_url": url,
+                "download_path": path,
+                "curl": format!("curl --fail-with-body -o '<存檔路徑>' '{url}'"),
+                "expires_at": issued.expires_at,
+                "note": "連結只能使用一次；用過或過期之後請重新取得。",
+            }),
+            format!(
+                "取得下載連結 {} v{} {} · {}",
+                doc.doc_no,
+                doc.version_no,
+                doc.file_name,
+                human_size(doc.byte_size)
+            ),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lapsed licence refuses what writes, and the documents are the
+    /// customer's: the link has to stay reachable while nothing else can be
+    /// written.
+    #[test]
+    fn a_download_link_is_not_a_write() {
+        assert!(!GetDownloadLink.writes());
+        assert!(matches!(GetDownloadLink.risk(), Risk::ReadOnly));
+    }
 
     /// The checksum column reads as `a91f…c4e2`. The short form is for
     /// reading; the full value is returned as well.

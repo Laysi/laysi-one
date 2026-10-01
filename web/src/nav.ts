@@ -168,6 +168,14 @@ export function consentRequested(): boolean {
   return window.location.pathname.replace(/\/+$/, '') === CONSENT_PATH;
 }
 
+export const UPLOAD_PAGE_PATH = '/upload/';
+
+export function uploadLinkSecret(path: string): string | null {
+  if (!path.startsWith(UPLOAD_PAGE_PATH)) return null;
+  const secret = path.slice(UPLOAD_PAGE_PATH.length).replace(/\/+$/, '');
+  return /^lysu_[0-9a-f]{64}$/.test(secret) ? secret : null;
+}
+
 export const SCREEN_PATH: Record<ScreenId, string> = {
   meclock: '/me/clock',
   me: '/me',

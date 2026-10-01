@@ -179,6 +179,147 @@ export function downloadFile(name: string, data: BlobPart, type: string) {
   URL.revokeObjectURL(url);
 }
 
+export const UPLOAD_ENDPOINT = '/v1/uploads/';
+
+export const uploadLink = z.object({
+  batch_id: z.string(),
+  upload_page: z.string(),
+  upload_endpoint: z.string(),
+  upload_path: z.string(),
+  curl: z.string(),
+  expires_at: z.string(),
+  max_files: z.number(),
+  max_file_bytes: z.number(),
+  note: z.string(),
+});
+export type UploadLink = z.infer<typeof uploadLink>;
+
+export const stagedFile = z.object({
+  upload_id: z.string(),
+  file_name: z.string(),
+  byte_size: z.number(),
+  content_type: z.string(),
+  checksum: z.string(),
+  remaining: z.number(),
+  note: z.string().nullable(),
+});
+export type StagedFile = z.infer<typeof stagedFile>;
+
+export const uploadLinkStatus = z.object({
+  expires_at: z.string(),
+  max_files: z.number(),
+  remaining: z.number(),
+  max_file_bytes: z.number(),
+  files: z.array(z.object({ file_name: z.string(), byte_size: z.number() })),
+});
+export type UploadLinkStatus = z.infer<typeof uploadLinkStatus>;
+
+function uploadEnvelope<S extends z.ZodType>(status: number, body: unknown, schema: S): z.infer<S> {
+  if (body && typeof body === 'object' && 'ok' in body) {
+    const envelope = body as { ok: boolean; data?: unknown; error?: ApiError };
+    if (envelope.ok && envelope.data !== undefined) return parsed(schema, envelope.data);
+    if (envelope.error) throw new OpFailed(envelope.error);
+  }
+  if (status === 413) {
+    throw new OpFailed({ code: 'too_large', message: '檔案超過單檔上限，請壓縮或分成幾個檔案再上傳。' });
+  }
+  throw new OpFailed({ code: 'network', message: `伺服器回應異常（HTTP ${status}）` });
+}
+
+export async function getUploadLinkStatus(secret: string): Promise<UploadLinkStatus> {
+  const res = await fetch(`${UPLOAD_ENDPOINT}${encodeURIComponent(secret)}`);
+  const body: unknown = await res.json().catch(() => null);
+  return uploadEnvelope(res.status, body, uploadLinkStatus);
+}
+
+export function sendToUploadLink(
+  path: string,
+  file: File,
+  onProgress?: (fraction: number) => void,
+): Promise<StagedFile> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', path);
+    request.responseType = 'json';
+    request.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    request.onload = () => {
+      try {
+        resolve(uploadEnvelope(request.status, request.response, stagedFile));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    request.onerror = () =>
+      reject(new OpFailed({ code: 'network', message: '上傳中斷，請確認網路連線後再試。' }));
+    const form = new FormData();
+    form.append('file', file, file.name);
+    request.send(form);
+  });
+}
+
+export async function uploadDocumentFile(
+  file: File,
+  fields: { kind: string; link_type?: string; link_ref?: string },
+  prompt: string,
+  onProgress?: (fraction: number) => void,
+): Promise<UploadedDocument> {
+  const link = await callOp('request_upload_link', {}, prompt, uploadLink);
+  const staged = await sendToUploadLink(link.upload_path, file, onProgress);
+  return callOp(
+    'upload_document',
+    { ...fields, upload_id: staged.upload_id },
+    prompt,
+    uploadedDocument,
+  );
+}
+
+export const downloadLink = z.object({
+  download_path: z.string(),
+  expires_at: z.string(),
+});
+export type DownloadLink = z.infer<typeof downloadLink>;
+
+async function downloadFailure(res: Response): Promise<never> {
+  const body: unknown = await res.json().catch(() => null);
+  const error = apiError.safeParse((body as { error?: unknown } | null)?.error);
+  if (error.success) throw new OpFailed(error.data);
+  throw new OpFailed({ code: 'network', message: `伺服器回應異常（HTTP ${res.status}）` });
+}
+
+export async function downloadDocumentFile(
+  doc: { doc_no: string; version_no?: number; file_name: string; content_type: string; byte_size: number },
+  onProgress?: (fraction: number) => void,
+): Promise<void> {
+  const link = await callOp(
+    'get_download_link',
+    { doc_no: doc.doc_no, version: doc.version_no },
+    undefined,
+    downloadLink,
+  );
+  const lost = () => new OpFailed({ code: 'network', message: '下載中斷，請確認網路連線後再試。' });
+  const res = await fetch(link.download_path, { cache: 'no-store' }).catch(() => {
+    throw lost();
+  });
+  if (!res.ok || !res.body) return downloadFailure(res);
+  const total = Number(res.headers.get('content-length')) || doc.byte_size;
+  let received = 0;
+  const counted = res.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        received += chunk.byteLength;
+        if (onProgress && total > 0) onProgress(Math.min(received / total, 1));
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  const blob = await new Response(counted).blob().catch(() => {
+    throw lost();
+  });
+  downloadFile(doc.file_name, blob, doc.content_type || 'application/octet-stream');
+}
+
 export const licenseState = z.object({
   standing: z.string(),
   writes_allowed: z.boolean(),
@@ -1488,15 +1629,6 @@ export type DocumentRow = z.infer<typeof documentRow>;
 export const uploadedDocument = z.object({ document: documentRow, new_version: z.boolean() });
 export type UploadedDocument = z.infer<typeof uploadedDocument>;
 
-export const verifiedDocument = z.object({
-  document: documentRow,
-  verified: z.boolean(),
-  checksum_recomputed: z.string(),
-  byte_size_actual: z.number(),
-  content_base64: z.string().nullable(),
-});
-export type VerifiedDocument = z.infer<typeof verifiedDocument>;
-
 export const documentList = z.object({
   documents: z.array(documentRow),
   stats: z.object({
@@ -1513,12 +1645,15 @@ export const documentList = z.object({
     objects: z.number(),
     bytes: z.number(),
     size_label: z.string(),
+    staged_objects: z.number(),
+    staged_bytes: z.number(),
   }).nullable(),
   bucket_difference: z.number().nullable(),
   bucket_reconciled: z.boolean().nullable(),
   storage_error: z.string().nullable(),
   immutability_note: z.string(),
   max_object_bytes: z.number(),
+  max_inline_bytes: z.number(),
 });
 export type DocumentList = z.infer<typeof documentList>;
 

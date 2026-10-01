@@ -135,6 +135,9 @@ fn ctx_for(
         actor_role: role.to_string(),
         username: None,
         employee_id,
+        user_id: None,
+        token_id: None,
+        public_base: None,
         prompt: None,
         // Not Mcp: this is a person running a command, and the MCP tool
         // grants exist to limit what AI may call.

@@ -4,13 +4,12 @@ import {
   businessToday,
   callOp,
   dimensionList,
-  downloadFile,
+  downloadDocumentFile,
   expenseApproval,
   expenseClaimList,
   expenseClaimResult,
   money,
   OpFailed,
-  verifiedDocument,
   type AccountList,
   type DimensionList,
   type ExpenseClaim,
@@ -43,6 +42,7 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit, canDocs }: 
   const [accounts, setAccounts] = useState<AccountList | null>(null);
   const [depts, setDepts] = useState<DimensionList | null>(null);
   const [fetching, setFetching] = useState<string | null>(null);
+  const [fetchProgress, setFetchProgress] = useState(0);
 
   const [drawer, setDrawer] = useState(false);
   const [title, setTitle] = useState('');
@@ -56,22 +56,9 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit, canDocs }: 
 
   async function openReceipt(r: ExpenseReceipt) {
     setFetching(r.doc_no);
+    setFetchProgress(0);
     try {
-      const d = await callOp(
-        'get_document',
-        { doc_no: r.doc_no, include_content: true },
-        undefined,
-        verifiedDocument,
-      );
-      if (!d.content_base64) {
-        onToast('檔案儲存沒有回傳內容，請再試一次');
-        return;
-      }
-      downloadFile(
-        r.file_name,
-        Uint8Array.from(atob(d.content_base64), (c) => c.charCodeAt(0)),
-        r.content_type || 'application/octet-stream',
-      );
+      await downloadDocumentFile(r, setFetchProgress);
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -278,7 +265,13 @@ export function Expenses({ onToast, reloadKey, onChanged, canSubmit, canDocs }: 
                                   disabled={fetching !== null}
                                   onClick={() => void openReceipt(r)}
                                 >
-                                  {fetching === r.doc_no ? '取回中…' : r.file_name}
+                                  {fetching === r.doc_no ? (
+                                    <>
+                                      下載中 <span className="num">{Math.round(fetchProgress * 100)}%</span>
+                                    </>
+                                  ) : (
+                                    r.file_name
+                                  )}
                                 </button>
                               ) : (
                                 r.file_name

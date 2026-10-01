@@ -392,9 +392,97 @@ SQL 會讓三張表對「什麼算已過帳」與日期怎麼比各有一套定�
 `document_version` 的物件鍵與雜湊由 trigger 擋住不可修改，封存的 `document`
 不可刪除。改內容只能上傳新版本，與「已過帳傳票只能開反向分錄」同一條規矩。
 
-上傳做成操作（走 `Registry`）而不是 multipart 端點，因為「所有操作都支援 MCP」
-不能有例外。代價是 base64 膨脹三分之一，因此設 `MAX_OBJECT_BYTES` 上限；要放更大
-的檔案得改成串流上傳，**不是把上限調大**。
+上傳原本只有一條路：`upload_document` 的 `content_base64`，因為「所有操作都支援
+MCP」不能有例外。那條路留著（25 MB，`MAX_OBJECT_BYTES`），但它有兩個後果：base64
+膨脹三分之一，而 AI 要把整份 base64 當輸出寫出來——1 MB 的 PDF 約 140 萬字元，超過
+單次輸出上限，所以 AI 實際上傳不進真實的檔案。
+
+**上傳連結**把位元組搬出操作輸入，操作仍然是入口：
+
+1. `request_upload_link`（`needs_confirm`，會寫一列）發一條 10 分鐘、至多 20 個檔的
+   連結，回 `batch_id`、瀏覽器頁網址（`/upload/{secret}`）、`POST` 網址
+   （`/v1/uploads/{secret}`）與 curl 指令。秘密只存 BLAKE3，稽核紀錄記「發了一條
+   連結」不記連結。網址由 `oauth::public_base` 推導：OAuth 連接器本來就只能走主站
+   網址，Caddy 在同一網域把 `/v1/*` 轉給 api。
+2. 檔案 `POST` 到連結，**一個請求一個檔案**：Cloudflare Free／Pro 每個請求上限
+   100 MB，所以 `MAX_UPLOAD_BYTES` 是 90 MB。串流寫進 RustFS 的 `staging/`：邊收
+   邊算 BLAKE3，每 8 MiB 送一段 multipart，一個上傳只佔一段的記憶體。
+3. `list_uploads` 列出收到的檔案；`upload_document { upload_id }` 在桶子裡以
+   CopyObject 搬到文件的物件鍵，類型與雜湊用收件當下記下的那兩個。
+4. 一天內沒人取用的暫存檔由 api 每小時的清除工作刪掉，連同桶子裡沒有資料列指著的
+   `staging/` 物件與中斷的 multipart。
+
+**先進暫存區，不直接成為文件**：文件封存後不可刪，傳錯的檔案要丟得掉；AI 也要先讀過
+檔案才知道要掛哪一張單。**連結不綁定目標操作**是同一個理由。
+
+**上傳連結只負責傳檔案**：這組操作把檔案送進私人儲存，讀內容交給 AI 自己的工具與
+一起使用的其他 MCP。AI 在自己的環境裡本來就讀得了它要上傳的圖片、PDF 與試算表；伺服器
+再解析一次，等於為外部送進來的檔案多養一個要隔離在無密鑰容器裡的解析器（圖片、試算表、
+PDF 各一套），換來的是 AI 已經有的東西。使用者以瀏覽器上傳頁送來的檔案，AI 從
+`list_uploads` 只看得到檔名、大小與類型，要掛哪一張單由使用者說明。CSV 匯入
+（`preview_import`）是另一條路，它解析的是傳票內容本身。
+
+`/v1/uploads/{secret}` 是 `/v1/auth/*` 之外第二個手寫路由：它收的是檔案本身，而
+連結的用意就是讓位元組不進操作輸入。它只寫暫存區、不寫業務資料，授權就是連結：
+讀 body 之前先驗連結存在、未到期、還有名額，且**持有者仍然有效**——Token 未撤銷、
+未過期、擁有者合格（`token_owner_active!`），或帳號啟用中且角色沒變。收件與拒收
+都以持有者的身分寫稽核（`upload_file`）。來源位址每分鐘 60 次。
+
+**持有者是帳號或 MCP Token 其中之一**（`upload_batch` 的 CHECK），`OpCtx.user_id`／
+`token_id` 由 session 或 Bearer 決定。一方暫存的檔案另一方看不到也取不走，別人的
+`upload_id` 回「查無此上傳編號」。名額在讀 body 之前以單一 `UPDATE … WHERE
+used_files < max_files` 佔下、失敗時退回；取用暫存檔以單一 `UPDATE … WHERE
+consumed_at IS NULL RETURNING` 標記，同一個檔案存不成兩份文件，存檔失敗就放回去。
+
+**類型由開頭的位元組決定**（`storage::detect_content_type`）：副檔名承諾的類型與
+位元組不符就拒收（改過副檔名的 `.pdf`），位元組認不出的一律存成
+`application/octet-stream`——HTML 與 SVG 永遠不會帶著瀏覽器會算繪的類型進桶子。
+
+`list_documents` 的桶子用量不算 `staging/`（另列 `staged_objects`／`staged_bytes`），
+不然每一個還沒存成文件的暫存檔都會讓文件對帳差一個數。`max_object_bytes` 回的是連結
+的上限（畫面走連結），`max_inline_bytes` 是 base64 的上限。
+
+**下載連結**是同一件事的反方向。`get_document` 以 base64 回內容，上限同樣是 25 MB：
+`include_content` 遇到更大的文件回錯誤、請使用者到「文件管理」畫面下載；不帶內容時照常
+驗證，並邊讀邊算雜湊（`ObjectStore::verify`），不把整份檔案放進記憶體。更大的文件：
+
+1. `get_download_link { doc_no, version }`（`read_only`，與 `get_document` 同屬
+   `manage_documents`）寫一列 `download_link`，回一條 5 分鐘、只能用一次的網址。**對 AI
+   預設關閉**：它是為了畫面而做的——上傳上限提高到 90 MB 之後，超過 25 MB 的文件得有
+   下載的路——而 AI 的上傳流程用不到它；要讓 AI 取得大檔，由系統管理員在「MCP 與 AI」
+   打開。它會寫一列，卻不算寫入（`writes()` 為 false）：授權失效的安裝仍然交得出自己的
+   文件，連結本身不是業務資料。秘密只存 BLAKE3，持有者的規則與上傳連結共用
+   （`links::LinkHolder`、`holder_active!`）。員工附件回查無此文件。
+2. `GET /v1/downloads/{secret}` 驗連結存在、未使用、未到期、持有者仍然有效，先佔一個
+   下載名額（`downloads::DOWNLOAD_SLOTS`）再以單一 `UPDATE … WHERE used_at IS NULL`
+   把連結標成已使用，然後把物件串流到本機暫存檔、同時算 BLAKE3（`ObjectStore::spool`），
+   **相符才開始送出**；不符回 409 與錯誤訊息，body 不含任何檔案內容。回應帶
+   `Content-Disposition: attachment`、`nosniff` 與 `Content-Length`，類型取自
+   `document_version`。
+3. 核發由 `dispatch` 寫稽核；實際下載以持有者的身分寫 `download_file`，成功、雜湊不符
+   與物件遺失各一種結果。
+
+**下載連結不是 presigned URL**。presigned URL 由 RustFS 自己驗簽，發出去之後 api 看不到它
+被用了幾次、被誰用，也撤不回——撤銷 Token 或停用帳號之後照樣有效，而 RustFS 的埠本來就
+沒有對外開。更根本的是它繞過雜湊比對：RustFS 不知道 `document_version.checksum`，被動過
+的物件會原樣送出去。下載連結是資料庫的一列，每一次使用都經過 api、比對雜湊、寫稽核。
+
+**先落地再送**：邊讀邊送的話，雜湊對不上時檔案已經送出大半。暫存檔建立後立刻 unlink，
+只剩開著的 handle 讀得到它，所以用戶端中途斷線或程序結束都不留殘檔；名額在回應送完或
+中斷時才歸還，同時佔用的磁碟空間至多 `DOWNLOAD_SLOTS` 份檔案（8 份、每份至多 90 MB，
+放在 api 容器的暫存目錄，在容器的可寫層上而不是 tmpfs）。等 30 秒還拿不到名額就回 503，
+這時連結還沒用掉，同一條可以再試。**連結在驗證之前就標成已使用**：驗證失敗或物件儲存
+暫時連不上時重新取得一條即可，而兩個同時送出的請求只有一個拿得到內容。`HEAD` 回 405：
+它要跑完整個下載才答得出標頭，還會順便把連結用掉。過期一天的連結由每小時的清除工作
+刪掉，與暫存區同一個排程。複製到暫存檔時讀到超過登記的 `byte_size` 就停下並當作雜湊
+不符：名額限得住同時幾份，限不住每一份多大，被換成更大檔案的物件否則會先寫滿磁碟。
+
+**畫面用 `fetch` 而不是導向連結**（`client.ts` 的 `downloadDocumentFile`，文件管理、
+傳票附件與報支收據共用）：導向的話，雜湊不符時瀏覽器只顯示「下載失敗」，說不出原因；
+`fetch` 讀得到錯誤訊息，也畫得出進度。回應經 `TransformStream` 計數後直接轉成 Blob——
+Blob 由瀏覽器管理，不是舊做法那樣 base64 字串、`atob` 的結果與 `Uint8Array` 三份同時
+放在 JavaScript 記憶體裡。報支收據那顆按鈕因此看 `get_download_link` 而不是
+`get_document` 決定畫不畫。
 
 **沒有 OCR**。`ocr_status` 原本由上傳當下的 MIME 型別推出 `pending` 或
 `not_applicable`，沒有任何判斷讀它，而畫面上那張統計卡與逐列標籤在每一套安裝上
@@ -1445,8 +1533,10 @@ MCP 這一項開著（`needs_confirm`）：草稿本來就是 AI 寫的，讓它
 | `create_budget_version` | BossOnly | `{ code, label?, fiscal_year?, is_current?, note? }` | `{ version }` |
 | `set_budget` | BossOnly | `{ account_code, amount, version?, dept_code? }` | `{ budget }` |
 | `list_documents` | ReadOnly | `{ q?, limit? }` | `documents[]`、`stats`、`bucket`、`bucket_reconciled` |
-| `upload_document` | NeedsConfirm | `{ file_name, content_base64, kind?, link_type?, link_ref?, doc_no? }` | `{ document, new_version }` |
+| `upload_document` | NeedsConfirm | `{ upload_id \| (file_name, content_base64), kind?, link_type?, link_ref?, doc_no?, name? }` | `{ document, new_version }`；兩種來源擇一，帶 `upload_id` 時 `file_name` 可省 |
 | `get_document` | ReadOnly | `{ doc_no, version?, include_content? }` | `{ document, verified, checksum_recomputed }` |
+| `request_upload_link` | NeedsConfirm | `{}` | `{ batch_id, upload_page, upload_endpoint, upload_path, curl, expires_at, max_files, max_file_bytes }` |
+| `list_uploads` | ReadOnly | `{ batch_id }` | `{ batch, files[] }`；`files[].filed_as` 是存成的文件編號 |
 | `list_imports` | ReadOnly | `{}` | `sources[]`、`batches[]`、`csv_columns` |
 | `preview_import` | NeedsConfirm | `{ source_code, file_name, content }` | `{ batch, drafts, can_commit, blocked_note }` |
 | `commit_import` | HighRisk | `{ batch_no }` | `{ batch, posted: false }` |
@@ -2291,10 +2381,15 @@ axum 對每個 `Json`／`Bytes` 擷取器有自己的 2 MB 預設，對登入太
 放在操作輸入裡，body 是它的 4/3。原本那個檔案在擷取器就被擋掉，操作自己的容量
 檢查與訊息永遠輪不到。所以 `/v1/auth/*` 收到 64 KB，`/v1/ops/{name}` 與 `/mcp`
 收到 40 MB，兩者的關係由 `const _: () = assert!(...)` 在編譯期釘住。
+`/v1/uploads/{secret}` 收 `MAX_UPLOAD_BYTES` 加 1 MB 的 multipart 框架
+（`uploads::UPLOAD_BODY_LIMIT`），而且只有這一條：宣告的長度超過就在讀 body 之前回
+413，串流中超過 90 MB 由每檔的檢查回一句說出上限的 413。
 
 `/healthz` 是公開端點。`/v1/meta`、`/v1/ops*` 必須有
-有效 session；`/mcp` 必須有自己的 Bearer 憑證。認證路由是操作註冊表唯一例外：
+有效 session；`/mcp` 必須有自己的 Bearer 憑證。認證路由是操作註冊表第一個例外：
 登入若經過 dispatch，就會先被角色權限步驟要求一個尚未取得的身分，形成循環。
+第二個是 `/v1/uploads/{secret}`，授權是上傳連結本身；第三個是
+`/v1/downloads/{secret}`，授權是下載連結本身。兩者見〈文件〉一節。
 `/v1/auth/bootstrap` 同樣未登入即可呼叫，但守門的是「安裝目前沒有任何帳號」，
 由資料庫的單列表保證，見上文〈網頁初始化〉。
 

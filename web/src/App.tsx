@@ -558,7 +558,7 @@ function Workspace() {
                   reloadKey={reloadKey}
                   onChanged={reload}
                   canSubmit={permissions.includes('submit_expense_claim')}
-                  canDocs={permissions.includes('get_document')}
+                  canDocs={permissions.includes('get_download_link')}
                 />
               )}
               {screen === 'budget' && <Budget onToast={showToast} reloadKey={reloadKey} />}

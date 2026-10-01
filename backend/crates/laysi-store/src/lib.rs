@@ -495,6 +495,16 @@ macro_rules! token_owner_active {
     };
 }
 
+// After `token_owner_active!`: the link holder check is built on it, and a
+// macro is only visible below its definition.
+#[macro_use]
+pub mod links;
+pub mod downloads;
+pub mod uploads;
+pub use downloads::DownloadLink;
+pub use links::LinkHolder;
+pub use uploads::{StagedUpload, UploadBatch};
+
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,

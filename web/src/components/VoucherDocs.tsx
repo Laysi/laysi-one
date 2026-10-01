@@ -3,12 +3,11 @@ import {
   businessTime,
   callOp,
   documentList,
-  downloadFile,
+  downloadDocumentFile,
+  fileSizeLabel,
   money,
   OpFailed,
-  readAsBase64,
-  uploadedDocument,
-  verifiedDocument,
+  uploadDocumentFile,
   type DocumentRow,
   type Voucher,
 } from '../api/client';
@@ -27,7 +26,9 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
   const [maxBytes, setMaxBytes] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
   const [fetching, setFetching] = useState<string | null>(null);
+  const [fetchProgress, setFetchProgress] = useState(0);
   const picker = useRef<HTMLInputElement>(null);
 
   const running = useRef<(() => void) | null>(null);
@@ -63,19 +64,19 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
   useEffect(load, [load]);
 
   async function upload(file: File) {
+    if (maxBytes > 0 && file.size > maxBytes) {
+      onToast(`${file.name} 超過 ${fileSizeLabel(maxBytes)}，請壓縮或分成幾個檔案再上傳`);
+      if (picker.current) picker.current.value = '';
+      return;
+    }
     setUploading(file.name);
+    setProgress(0);
     try {
-      const d = await callOp(
-        'upload_document',
-        {
-          file_name: file.name,
-          content_base64: await readAsBase64(file),
-          kind: 'receipt',
-          link_type: 'voucher',
-          link_ref: no,
-        },
+      const d = await uploadDocumentFile(
+        file,
+        { kind: 'receipt', link_type: 'voucher', link_ref: no },
         `把 ${file.name} 附到傳票 ${no}`,
-        uploadedDocument,
+        setProgress,
       );
       onToast(`${d.document.doc_no} ${d.document.version_label} 已附到 ${no}`);
       load();
@@ -90,22 +91,9 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
 
   async function download(d: DocumentRow) {
     setFetching(d.doc_no);
+    setFetchProgress(0);
     try {
-      const r = await callOp(
-        'get_document',
-        { doc_no: d.doc_no, include_content: true },
-        undefined,
-        verifiedDocument,
-      );
-      if (!r.content_base64) {
-        onToast('檔案儲存沒有回傳內容，請再試一次');
-        return;
-      }
-      downloadFile(
-        d.file_name,
-        Uint8Array.from(atob(r.content_base64), (c) => c.charCodeAt(0)),
-        d.content_type || 'application/octet-stream',
-      );
+      await downloadDocumentFile(d, setFetchProgress);
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -171,7 +159,12 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
                           {d.uploaded_by} ·{' '}
                           <span className="num">{businessTime(d.uploaded_at)}</span>
                           {d.versions > 1 && ` · 共 ${d.versions} 版`}
-                          {fetching === d.doc_no && ' · 取回中…'}
+                          {fetching === d.doc_no && (
+                          <>
+                            {' · 下載中 '}
+                            <span className="num">{Math.round(fetchProgress * 100)}%</span>
+                          </>
+                        )}
                         </span>
                       </td>
                       <td className="num align-right">{d.size_label}</td>
@@ -180,7 +173,8 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
                   {uploading && (
                     <tr>
                       <td colSpan={2} className="cell-muted">
-                        上傳中… {uploading}
+                        上傳中 <span className="num">{Math.round(progress * 100)}%</span> ·{' '}
+                        {uploading}
                       </td>
                     </tr>
                   )}
@@ -209,7 +203,7 @@ export function VoucherDocs({ voucher, onClose, onToast, onChanged }: Props) {
             disabled={uploading !== null}
             onClick={() => picker.current?.click()}
           >
-            {uploading ? '上傳中…' : '附上檔案'}
+            {uploading ? `上傳中 ${Math.round(progress * 100)}%` : '附上檔案'}
           </button>
         </div>
       </aside>
