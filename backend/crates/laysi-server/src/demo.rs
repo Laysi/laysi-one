@@ -20,9 +20,11 @@
 //! than a bracket table, and every rate comes from `laysi-regulation` by way
 //! of the operations themselves.
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Context};
-use chrono::{Datelike, Months, NaiveDate, NaiveTime, Weekday};
-use laysi_ops::ops::attendance::business_instant;
+use chrono::{Datelike, Months, NaiveDate, NaiveTime};
+use laysi_ops::ops::attendance::{business_instant, default_day_kind, DayKind};
 use laysi_ops::{Channel, OpCtx, Registry};
 use laysi_store::Store;
 use serde_json::{json, Value};
@@ -160,6 +162,52 @@ fn back(today: NaiveDate, months: u32, day: u32) -> NaiveDate {
 fn plus_days(date: NaiveDate, days: i64) -> NaiveDate {
     date.checked_add_signed(chrono::Duration::days(days))
         .unwrap_or(date)
+}
+
+/// How far back a date may be moved to reach working days. The longest run
+/// of days off in a Taiwanese year is the Lunar New Year, around ten days.
+const WORKDAY_LOOKBACK_DAYS: i64 = 60;
+
+/// Working days of clock-in history the demo carries.
+const PUNCH_DAYS: usize = 10;
+
+/// Which dates are working days, by the installation's own work calendar.
+///
+/// Every date the seed files a leave request, an overtime request or a punch
+/// on goes through this. A holiday next to a weekend is worth no working
+/// hours either, and `request_leave` refuses a range that has none.
+struct Workdays(BTreeMap<NaiveDate, DayKind>);
+
+impl Workdays {
+    async fn load(store: &Store) -> anyhow::Result<Self> {
+        let days = store.work_calendar().await.context("讀不到工作日曆")?;
+        Ok(Self(
+            days.into_iter()
+                .filter_map(|d| DayKind::from_code(&d.kind).map(|kind| (d.on_date, kind)))
+                .collect(),
+        ))
+    }
+
+    fn works(&self, day: NaiveDate) -> bool {
+        self.0
+            .get(&day)
+            .copied()
+            .unwrap_or_else(|| default_day_kind(day))
+            .works()
+    }
+
+    /// The latest start on or before `from` whose `span` consecutive days are
+    /// all working days.
+    fn back_to_workdays(&self, from: NaiveDate, span: i64) -> anyhow::Result<NaiveDate> {
+        (0..WORKDAY_LOOKBACK_DAYS)
+            .map(|back| plus_days(from, -back))
+            .find(|start| (0..span).all(|i| self.works(plus_days(*start, i))))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "工作日曆在 {from} 之前的 {WORKDAY_LOOKBACK_DAYS} 天裡找不到連續 {span} 個工作日，請檢查「工作日曆」"
+                )
+            })
+    }
 }
 
 /// Seeds a demo company.
@@ -768,8 +816,9 @@ async fn seed_self_service(
         }
     }
 
-    seed_punches(registry, store, boss, today, calls).await?;
-    seed_overtime(registry, store, boss, today, calls).await?;
+    let workdays = Workdays::load(store).await?;
+    seed_punches(registry, store, boss, today, &workdays, calls).await?;
+    seed_overtime(registry, store, boss, today, &workdays, calls).await?;
 
     // A full day, an afternoon and a two-day absence, so the screens show
     // that the length of a request comes from its range and not from a
@@ -782,15 +831,7 @@ async fn seed_self_service(
     for (emp_no, kind, days_ago, span, from_time, to_time, decide) in leaves {
         let employee = store.employee(emp_no).await.context("找不到示範員工")?;
         let staff = ctx_for(store, &employee.name, "staff", Some(employee.id), today);
-        // A weekend is worth no working hours, so a request landing on one
-        // would be refused. Step back to a week that holds the whole span.
-        let mut from = plus_days(today, -days_ago);
-        while [from, plus_days(from, span - 1)]
-            .iter()
-            .any(|day| matches!(day.weekday(), Weekday::Sat | Weekday::Sun))
-        {
-            from = plus_days(from, -1);
-        }
+        let from = workdays.back_to_workdays(plus_days(today, -days_ago), span)?;
         let out = call(
             registry,
             &staff,
@@ -832,19 +873,17 @@ async fn seed_overtime(
     store: &Store,
     boss: &OpCtx,
     today: NaiveDate,
+    workdays: &Workdays,
     calls: &mut usize,
 ) -> anyhow::Result<()> {
-    // Evenings, because the demo company works 09:00 to 18:00 and overtime
-    // that overlaps normal hours is refused.
+    // Weekday evenings, because the demo company works 09:00 to 18:00 and
+    // overtime that overlaps normal hours is refused.
     let requests = [
         ("E003", back(today, 1, 15), "18:30:00", "20:30:00", true),
         ("E002", plus_days(today, -2), "18:00:00", "20:00:00", false),
     ];
     for (emp_no, day, from_time, to_time, decide) in requests {
-        let mut worked_on = day;
-        while matches!(worked_on.weekday(), Weekday::Sat | Weekday::Sun) {
-            worked_on = plus_days(worked_on, -1);
-        }
+        let worked_on = workdays.back_to_workdays(day, 1)?;
         let employee = store.employee(emp_no).await.context("找不到示範員工")?;
         let staff = ctx_for(store, &employee.name, "staff", Some(employee.id), today);
         let out = call(
@@ -854,7 +893,6 @@ async fn seed_overtime(
             json!({
                 "from_at": format!("{worked_on}T{from_time}"),
                 "to_at": format!("{worked_on}T{to_time}"),
-                "day_type": "weekday",
                 "reason": "結帳趕件",
             }),
             calls,
@@ -895,6 +933,7 @@ async fn seed_punches(
     store: &Store,
     boss: &OpCtx,
     today: NaiveDate,
+    workdays: &Workdays,
     calls: &mut usize,
 ) -> anyhow::Result<()> {
     // Arrival and departure per person, chosen so the screen shows an
@@ -909,15 +948,21 @@ async fn seed_punches(
         ("E005", "09:30:18", "20:15:02"),
     ];
 
-    // The working days to fill, most recent first. Weekends are skipped
-    // rather than given punches: this system has no holiday calendar, so the
-    // demo leaves those days empty instead of inventing one. Every later step
-    // indexes into this list, because "four days ago" lands on a Sunday
-    // roughly two times in seven and there would be no arrival to correct.
-    let days: Vec<NaiveDate> = (1..=14)
+    // The working days to fill, most recent first: two working weeks, reaching
+    // further back when a long holiday falls among them. Days off are skipped
+    // rather than given punches. Every later step indexes into this list,
+    // because "four days ago" can land on a day off and there would be no
+    // arrival to correct.
+    let days: Vec<NaiveDate> = (1..=WORKDAY_LOOKBACK_DAYS)
         .map(|back| plus_days(today, -back))
-        .filter(|day| !matches!(day.weekday(), Weekday::Sat | Weekday::Sun))
+        .filter(|day| workdays.works(*day))
+        .take(PUNCH_DAYS)
         .collect();
+    if days.len() < PUNCH_DAYS {
+        bail!(
+            "工作日曆在 {today} 之前的 {WORKDAY_LOOKBACK_DAYS} 天裡不到 {PUNCH_DAYS} 個工作日，請檢查「工作日曆」"
+        );
+    }
 
     for (emp_no, arrive, leave) in pattern {
         let employee = store.employee(emp_no).await.context("找不到示範員工")?;
@@ -1028,6 +1073,53 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 3, 31).expect("有效日期");
         let landed = back(today, 1, 31);
         assert_eq!(landed.month(), 2, "2 月沒有 31 日，不可溢位到 3 月");
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("有效日期")
+    }
+
+    /// 2026-09-25 is 中秋節, a Friday. Stepping back from Saturday the 26th
+    /// past the weekend alone lands on it, and a request for that day has no
+    /// working hours in it.
+    #[test]
+    fn a_holiday_next_to_a_weekend_is_stepped_over() {
+        let workdays = Workdays(BTreeMap::from([(date(2026, 9, 25), DayKind::Holiday)]));
+        assert_eq!(
+            workdays
+                .back_to_workdays(date(2026, 9, 26), 1)
+                .expect("應找得到工作日"),
+            date(2026, 9, 24)
+        );
+        // A two-day range may not straddle the holiday either: skipping
+        // weekends alone would settle on Thursday the 24th.
+        assert_eq!(
+            workdays
+                .back_to_workdays(date(2026, 9, 27), 2)
+                .expect("應找得到工作日"),
+            date(2026, 9, 23)
+        );
+    }
+
+    /// The calendar overrides the weekday in both directions: a make-up
+    /// working Saturday is a working day.
+    #[test]
+    fn a_make_up_working_saturday_is_a_working_day() {
+        let workdays = Workdays(BTreeMap::from([(date(2026, 2, 7), DayKind::Workday)]));
+        assert!(workdays.works(date(2026, 2, 7)));
+        assert!(!workdays.works(date(2026, 2, 8)));
+    }
+
+    /// A calendar with no working day in reach is an error, not a hang.
+    #[test]
+    fn no_working_day_in_reach_is_an_error() {
+        let start = date(2026, 1, 1);
+        let workdays = Workdays(
+            (0..WORKDAY_LOOKBACK_DAYS + 5)
+                .map(|i| (plus_days(start, -i), DayKind::Holiday))
+                .collect(),
+        );
+        assert!(workdays.back_to_workdays(start, 1).is_err());
     }
 
     /// Checked against the RFC 4648 vectors, including both pad lengths.

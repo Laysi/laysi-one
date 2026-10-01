@@ -293,10 +293,15 @@ async fn link_oauth(store: &Store, cli: &Cli) -> anyhow::Result<()> {
 /// vouchers unless `--force` is given; see `laysi_server::demo`.
 async fn seed_demo(store: &Store, cli: &Cli) -> anyhow::Result<()> {
     let force = cli.options.contains_key("--force");
+    // The business date, as the server reads it. The UTC date is the day
+    // before between midnight and 08:00 local, which is when the demo
+    // rebuild runs. Loading the offset also publishes it, so the seeded
+    // punches are stamped in the installation's own time zone.
+    let offset = laysi_ops::load_business_offset(store).await;
     let today = std::env::var("LAYSI_TODAY")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or_else(|| chrono::Utc::now().date_naive());
+        .unwrap_or_else(|| laysi_domain::business_today(offset));
 
     let calls = laysi_server::demo::seed(store, today, force).await?;
 
