@@ -18,6 +18,12 @@ EnvironmentFile=%h/.config/laysi-demo.env
 ExecStart=/bin/sh %h/laysi-one-demo/reset-demo.sh
 # The rebuild pulls no images and copies no data; anything past this is stuck.
 TimeoutStartSec=900
+# A file rather than the journal: the deployment account cannot read its own
+# journal on this host, and deploy.yml prints this file when a rebuild fails.
+# Truncated at every start, so it holds the last run, as deploy.log does for
+# the production install.
+StandardOutput=truncate:%h/laysi-one-demo/reset.log
+StandardError=inherit
 # The containers this starts must outlive the run. `podman-compose up -d`
 # leaves one conmon per container in this unit's cgroup, and the default
 # KillMode=control-group kills every one of them the moment ExecStart returns
