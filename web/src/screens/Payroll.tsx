@@ -362,7 +362,8 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                         <td className="num align-right">
                           {money(s.deduction)}
                           <span className="cell-hint cell-hint--block num">
-                            勞保 {money(s.labor_employee)} · 健保 {money(s.health_employee)} · 稅{' '}
+                            勞保 {money(s.labor_employee)} · 健保 {money(s.health_employee)}
+                            {s.health_dependents > 0 && `（含眷屬 ${s.health_dependents} 口）`} · 稅{' '}
                             {money(s.income_tax)}
                           </span>
                         </td>

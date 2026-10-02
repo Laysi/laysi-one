@@ -156,12 +156,13 @@ government_share = "0.10"
 | `overtime` | `monthly_hours=240` `monthly_max_hours=46`、`day_types` 陣列：`{code, label, max_hours, bands[{up_to_hours?, multiplier}]}` 依勞基法第 24 條 |
 | `owner_insurance` | `health_employer_share=0` `health_employee_share=1.00` `health_government_share=0` `pension_employer_rate=0` |
 | `leave_pay` | 每個假別一節：`ratio`（工資給付比例）；病假另有 `yearly_days=30` `beyond_ratio=0`，生理假 `separate_days=3`，產假 `min_service_months=6` `short_service_ratio=0.5`。依勞工請假規則、性平法第 14 條、勞基法第 50 條 |
+| `health_dependents` | `max_counted=3`（員工健保自付額計入的眷口數上限，整數）。依健保法第 18 條第 2 項，自 2013-01-01 起 |
 
 驗證基準（**必須寫成單元測試**，數值取自原型的 `ins` / `pay` 區塊）：
 
 - 勞保級距 45,800、非工會身分 → 公司負擔 `45800 × 0.11 × 0.70 = 3527`（四捨五入）
 - 健保級距 53,000 → 公司負擔 `53000 × 0.0517 × 0.60 × 1.61 = 2647`
-- 健保級距 53,000 → 員工自付 `53000 × 0.0517 × 0.30 = 822`
+- 健保級距 53,000 → 員工自付 `53000 × 0.0517 × 0.30 = 822`（本人一口；每位在保眷屬再加一口，最多計三口，兩名眷屬為 `822 × 3 = 2466`）
 - 勞保級距 45,800 → 員工自付 `45800 × 0.11 × 0.20 = 1008`
 - 提繳工資 53,000 → 公司勞退 `53000 × 0.06 = 3180`
 
@@ -176,12 +177,16 @@ pub fn all() -> &'static [Ruleset];
 
 pub struct Contribution { pub employer: Money, pub employee: Money, pub government: Money }
 pub fn labor_insurance(rs: &Ruleset, insured_salary: Money) -> Result<Contribution, RegulationError>;
-pub fn health_insurance(rs: &Ruleset, insured_salary: Money) -> Result<Contribution, RegulationError>;
+/// 員工自付與政府補助逐口先取整再乘 1 + min(眷口, 上限)；雇主負擔仍乘平均眷口數。
+pub fn health_insurance(rs: &Ruleset, dependants_rs: &Ruleset, insured_salary: Money,
+                        covered_dependants: u32) -> Result<Contribution, RegulationError>;
+pub fn dependants_charged(rs: &Ruleset, covered: u32) -> Result<u32, RegulationError>;
 pub fn pension(rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError>;
 pub fn vat(rs: &Ruleset, net_amount: Money) -> Result<Money, RegulationError>;
 
 /// 負責人身分：費率仍取自 health_insurance，只有分擔比率取自 owner_insurance。
-pub fn health_insurance_owner(health_rs: &Ruleset, owner_rs: &Ruleset, insured_salary: Money)
+pub fn health_insurance_owner(health_rs: &Ruleset, owner_rs: &Ruleset, dependants_rs: &Ruleset,
+                              insured_salary: Money, covered_dependants: u32)
     -> Result<Contribution, RegulationError>;
 pub fn pension_owner(owner_rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError>;
 
@@ -207,6 +212,30 @@ pub fn overtime_pay(rs: &Ruleset, hourly_wage: Money, day_type: &str, hours: Mon
 **勞保沒有負責人節點**：勞保條例第 15 條第 1 款對「實際從事勞動之雇主」與受僱者是
 同一組 70／20／10，抄一份到這裡只會多一個會漂走的副本。
 `premiums_on` 因此只換健保與勞退兩項。
+
+### 健保自付額依眷口數計，上限是另一個 domain
+
+員工自付本人一口，另加每位在保眷屬一口，超過上限以上限計（健保法第 18 條第 2 項）；
+雇主負擔仍乘 `avg_dependents`，與這位員工實際有幾位眷屬無關——那是法律的分攤方式。
+政府補助與員工自付同一組口數。負責人身分同樣逐口計費，全額自付。
+
+**上限是 `health_dependents` 的 `max_counted`，不是 `health_insurance` 的欄位**：理由與
+`owner_insurance` 相同，塞進去要一個同日生效的新版本。`effective_from` 是 2013-01-01
+（現行條文施行日）而不是出廠年度，補算較早期間時不會因為找不到上限而失敗。
+`premiums_on` 不論眷口數多少都解析這個 domain，找不到就回錯誤，不當成 0 口；
+`max_counted` 不是整數（`2.5`、`-1`）一樣回錯誤，`3.0` 讀成 3。
+
+**逐口先取整再加總**：健保署逐口計費，`38200` 級距三名眷屬是 `592 × 4 = 2368`，先乘再
+取整會得到 2370。
+
+**在保眷口數看期末日**：保費按月計，由月底在保的單位收取。`covered_dependants` 數
+`health_enrolled_from <= 期末日` 且退保日為空或 `>= 期末日` 的眷屬（退保日是最後在保日，
+當天仍在保），所以月中退保的那個月不收、月中加保的那個月收。勞健保頁以 `as_of` 計。
+
+**薪資單存下計入的口數**（`payslip.health_dependents`，已套用上限、不含本人）：
+`list_payslips` 拿存下的級距重算保費再比對，而眷屬名單之後還會改——事後補登一位加保日
+較早的眷屬，會讓每一張舊薪資單的重算都對不上，雖然每一張都照當時的名單扣了。口數因此
+與級距一起存，重算用存下的口數，比對的是規則。
 
 規則以 `include_str!` 在編譯期嵌入，另外由
 `laysi-store` 寫入 `reg_ruleset` 表供稽核與查詢。
@@ -533,6 +562,39 @@ Blob 由瀏覽器管理，不是舊做法那樣 base64 字串、`atob` 的結果
 
 舊欄位的值搬過來時只能盡力拆：第一個數字之前是銀行、之後是帳號。整串
 沒有數字的原樣留在帳號欄，於是它會出現在名冊上等人更正，而不是安靜消失。
+
+重複帳號的錯誤訊息只寫銀行名稱不寫帳號：錯誤訊息原文寫進稽核摘要，而
+`REDACTED_FIELDS` 只碰輸入參數，碰不到摘要。
+
+### 眷屬是一份名單，健保依附與列報扶養是同一個人的兩個事實
+
+`employee_dependent` 記員工的眷屬：姓名、關係、身分證字號、生日、健保加保日與
+退保日、是否列報扶養。健保自付額的眷口數與扣繳稅額表的扶養人數都從這份名單推導，
+所以只有一份：配偶有工作時不是健保眷屬、仍可列報扶養，拆成兩份名單就是同一個人
+登記兩次，改了一邊另一邊不會跟著動。
+
+**健保依附記期間不記布林**：保費按月計，補算前期薪資要問的是「那個月誰在保」，
+布林只回答得了「現在誰在保」。`health_enrolled_until` 是**最後在保日**（當天仍在保），
+所以加保與退保可以是同一天；有退保日一定有加保日，退保日不得早於加保日。
+兄弟姊妹與「其他」不得依附健保（全民健康保險法第 2 條的眷屬範圍），但可以列報
+扶養，所以名單收得下他們，CHECK 擋住他們的投保期間。關係的清單在
+`ops/employees.rs` 的 `RELATIONS`，由 `list_employees` 以 `relations` 帶給畫面；
+`the_relations_list_agrees_with_the_table` 拿它比對 migration 的兩條 CHECK。
+
+`dependents` 與 `bank_accounts` 同一族的三態：不帶＝不動、空清單＝全部刪除、給清單
+＝整份取代。字號存大寫（CHECK 釘住），同一員工底下不得重複（partial UNIQUE，空白
+不算，還沒收到的可以有好幾個），寫入前走與本人字號相同的 `is_valid_id_no`。錯誤
+訊息寫眷屬姓名、不寫字號，理由與上一段的帳號相同；稽核紀錄裡的 `dependents[].id_no`
+由 `redact_for_audit` 依欄位名遮蔽（它遞迴進陣列）。
+
+**畫面上已存檔的投保期間按不掉**：一顆開關同時代表「更正」與「退保」，按掉就把
+加保日一起清掉，而那個月的眷口數從此算不回來。所以存過的期間畫成標籤，那位眷屬也
+不畫刪除鈕——刪掉一列等於刪掉它的投保期間，回查過去日期的勞健保頁會少算——結束它
+只能填退保日。期間開著時關係下拉只列可依附的關係，否則選了兄弟姊妹就存不進去。
+
+三個管道看到的不一樣：名冊（人資）回完整資料；個人專區回姓名、關係、投保期間與
+列報扶養，**不回字號與生日**（與本人字號同一條規則）；MCP 通道的名冊整份拿掉
+`dependents`，與底薪、銀行帳戶同一個 `redact_for_ai`。
 
 ## REST 登入只接受伺服器端 session
 
@@ -1168,6 +1230,12 @@ employee_bank_account       一人可有多筆；`is_payroll` 標出薪轉的那
                             以 partial UNIQUE 索引限制至多一筆。
                             原本是 `employee.bank_account` 單一自由文字欄
 
+-- 員工的眷屬
+employee_dependent          一人可有多筆；健保依附記 `health_enrolled_from`／
+                            `health_enrolled_until`（最後在保日），列報扶養記
+                            `tax_dependent`。兄弟姊妹與「其他」不得依附健保（CHECK）；
+                            `id_no` 存大寫，同一員工底下不重複（partial UNIQUE）
+
 ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
              tool_name text, risk text, prompt text null,
              params jsonb, result_summary text, outcome text,
@@ -1467,8 +1535,8 @@ MCP 這一項開著（`needs_confirm`）：草稿本來就是 AI 寫的，讓它
 |---|---|---|
 | `create_account` | NeedsConfirm | `report_group` 與 `cash_flow_section` 都必填；損益科目明確送 `null`。`normal_side` 依 kind 採慣例值，但可覆寫 |
 | `update_account` | NeedsConfirm | 完整更新或以 `is_active = false` 停用；不提供刪除，既有分錄仍保留 |
-| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 一次收整份清單；`pay_basis`（`monthly`／`hourly`）與 `insured_as`（`employee`／`owner`）不帶時取前者；`birthday` 必須早於到職日；不建立登入帳號（另有 `create_employee_login`） |
-| `update_employee` | NeedsConfirm | 除四個金額外完整更新（`birthday` 也是，不帶＝清空）；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 不帶＝不動、給清單＝整份取代；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
+| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 與 `dependents` 一次收整份清單；`pay_basis`（`monthly`／`hourly`）與 `insured_as`（`employee`／`owner`）不帶時取前者；`birthday` 必須早於到職日；不建立登入帳號（另有 `create_employee_login`） |
+| `update_employee` | NeedsConfirm | 除四個金額外完整更新（`birthday` 也是，不帶＝清空）；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 與 `dependents` 不帶＝不動、給清單＝整份取代；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
 | `create_bank_account` | NeedsConfirm | `gl_code` 必須指向啟用中的可入帳資產科目 |
 | `create_dimension_value` | NeedsConfirm | 只在既有 `dimension` 下新增項目；不建立分類。`code` 留空時取 `label` |
 | `update_dimension_value` | NeedsConfirm | 依 `(dimension_code, code)` 改名或切換 `active`；兩個欄位都不帶就回「沒有變更」。改名只在 `code` 仍等於舊 `label` 時一起改寫 `code`——CSV 匯入以 `code` 比對且會把可用的代碼列給使用者看，另外指定過的 `code` 是別人的鍵，不動 |
@@ -1669,7 +1737,7 @@ column，因此不可能與上面的區間不一致。
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）與人資／財務銜接狀態 |
-| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
+| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`relations` 供眷屬的關係下拉（帶可否依附健保）、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_employee_documents` | ReadOnly | `{ emp_no }` | 該員工的附件清單與可用類型；內容要另外取回 |
 | `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
 | `get_employee_document` | ReadOnly | `{ emp_no, doc_no, version?, include_content? }` | 重算雜湊比對；不屬於這位員工的編號回查無此附件 |
@@ -1679,11 +1747,11 @@ column，因此不可能與上面的區間不一致。
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
 | `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額 |
-| `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳 |
-| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額） |
+| `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳；重算用薪資單存下的 `health_dependents`，不用現在的眷屬名單 |
+| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents` |
 | `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
-| `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額 |
-| `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, as_of? }` | 單一級距試算與三份 ruleset；`insured_as = "owner"` 另回 `owner_ruleset` |
+| `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額；`health_dependents`（計入的眷口）與 `health_dependents_covered`（在保的眷屬）以 `as_of` 計；`dependents_cap` 供試算的眷屬下拉 |
+| `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, dependents?, as_of? }` | 單一級距試算與三份 ruleset；`dependents` 是在保眷屬人數，回 `health.dependents_charged`；`insured_as = "owner"` 另回 `owner_ruleset` |
 | `get_hr_compliance` | ReadOnly | `{ as_of? }` | `checks[]`；逐項帶 `checked`、`passed`、ruleset 與差異 |
 | `list_withholding_statements` | BossOnly | `{ year? }` | 逐給付對象年度所得；`table` 稅額缺值保持 `null` |
 
@@ -1794,7 +1862,7 @@ Token 雖然都要求帳號啟用中，但那只在帳號停用期間成立—�
 三個投保級距與銀行帳戶，因為編輯抽屜要顯示它即將取代的值，而全系統沒有第二頁
 說得出某人現在領多少。這幾項後來才加進去，於是那個工具的 grant 備註「不含薪資」
 從此是假的，而一把 MCP Token 就把整份名冊倒進對話裡。`ctx.channel == Channel::Mcp`
-時因此把四個金額與銀行帳戶整個拿掉，身分證字號改回遮罩過的形狀——遮罩而不是刪掉，
+時因此把四個金額、銀行帳戶與眷屬名單整個拿掉，身分證字號改回遮罩過的形狀——遮罩而不是刪掉，
 是為了名冊仍答得出某人有沒有登錄字號。這條分流不需要新的模型或新的操作：`Channel`
 本來就是「同一個能力，人與 AI 兩種答案」的分界。
 
@@ -2226,7 +2294,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 
 | name | risk | input | output 重點 |
 |---|---|---|---|
-| `get_my_home` | ReadOnly | `{}` | 本人基本資料、年資、本月出勤、特休餘額、送出的單走到哪 |
+| `get_my_home` | ReadOnly | `{}` | 本人基本資料（含眷屬的姓名、關係與投保期間，不含字號與生日）、年資、本月出勤、特休餘額、送出的單走到哪 |
 | `list_my_payslips` | ReadOnly | `{}` | **只有本人的**薪資單 |
 | `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`、`schedule`，以及表單預設日期 `next_workday`（今天起第一個工作日，依工作日曆） |
 | `preview_leave` | ReadOnly | `{ from_at, to_at }` | `{ hours, days, off_days }`；與 `request_leave` 共用 `leave_worth`，送出前顯示的就是會存下的數字 |

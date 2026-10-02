@@ -53,7 +53,7 @@ use crate::ops::attendance::{
 #[cfg(test)]
 use crate::ops::employees::INSURED_EMPLOYEE;
 use crate::ops::employees::{pay_basis_label, service_months, BASIS_HOURLY, BASIS_MONTHLY};
-use crate::ops::insurance::{percent, premiums_on, ruleset_json};
+use crate::ops::insurance::{covered_dependants, percent, premiums_on, ruleset_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -457,13 +457,15 @@ fn compute_one(
     let base = base.max(Money::ZERO);
     let gross = base + overtime;
 
-    // Premiums resolve on the period end: the version in force for this period.
+    // Premiums resolve on the period end: the version in force for this period,
+    // and the dependants covered on its last day.
     let p = premiums_on(
         to,
         &e.insured_as,
         e.labor_insured_salary,
         e.health_insured_salary,
         e.pension_wage,
+        covered_dependants(e, to),
     )?;
 
     // Withholding resolves on the payment date: the obligation arises then.
@@ -545,6 +547,7 @@ fn compute_one(
             paid_days: days,
             month_days,
             note,
+            health_dependents: i32::try_from(p.health_dependants).unwrap_or(i32::MAX),
         },
         labor_version: p.labor_rs.version.clone(),
         health_version: p.health_rs.version.clone(),
@@ -776,12 +779,15 @@ impl Operation for ListPayslips {
             // Recompute from the same rules. What was stored is the result at the
             // time; recomputation is a second path, and a mismatch is stated on
             // screen as with AR ageing and depreciation.
+            // The dependants the slip charged, as stored: the list on file may
+            // have changed since, and what is being checked is the rules.
             let p = premiums_on(
                 period_end,
                 &s.insured_as,
                 s.labor_insured_salary,
                 s.health_insured_salary,
                 s.pension_wage,
+                u32::try_from(s.health_dependents).unwrap_or(0),
             )?;
             let same = p.labor.employee == s.labor_employee
                 && p.labor.employer == s.labor_employer
@@ -804,6 +810,7 @@ impl Operation for ListPayslips {
                 "pension_wage": s.pension_wage.to_string(),
                 "labor_employee": s.labor_employee.to_string(),
                 "health_employee": s.health_employee.to_string(),
+                "health_dependents": s.health_dependents,
                 "income_tax": s.income_tax.to_string(),
                 "deduction": s.deduction.to_string(),
                 "net": s.net.to_string(),
@@ -1236,6 +1243,7 @@ mod tests {
             pension_wage: n("53000"),
             id_no: String::new(),
             bank_accounts: Vec::new(),
+            dependents: Vec::new(),
             note: String::new(),
         }
     }
@@ -1252,6 +1260,7 @@ mod tests {
             n("45800"),
             n("53000"),
             n("53000"),
+            0,
         )
         .unwrap();
         assert_eq!(p.labor.employee, n("1008"));
@@ -1622,6 +1631,49 @@ mod tests {
         .unwrap();
         assert_eq!(c.slip.base_salary, n("39290"), "42,000 − 1,355 − 1,355");
         assert_eq!(c.slip.note, "事假 1 日扣 1,355、病假 2 日扣 1,355");
+    }
+
+    /// The payslip charges the dependants covered on the last day of the
+    /// period and records how many, so recomputing it later uses the same
+    /// count whatever the list says by then.
+    #[test]
+    fn a_payslip_charges_and_records_the_dependants_covered_at_month_end() {
+        let mut e = emp(d(2025, 3, 3), None);
+        let dependant =
+            |from: NaiveDate, until: Option<NaiveDate>| laysi_store::EmployeeDependent {
+                id: 0,
+                name: "眷屬".into(),
+                relation: "child".into(),
+                id_no: String::new(),
+                birthday: None,
+                health_enrolled_from: Some(from),
+                health_enrolled_until: until,
+                tax_dependent: false,
+            };
+        e.dependents = vec![
+            dependant(d(2026, 1, 1), None),
+            dependant(d(2026, 6, 30), None),
+            dependant(d(2026, 1, 1), Some(d(2026, 6, 15))),
+        ];
+        let (from, to) = (d(2026, 6, 1), d(2026, 6, 30));
+        let c = compute_one(
+            &e,
+            from,
+            to,
+            d(2026, 7, 5),
+            Money::ZERO,
+            Money::ZERO,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(c.slip.health_dependents, 2, "6/15 退保的那一位不計");
+        assert_eq!(c.slip.health_employee, n("2466"), "822 × 3");
+        assert_eq!(c.slip.health_employer, n("2647"), "公司負擔不隨眷口變動");
+        assert_eq!(
+            c.slip.deduction,
+            n("1008") + n("2466") + n("2650"),
+            "勞保、健保與扣繳"
+        );
     }
 
     /// A request that starts in December is split over all its dates, but only

@@ -125,6 +125,30 @@ export function Me({ onGo, reloadKey }: Props) {
               </div>
             ))
           )}
+          {p.dependents.length === 0 ? (
+            <div className="fact">
+              <span className="fact__key">眷屬</span>
+              <span className="fact__value">尚未登記，由人資維護</span>
+            </div>
+          ) : (
+            p.dependents.map((d, i) => (
+              <div className="fact" key={i}>
+                <span className="fact__key">{d.relation_label}</span>
+                <span className="fact__value">
+                  {d.name}
+                  <span className="fact__note num">
+                    {[
+                      d.health_enrolled_from &&
+                        `健保 ${d.health_enrolled_from}${d.health_enrolled_until ? `～${d.health_enrolled_until}` : ' 起'}`,
+                      d.tax_dependent && '列報扶養',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
+                </span>
+              </div>
+            ))
+          )}
         </div>
       </section>
 

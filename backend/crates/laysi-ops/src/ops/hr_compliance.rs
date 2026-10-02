@@ -34,7 +34,7 @@ use crate::ops::attendance::{punch_days, summarise, OvertimeLimits, WorkSchedule
 use crate::ops::employees::{
     pay_basis_label, service_months, BASIS_HOURLY, INSURED_EMPLOYEE, INSURED_OWNER,
 };
-use crate::ops::insurance::{missing_brackets, premiums_on, ruleset_json};
+use crate::ops::insurance::{covered_dependants, missing_brackets, premiums_on, ruleset_json};
 use crate::ops::payroll::SALARY_INCOME_CODE;
 use crate::ops::tax::{code_rule, withhold};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
@@ -164,6 +164,7 @@ impl Operation for GetHrCompliance {
             Money::ZERO,
             Money::ZERO,
             Money::ZERO,
+            0,
         )?;
 
         let mut minimum_failures = Vec::new();
@@ -203,6 +204,7 @@ impl Operation for GetHrCompliance {
                 employee.labor_insured_salary,
                 employee.health_insured_salary,
                 employee.pension_wage,
+                covered_dependants(employee, as_of),
             )?;
             if premiums.labor_capped {
                 labor_cap_failures.push(json!({

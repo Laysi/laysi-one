@@ -887,6 +887,27 @@ mod tests {
         assert_eq!(redacted["emp_no"], serde_json::json!("E010"));
     }
 
+    /// A dependant's number sits one list down in `update_employee`, and the
+    /// rule is by field name wherever the field is.
+    #[test]
+    fn a_dependant_id_number_is_redacted_in_the_audit_trail() {
+        let redacted = redact_for_audit(&serde_json::json!({
+            "emp_no": "E002",
+            "dependents": [
+                { "name": "王小寶", "relation": "child", "id_no": "B223456782" },
+            ],
+        }));
+        assert_eq!(
+            redacted["dependents"][0]["id_no"],
+            serde_json::json!("[已遮蔽]")
+        );
+        assert_eq!(
+            redacted["dependents"][0]["name"],
+            serde_json::json!("王小寶")
+        );
+        assert!(!redacted.to_string().contains("B223456782"));
+    }
+
     #[test]
     fn registry_holds_every_operation_exactly_once() {
         let r = Registry::new();

@@ -53,6 +53,7 @@ fn domain_label(domain: &str) -> &'static str {
         "overtime" => "延長工時",
         "owner_insurance" => "負責人投保",
         "leave_pay" => "請假工資",
+        "health_dependents" => "健保眷屬計費",
         other => {
             debug_assert!(false, "法規領域 {other} 沒有顯示名稱");
             "其他"
@@ -73,6 +74,7 @@ const FIELDS: &[(&str, &str)] = &[
     ("premium_rate", "普通事故保險費率"),
     ("rate", "費率"),
     ("avg_dependents", "平均眷口數"),
+    ("max_counted", "計費眷口數上限"),
     ("employer_rate", "雇主提繳率"),
     ("employer_share", "雇主負擔比率"),
     ("employee_share", "員工負擔比率"),
@@ -287,7 +289,11 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
             laysi_regulation::labor_insurance(rs, one)?;
         }
         "health_insurance" => {
-            laysi_regulation::health_insurance(rs, one)?;
+            let dependants = laysi_regulation::resolve("health_dependents", rs.effective_from)?;
+            laysi_regulation::health_insurance(rs, dependants, one, 1)?;
+        }
+        "health_dependents" => {
+            laysi_regulation::dependants_charged(rs, 1)?;
         }
         "pension" => {
             laysi_regulation::pension(rs, one)?;
@@ -302,7 +308,8 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
         }
         "owner_insurance" => {
             let health = laysi_regulation::resolve("health_insurance", rs.effective_from)?;
-            laysi_regulation::health_insurance_owner(health, rs, one)?;
+            let dependants = laysi_regulation::resolve("health_dependents", rs.effective_from)?;
+            laysi_regulation::health_insurance_owner(health, rs, dependants, one, 1)?;
             laysi_regulation::pension_owner(rs, one)?;
         }
         "annual_leave" => {

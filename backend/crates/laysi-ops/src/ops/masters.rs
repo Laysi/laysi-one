@@ -33,7 +33,7 @@ use laysi_domain::Money;
 use laysi_store::{
     CreateBankAccount as StoreCreateBankAccount, CreateDimensionValue as StoreCreateDimensionValue,
     SetApprovalRule as StoreSetApprovalRule, UpdateDimensionValue as StoreUpdateDimensionValue,
-    WriteAccount, WriteEmployee, WriteEmployeeBankAccount,
+    WriteAccount, WriteEmployee, WriteEmployeeBankAccount, WriteEmployeeDependent,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -387,9 +387,41 @@ pub struct EmployeeInput {
     /// file alone; send the whole list to replace them.
     #[serde(default)]
     pub bank_accounts: Option<Vec<EmployeeBankAccountInput>>,
+    /// Everyone on this person's dependants list. Omit to leave the list on
+    /// file alone; send the whole list to replace it, or an empty list to
+    /// clear it.
+    #[serde(default)]
+    pub dependents: Option<Vec<EmployeeDependentInput>>,
     /// Notes.
     #[serde(default)]
     pub note: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EmployeeDependentInput {
+    /// Name.
+    pub name: String,
+    /// One of `spouse`, `parent`, `grandparent`, `child`, `grandchild`,
+    /// `sibling`, `other`.
+    pub relation: String,
+    /// National ID, checked like the employee's own. May be blank while it
+    /// has not been collected.
+    #[serde(default)]
+    pub id_no: String,
+    /// Date of birth.
+    #[serde(default)]
+    pub birthday: Option<NaiveDate>,
+    /// First day covered under this employee's health insurance. Leave it out
+    /// for someone who is not a health dependant. `sibling` and `other` cannot
+    /// be covered.
+    #[serde(default)]
+    pub health_enrolled_from: Option<NaiveDate>,
+    /// Last day covered. Leave it out while the person is still covered.
+    #[serde(default)]
+    pub health_enrolled_until: Option<NaiveDate>,
+    /// Claimed as a dependant for the salary withholding table.
+    #[serde(default)]
+    pub tax_dependent: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -515,6 +547,7 @@ fn validate_new_employee(input: &EmployeeInput) -> Result<(), OpError> {
         ));
     }
     validate_bank_accounts(input)?;
+    validate_dependents(input)?;
     if [
         input.labor_insured_salary,
         input.health_insured_salary,
@@ -545,9 +578,11 @@ fn validate_bank_accounts(input: &EmployeeInput) -> Result<(), OpError> {
                 "銀行帳戶要填銀行名稱與帳號；不再使用的帳戶請整筆刪除".into(),
             ));
         }
+        // The account number stays out of the message: a refusal is written
+        // to the audit trail word for word, and the number is redacted there.
         if seen.contains(&(bank_name, account_no)) {
             return Err(OpError::BadInput(format!(
-                "{bank_name} {account_no} 重複登錄了兩次"
+                "{bank_name} 有兩筆相同的帳號，請刪除其中一筆"
             )));
         }
         seen.push((bank_name, account_no));
@@ -556,6 +591,109 @@ fn validate_bank_accounts(input: &EmployeeInput) -> Result<(), OpError> {
         return Err(OpError::BadInput("薪轉帳戶只能指定一個".into()));
     }
     Ok(())
+}
+
+/// Trim every dependant field and upper-case the id number, which is how the
+/// table stores it. Done before [`validate_dependents`], so the checks and
+/// the write see the same values.
+fn normalize_dependents(input: &mut EmployeeInput) {
+    for dependent in input.dependents.iter_mut().flatten() {
+        dependent.name = dependent.name.trim().to_string();
+        dependent.relation = dependent.relation.trim().to_string();
+        dependent.id_no = dependent.id_no.trim().to_ascii_uppercase();
+    }
+}
+
+/// Reject a dependants list the table would refuse, naming the person rather
+/// than a row number. The id number never appears in a message: refusals are
+/// written to the audit trail as they are, and the number is redacted there.
+fn validate_dependents(input: &EmployeeInput) -> Result<(), OpError> {
+    let Some(dependents) = &input.dependents else {
+        return Ok(());
+    };
+    for (index, dependent) in dependents.iter().enumerate() {
+        if dependent.name.is_empty() {
+            return Err(OpError::BadInput(format!(
+                "第 {} 位眷屬的姓名要填寫；不再登記的眷屬請整筆刪除",
+                index + 1
+            )));
+        }
+        let name = dependent.name.as_str();
+        let Some(relation) = crate::ops::employees::relation(&dependent.relation) else {
+            return Err(OpError::BadInput(format!(
+                "{name} 的關係要從清單選擇：{}",
+                crate::ops::employees::RELATIONS
+                    .iter()
+                    .map(|r| r.label)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )));
+        };
+        if !dependent.id_no.is_empty() && !is_valid_id_no(&dependent.id_no) {
+            return Err(OpError::BadInput(format!(
+                "{name} 的身分證字號要一個英文字母加九碼數字，且檢查碼相符；還沒收到可以留空"
+            )));
+        }
+        match (
+            dependent.health_enrolled_from,
+            dependent.health_enrolled_until,
+        ) {
+            (None, Some(_)) => {
+                return Err(OpError::BadInput(format!(
+                    "{name} 只填了健保退保日，請一併填加保日"
+                )))
+            }
+            (Some(from), Some(until)) if until < from => {
+                return Err(OpError::BadInput(format!(
+                    "{name} 的健保退保日早於加保日，請更正其中一個日期"
+                )))
+            }
+            _ => {}
+        }
+        if let Some(from) = dependent.health_enrolled_from {
+            if !relation.health_eligible {
+                return Err(OpError::BadInput(format!(
+                    "{}不能依附健保，請清除 {name} 的健保加保日",
+                    relation.label
+                )));
+            }
+            if dependent.birthday.is_some_and(|birthday| from < birthday) {
+                return Err(OpError::BadInput(format!(
+                    "{name} 的健保加保日早於生日，請更正其中一個日期"
+                )));
+            }
+        }
+        if let Some(earlier) = dependents[..index]
+            .iter()
+            .find(|other| !other.id_no.is_empty() && other.id_no == dependent.id_no)
+        {
+            return Err(OpError::BadInput(format!(
+                "{} 與 {name} 登記了相同的身分證字號，請更正其中一位",
+                earlier.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The dependants as the store writes them, borrowed from the normalized
+/// input for the same reason as [`employee_accounts`].
+fn employee_dependents(input: &EmployeeInput) -> Option<Vec<WriteEmployeeDependent<'_>>> {
+    let dependents = input.dependents.as_ref()?;
+    Some(
+        dependents
+            .iter()
+            .map(|dependent| WriteEmployeeDependent {
+                name: &dependent.name,
+                relation: &dependent.relation,
+                id_no: &dependent.id_no,
+                birthday: dependent.birthday,
+                health_enrolled_from: dependent.health_enrolled_from,
+                health_enrolled_until: dependent.health_enrolled_until,
+                tax_dependent: dependent.tax_dependent,
+            })
+            .collect(),
+    )
 }
 
 /// The accounts as the store writes them. Kept out of [`employee_write`]
@@ -583,6 +721,7 @@ fn employee_write<'a>(
     input: &'a EmployeeInput,
     actor: &'a str,
     bank_accounts: Option<&'a [WriteEmployeeBankAccount<'a>]>,
+    dependents: Option<&'a [WriteEmployeeDependent<'a>]>,
 ) -> WriteEmployee<'a> {
     WriteEmployee {
         emp_no: input.emp_no.trim(),
@@ -606,6 +745,7 @@ fn employee_write<'a>(
         pension_wage: input.pension_wage,
         id_no: input.id_no.trim(),
         bank_accounts,
+        dependents,
         note: input.note.trim(),
         actor,
         keep_active_role: crate::ROLE_ADMIN,
@@ -630,7 +770,8 @@ impl Operation for CreateEmployee {
     }
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let input: EmployeeInput = parse(input)?;
+        let mut input: EmployeeInput = parse(input)?;
+        normalize_dependents(&mut input);
         // Blank means "give me the next one", the same as `create_user_account`.
         // Two screens asking for the same field and only one of them numbering
         // it is a difference the user has to learn for no reason. The number is
@@ -638,9 +779,15 @@ impl Operation for CreateEmployee {
         // from picking the same one.
         validate_new_employee(&input)?;
         let accounts = employee_accounts(&input);
+        let dependents = employee_dependents(&input);
         let employee = ctx
             .store
-            .create_employee(employee_write(&input, &ctx.actor, accounts.as_deref()))
+            .create_employee(employee_write(
+                &input,
+                &ctx.actor,
+                accounts.as_deref(),
+                dependents.as_deref(),
+            ))
             .await?;
         let summary = format!(
             "建立員工 {} {} · 未建立登入帳號",
@@ -675,12 +822,19 @@ impl Operation for UpdateEmployee {
     }
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
-        let input: EmployeeInput = parse(input)?;
+        let mut input: EmployeeInput = parse(input)?;
+        normalize_dependents(&mut input);
         validate_employee(&input)?;
         let accounts = employee_accounts(&input);
+        let dependents = employee_dependents(&input);
         let updated = ctx
             .store
-            .update_employee(employee_write(&input, &ctx.actor, accounts.as_deref()))
+            .update_employee(employee_write(
+                &input,
+                &ctx.actor,
+                accounts.as_deref(),
+                dependents.as_deref(),
+            ))
             .await?;
         let employee = updated.employee;
         let closed = updated.closed;
@@ -1143,6 +1297,7 @@ mod tests {
             pension_wage: None,
             id_no: "A123456789".into(),
             bank_accounts: None,
+            dependents: None,
             note: String::new(),
         }
     }
@@ -1287,8 +1442,134 @@ mod tests {
             account("玉山銀行", "0012345", true),
             account("玉山銀行", " 0012345 ", false),
         ]);
-        let error = validate_employee(&input).unwrap_err();
-        assert!(error.to_string().contains("重複登錄"));
+        let error = validate_employee(&input).unwrap_err().to_string();
+        assert!(error.contains("兩筆相同的帳號"), "{error}");
+        // Refusals reach the audit trail word for word, and the number is
+        // redacted there.
+        assert!(!error.contains("0012345"), "{error}");
+    }
+
+    fn dependent(name: &str, relation: &str) -> EmployeeDependentInput {
+        EmployeeDependentInput {
+            name: name.into(),
+            relation: relation.into(),
+            id_no: String::new(),
+            birthday: None,
+            health_enrolled_from: None,
+            health_enrolled_until: None,
+            tax_dependent: false,
+        }
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> Option<NaiveDate> {
+        NaiveDate::from_ymd_opt(y, m, d)
+    }
+
+    /// Run the same steps the two operations run before writing.
+    fn checked(mut input: EmployeeInput) -> Result<EmployeeInput, String> {
+        normalize_dependents(&mut input);
+        validate_employee(&input).map_err(|e| e.to_string())?;
+        Ok(input)
+    }
+
+    #[test]
+    fn omitting_the_dependants_leaves_the_list_on_file_alone() {
+        assert!(employee_dependents(&valid_employee()).is_none());
+        let mut input = valid_employee();
+        input.dependents = Some(Vec::new());
+        assert_eq!(
+            employee_dependents(&input).map(|list| list.len()),
+            Some(0),
+            "空清單是清空，不是不動"
+        );
+    }
+
+    #[test]
+    fn a_dependant_id_number_is_checked_and_named_by_the_person() {
+        let mut input = valid_employee();
+        let mut spouse = dependent("王太太", "spouse");
+        spouse.id_no = "B223456788".into();
+        input.dependents = Some(vec![spouse]);
+        let error = checked(input).err().expect("應被擋下");
+        assert!(error.contains("王太太"), "{error}");
+        assert!(error.contains("檢查碼"), "{error}");
+        assert!(!error.contains("B223456788"), "訊息會進稽核摘要：{error}");
+    }
+
+    #[test]
+    fn a_dependant_id_number_is_stored_upper_case() {
+        let mut input = valid_employee();
+        let mut spouse = dependent(" 王太太 ", "spouse");
+        spouse.id_no = " b223456782 ".into();
+        input.dependents = Some(vec![spouse]);
+        let input = checked(input).expect("小寫字號換成大寫後應通過");
+        let written = employee_dependents(&input).unwrap();
+        assert_eq!(written[0].id_no, "B223456782");
+        assert_eq!(written[0].name, "王太太");
+    }
+
+    #[test]
+    fn two_dependants_cannot_share_an_id_number() {
+        let mut input = valid_employee();
+        let mut mother = dependent("王媽媽", "parent");
+        mother.id_no = "B223456782".into();
+        let mut father = dependent("王爸爸", "parent");
+        father.id_no = "b223456782".into();
+        input.dependents = Some(vec![mother, father, dependent("王阿嬤", "grandparent")]);
+        let error = checked(input).err().expect("應被擋下");
+        assert!(error.contains("王媽媽 與 王爸爸"), "{error}");
+        assert!(!error.contains("B223456782"), "{error}");
+
+        // Two numbers nobody has collected yet are not a collision.
+        let mut input = valid_employee();
+        input.dependents = Some(vec![
+            dependent("王媽媽", "parent"),
+            dependent("王爸爸", "parent"),
+        ]);
+        assert!(checked(input).is_ok());
+    }
+
+    #[test]
+    fn health_cover_needs_an_eligible_relation_and_a_coherent_period() {
+        let refuse = |d: EmployeeDependentInput, expect: &str| {
+            let mut input = valid_employee();
+            input.dependents = Some(vec![d]);
+            let error = checked(input).err().expect("應被擋下");
+            assert!(error.contains(expect), "{error}");
+        };
+
+        let mut sister = dependent("王小妹", "sibling");
+        sister.health_enrolled_from = day(2026, 3, 1);
+        refuse(sister, "兄弟姊妹不能依附健保");
+
+        let mut until_only = dependent("王小寶", "child");
+        until_only.health_enrolled_until = day(2026, 3, 1);
+        refuse(until_only, "只填了健保退保日");
+
+        let mut backwards = dependent("王小寶", "child");
+        backwards.health_enrolled_from = day(2026, 3, 2);
+        backwards.health_enrolled_until = day(2026, 3, 1);
+        refuse(backwards, "退保日早於加保日");
+
+        let mut unborn = dependent("王小寶", "child");
+        unborn.birthday = day(2026, 3, 2);
+        unborn.health_enrolled_from = day(2026, 3, 1);
+        refuse(unborn, "加保日早於生日");
+
+        refuse(dependent("王表哥", "cousin"), "關係要從清單選擇");
+        refuse(dependent("  ", "child"), "第 1 位眷屬的姓名要填寫");
+
+        // A sibling can still be claimed for withholding, and a one-day
+        // period is a period.
+        let mut input = valid_employee();
+        let mut sister = dependent("王小妹", "sibling");
+        sister.tax_dependent = true;
+        let mut baby = dependent("王小寶", "child");
+        baby.birthday = day(2026, 3, 1);
+        baby.health_enrolled_from = day(2026, 3, 1);
+        baby.health_enrolled_until = day(2026, 3, 1);
+        input.dependents = Some(vec![sister, baby]);
+        assert!(checked(input).is_ok());
     }
 
     #[test]

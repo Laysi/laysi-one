@@ -619,6 +619,55 @@ async function main() {
       return `健保自付 ${boss.health.employee} · 勞退 ${boss.pension.employer} · 依 ${boss.health.owner_ruleset.version}`;
     });
 
+    await check("H13", "兩名在保眷屬的員工，健保自付是本人一口的三倍", async () => {
+      const period = TODAY.slice(0, 7);
+      const hire = `${period}-01`;
+      const created = await must("create_employee", {
+        name: "測試眷屬", hired_on: hire,
+        base_salary: "53000",
+        labor_insured_salary: "45800", health_insured_salary: "53000", pension_wage: "53000",
+        dependents: [
+          { name: "測試配偶", relation: "spouse", health_enrolled_from: hire },
+          { name: "測試子女", relation: "child", health_enrolled_from: hire, tax_dependent: true },
+          { name: "測試父親", relation: "parent", tax_dependent: true },
+        ],
+      });
+      const empNo = created.employee.emp_no;
+      const one = await must("compute_insurance", {
+        insured_salary: "45800", health_insured_salary: "53000", pension_wage: "53000",
+        as_of: TODAY,
+      });
+      const perHead = money(one.health.employee);
+
+      const paid = await must("run_payroll", { period, pay_on: TODAY });
+      expectEq(paid.run.headcount, 1, "計薪人數");
+      const slip = (await must("list_payslips", { period })).rows.find((r: any) => r.emp_no === empNo);
+      expect(slip, "找不到這位員工的薪資單");
+      expectEq(money(slip.health_employee), perHead * 3, "健保自付");
+      expectEq(slip.health_dependents, 2, "計入的眷口數");
+      expectEq(money(slip.health_employer), money(one.health.employer), "公司負擔不隨眷口變動");
+
+      const insurance = await must("get_insurance_summary", { as_of: TODAY });
+      const row = insurance.rows.find((r: any) => r.emp_no === empNo);
+      expectEq(money(row.health_employee), perHead * 3, "勞健保頁的健保自付");
+      expectEq(row.health_dependents, 2, "勞健保頁的眷口數");
+
+      // A dependant registered afterwards, enrolled from the same day, does
+      // not make the payslip disagree with its own recomputation.
+      await must("update_employee", {
+        emp_no: empNo, name: "測試眷屬", hired_on: hire,
+        dependents: [
+          { name: "測試配偶", relation: "spouse", health_enrolled_from: hire },
+          { name: "測試子女", relation: "child", health_enrolled_from: hire, tax_dependent: true },
+          { name: "測試父親", relation: "parent", health_enrolled_from: hire, tax_dependent: true },
+        ],
+      });
+      const after = (await must("list_payslips", { period })).rows.find((r: any) => r.emp_no === empNo);
+      expectEq(after.health_dependents, 2, "已計算的薪資單仍是當時的口數");
+      expectEq(after.recompute_matches, true, "補登眷屬之後重算仍相符");
+      return `${empNo} 健保自付 ${slip.health_employee} = ${one.health.employee} × 3`;
+    });
+
     await check("H11", "負責人的健保投保金額低於受僱員工最高者會被檢核出來", async () => {
       const created = await must("create_employee", {
         name: "測試負責人身分", hired_on: "2026-01-01", insured_as: "owner",
@@ -937,6 +986,47 @@ async function main() {
         notes.push(`${preview.hours} 小時／${preview.days} 日`);
       }
       return notes.join(" · ");
+    });
+
+    await check("P7", "眷屬名單整份取代，不帶就不動，字號存大寫", async () => {
+      const base = { emp_no: personEmpNo, name: "附件測試", hired_on: "2026-02-01" };
+      const listed = async () =>
+        (await must("list_employees", { q: personEmpNo })).employees.find(
+          (e: any) => e.emp_no === personEmpNo,
+        ).dependents;
+      await must("update_employee", {
+        ...base,
+        dependents: [
+          { name: "測試配偶", relation: "spouse", id_no: "b223456782", tax_dependent: true },
+          { name: "測試子女", relation: "child", birthday: "2026-03-01", health_enrolled_from: "2026-03-01" },
+        ],
+      });
+      let rows = await listed();
+      expectEq(rows.length, 2, "存下的眷屬數");
+      expectEq(rows[0].id_no, "B223456782", "字號存大寫");
+      expectEq(rows[1].health_enrolled_from, "2026-03-01", "健保加保日");
+
+      await must("update_employee", { ...base, title: "改職稱" });
+      expectEq((await listed()).length, 2, "不帶眷屬欄位時名單不變");
+
+      const sibling = await op("update_employee", {
+        ...base,
+        dependents: [{ name: "測試手足", relation: "sibling", health_enrolled_from: "2026-03-01" }],
+      });
+      expect(!sibling.ok, "兄弟姊妹竟然依附得了健保");
+      expect(sibling.error!.message.includes("測試手足"), sibling.error!.message);
+      const typo = await op("update_employee", {
+        ...base,
+        dependents: [{ name: "測試配偶", relation: "spouse", id_no: "B223456789" }],
+      });
+      expect(!typo.ok, "檢查碼錯誤的字號竟然存得進去");
+      expect(!typo.error!.message.includes("B223456789"), `錯誤訊息印出字號：${typo.error!.message}`);
+      expectEq((await listed()).length, 2, "被擋下的更新不動名單");
+
+      await must("update_employee", { ...base, dependents: [] });
+      rows = await listed();
+      expectEq(rows.length, 0, "空清單清空名單");
+      return "整份取代 · 不帶不動 · 空清單清空 · 兄弟姊妹與錯字號擋下";
     });
 
     console.log("\nD 文件下載連結");

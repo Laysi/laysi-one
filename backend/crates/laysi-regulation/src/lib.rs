@@ -85,6 +85,10 @@ const SOURCES: &[(&str, &str)] = &[
         "2026/leave_pay.toml",
         include_str!("../../../regulation/2026/leave_pay.toml"),
     ),
+    (
+        "2013/health_dependents.toml",
+        include_str!("../../../regulation/2013/health_dependents.toml"),
+    ),
 ];
 
 /// Regulation domains the system knows. A rule file's `domain` must be one
@@ -101,6 +105,7 @@ pub const DOMAINS: &[&str] = &[
     "overtime",
     "owner_insurance",
     "leave_pay",
+    "health_dependents",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -155,6 +160,14 @@ pub enum RegulationError {
         value: Decimal,
         min: Decimal,
         max: Decimal,
+    },
+
+    #[error("法規 {domain}/{version} 的欄位「{key}」要是 0 以上的整數，收到 {value}")]
+    NotWholeNumber {
+        domain: String,
+        version: String,
+        key: String,
+        value: Decimal,
     },
 
     #[error("這個計算子需要 {expected} 的規則，收到的卻是 {found}")]
@@ -330,24 +343,50 @@ pub fn labor_insurance(
     })
 }
 
+/// How many of a person's covered dependants are charged: all of them, up to
+/// the cap in `health_dependents`.
+pub fn dependants_charged(rs: &Ruleset, covered: u32) -> Result<u32, RegulationError> {
+    rs.expect_domain("health_dependents")?;
+    let cap = rs.decimal("max_counted")?;
+    if cap < Money::ZERO || cap != cap.trunc() {
+        return Err(RegulationError::NotWholeNumber {
+            domain: rs.domain.clone(),
+            version: rs.version.clone(),
+            key: "max_counted".to_string(),
+            value: cap,
+        });
+    }
+    let cap: u32 = cap.trunc().try_into().unwrap_or(u32::MAX);
+    Ok(covered.min(cap))
+}
+
 /// National health insurance ordinary premium.
 ///
 /// The employer share is multiplied by the average number of dependants
 /// across all insured persons rather than this employee's actual
 /// dependants, because the law apportions it that way. A single employee's
 /// employer share therefore exceeds twice their own contribution.
+///
+/// The employee pays one head for themselves and one for each covered
+/// dependant, up to the cap in `dependants_rs`; the government subsidises the
+/// same heads. Each head is rounded before the heads are added up, which is
+/// how the insurer bills it: multiplying first and rounding once differs by a
+/// dollar on some brackets.
 pub fn health_insurance(
     rs: &Ruleset,
+    dependants_rs: &Ruleset,
     insured_salary: Money,
+    covered_dependants: u32,
 ) -> Result<Contribution, RegulationError> {
     rs.expect_domain("health_insurance")?;
+    let heads = Money::from(1 + dependants_charged(dependants_rs, covered_dependants)?);
     let premium = insured_salary * rs.decimal("rate")?;
     Ok(Contribution {
         employer: to_dollars(
             premium * rs.decimal("employer_share")? * rs.decimal("avg_dependents")?,
         ),
-        employee: to_dollars(premium * rs.decimal("employee_share")?),
-        government: to_dollars(premium * rs.decimal("government_share")?),
+        employee: to_dollars(premium * rs.decimal("employee_share")?) * heads,
+        government: to_dollars(premium * rs.decimal("government_share")?) * heads,
     })
 }
 
@@ -356,19 +395,27 @@ pub fn health_insurance(
 /// The rate is the same one everybody pays, so it comes from the health
 /// insurance ruleset; only the split differs, and that comes from
 /// `owner_insurance`. The average-dependants multiplier is not applied,
-/// because it scales an employer share this split does not have.
+/// because it scales an employer share this split does not have. Covered
+/// dependants are charged per head as in [`health_insurance`]: an owner bears
+/// their family's premium in full, as their own.
 pub fn health_insurance_owner(
     health_rs: &Ruleset,
     owner_rs: &Ruleset,
+    dependants_rs: &Ruleset,
     insured_salary: Money,
+    covered_dependants: u32,
 ) -> Result<Contribution, RegulationError> {
     health_rs.expect_domain("health_insurance")?;
     owner_rs.expect_domain("owner_insurance")?;
+    let heads = Money::from(1 + dependants_charged(dependants_rs, covered_dependants)?);
     let premium = insured_salary * health_rs.decimal("rate")?;
+    let head = |key: &str| -> Result<Money, RegulationError> {
+        Ok(to_dollars(premium * owner_rs.decimal(key)?) * heads)
+    };
     Ok(Contribution {
-        employer: to_dollars(premium * owner_rs.decimal("health_employer_share")?),
-        employee: to_dollars(premium * owner_rs.decimal("health_employee_share")?),
-        government: to_dollars(premium * owner_rs.decimal("health_government_share")?),
+        employer: head("health_employer_share")?,
+        employee: head("health_employee_share")?,
+        government: head("health_government_share")?,
     })
 }
 
@@ -818,7 +865,8 @@ mod tests {
     #[test]
     fn health_insurance_matches_the_prototype() {
         let rs = resolve("health_insurance", d(2026, 7, 25)).unwrap();
-        let c = health_insurance(rs, dec!(53000)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let c = health_insurance(rs, deps, dec!(53000), 0).unwrap();
         assert_eq!(c.employer, dec!(2647), "公司負擔健保（含平均眷口 1.61）");
         assert_eq!(c.employee, dec!(822), "員工自付健保");
     }
@@ -914,8 +962,9 @@ mod tests {
         let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
         let owner = resolve("owner_insurance", d(2026, 7, 25)).unwrap();
 
-        let staff = health_insurance(health, dec!(53000)).unwrap();
-        let boss = health_insurance_owner(health, owner, dec!(53000)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let staff = health_insurance(health, deps, dec!(53000), 0).unwrap();
+        let boss = health_insurance_owner(health, owner, deps, dec!(53000), 0).unwrap();
         assert_eq!(boss.employer, Money::ZERO, "雇主身分沒有公司負擔那一半");
         assert_eq!(boss.government, Money::ZERO, "政府不補助");
         assert_eq!(boss.employee, dec!(2740), "53000 × 5.17% 全額自付");
@@ -923,6 +972,99 @@ mod tests {
 
         assert_eq!(pension_owner(owner, dec!(53000)).unwrap(), Money::ZERO);
         assert!(pension_owner(health, dec!(53000)).is_err(), "領域要對得上");
+    }
+
+    /// The employee pays a head for each covered dependant, up to the cap;
+    /// the employer share is apportioned by the average and does not move.
+    #[test]
+    fn dependants_are_charged_per_head_up_to_the_cap() {
+        let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let one = health_insurance(health, deps, dec!(53000), 0).unwrap();
+        assert_eq!(one.employee, dec!(822));
+
+        for (covered, heads) in [(0, 1), (1, 2), (3, 4), (4, 4)] {
+            let c = health_insurance(health, deps, dec!(53000), covered).unwrap();
+            assert_eq!(
+                c.employee,
+                one.employee * Decimal::from(heads),
+                "眷口 {covered} 應計 {heads} 口"
+            );
+            assert_eq!(c.employer, dec!(2647), "公司負擔仍依平均眷口數");
+            assert_eq!(c.government, one.government * Decimal::from(heads));
+        }
+    }
+
+    /// Each head is rounded on its own and then added up: 38,200 × 5.17% ×
+    /// 30% is 592.482, so four heads are 4 × 592 = 2,368, where rounding the
+    /// product once would give 2,370.
+    #[test]
+    fn each_head_is_rounded_before_the_heads_are_added() {
+        let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let c = health_insurance(health, deps, dec!(38200), 3).unwrap();
+        assert_eq!(c.employee, dec!(2368));
+    }
+
+    /// The cap is read from the ruleset, and a cap that is not a whole number
+    /// of people is refused rather than rounded.
+    #[test]
+    fn the_dependant_cap_comes_from_the_ruleset() {
+        let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let one = health_insurance(health, deps, dec!(53000), 0).unwrap();
+
+        let mut two = deps.clone();
+        two.payload["max_counted"] = "2".into();
+        let c = health_insurance(health, &two, dec!(53000), 3).unwrap();
+        assert_eq!(
+            c.employee,
+            one.employee * dec!(3),
+            "上限 2 時眷口 3 只計 2 口"
+        );
+
+        for written in ["3.0", "3.00"] {
+            let mut same = deps.clone();
+            same.payload["max_counted"] = written.into();
+            assert_eq!(dependants_charged(&same, 5).unwrap(), 3, "{written}");
+        }
+        for bad in ["2.5", "-1"] {
+            let mut odd = deps.clone();
+            odd.payload["max_counted"] = bad.into();
+            assert!(
+                matches!(
+                    dependants_charged(&odd, 1),
+                    Err(RegulationError::NotWholeNumber { .. })
+                ),
+                "{bad}"
+            );
+        }
+        assert!(
+            dependants_charged(health, 1).is_err(),
+            "要 health_dependents 的規則"
+        );
+    }
+
+    /// An owner bears each covered dependant's premium in full, as their own.
+    #[test]
+    fn an_owner_pays_for_each_dependant_too() {
+        let health = resolve("health_insurance", d(2026, 7, 25)).unwrap();
+        let owner = resolve("owner_insurance", d(2026, 7, 25)).unwrap();
+        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
+        let boss = health_insurance_owner(health, owner, deps, dec!(53000), 2).unwrap();
+        assert_eq!(boss.employee, dec!(2740) * dec!(3));
+        assert_eq!(boss.employer, Money::ZERO);
+    }
+
+    /// The cap has been law since the current act came into force; before
+    /// that there is no version, and that is an error rather than no cap.
+    #[test]
+    fn a_date_before_the_dependant_rule_has_no_cap_to_guess() {
+        assert!(resolve("health_dependents", d(2013, 1, 1)).is_ok());
+        assert!(matches!(
+            resolve("health_dependents", d(2012, 12, 31)),
+            Err(RegulationError::NotFound { .. })
+        ));
     }
 
     #[test]

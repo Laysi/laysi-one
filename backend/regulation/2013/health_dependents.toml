@@ -1,0 +1,25 @@
+# Dependants charged on an employee's health insurance premium
+#
+# National Health Insurance Act art. 18 para. 2: the insured person pays the
+# premium of each covered dependant, at the same amount as their own, and more
+# than three dependants are counted as three. The employer share is not
+# affected: it is apportioned by the average number of dependants in
+# `health_insurance`.
+#
+# A domain of its own rather than a field in `health_insurance`, because
+# adding a field there means a second version effective the same day, and
+# `resolve()` picks between two versions with the same `effective_from` in
+# whatever order the database returns them.
+#
+# Effective from the day the article came into force rather than the factory
+# year, so a period recomputed under an earlier health insurance version still
+# finds a cap instead of failing.
+
+domain = "health_dependents"
+version = "2013.1"
+effective_from = "2013-01-01"
+source_note = "全民健康保險法第 18 條第 2 項"
+
+[payload]
+# Most dependants charged; a whole number.
+max_counted = "3"

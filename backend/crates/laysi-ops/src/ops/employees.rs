@@ -6,9 +6,10 @@
 //! it is about to replace, and no other page says what someone is paid today.
 //! Monthly payslips stay in `list_payslips` (boss only).
 //!
-//! Over MCP the same operation answers with less: the amounts and the bank
-//! accounts are dropped and the id number is masked. The tool grant already
-//! promises as much, and a model has no filing errand that needs either.
+//! Over MCP the same operation answers with less: the amounts, the bank
+//! accounts and the dependants list are dropped and the id number is masked.
+//! The tool grant already promises as much, and a model has no filing errand
+//! that needs any of them.
 //!
 //! Annual leave entitlement is `annual_leave_days(ruleset, service_months)`,
 //! never stored; days taken are summed from `leave_request`.
@@ -27,7 +28,7 @@ use base64::Engine;
 use chrono::{Datelike, NaiveDate};
 use laysi_domain::Money;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES};
-use laysi_store::ReserveDocument;
+use laysi_store::{EmployeeDependent, ReserveDocument};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -65,9 +66,96 @@ fn redact_for_ai(row: &mut Value) {
         "pension_wage",
         "bank_accounts",
         "birthday",
+        "dependents",
     ] {
         fields.remove(key);
     }
+}
+
+/// A relation a dependant may have to the employee.
+pub(crate) struct Relation {
+    pub code: &'static str,
+    pub label: &'static str,
+    /// Whether this relation can be covered under the employee's health
+    /// insurance (National Health Insurance Act art. 2). The rest can still be
+    /// claimed for withholding.
+    pub health_eligible: bool,
+}
+
+/// Every relation `employee_dependent.relation` accepts, in the order the
+/// drawer lists them. The CHECK on that column and the health rule beside it
+/// are tested against this list.
+pub(crate) const RELATIONS: [Relation; 7] = [
+    Relation {
+        code: "spouse",
+        label: "配偶",
+        health_eligible: true,
+    },
+    Relation {
+        code: "parent",
+        label: "父母",
+        health_eligible: true,
+    },
+    Relation {
+        code: "grandparent",
+        label: "祖父母",
+        health_eligible: true,
+    },
+    Relation {
+        code: "child",
+        label: "子女",
+        health_eligible: true,
+    },
+    Relation {
+        code: "grandchild",
+        label: "孫子女",
+        health_eligible: true,
+    },
+    Relation {
+        code: "sibling",
+        label: "兄弟姊妹",
+        health_eligible: false,
+    },
+    Relation {
+        code: "other",
+        label: "其他",
+        health_eligible: false,
+    },
+];
+
+pub(crate) fn relation(code: &str) -> Option<&'static Relation> {
+    RELATIONS.iter().find(|r| r.code == code)
+}
+
+pub(crate) fn relation_label(code: &str) -> &'static str {
+    relation(code).map(|r| r.label).unwrap_or("其他")
+}
+
+/// The relations as the drawer offers them.
+fn relations_json() -> Value {
+    json!(RELATIONS
+        .iter()
+        .map(|r| json!({
+            "code": r.code,
+            "label": r.label,
+            "health_eligible": r.health_eligible,
+        }))
+        .collect::<Vec<_>>())
+}
+
+/// One dependant as the roster returns it: everything on file, because the
+/// drawer that edits the list has to send it all back.
+fn dependent_json(d: &EmployeeDependent) -> Value {
+    json!({
+        "name": d.name,
+        "relation": d.relation,
+        "relation_label": relation_label(&d.relation),
+        "id_no": d.id_no,
+        "birthday": d.birthday,
+        "health_enrolled_from": d.health_enrolled_from,
+        "health_enrolled_until": d.health_enrolled_until,
+        "tax_dependent": d.tax_dependent,
+    })
 }
 
 /// Voucher status as the screens name it. The stored value is an internal
@@ -447,6 +535,9 @@ impl Operation for ListEmployees {
                 // brackets: the drawer that edits them has to show what it is
                 // about to replace. Self-service sees only the last digits.
                 "bank_accounts": e.bank_accounts,
+                // Health cover and withholding claims are both read from
+                // this list, so the drawer edits it whole.
+                "dependents": e.dependents.iter().map(dependent_json).collect::<Vec<_>>(),
                 "note": e.note,
             }));
         }
@@ -480,6 +571,7 @@ impl Operation for ListEmployees {
                     .map(|(d, n)| json!({ "label": d, "count": n }))
                     .collect::<Vec<_>>(),
                 "departments": departments,
+                "relations": relations_json(),
                 "avg_service_months": avg_months,
                 "avg_service_label": service_label(avg_months),
                 "annual_leave_ruleset": crate::ops::insurance::ruleset_json(rs),
@@ -894,6 +986,7 @@ mod tests {
             "pension_wage": "45800",
             "bank_accounts": [{ "bank_name": "第一銀行", "account_no": "12345678901" }],
             "birthday": "1990-05-02",
+            "dependents": [{ "name": "王太太", "relation": "spouse", "id_no": "B223456782" }],
         });
         redact_for_ai(&mut row);
 
@@ -905,9 +998,43 @@ mod tests {
             "pension_wage",
             "bank_accounts",
             "birthday",
+            "dependents",
         ] {
             assert!(row.get(gone).is_none(), "{gone} 不該留在 AI 讀到的名冊上");
         }
         assert_eq!(row["name"], json!("王小明"), "姓名與編號仍然要回");
+    }
+
+    /// The drawer offers the relations and says which can be covered; the
+    /// table refuses anything else. The two must name the same set, or a
+    /// choice on screen ends in a database error.
+    #[test]
+    fn the_relations_list_agrees_with_the_table() {
+        let sql = include_str!("../../../../migrations/0019_employee_dependents.sql");
+        let quoted = |line: &str| -> Vec<String> {
+            line.split("'")
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        };
+        let relation_check = sql
+            .lines()
+            .find(|l| l.contains("employee_dependent_relation_check"))
+            .expect("migration 應有關係的 CHECK");
+        let health_check = sql
+            .lines()
+            .find(|l| l.contains("employee_dependent_health_relation"))
+            .expect("migration 應有依附健保的 CHECK");
+
+        let codes: Vec<String> = RELATIONS.iter().map(|r| r.code.to_string()).collect();
+        assert_eq!(quoted(relation_check), codes);
+
+        let barred: Vec<String> = RELATIONS
+            .iter()
+            .filter(|r| !r.health_eligible)
+            .map(|r| r.code.to_string())
+            .collect();
+        assert_eq!(quoted(health_check), barred);
     }
 }
