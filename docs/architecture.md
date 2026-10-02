@@ -223,7 +223,9 @@ pub fn overtime_pay(rs: &Ruleset, hourly_wage: Money, day_type: &str, hours: Mon
 `owner_insurance` 相同，塞進去要一個同日生效的新版本。`effective_from` 是 2013-01-01
 （現行條文施行日）而不是出廠年度，補算較早期間時不會因為找不到上限而失敗。
 `premiums_on` 不論眷口數多少都解析這個 domain，找不到就回錯誤，不當成 0 口；
-`max_counted` 不是整數（`2.5`、`-1`）一樣回錯誤，`3.0` 讀成 3。
+`max_counted` 不是整數（`2.5`、`-1`）一樣回錯誤，`3.0` 讀成 3。前一條由
+`crates/laysi-server/tests/payroll_dependant_cap.rs` 跑一次真的 `run_payroll` 證明：法規快取是
+行程內的全域狀態，拿掉一個 domain 會波及同一個測試執行檔裡的其他測試，所以它單獨一個檔案。
 
 **逐口先取整再加總**：健保署逐口計費，`38200` 級距三名眷屬是 `592 × 4 = 2368`，先乘再
 取整會得到 2370。
