@@ -127,7 +127,7 @@ export function Me({ onGo, reloadKey }: Props) {
           )}
           {p.dependents.length === 0 ? (
             <div className="fact">
-              <span className="fact__key">眷屬</span>
+              <span className="fact__key">健保眷屬</span>
               <span className="fact__value">尚未登記，由人資維護</span>
             </div>
           ) : (
@@ -137,13 +137,8 @@ export function Me({ onGo, reloadKey }: Props) {
                 <span className="fact__value">
                   {d.name}
                   <span className="fact__note num">
-                    {[
-                      d.health_enrolled_from &&
-                        `健保 ${d.health_enrolled_from}${d.health_enrolled_until ? `～${d.health_enrolled_until}` : ' 起'}`,
-                      d.tax_dependent && '列報扶養',
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
+                    健保 {d.health_enrolled_from}
+                    {d.health_enrolled_until ? `～${d.health_enrolled_until}` : ' 起'}
                   </span>
                 </span>
               </div>

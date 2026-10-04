@@ -1646,9 +1646,8 @@ mod tests {
                 relation: "child".into(),
                 id_no: String::new(),
                 birthday: None,
-                health_enrolled_from: Some(from),
+                health_enrolled_from: from,
                 health_enrolled_until: until,
-                tax_dependent: false,
             };
         e.dependents = vec![
             dependant(d(2026, 1, 1), None),

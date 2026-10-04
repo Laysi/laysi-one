@@ -61,7 +61,6 @@ const row = {
       birthday: "2026-03-01",
       health_enrolled_from: "2026-03-01",
       health_enrolled_until: null,
-      tax_dependent: true,
     },
   ],
   note: "",
@@ -74,7 +73,7 @@ const list = {
   leaving: 0,
   by_dept: [{ label: "未指定", count: 1 }],
   departments: [{ code: "ADM", label: "行政部", active: true }],
-  relations: [{ code: "child", label: "子女", health_eligible: true }],
+  relations: [{ code: "child", label: "子女" }],
   avg_service_months: 29,
   avg_service_label: "2 年 5 個月",
   annual_leave_ruleset: {

@@ -6000,7 +6000,7 @@ impl Store {
         let ids: Vec<i32> = staff.iter().map(|e| e.id).collect();
         let rows = sqlx::query(
             "SELECT employee_id, id, name, relation, id_no, birthday,
-                    health_enrolled_from, health_enrolled_until, tax_dependent
+                    health_enrolled_from, health_enrolled_until
                FROM employee_dependent
               WHERE employee_id = ANY($1)
               ORDER BY employee_id, id",
@@ -6020,7 +6020,6 @@ impl Store {
                     birthday: r.get("birthday"),
                     health_enrolled_from: r.get("health_enrolled_from"),
                     health_enrolled_until: r.get("health_enrolled_until"),
-                    tax_dependent: r.get("tax_dependent"),
                 })
                 .collect();
         }
@@ -8771,13 +8770,10 @@ pub struct EmployeeDependent {
     /// Upper case; blank while it has not been collected.
     pub id_no: String,
     pub birthday: Option<NaiveDate>,
-    /// First day covered under this employee's health insurance; `None` when
-    /// the person is not a health dependant.
-    pub health_enrolled_from: Option<NaiveDate>,
+    /// First day covered under this employee's health insurance.
+    pub health_enrolled_from: NaiveDate,
     /// Last day covered; `None` while still covered.
     pub health_enrolled_until: Option<NaiveDate>,
-    /// Claimed for the salary withholding table.
-    pub tax_dependent: bool,
 }
 
 /// One dependant as the caller wants it stored.
@@ -8786,9 +8782,8 @@ pub struct WriteEmployeeDependent<'a> {
     pub relation: &'a str,
     pub id_no: &'a str,
     pub birthday: Option<NaiveDate>,
-    pub health_enrolled_from: Option<NaiveDate>,
+    pub health_enrolled_from: NaiveDate,
     pub health_enrolled_until: Option<NaiveDate>,
-    pub tax_dependent: bool,
 }
 
 /// One bank account belonging to one employee.
@@ -9391,8 +9386,8 @@ async fn replace_dependents(
         sqlx::query(
             "INSERT INTO employee_dependent
                 (employee_id, name, relation, id_no, birthday,
-                 health_enrolled_from, health_enrolled_until, tax_dependent, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                 health_enrolled_from, health_enrolled_until, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(employee_id)
         .bind(dependent.name)
@@ -9401,7 +9396,6 @@ async fn replace_dependents(
         .bind(dependent.birthday)
         .bind(dependent.health_enrolled_from)
         .bind(dependent.health_enrolled_until)
-        .bind(dependent.tax_dependent)
         .bind(req.actor)
         .execute(&mut **tx)
         .await?;
@@ -11339,6 +11333,7 @@ mod tests {
             }
         }
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day);
+        let march = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
 
         let created = store
             .create_employee(write(
@@ -11349,18 +11344,16 @@ mod tests {
                         relation: "spouse",
                         id_no: "B223456782",
                         birthday: d(1990, 5, 2),
-                        health_enrolled_from: None,
+                        health_enrolled_from: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                         health_enrolled_until: None,
-                        tax_dependent: true,
                     },
                     WriteEmployeeDependent {
                         name: "王小寶",
                         relation: "child",
                         id_no: "",
                         birthday: d(2026, 3, 1),
-                        health_enrolled_from: d(2026, 3, 1),
+                        health_enrolled_from: march,
                         health_enrolled_until: None,
-                        tax_dependent: true,
                     },
                 ]),
             ))
@@ -11368,7 +11361,7 @@ mod tests {
             .expect("應可建立員工與眷屬");
         assert_eq!(created.dependents.len(), 2);
         assert_eq!(created.dependents[0].name, "王太太", "依輸入順序");
-        assert_eq!(created.dependents[1].health_enrolled_from, d(2026, 3, 1));
+        assert_eq!(created.dependents[1].health_enrolled_from, march);
 
         // Omitting the list leaves what is on file alone.
         let untouched = store
@@ -11385,9 +11378,8 @@ mod tests {
                     relation: "child",
                     id_no: "",
                     birthday: d(2026, 3, 1),
-                    health_enrolled_from: d(2026, 3, 1),
+                    health_enrolled_from: march,
                     health_enrolled_until: d(2026, 9, 30),
-                    tax_dependent: true,
                 }]),
             ))
             .await
@@ -11417,8 +11409,26 @@ mod tests {
         // The table's own rules, for whatever writes to it without going
         // through the operation's checks.
         let employee_id = emptied.employee.id;
+        // 23514 is a CHECK, 23502 a NOT NULL.
         let refused = [
-            ("不在清單內的關係", "甲", "cousin", "", None, None),
+            (
+                "不在清單內的關係",
+                "甲",
+                "cousin",
+                "",
+                d(2026, 3, 1),
+                None,
+                "23514",
+            ),
+            (
+                "兄弟姊妹",
+                "甲",
+                "sibling",
+                "",
+                d(2026, 3, 1),
+                None,
+                "23514",
+            ),
             (
                 "退保日早於加保日",
                 "甲",
@@ -11426,14 +11436,21 @@ mod tests {
                 "",
                 d(2026, 3, 1),
                 d(2026, 2, 28),
+                "23514",
             ),
-            ("只有退保日", "甲", "child", "", None, d(2026, 2, 28)),
-            ("兄弟姊妹依附健保", "甲", "sibling", "", d(2026, 3, 1), None),
-            ("其他依附健保", "甲", "other", "", d(2026, 3, 1), None),
-            ("空白姓名", "  ", "child", "", None, None),
-            ("小寫字號", "甲", "child", "b223456782", None, None),
+            ("沒有加保日", "甲", "child", "", None, None, "23502"),
+            ("空白姓名", "  ", "child", "", d(2026, 3, 1), None, "23514"),
+            (
+                "小寫字號",
+                "甲",
+                "child",
+                "b223456782",
+                d(2026, 3, 1),
+                None,
+                "23514",
+            ),
         ];
-        for (why, name, relation, id_no, from, until) in refused {
+        for (why, name, relation, id_no, from, until, expected) in refused {
             let err = sqlx::query(
                 "INSERT INTO employee_dependent
                     (employee_id, name, relation, id_no, health_enrolled_from, health_enrolled_until)
@@ -11451,8 +11468,8 @@ mod tests {
             let code = err.as_database_error().and_then(|db| db.code());
             assert_eq!(
                 code.as_deref(),
-                Some("23514"),
-                "{why}應由 CHECK 擋下：{err}"
+                Some(expected),
+                "{why}應由資料表擋下：{err}"
             );
         }
         // Same-day cover is a period of one day, not a mistake.
@@ -11481,18 +11498,16 @@ mod tests {
                         relation: "spouse",
                         id_no: "B223456782",
                         birthday: None,
-                        health_enrolled_from: None,
+                        health_enrolled_from: march,
                         health_enrolled_until: None,
-                        tax_dependent: false,
                     },
                     WriteEmployeeDependent {
                         name: "王媽媽",
                         relation: "parent",
                         id_no: "B223456782",
                         birthday: None,
-                        health_enrolled_from: None,
+                        health_enrolled_from: march,
                         health_enrolled_until: None,
-                        tax_dependent: false,
                     },
                 ]),
             ))
@@ -11510,18 +11525,16 @@ mod tests {
                         relation: "parent",
                         id_no: "",
                         birthday: None,
-                        health_enrolled_from: None,
+                        health_enrolled_from: march,
                         health_enrolled_until: None,
-                        tax_dependent: false,
                     },
                     WriteEmployeeDependent {
                         name: "王媽媽",
                         relation: "parent",
                         id_no: "",
                         birthday: None,
-                        health_enrolled_from: None,
+                        health_enrolled_from: march,
                         health_enrolled_until: None,
-                        tax_dependent: false,
                     },
                 ]),
             ))

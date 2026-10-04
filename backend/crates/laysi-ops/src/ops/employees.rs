@@ -72,54 +72,36 @@ fn redact_for_ai(row: &mut Value) {
     }
 }
 
-/// A relation a dependant may have to the employee.
+/// A relation a health dependant may have to the employee.
 pub(crate) struct Relation {
     pub code: &'static str,
     pub label: &'static str,
-    /// Whether this relation can be covered under the employee's health
-    /// insurance (National Health Insurance Act art. 2). The rest can still be
-    /// claimed for withholding.
-    pub health_eligible: bool,
 }
 
 /// Every relation `employee_dependent.relation` accepts, in the order the
-/// drawer lists them. The CHECK on that column and the health rule beside it
-/// are tested against this list.
-pub(crate) const RELATIONS: [Relation; 7] = [
+/// drawer lists them: the ones the National Health Insurance Act art. 2
+/// allows to be covered as dependants. The CHECK on that column is tested
+/// against this list.
+pub(crate) const RELATIONS: [Relation; 5] = [
     Relation {
         code: "spouse",
         label: "配偶",
-        health_eligible: true,
     },
     Relation {
         code: "parent",
         label: "父母",
-        health_eligible: true,
     },
     Relation {
         code: "grandparent",
         label: "祖父母",
-        health_eligible: true,
     },
     Relation {
         code: "child",
         label: "子女",
-        health_eligible: true,
     },
     Relation {
         code: "grandchild",
         label: "孫子女",
-        health_eligible: true,
-    },
-    Relation {
-        code: "sibling",
-        label: "兄弟姊妹",
-        health_eligible: false,
-    },
-    Relation {
-        code: "other",
-        label: "其他",
-        health_eligible: false,
     },
 ];
 
@@ -127,8 +109,9 @@ pub(crate) fn relation(code: &str) -> Option<&'static Relation> {
     RELATIONS.iter().find(|r| r.code == code)
 }
 
+/// The label a page prints. The CHECK keeps any other code out of the table.
 pub(crate) fn relation_label(code: &str) -> &'static str {
-    relation(code).map(|r| r.label).unwrap_or("其他")
+    relation(code).map_or("", |r| r.label)
 }
 
 /// The relations as the drawer offers them.
@@ -138,7 +121,6 @@ fn relations_json() -> Value {
         .map(|r| json!({
             "code": r.code,
             "label": r.label,
-            "health_eligible": r.health_eligible,
         }))
         .collect::<Vec<_>>())
 }
@@ -154,7 +136,6 @@ fn dependent_json(d: &EmployeeDependent) -> Value {
         "birthday": d.birthday,
         "health_enrolled_from": d.health_enrolled_from,
         "health_enrolled_until": d.health_enrolled_until,
-        "tax_dependent": d.tax_dependent,
     })
 }
 
@@ -1005,9 +986,9 @@ mod tests {
         assert_eq!(row["name"], json!("王小明"), "姓名與編號仍然要回");
     }
 
-    /// The drawer offers the relations and says which can be covered; the
-    /// table refuses anything else. The two must name the same set, or a
-    /// choice on screen ends in a database error.
+    /// The drawer offers the relations; the table refuses anything else. The
+    /// two must name the same set, or a choice on screen ends in a database
+    /// error.
     #[test]
     fn the_relations_list_agrees_with_the_table() {
         let sql = include_str!("../../../../migrations/0019_employee_dependents.sql");
@@ -1022,19 +1003,8 @@ mod tests {
             .lines()
             .find(|l| l.contains("employee_dependent_relation_check"))
             .expect("migration 應有關係的 CHECK");
-        let health_check = sql
-            .lines()
-            .find(|l| l.contains("employee_dependent_health_relation"))
-            .expect("migration 應有依附健保的 CHECK");
 
         let codes: Vec<String> = RELATIONS.iter().map(|r| r.code.to_string()).collect();
         assert_eq!(quoted(relation_check), codes);
-
-        let barred: Vec<String> = RELATIONS
-            .iter()
-            .filter(|r| !r.health_eligible)
-            .map(|r| r.code.to_string())
-            .collect();
-        assert_eq!(quoted(health_check), barred);
     }
 }

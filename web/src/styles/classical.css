@@ -2113,17 +2113,6 @@ textarea {
   margin-top: var(--space-xl);
 }
 
-.dependent-flags {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-  margin-top: var(--space-xl);
-}
-
-.dependent-flags .tag--static {
-  margin-left: 0;
-}
-
 .entry-input {
   padding: var(--space-md) var(--space-md);
   border: var(--rule-width) solid var(--rule-strong);

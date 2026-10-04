@@ -159,8 +159,7 @@ pub(crate) fn covered_dependants(e: &Employee, on: NaiveDate) -> u32 {
         .dependents
         .iter()
         .filter(|d| {
-            d.health_enrolled_from.is_some_and(|from| from <= on)
-                && d.health_enrolled_until.is_none_or(|until| until >= on)
+            d.health_enrolled_from <= on && d.health_enrolled_until.is_none_or(|until| until >= on)
         })
         .count();
     u32::try_from(covered).unwrap_or(u32::MAX)
@@ -926,10 +925,7 @@ mod tests {
         assert_eq!(m.labels(), vec!["勞保投保薪資"]);
     }
 
-    fn dependant(
-        from: Option<NaiveDate>,
-        until: Option<NaiveDate>,
-    ) -> laysi_store::EmployeeDependent {
+    fn dependant(from: NaiveDate, until: Option<NaiveDate>) -> laysi_store::EmployeeDependent {
         laysi_store::EmployeeDependent {
             id: 0,
             name: "眷屬".into(),
@@ -938,24 +934,22 @@ mod tests {
             birthday: None,
             health_enrolled_from: from,
             health_enrolled_until: until,
-            tax_dependent: false,
         }
     }
 
     /// Who is covered on the last day of the month is who the month is
-    /// charged for. The last day covered still counts; a dependant claimed
-    /// for withholding only is not on the health insurance at all.
+    /// charged for. The last day covered still counts; a dependant enrolled
+    /// after it does not.
     #[test]
     fn dependants_are_counted_on_the_last_day_of_the_month() {
         let mut e = test_employee("active", n("53000"), n("45800"), n("53000"), n("53000"));
         let end = d(2026, 9, 30);
         e.dependents = vec![
-            dependant(Some(d(2026, 3, 1)), None),
-            dependant(Some(d(2026, 9, 30)), None),
-            dependant(Some(d(2026, 1, 1)), Some(d(2026, 9, 30))),
-            dependant(Some(d(2026, 1, 1)), Some(d(2026, 9, 29))),
-            dependant(Some(d(2026, 10, 1)), None),
-            dependant(None, None),
+            dependant(d(2026, 3, 1), None),
+            dependant(d(2026, 9, 30), None),
+            dependant(d(2026, 1, 1), Some(d(2026, 9, 30))),
+            dependant(d(2026, 1, 1), Some(d(2026, 9, 29))),
+            dependant(d(2026, 10, 1), None),
         ];
         assert_eq!(covered_dependants(&e, end), 3, "前三位在 9/30 在保");
         assert_eq!(

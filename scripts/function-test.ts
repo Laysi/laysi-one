@@ -629,8 +629,7 @@ async function main() {
         labor_insured_salary: "45800", health_insured_salary: "53000", pension_wage: "53000",
         dependents: [
           { name: "測試配偶", relation: "spouse", health_enrolled_from: hire },
-          { name: "測試子女", relation: "child", health_enrolled_from: hire, tax_dependent: true },
-          { name: "測試父親", relation: "parent", tax_dependent: true },
+          { name: "測試子女", relation: "child", health_enrolled_from: hire },
         ],
       });
       const empNo = created.employee.emp_no;
@@ -659,8 +658,8 @@ async function main() {
         emp_no: empNo, name: "測試眷屬", hired_on: hire,
         dependents: [
           { name: "測試配偶", relation: "spouse", health_enrolled_from: hire },
-          { name: "測試子女", relation: "child", health_enrolled_from: hire, tax_dependent: true },
-          { name: "測試父親", relation: "parent", health_enrolled_from: hire, tax_dependent: true },
+          { name: "測試子女", relation: "child", health_enrolled_from: hire },
+          { name: "測試父親", relation: "parent", health_enrolled_from: hire },
         ],
       });
       const after = (await must("list_payslips", { period })).rows.find((r: any) => r.emp_no === empNo);
@@ -998,7 +997,7 @@ async function main() {
       await must("update_employee", {
         ...base,
         dependents: [
-          { name: "測試配偶", relation: "spouse", id_no: "b223456782", tax_dependent: true },
+          { name: "測試配偶", relation: "spouse", id_no: "b223456782", health_enrolled_from: "2026-02-01" },
           { name: "測試子女", relation: "child", birthday: "2026-03-01", health_enrolled_from: "2026-03-01" },
         ],
       });
@@ -1014,11 +1013,18 @@ async function main() {
         ...base,
         dependents: [{ name: "測試手足", relation: "sibling", health_enrolled_from: "2026-03-01" }],
       });
-      expect(!sibling.ok, "兄弟姊妹竟然依附得了健保");
+      expect(!sibling.ok, "兄弟姊妹竟然登記得進健保眷屬");
       expect(sibling.error!.message.includes("測試手足"), sibling.error!.message);
+      const undated = await op("update_employee", {
+        ...base,
+        dependents: [{ name: "測試配偶", relation: "spouse" }],
+      });
+      expect(!undated.ok, "沒有健保加保日的眷屬竟然存得進去");
       const typo = await op("update_employee", {
         ...base,
-        dependents: [{ name: "測試配偶", relation: "spouse", id_no: "B223456789" }],
+        dependents: [
+          { name: "測試配偶", relation: "spouse", id_no: "B223456789", health_enrolled_from: "2026-02-01" },
+        ],
       });
       expect(!typo.ok, "檢查碼錯誤的字號竟然存得進去");
       expect(!typo.error!.message.includes("B223456789"), `錯誤訊息印出字號：${typo.error!.message}`);
@@ -1027,7 +1033,7 @@ async function main() {
       await must("update_employee", { ...base, dependents: [] });
       rows = await listed();
       expectEq(rows.length, 0, "空清單清空名單");
-      return "整份取代 · 不帶不動 · 空清單清空 · 兄弟姊妹與錯字號擋下";
+      return "整份取代 · 不帶不動 · 空清單清空 · 兄弟姊妹、沒有加保日與錯字號擋下";
     });
 
     console.log("\nD 文件下載連結");

@@ -1772,16 +1772,14 @@ export const employeeDependentRow = z.object({
   relation_label: z.string(),
   id_no: z.string(),
   birthday: z.string().nullable(),
-  health_enrolled_from: z.string().nullable(),
+  health_enrolled_from: z.string(),
   health_enrolled_until: z.string().nullable(),
-  tax_dependent: z.boolean(),
 });
 export type EmployeeDependentRow = z.infer<typeof employeeDependentRow>;
 
 export const dependentRelation = z.object({
   code: z.string(),
   label: z.string(),
-  health_eligible: z.boolean(),
 });
 export type DependentRelation = z.infer<typeof dependentRelation>;
 
@@ -2326,9 +2324,8 @@ export const myProfile = z.object({
   dependents: z.array(z.object({
     name: z.string(),
     relation_label: z.string(),
-    health_enrolled_from: z.string().nullable(),
+    health_enrolled_from: z.string(),
     health_enrolled_until: z.string().nullable(),
-    tax_dependent: z.boolean(),
   })),
   privacy_note: z.string(),
 });

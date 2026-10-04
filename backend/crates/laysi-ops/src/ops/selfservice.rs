@@ -211,7 +211,6 @@ fn profile_json(employee: &Employee, months: u32) -> Value {
             "relation_label": crate::ops::employees::relation_label(&d.relation),
             "health_enrolled_from": d.health_enrolled_from,
             "health_enrolled_until": d.health_enrolled_until,
-            "tax_dependent": d.tax_dependent,
         })).collect::<Vec<_>>(),
         "privacy_note": "不回本人與眷屬的身分證字號，也不回眷屬生日；銀行帳戶只回銀行名稱與尾碼。",
     })
@@ -2358,9 +2357,8 @@ mod tests {
             relation: "child".into(),
             id_no: "B223456782".into(),
             birthday: NaiveDate::from_ymd_opt(2026, 3, 1),
-            health_enrolled_from: NaiveDate::from_ymd_opt(2026, 3, 1),
+            health_enrolled_from: NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
             health_enrolled_until: None,
-            tax_dependent: true,
         }];
         let profile = profile_json(&me, 0);
         let listed = &profile["dependents"][0];

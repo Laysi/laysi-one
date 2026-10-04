@@ -401,8 +401,8 @@ pub struct EmployeeInput {
 pub struct EmployeeDependentInput {
     /// Name.
     pub name: String,
-    /// One of `spouse`, `parent`, `grandparent`, `child`, `grandchild`,
-    /// `sibling`, `other`.
+    /// One of `spouse`, `parent`, `grandparent`, `child`, `grandchild`: the
+    /// relations a health dependant may have.
     pub relation: String,
     /// National ID, checked like the employee's own. May be blank while it
     /// has not been collected.
@@ -411,17 +411,11 @@ pub struct EmployeeDependentInput {
     /// Date of birth.
     #[serde(default)]
     pub birthday: Option<NaiveDate>,
-    /// First day covered under this employee's health insurance. Leave it out
-    /// for someone who is not a health dependant. `sibling` and `other` cannot
-    /// be covered.
-    #[serde(default)]
-    pub health_enrolled_from: Option<NaiveDate>,
+    /// First day covered under this employee's health insurance.
+    pub health_enrolled_from: NaiveDate,
     /// Last day covered. Leave it out while the person is still covered.
     #[serde(default)]
     pub health_enrolled_until: Option<NaiveDate>,
-    /// Claimed as a dependant for the salary withholding table.
-    #[serde(default)]
-    pub tax_dependent: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -619,7 +613,7 @@ fn validate_dependents(input: &EmployeeInput) -> Result<(), OpError> {
             )));
         }
         let name = dependent.name.as_str();
-        let Some(relation) = crate::ops::employees::relation(&dependent.relation) else {
+        if crate::ops::employees::relation(&dependent.relation).is_none() {
             return Err(OpError::BadInput(format!(
                 "{name} 的關係要從清單選擇：{}",
                 crate::ops::employees::RELATIONS
@@ -628,40 +622,25 @@ fn validate_dependents(input: &EmployeeInput) -> Result<(), OpError> {
                     .collect::<Vec<_>>()
                     .join("、")
             )));
-        };
+        }
         if !dependent.id_no.is_empty() && !is_valid_id_no(&dependent.id_no) {
             return Err(OpError::BadInput(format!(
                 "{name} 的身分證字號要一個英文字母加九碼數字，且檢查碼相符；還沒收到可以留空"
             )));
         }
-        match (
-            dependent.health_enrolled_from,
-            dependent.health_enrolled_until,
-        ) {
-            (None, Some(_)) => {
-                return Err(OpError::BadInput(format!(
-                    "{name} 只填了健保退保日，請一併填加保日"
-                )))
-            }
-            (Some(from), Some(until)) if until < from => {
-                return Err(OpError::BadInput(format!(
-                    "{name} 的健保退保日早於加保日，請更正其中一個日期"
-                )))
-            }
-            _ => {}
+        let from = dependent.health_enrolled_from;
+        if dependent
+            .health_enrolled_until
+            .is_some_and(|until| until < from)
+        {
+            return Err(OpError::BadInput(format!(
+                "{name} 的健保退保日早於加保日，請更正其中一個日期"
+            )));
         }
-        if let Some(from) = dependent.health_enrolled_from {
-            if !relation.health_eligible {
-                return Err(OpError::BadInput(format!(
-                    "{}不能依附健保，請清除 {name} 的健保加保日",
-                    relation.label
-                )));
-            }
-            if dependent.birthday.is_some_and(|birthday| from < birthday) {
-                return Err(OpError::BadInput(format!(
-                    "{name} 的健保加保日早於生日，請更正其中一個日期"
-                )));
-            }
+        if dependent.birthday.is_some_and(|birthday| from < birthday) {
+            return Err(OpError::BadInput(format!(
+                "{name} 的健保加保日早於生日，請更正其中一個日期"
+            )));
         }
         if let Some(earlier) = dependents[..index]
             .iter()
@@ -690,7 +669,6 @@ fn employee_dependents(input: &EmployeeInput) -> Option<Vec<WriteEmployeeDepende
                 birthday: dependent.birthday,
                 health_enrolled_from: dependent.health_enrolled_from,
                 health_enrolled_until: dependent.health_enrolled_until,
-                tax_dependent: dependent.tax_dependent,
             })
             .collect(),
     )
@@ -1455,9 +1433,8 @@ mod tests {
             relation: relation.into(),
             id_no: String::new(),
             birthday: None,
-            health_enrolled_from: None,
+            health_enrolled_from: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             health_enrolled_until: None,
-            tax_dependent: false,
         }
     }
 
@@ -1537,39 +1514,42 @@ mod tests {
             let error = checked(input).err().expect("應被擋下");
             assert!(error.contains(expect), "{error}");
         };
+        let march = |d: u32| NaiveDate::from_ymd_opt(2026, 3, d).unwrap();
 
-        let mut sister = dependent("王小妹", "sibling");
-        sister.health_enrolled_from = day(2026, 3, 1);
-        refuse(sister, "兄弟姊妹不能依附健保");
-
-        let mut until_only = dependent("王小寶", "child");
-        until_only.health_enrolled_until = day(2026, 3, 1);
-        refuse(until_only, "只填了健保退保日");
+        refuse(dependent("王小妹", "sibling"), "關係要從清單選擇");
+        refuse(dependent("王表哥", "other"), "關係要從清單選擇");
 
         let mut backwards = dependent("王小寶", "child");
-        backwards.health_enrolled_from = day(2026, 3, 2);
+        backwards.health_enrolled_from = march(2);
         backwards.health_enrolled_until = day(2026, 3, 1);
         refuse(backwards, "退保日早於加保日");
 
         let mut unborn = dependent("王小寶", "child");
         unborn.birthday = day(2026, 3, 2);
-        unborn.health_enrolled_from = day(2026, 3, 1);
+        unborn.health_enrolled_from = march(1);
         refuse(unborn, "加保日早於生日");
 
-        refuse(dependent("王表哥", "cousin"), "關係要從清單選擇");
         refuse(dependent("  ", "child"), "第 1 位眷屬的姓名要填寫");
 
-        // A sibling can still be claimed for withholding, and a one-day
-        // period is a period.
+        // A one-day period is a period.
         let mut input = valid_employee();
-        let mut sister = dependent("王小妹", "sibling");
-        sister.tax_dependent = true;
         let mut baby = dependent("王小寶", "child");
         baby.birthday = day(2026, 3, 1);
-        baby.health_enrolled_from = day(2026, 3, 1);
+        baby.health_enrolled_from = march(1);
         baby.health_enrolled_until = day(2026, 3, 1);
-        input.dependents = Some(vec![sister, baby]);
+        input.dependents = Some(vec![baby]);
         assert!(checked(input).is_ok());
+    }
+
+    /// A row without the date its cover starts is not a health dependant, and
+    /// the list keeps nothing else.
+    #[test]
+    fn a_dependant_without_an_enrolment_date_does_not_parse() {
+        let parsed = serde_json::from_value::<EmployeeDependentInput>(serde_json::json!({
+            "name": "王小寶",
+            "relation": "child",
+        }));
+        assert!(parsed.is_err());
     }
 
     #[test]

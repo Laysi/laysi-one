@@ -669,12 +669,12 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 `bank_accounts` 不帶＝不動、給清單＝整份取代，與四個金額同一族的三態；至多一筆可標為
 薪轉，一筆都沒標時以第一筆為準。`account_no` 與 `id_no` 同列 `REDACTED_FIELDS`。
 
-**眷屬是一份名單**：`employee_dependent` 一人帶「健保依附」（加保日／退保日，退保日是
-最後在保日）與「列報扶養」兩個事實，不拆兩份——有工作的配偶不是健保眷屬、仍可列報扶養。
-`dependents` 與 `bank_accounts` 同一族的三態；關係清單是 `ops/employees.rs` 的
-`RELATIONS`，測試比對 migration 的 CHECK。兄弟姊妹與「其他」不得依附健保。畫面上存過的
-投保期間按不掉、那位眷屬也不畫刪除鈕，只能填退保日；個人專區不回眷屬字號與生日，
-MCP 的名冊整份拿掉眷屬。
+**眷屬名單只記健保眷屬**：`employee_dependent` 一人一列，加保日必填、退保日是最後在保日。
+**不記列報扶養**——報稅列誰是員工自己的選擇，扣繳一律 5% 用不到它；改按扣繳稅額表時
+記的是員工申報的人數，不從名單推導（#108）。`dependents` 與 `bank_accounts` 同一族的
+三態；關係只有健保法第 2 條的五種，清單是 `ops/employees.rs` 的 `RELATIONS`，測試比對
+migration 的 CHECK。畫面上存過的眷屬不畫刪除鈕，只能填退保日；個人專區不回眷屬字號與
+生日，MCP 的名冊整份拿掉眷屬。
 **健保自付額逐口計**：本人一口加期末日在保的眷屬，上限在 `health_dependents` domain
 （不在 `health_insurance`，理由同 `owner_insurance`），逐口先取整再加總；雇主負擔仍乘
 平均眷口數。口數存進 `payslip.health_dependents`，`list_payslips` 用存下的口數重算。

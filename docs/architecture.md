@@ -568,20 +568,25 @@ Blob 由瀏覽器管理，不是舊做法那樣 base64 字串、`atob` 的結果
 重複帳號的錯誤訊息只寫銀行名稱不寫帳號：錯誤訊息原文寫進稽核摘要，而
 `REDACTED_FIELDS` 只碰輸入參數，碰不到摘要。
 
-### 眷屬是一份名單，健保依附與列報扶養是同一個人的兩個事實
+### 眷屬名單只記健保眷屬
 
-`employee_dependent` 記員工的眷屬：姓名、關係、身分證字號、生日、健保加保日與
-退保日、是否列報扶養。健保自付額的眷口數與扣繳稅額表的扶養人數都從這份名單推導，
-所以只有一份：配偶有工作時不是健保眷屬、仍可列報扶養，拆成兩份名單就是同一個人
-登記兩次，改了一邊另一邊不會跟著動。
+`employee_dependent` 記掛在員工健保底下的眷屬：姓名、關係、身分證字號、生日、
+健保加保日與退保日。健保自付額的眷口數從這份名單推導；加退保要經過投保單位辦理，
+這份資料公司本來就要掌握。
 
-**健保依附記期間不記布林**：保費按月計，補算前期薪資要問的是「那個月誰在保」，
-布林只回答得了「現在誰在保」。`health_enrolled_until` 是**最後在保日**（當天仍在保），
-所以加保與退保可以是同一天；有退保日一定有加保日，退保日不得早於加保日。
-兄弟姊妹與「其他」不得依附健保（全民健康保險法第 2 條的眷屬範圍），但可以列報
-扶養，所以名單收得下他們，CHECK 擋住他們的投保期間。關係的清單在
-`ops/employees.rs` 的 `RELATIONS`，由 `list_employees` 以 `relations` 帶給畫面；
-`the_relations_list_agrees_with_the_table` 拿它比對 migration 的兩條 CHECK。
+**不記列報扶養**：員工報綜所稅時列誰為扶養親屬是本人的選擇，每年可能換人（兄弟姊妹
+輪流扶養父母），扣繳憑單上也沒有這一欄。公司唯一用得到扶養人數的地方是按扣繳稅額表
+預扣，而系統一律按 5% 扣繳；為一個沒有計算會讀的欄位逐位眷屬記一份，等於多存一份
+會過時的個資。改按扣繳稅額表時，記的是員工以免稅額申報表申報的人數，不從這份名單
+推導（#108）。
+
+**投保期間記日期不記布林**：保費按月計，補算前期薪資要問的是「那個月誰在保」，
+布林只回答得了「現在誰在保」。加保日必填（`NOT NULL`）——沒有加保日的一列不是健保
+眷屬，而名單不收其他人。`health_enrolled_until` 是**最後在保日**（當天仍在保），
+所以加保與退保可以是同一天；退保日不得早於加保日。關係只收得到全民健康保險法第 2 條
+的眷屬範圍：配偶、父母、祖父母、子女、孫子女。清單在 `ops/employees.rs` 的
+`RELATIONS`，由 `list_employees` 以 `relations` 帶給畫面；
+`the_relations_list_agrees_with_the_table` 拿它比對 migration 的 CHECK。
 
 `dependents` 與 `bank_accounts` 同一族的三態：不帶＝不動、空清單＝全部刪除、給清單
 ＝整份取代。字號存大寫（CHECK 釘住），同一員工底下不得重複（partial UNIQUE，空白
@@ -589,13 +594,12 @@ Blob 由瀏覽器管理，不是舊做法那樣 base64 字串、`atob` 的結果
 訊息寫眷屬姓名、不寫字號，理由與上一段的帳號相同；稽核紀錄裡的 `dependents[].id_no`
 由 `redact_for_audit` 依欄位名遮蔽（它遞迴進陣列）。
 
-**畫面上已存檔的投保期間按不掉**：一顆開關同時代表「更正」與「退保」，按掉就把
-加保日一起清掉，而那個月的眷口數從此算不回來。所以存過的期間畫成標籤，那位眷屬也
-不畫刪除鈕——刪掉一列等於刪掉它的投保期間，回查過去日期的勞健保頁會少算——結束它
-只能填退保日。期間開著時關係下拉只列可依附的關係，否則選了兄弟姊妹就存不進去。
+**畫面上已存檔的眷屬刪不掉**：刪掉一列等於刪掉它的投保期間，那個月的眷口數從此
+算不回來，回查過去日期的勞健保頁會少算。所以存過的眷屬不畫刪除鈕，結束只能填退保日；
+加保日可以改、不能清空。
 
-三個管道看到的不一樣：名冊（人資）回完整資料；個人專區回姓名、關係、投保期間與
-列報扶養，**不回字號與生日**（與本人字號同一條規則）；MCP 通道的名冊整份拿掉
+三個管道看到的不一樣：名冊（人資）回完整資料；個人專區回姓名、關係與投保期間，
+**不回字號與生日**（與本人字號同一條規則）；MCP 通道的名冊整份拿掉
 `dependents`，與底薪、銀行帳戶同一個 `redact_for_ai`。
 
 ## REST 登入只接受伺服器端 session
@@ -1232,10 +1236,10 @@ employee_bank_account       一人可有多筆；`is_payroll` 標出薪轉的那
                             以 partial UNIQUE 索引限制至多一筆。
                             原本是 `employee.bank_account` 單一自由文字欄
 
--- 員工的眷屬
-employee_dependent          一人可有多筆；健保依附記 `health_enrolled_from`／
-                            `health_enrolled_until`（最後在保日），列報扶養記
-                            `tax_dependent`。兄弟姊妹與「其他」不得依附健保（CHECK）；
+-- 員工的健保眷屬
+employee_dependent          一人可有多筆；`health_enrolled_from`（必填）／
+                            `health_enrolled_until`（最後在保日）。關係限健保法
+                            第 2 條的眷屬範圍（CHECK）；
                             `id_no` 存大寫，同一員工底下不重複（partial UNIQUE）
 
 ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
@@ -1739,7 +1743,7 @@ column，因此不可能與上面的區間不一致。
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）與人資／財務銜接狀態 |
-| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`relations` 供眷屬的關係下拉（帶可否依附健保）、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
+| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`relations` 供眷屬的關係下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_employee_documents` | ReadOnly | `{ emp_no }` | 該員工的附件清單與可用類型；內容要另外取回 |
 | `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
 | `get_employee_document` | ReadOnly | `{ emp_no, doc_no, version?, include_content? }` | 重算雜湊比對；不屬於這位員工的編號回查無此附件 |
