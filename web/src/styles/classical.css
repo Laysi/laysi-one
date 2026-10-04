@@ -2106,6 +2106,15 @@ textarea {
   gap: var(--space-lg);
 }
 
+.dependent-head--removing {
+  align-items: center;
+}
+
+.dependent-head--removing .form-warn {
+  flex: 1;
+  margin: 0;
+}
+
 .dependent-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;

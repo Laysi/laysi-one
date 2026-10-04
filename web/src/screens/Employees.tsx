@@ -68,6 +68,7 @@ interface DependentForm {
   health_enrolled_from: string;
   health_enrolled_until: string;
   saved_from: string;
+  removing: boolean;
 }
 
 interface FormState {
@@ -225,6 +226,7 @@ export function Employees({
         health_enrolled_from: d.health_enrolled_from,
         health_enrolled_until: d.health_enrolled_until ?? '',
         saved_from: d.health_enrolled_from,
+        removing: false,
       })),
       note: e.note,
     });
@@ -341,6 +343,7 @@ export function Employees({
         health_enrolled_from: '',
         health_enrolled_until: '',
         saved_from: '',
+        removing: false,
       },
     ]);
   }
@@ -369,12 +372,17 @@ export function Employees({
       onToast('銀行帳戶要填銀行名稱與帳號；不再使用的帳戶請按 × 刪除');
       return;
     }
-    const nameless = form.dependents.findIndex((d) => !d.name.trim());
+    const nameless = form.dependents.findIndex((d) => !d.removing && !d.name.trim());
     if (nameless >= 0) {
-      onToast(`第 ${nameless + 1} 位眷屬的姓名要填寫；不再登記的眷屬請按 × 刪除`);
+      onToast(
+        form.dependents[nameless]?.saved_from
+          ? `第 ${nameless + 1} 位眷屬的姓名要填寫`
+          : `第 ${nameless + 1} 位眷屬的姓名要填寫；不再登記的眷屬請按 × 刪除`,
+      );
       return;
     }
-    const undated = form.dependents.find((d) => !d.health_enrolled_from);
+    const dependents = form.dependents.filter((d) => !d.removing);
+    const undated = dependents.find((d) => !d.health_enrolled_from);
     if (undated) {
       onToast(
         undated.saved_from
@@ -405,7 +413,7 @@ export function Employees({
           is_payroll: b.is_payroll,
           note: b.note.trim(),
         })),
-        dependents: form.dependents.map((d) => ({
+        dependents: dependents.map((d) => ({
           name: d.name.trim(),
           relation: d.relation,
           id_no: d.id_no.trim(),
@@ -1054,82 +1062,105 @@ export function Employees({
               {form.dependents.length === 0 ? (
                 <p className="section-note">尚未登記眷屬。</p>
               ) : (
-                form.dependents.map((d, i) => (
-                  <div className="card dependent-card" key={i}>
-                    <div className="dependent-head">
-                      <label className="field field--grow">
-                        姓名
-                        <input
-                          className="input"
-                          value={d.name}
-                          onChange={(e) => setDependent(i, { name: e.target.value })}
-                        />
-                      </label>
-                      {!d.saved_from && (
+                form.dependents.map((d, i) =>
+                  d.removing ? (
+                    <div className="card dependent-card" key={i}>
+                      <div className="dependent-head dependent-head--removing">
+                        <p className="form-warn">
+                          存檔後刪除 {d.name}，勞健保頁不再計入，已算好的薪資單不變。
+                        </p>
                         <button
-                          className="btn btn--icon"
-                          onClick={() => removeDependent(i)}
-                          aria-label="刪除本位眷屬"
+                          className="btn btn--compact btn--secondary"
+                          onClick={() => setDependent(i, { removing: false })}
                         >
-                          ×
+                          復原
                         </button>
-                      )}
+                      </div>
                     </div>
-
-                    <div className="dependent-grid">
-                      <label className="field">
-                        關係
-                        <select
-                          className="input"
-                          value={d.relation}
-                          onChange={(e) => setDependent(i, { relation: e.target.value })}
-                        >
-                          {(data?.relations ?? []).map((r) => (
-                            <option key={r.code} value={r.code}>
-                              {r.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="field">
-                        身分證字號
-                        <input
-                          className="input num"
-                          value={d.id_no}
-                          onChange={(e) => setDependent(i, { id_no: e.target.value })}
-                        />
-                      </label>
-                      <label className="field">
-                        生日
-                        <DateField
-                          className="input"
-                          value={d.birthday}
-                          onChange={(v) => setDependent(i, { birthday: v })}
-                        />
-                      </label>
+                  ) : (
+                    <div className="card dependent-card" key={i}>
+                      <div className="dependent-head">
+                        <label className="field field--grow">
+                          姓名
+                          <input
+                            className="input"
+                            value={d.name}
+                            onChange={(e) => setDependent(i, { name: e.target.value })}
+                          />
+                        </label>
+                        {d.saved_from ? (
+                          <button
+                            className="btn btn--compact btn--secondary"
+                            onClick={() => setDependent(i, { removing: true })}
+                          >
+                            登記錯誤，刪除
+                          </button>
+                        ) : (
+                          <button
+                            className="btn btn--icon"
+                            onClick={() => removeDependent(i)}
+                            aria-label="刪除本位眷屬"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+  
+                      <div className="dependent-grid">
+                        <label className="field">
+                          關係
+                          <select
+                            className="input"
+                            value={d.relation}
+                            onChange={(e) => setDependent(i, { relation: e.target.value })}
+                          >
+                            {(data?.relations ?? []).map((r) => (
+                              <option key={r.code} value={r.code}>
+                                {r.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="field">
+                          身分證字號
+                          <input
+                            className="input num"
+                            value={d.id_no}
+                            onChange={(e) => setDependent(i, { id_no: e.target.value })}
+                          />
+                        </label>
+                        <label className="field">
+                          生日
+                          <DateField
+                            className="input"
+                            value={d.birthday}
+                            onChange={(v) => setDependent(i, { birthday: v })}
+                          />
+                        </label>
+                      </div>
+  
+                      <div className="dependent-grid">
+                        <label className="field">
+                          健保加保日
+                          <DateField
+                            className="input"
+                            value={d.health_enrolled_from}
+                            onChange={(v) => setDependent(i, { health_enrolled_from: v })}
+                          />
+                        </label>
+                        <label className="field">
+                          健保退保日
+                          <DateField
+                            className="input"
+                            value={d.health_enrolled_until}
+                            onChange={(v) => setDependent(i, { health_enrolled_until: v })}
+                          />
+                          <span className="field__hint">留空表示仍在保</span>
+                        </label>
+                      </div>
                     </div>
-
-                    <div className="dependent-grid">
-                      <label className="field">
-                        健保加保日
-                        <DateField
-                          className="input"
-                          value={d.health_enrolled_from}
-                          onChange={(v) => setDependent(i, { health_enrolled_from: v })}
-                        />
-                      </label>
-                      <label className="field">
-                        健保退保日
-                        <DateField
-                          className="input"
-                          value={d.health_enrolled_until}
-                          onChange={(v) => setDependent(i, { health_enrolled_until: v })}
-                        />
-                        <span className="field__hint">留空表示仍在保</span>
-                      </label>
-                    </div>
-                  </div>
-                ))
+                  ),
+                )
               )}
 
               {drawer === 'edit' && canReadDocuments && (
