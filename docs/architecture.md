@@ -1287,7 +1287,7 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 （權數 1、2、1、2、1、2、4、1，逐位數字相乘後各位數相加，總和被 5 整除；第七碼
 為 7 時另接受總和加一後整除），對 `fiscal_year` 只收 1 到 12，對 `work_start`／
 `work_end` 只收 `HH:MM`（兩位小時、兩位分鐘的 24 小時制），對兩個分鐘數只收整數，
-對 `punch_correction_policy` 與 `owner_self_decide` 只收各自的兩個值。驗在後端而不只在精靈裡，因為 MCP 與
+對 `punch_correction_policy`、`owner_self_decide` 與 `payroll_timing` 只收各自的兩個值。驗在後端而不只在精靈裡，因為 MCP 與
 未來的匯入程式走的是同一個操作。這些值不是法規數值，是公司自己的登記事實與決定，
 所以留在 `company_setting` 而不進規則檔。
 
@@ -1668,7 +1668,7 @@ column，因此不可能與上面的區間不一致。
 
 | name | risk | input | output 重點 |
 |---|---|---|---|
-| `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）與人資／財務銜接狀態 |
+| `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）、應計期別尚未計算薪資的提醒與人資／財務銜接狀態 |
 | `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_employee_documents` | ReadOnly | `{ emp_no }` | 該員工的附件清單與可用類型；內容要另外取回 |
 | `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
@@ -1678,9 +1678,9 @@ column，因此不可能與上面的區間不一致。
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
 | `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
-| `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額 |
+| `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額；`next_period` 是尚未計算的應計期別，算過就是 `null` |
 | `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳 |
-| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額） |
+| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；`period` 不帶時為應計期別；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額） |
 | `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
 | `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額 |
 | `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, as_of? }` | 單一級距試算與三份 ruleset；`insured_as = "owner"` 另回 `owner_ruleset` |
@@ -1719,6 +1719,17 @@ ruleset 的上限比較。
 這一頁的主體。`payroll_reconciliation.note`、`table_note`、`source_note` 與逐列的
 `source_note` 一併移除：對帳結論由差額欄位自己說，稅額缺值與「可能為多人合併」
 都已經是該列上的標記。
+
+**應計期別由發薪時點決定。** `company_setting.payroll_timing` 是「當月」或「次月」，
+`payroll::due_period` 依它與今天算出應計期別：當月是今天所在的月份，次月是前一個月
+（2026-01 的前一個月是 2025-12）。薪資作業的期別預設（`get_payroll_summary` 的
+`next_period`）、`run_payroll` 不帶期別時的預設，以及人資總覽的「尚未計算薪資」待辦，
+三處都經 `unpaid_due_period`，不各自寫一份。原本三處都問「本月算過沒有」，次月發薪
+（10 月初發 9 月薪）的公司打開薪資作業看到的是 `2026-10`；期別決定保費的期末日與出勤、
+加班、休假的讀取範圍，沒改到就算成另一個月，而算完 9 月之後人資總覽整個 10 月掛著一則
+消不掉的提醒。**不由計算紀錄推導**：第一次計薪時沒有紀錄可看，而且次月發薪的公司照樣
+整月被提醒本月尚未計算。種子是「當月」，與原本的行為相同。期別欄空著時計算按鈕不能按
+——原本空著按下去由後端補成本月，按鈕上寫的卻是「計算薪資並產生傳票」而不是補算。
 
 **一期不只一次計算。** `payroll_run.period` 沒有 UNIQUE，讓計薪之後才到職
 的人仍領得到那幾天的錢，`run_payroll` 改成跳過已經持有薪資單的人。但
