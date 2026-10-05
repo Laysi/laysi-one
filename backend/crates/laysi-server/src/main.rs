@@ -270,30 +270,23 @@ async fn main() -> anyhow::Result<()> {
     //
     // Nothing is sent without a key to present, and a boot that already
     // checked in today does not check again -- a container in a restart loop
-    // must not become a load generator against the licence server.
+    // must not become a load generator against the licence server. Every
+    // process on the database runs this loop, and `check_if_due` decides
+    // with the licence row held, so the processes that start together check
+    // in once between them.
     {
         let store = store.clone();
         tokio::spawn(async move {
             loop {
                 let today = laysi_domain::business_today(laysi_ops::business_offset());
-                if let Ok(state) = store.license_state().await {
-                    let due = state
-                        .last_check_at
-                        .map(|at| (chrono::Utc::now() - at).num_hours() >= 20)
-                        .unwrap_or(true);
-                    if due && !state.activation_key.is_empty() {
-                        match laysi_ops::ops::license::check_now(&store, &state.activation_key)
-                            .await
-                        {
-                            Ok(licence) => {
-                                tracing::info!(standing = licence.label(), "licence check")
-                            }
-                            // Not an error worth waking anybody for: the lease
-                            // inside the stored token is what decides, and it
-                            // has weeks left.
-                            Err(error) => tracing::warn!(%error, "licence check failed"),
-                        }
+                match laysi_ops::ops::license::check_if_due(&store).await {
+                    Some(Ok(licence)) => {
+                        tracing::info!(standing = licence.label(), "licence check")
                     }
+                    // Not an error worth waking anybody for: the lease inside
+                    // the stored token is what decides, and it has weeks left.
+                    Some(Err(error)) => tracing::warn!(%error, "licence check failed"),
+                    None => {}
                 }
                 laysi_ops::ops::license::refresh(&store, today).await;
                 tokio::time::sleep(std::time::Duration::from_secs(43_200)).await;
