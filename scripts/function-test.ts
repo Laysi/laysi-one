@@ -41,6 +41,7 @@ const SERVER_BIN = new URL("../backend/target/debug/laysi-server", import.meta.u
 // tomorrow and every report would close before them.
 const TODAY =
   process.env.TEST_TODAY ?? new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+const DUE_ON = new Date(Date.parse(TODAY) + 30 * 86400 * 1000).toISOString().slice(0, 10);
 const ADMIN_PASSWORD = "Function-Test-2026";
 // Initialisation activates before it creates the account, so this script needs
 // a licence the way a real installation does: an activation key checked against
@@ -309,7 +310,7 @@ async function main() {
     console.log("\nT 營業稅拆分");
     await check("T1", "只給含稅金額，未稅與稅額由稅率算出", async () => {
       const data = await must("create_ar_invoice", {
-        invoice_no: "AR-001", customer: "甲客戶", issued_on: TODAY, due_on: "2026-09-30",
+        invoice_no: "AR-001", customer: "甲客戶", issued_on: TODAY, due_on: DUE_ON,
         amount: "10500", revenue_account_code: "4111",
       });
       expectEq(money(data.net_amount), 1000000, "未稅金額");
@@ -320,7 +321,7 @@ async function main() {
 
     await check("T2", "只給未稅金額，含稅與稅額由稅率算出", async () => {
       const data = await must("create_ar_invoice", {
-        invoice_no: "AR-002", customer: "乙客戶", issued_on: TODAY, due_on: "2026-09-30",
+        invoice_no: "AR-002", customer: "乙客戶", issued_on: TODAY, due_on: DUE_ON,
         net_amount: "20000", revenue_account_code: "4111",
       });
       expectEq(money(data.invoice.amount), 2100000, "含稅金額");
@@ -330,7 +331,7 @@ async function main() {
 
     await check("T3", "零稅率明確寫 0，不是靠旗標", async () => {
       const data = await must("create_ar_invoice", {
-        invoice_no: "AR-003", customer: "丙客戶（外銷）", issued_on: TODAY, due_on: "2026-09-30",
+        invoice_no: "AR-003", customer: "丙客戶（外銷）", issued_on: TODAY, due_on: DUE_ON,
         amount: "30000", tax_amount: "0", revenue_account_code: "4111",
       });
       expectEq(money(data.net_amount), 3000000, "未稅金額應等於含稅金額");
@@ -340,7 +341,7 @@ async function main() {
 
     await check("T4", "應收單的傳票把稅額拆到 2211", async () => {
       const data = await must("create_ar_invoice", {
-        invoice_no: "AR-004", customer: "丁客戶", issued_on: TODAY, due_on: "2026-09-30",
+        invoice_no: "AR-004", customer: "丁客戶", issued_on: TODAY, due_on: DUE_ON,
         amount: "10500", revenue_account_code: "4111",
       });
       const lines = data.voucher?.lines ?? [];
@@ -627,10 +628,11 @@ async function main() {
       expect(dry.error!.message.includes(empNo), dry.error!.message);
       expect(dry.error!.message.includes("打卡"), dry.error!.message);
 
-      // 09:00 to 18:00 with no break is nine hours; 200 x 9 = 1,800.
+      // 09:00 to 18:00 with no break is nine hours; 200 x 9 = 1,800. The day
+      // is the hire date, the one day of the period never ahead of TODAY.
       for (const [kind, at] of [["in", "09:00:00"], ["out", "18:00:00"]]) {
         await must("correct_punch", {
-          emp_no: empNo, punched_on: `${period}-02`, kind, at, note: "測試補登",
+          emp_no: empNo, punched_on: hire, kind, at, note: "測試補登",
         });
       }
       const paid = await must("run_payroll", { period, pay_on: TODAY });
@@ -1048,7 +1050,7 @@ async function main() {
 
     await check("D3", "超過 25 MB 的文件不以 base64 回傳，只驗證雜湊照常", async () => {
       const inline = await op("get_document", { doc_no: bigNo, include_content: true });
-      expect(!inline.ok && /下載連結/.test(inline.error?.message ?? ""), `竟然回傳了內容：${JSON.stringify(inline.error)}`);
+      expect(!inline.ok && /文件管理/.test(inline.error?.message ?? ""), `竟然回傳了內容：${JSON.stringify(inline.error)}`);
       const verified = await op("get_document", { doc_no: bigNo });
       expect(verified.ok, JSON.stringify(verified.error));
       expectEq(verified.data.verified, true, "雜湊比對");
