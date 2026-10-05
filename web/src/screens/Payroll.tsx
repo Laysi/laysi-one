@@ -14,6 +14,7 @@ import {
   type PayslipList,
 } from '../api/client';
 import { DateField } from '../components/DateField';
+import { PeriodPicker } from '../components/PeriodPicker';
 import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
@@ -155,15 +156,7 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
       {summary && (
         <>
           <div className="toolbar">
-            {summary.periods.map((p) => (
-              <button
-                key={p}
-                className={`chip${p === summary.period ? ' chip--on' : ''}`}
-                onClick={() => setPeriod(p)}
-              >
-                {p}
-              </button>
-            ))}
+            <PeriodPicker periods={summary.periods} value={summary.period} onChange={setPeriod} />
             <span className="spacer" />
             <span className="section-note">
               {run0 ? `${run0.headcount} 人 · 給付日 ${run0.pay_on}` : ''}

@@ -17,6 +17,7 @@ import {
 } from '../api/client';
 import { DateField } from '../components/DateField';
 import { DayMarks } from '../components/DayMarks';
+import { PeriodPicker } from '../components/PeriodPicker';
 import { PunchTrail } from '../components/PunchTrail';
 import { useCurrentUser } from '../auth';
 import { RulesetNote } from '../components/RulesetNote';
@@ -51,6 +52,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const [fixNoteById, setFixNoteById] = useState<Record<number, string>>({});
   const [trailOn, setTrailOn] = useState<string | null>(null);
   const [month, setMonth] = useState<string | undefined>(undefined);
+  const [thisMonth, setThisMonth] = useState<string | undefined>(undefined);
   const [picked, setPicked] = useState<string | null>(null);
   const [fixOn, setFixOn] = useState('');
   const [fixKind, setFixKind] = useState('in');
@@ -87,6 +89,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
           if (!live) return;
           setLeave(l);
           setPunches(p);
+          if (!month) setThisMonth(p.month);
         }),
       )
       .catch((e: Error) => live && setError(e.message));
@@ -256,15 +259,11 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       {punches && leave && (
         <>
           <div className="toolbar">
-            {punches.months.map((m) => (
-              <button
-                key={m}
-                className={`chip${m === punches.month ? ' chip--on' : ''}`}
-                onClick={() => setMonth(m)}
-              >
-                {m}
-              </button>
-            ))}
+            <PeriodPicker
+              periods={thisMonth ? [...punches.months, thisMonth] : punches.months}
+              value={punches.month}
+              onChange={setMonth}
+            />
             <span className="spacer" />
             <span className="section-note">{punches.rows.length} 人</span>
           </div>
