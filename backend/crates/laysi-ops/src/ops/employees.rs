@@ -317,10 +317,10 @@ impl Operation for GetHrDashboard {
                 "screen": "gl",
             }));
         }
-        if ctx.store.payroll_run(&month).await?.is_none() {
+        if let Some(due) = crate::ops::payroll::unpaid_due_period(ctx).await? {
             todos.push(json!({
                 "count": "1",
-                "label": format!("{month} 尚未計算薪資"),
+                "label": format!("{due} 尚未計算薪資"),
                 "due": "薪資作業",
                 "screen": "hr_pay",
             }));

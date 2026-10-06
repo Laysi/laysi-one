@@ -74,33 +74,48 @@ pub fn fingerprint(install_id: Uuid) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-impl Store {
-    pub async fn license_state(&self) -> Result<LicenseState> {
-        let row = sqlx::query(
-            "SELECT install_id, activation_key, token, nonce, last_check_at, last_error,
-                    grace_until
-               FROM license_state WHERE id = 1",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(LicenseState {
-            install_id: row.get("install_id"),
-            activation_key: row.get("activation_key"),
-            token: row.get("token"),
-            nonce: row.get("nonce"),
-            last_check_at: row.get("last_check_at"),
-            last_error: row.get("last_error"),
-            grace_until: row.get("grace_until"),
-        })
-    }
+const SELECT_STATE: &str = "SELECT install_id, activation_key, token, nonce, last_check_at,
+                                   last_error, grace_until
+                              FROM license_state WHERE id = 1";
 
+fn state_from(row: &sqlx::postgres::PgRow) -> LicenseState {
+    LicenseState {
+        install_id: row.get("install_id"),
+        activation_key: row.get("activation_key"),
+        token: row.get("token"),
+        nonce: row.get("nonce"),
+        last_check_at: row.get("last_check_at"),
+        last_error: row.get("last_error"),
+        grace_until: row.get("grace_until"),
+    }
+}
+
+/// The licence row, held from the read of the nonce to the write of the next
+/// one.
+///
+/// Every process on the database checks in -- `api` and `mcp` both do -- and
+/// the licence server counts a nonce it has already replaced as a second
+/// copy of the books. Two checks that read the row before either saved its
+/// answer send the same nonce, and two answers saved in the opposite order
+/// to the one they were issued in leave the row holding a nonce the server
+/// has moved past. Holding the row for the whole exchange rules out both.
+///
+/// Dropping the lock without [`save`](Self::save) or
+/// [`record_error`](Self::record_error) rolls back and leaves the row as it
+/// was.
+pub struct LicenseLock {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    pub state: LicenseState,
+}
+
+impl LicenseLock {
     /// Record a successful check.
     ///
     /// The grace window is cleared here rather than left to expire: once a
     /// real licence has arrived, an installation that predates licensing is
     /// no longer one of the cases that needed it, and leaving the date behind
     /// would make a later lapse look like it still had time.
-    pub async fn save_license(&self, key: &str, token: &str, nonce: &str) -> Result<()> {
+    pub async fn save(mut self, key: &str, token: &str, nonce: &str) -> Result<()> {
         sqlx::query(
             "UPDATE license_state
                 SET activation_key = $1, token = $2, nonce = $3,
@@ -110,8 +125,9 @@ impl Store {
         .bind(key)
         .bind(token)
         .bind(nonce)
-        .execute(&self.pool)
+        .execute(&mut *self.tx)
         .await?;
+        self.tx.commit().await?;
         Ok(())
     }
 
@@ -120,12 +136,33 @@ impl Store {
     /// The token is left alone. A refused or unreachable check does not
     /// revoke anything on its own: the lease inside the token is what decides,
     /// and it runs out by itself.
-    pub async fn record_license_error(&self, message: &str) -> Result<()> {
+    pub async fn record_error(mut self, message: &str) -> Result<()> {
         sqlx::query("UPDATE license_state SET last_error = $1, last_check_at = now() WHERE id = 1")
             .bind(message.chars().take(300).collect::<String>())
-            .execute(&self.pool)
+            .execute(&mut *self.tx)
             .await?;
+        self.tx.commit().await?;
         Ok(())
+    }
+}
+
+impl Store {
+    pub async fn license_state(&self) -> Result<LicenseState> {
+        let row = sqlx::query(SELECT_STATE).fetch_one(&self.pool).await?;
+        Ok(state_from(&row))
+    }
+
+    /// Take the licence row for one check. A second caller waits here until
+    /// the first has saved its answer, then reads that answer.
+    pub async fn lock_license(&self) -> Result<LicenseLock> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!("{SELECT_STATE} FOR UPDATE")))
+            .fetch_one(&mut *tx)
+            .await?;
+        Ok(LicenseLock {
+            state: state_from(&row),
+            tx,
+        })
     }
 }
 

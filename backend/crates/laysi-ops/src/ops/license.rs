@@ -22,7 +22,7 @@ use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
 use laysi_store::{LicenseState, Store};
 use schemars::JsonSchema;
@@ -355,21 +355,73 @@ fn build_version() -> &'static str {
     }
 }
 
-/// Present the stored key to the licence server and store what comes back.
+/// Hours after the last check at which the daily one is due again. Short of
+/// a day so a loop that wakes every twelve hours checks once a day rather
+/// than every other day.
+const CHECK_AFTER_HOURS: i64 = 20;
+
+/// Whether the daily check is due. A check the licence server refused counts,
+/// since it stamps `last_check_at` too; one that never reached it does not,
+/// so the next pass tries again.
+fn due(state: &LicenseState, now: DateTime<Utc>) -> bool {
+    !state.activation_key.is_empty()
+        && state
+            .last_check_at
+            .is_none_or(|at| (now - at).num_hours() >= CHECK_AFTER_HOURS)
+}
+
+/// Where a check goes and the key its answers must verify against. Always
+/// [`LicenceServer::product`] outside tests.
+struct LicenceServer {
+    url: String,
+    key: VerifyingKey,
+}
+
+/// What a check reports when the token that came back does not verify. The
+/// same sentence covers a build whose own key does not parse, which
+/// `the_compiled_in_public_key_parses` keeps from shipping.
+const UNVERIFIABLE: &str = "授權伺服器發出的授權檔無法驗證，請洽經銷商確認系統版本。";
+
+impl LicenceServer {
+    fn product() -> Result<Self, OpError> {
+        let key = product_key().ok_or_else(|| OpError::BadInput(UNVERIFIABLE.into()))?;
+        Ok(Self {
+            url: license_url(),
+            key,
+        })
+    }
+}
+
+/// Present a key to the licence server and store what comes back, with the
+/// licence row held throughout (see [`laysi_store::license::LicenseLock`]).
+///
+/// `key` is the key a person typed; `None` is the daily check, which
+/// presents the stored key and only when [`due`] still holds once the row is
+/// held -- the process that waited behind another's check finds it done.
+/// Returns whether the licence server was asked.
 ///
 /// Five fields travel and that is the whole of it: the key, the installation,
 /// the host, the version and the continuity nonce. Nothing describes the
 /// business -- not its size, not its people, not a figure out of its books.
-pub async fn check_now(store: &Store, key: &str) -> Result<Licence, OpError> {
-    let state = store.license_state().await?;
-    let fingerprint = laysi_store::license::fingerprint(state.install_id);
+async fn exchange(
+    store: &Store,
+    key: Option<&str>,
+    server: &LicenceServer,
+) -> Result<bool, OpError> {
+    let lock = store.lock_license().await?;
+    let key = match key {
+        Some(key) => key.to_string(),
+        None if due(&lock.state, Utc::now()) => lock.state.activation_key.clone(),
+        None => return Ok(false),
+    };
+    let fingerprint = laysi_store::license::fingerprint(lock.state.install_id);
 
     let body = serde_json::to_string(&CheckRequest {
-        activation_key: key,
-        install_id: state.install_id.to_string(),
+        activation_key: &key,
+        install_id: lock.state.install_id.to_string(),
         fingerprint: &fingerprint,
         version: build_version(),
-        nonce: &state.nonce,
+        nonce: &lock.state.nonce,
     })
     .map_err(|_| OpError::BadInput("無法組出驗證請求。".into()))?;
 
@@ -378,7 +430,7 @@ pub async fn check_now(store: &Store, key: &str) -> Result<Licence, OpError> {
         .build()
         .map_err(|e| OpError::BadInput(format!("連線設定失敗：{e}")))?;
     let response = client
-        .post(license_url())
+        .post(&server.url)
         .header("content-type", "application/json")
         .body(body)
         .send()
@@ -396,12 +448,7 @@ pub async fn check_now(store: &Store, key: &str) -> Result<Licence, OpError> {
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
             .unwrap_or_else(|| format!("授權伺服器回應 {}，請稍後再試。", status.as_u16()));
-        let _ = store.record_license_error(&message).await;
-        let _ = refresh(
-            store,
-            laysi_domain::business_today(crate::business_offset()),
-        )
-        .await;
+        let _ = lock.record_error(&message).await;
         return Err(OpError::BadInput(message));
     }
 
@@ -409,20 +456,47 @@ pub async fn check_now(store: &Store, key: &str) -> Result<Licence, OpError> {
         .map_err(|_| OpError::BadInput("授權伺服器的回應無法解讀，請稍後再試。".into()))?;
     // Verified before it is stored: a token this build cannot read is a token
     // that would leave the installation unlicensed with no error anywhere.
-    let key_ok = product_key().is_some_and(|k| verify_with(&k, &answer.token).is_some());
-    if !key_ok {
-        let message = "授權伺服器發出的授權檔無法驗證，請洽經銷商確認系統版本。".to_string();
-        let _ = store.record_license_error(&message).await;
-        return Err(OpError::BadInput(message));
+    if verify_with(&server.key, &answer.token).is_none() {
+        let _ = lock.record_error(UNVERIFIABLE).await;
+        return Err(OpError::BadInput(UNVERIFIABLE.into()));
     }
-    store
-        .save_license(key, &answer.token, &answer.nonce)
-        .await?;
+    lock.save(&key, &answer.token, &answer.nonce).await?;
+    Ok(true)
+}
 
+/// Publish the licence after a check, whatever its outcome: a refusal can
+/// still move the standing, because the stored token keeps ageing.
+async fn publish(store: &Store) -> Result<Licence, OpError> {
     let today = laysi_domain::business_today(crate::business_offset());
     refresh(store, today)
         .await
         .ok_or_else(|| OpError::BadInput("授權已寫入，但目前讀不回來。".into()))
+}
+
+/// Present `key` to the licence server now, and store what comes back.
+pub async fn check_now(store: &Store, key: &str) -> Result<Licence, OpError> {
+    let asked = exchange(store, Some(key), &LicenceServer::product()?).await;
+    let licence = publish(store).await;
+    asked?;
+    licence
+}
+
+/// The daily check: present the stored key when a day has passed since the
+/// last check. `None` when nothing was sent -- not due yet, no key stored, or
+/// another process on the same database has just checked.
+pub async fn check_if_due(store: &Store) -> Option<Result<Licence, OpError>> {
+    let server = match LicenceServer::product() {
+        Ok(server) => server,
+        Err(error) => return Some(Err(error)),
+    };
+    match exchange(store, None, &server).await {
+        Ok(false) => None,
+        Ok(true) => Some(publish(store).await),
+        Err(error) => {
+            let _ = publish(store).await;
+            Some(Err(error))
+        }
+    }
 }
 
 // Operations
@@ -557,8 +631,8 @@ impl Operation for ActivateLicense {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use ed25519_dalek::{Signer, SigningKey};
+    use std::sync::{Arc, Mutex};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -747,5 +821,187 @@ mod tests {
         let offline = lapse_reason(today, d(2027, 9, 1), "示範資訊");
         assert!(offline.contains("連線"), "{offline}");
         assert!(!offline.contains("續約"), "{offline}");
+    }
+
+    #[test]
+    fn the_daily_check_is_due_once_a_day_and_only_with_a_key() {
+        let now = Utc::now();
+        let mut s = state(String::new());
+
+        s.last_check_at = None;
+        assert!(due(&s, now), "從未檢查過就該檢查");
+        s.last_check_at = Some(now - chrono::Duration::hours(19));
+        assert!(!due(&s, now), "迴圈每 12 小時醒一次，20 小時內不重送");
+        s.last_check_at = Some(now - chrono::Duration::hours(20));
+        assert!(due(&s, now));
+
+        s.activation_key.clear();
+        assert!(!due(&s, now), "沒有金鑰就沒有東西可送");
+    }
+
+    const KEY: &str = "LAYSI-TEST0-TEST0-TEST0-TEST0";
+
+    /// A database of its own on the `TEST_DATABASE_URL` server.
+    /// `license_state` is one row, so the race cannot be staged on the shared
+    /// test database without racing every other test that reads it.
+    struct Scratch {
+        admin: sqlx::PgPool,
+        options: sqlx::postgres::PgConnectOptions,
+        name: String,
+    }
+
+    impl Scratch {
+        async fn new() -> Self {
+            let url =
+                std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+            let base: sqlx::postgres::PgConnectOptions =
+                url.parse().expect("TEST_DATABASE_URL 應是合法的連線字串");
+            let admin = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(base.clone())
+                .await
+                .expect("應可連上測試資料庫");
+            let name = format!("laysi_license_{}", uuid::Uuid::new_v4().simple());
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+                .execute(&admin)
+                .await
+                .expect("應可建立拋棄式資料庫");
+            Self {
+                admin,
+                options: base.database(&name),
+                name,
+            }
+        }
+
+        /// A pool of its own, as each server process has.
+        async fn process(&self) -> anyhow::Result<Store> {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(self.options.clone())
+                .await?;
+            Ok(Store::from_pool(pool))
+        }
+
+        async fn remove(self) {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE {} WITH (FORCE)",
+                self.name
+            )))
+            .execute(&self.admin)
+            .await
+            .expect("應可刪掉拋棄式資料庫");
+        }
+    }
+
+    /// Stands in for the licence server: hands out `n1`, `n2`, ... in the
+    /// order checks arrive, and keeps the nonce each one carried. Each answer
+    /// is held back long enough that a check which did not wait for the row
+    /// reads it before the first answer is saved.
+    async fn stand_in() -> anyhow::Result<(LicenceServer, Arc<Mutex<Vec<String>>>)> {
+        let signing = SigningKey::from_bytes(&[5u8; 32]);
+        let received = Arc::new(Mutex::new(Vec::<String>::new()));
+        let app = axum::Router::new().route(
+            "/v1/license/check",
+            axum::routing::post({
+                let (received, signing) = (received.clone(), signing.clone());
+                move |axum::Json(request): axum::Json<Value>| async move {
+                    let n = {
+                        let mut seen = received.lock().unwrap();
+                        seen.push(request["nonce"].as_str().unwrap_or_default().to_string());
+                        seen.len()
+                    };
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    let fingerprint = request["fingerprint"].as_str().unwrap_or_default();
+                    let token = sign(
+                        &signing,
+                        &payload(d(2026, 11, 1), d(2027, 9, 1), fingerprint),
+                    );
+                    axum::Json(json!({ "token": token, "nonce": format!("n{n}") }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}/v1/license/check", listener.local_addr()?);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let server = LicenceServer {
+            url,
+            key: signing.verifying_key(),
+        };
+        Ok((server, received))
+    }
+
+    /// `api` and `mcp` checking at the same moment, which is what put a
+    /// 「疑似重複安裝」 on the production licence once a day: the second
+    /// check has to carry the nonce the first one was handed, and the row has
+    /// to end up holding the nonce handed out last.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-ops
+    /// two_processes_checking_at_once_carry_each_others_nonce -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可建立資料庫的 PostgreSQL"]
+    async fn two_processes_checking_at_once_carry_each_others_nonce() {
+        let scratch = Scratch::new().await;
+        let outcome = async {
+            let (api, mcp) = (scratch.process().await?, scratch.process().await?);
+            api.migrate().await?;
+            let (server, received) = stand_in().await?;
+
+            let (a, b) = tokio::join!(
+                exchange(&api, Some(KEY), &server),
+                exchange(&mcp, Some(KEY), &server)
+            );
+            anyhow::ensure!(a? && b?, "兩次都是明確要求的檢查，都該送出");
+            let received = received.lock().unwrap().clone();
+            anyhow::ensure!(
+                received == ["", "n1"],
+                "後到的檢查要帶先到那次拿到的 nonce，實際收到 {received:?}"
+            );
+            let stored = api.license_state().await?.nonce;
+            anyhow::ensure!(stored == "n2", "要存下最後發出的 nonce，實際是 {stored}");
+            Ok(())
+        }
+        .await;
+        scratch.remove().await;
+        outcome.unwrap();
+    }
+
+    /// The daily loop runs in every process, and processes started together
+    /// come due together. Only one of them may check in.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-ops
+    /// processes_due_together_check_in_once -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可建立資料庫的 PostgreSQL"]
+    async fn processes_due_together_check_in_once() {
+        let scratch = Scratch::new().await;
+        let outcome = async {
+            let (api, mcp) = (scratch.process().await?, scratch.process().await?);
+            api.migrate().await?;
+            sqlx::query("UPDATE license_state SET activation_key = $1 WHERE id = 1")
+                .bind(KEY)
+                .execute(api.pool())
+                .await?;
+            let (server, received) = stand_in().await?;
+
+            let (a, b) = tokio::join!(exchange(&api, None, &server), exchange(&mcp, None, &server));
+            let asked = [a?, b?].iter().filter(|asked| **asked).count();
+            anyhow::ensure!(
+                asked == 1,
+                "同時到期的兩個程序只能有一個送出，實際 {asked} 個"
+            );
+            let received = received.lock().unwrap().clone();
+            anyhow::ensure!(
+                received == [""],
+                "授權伺服器只該收到一次，實際 {received:?}"
+            );
+            let state = api.license_state().await?;
+            anyhow::ensure!(state.nonce == "n1" && state.last_check_at.is_some());
+            Ok(())
+        }
+        .await;
+        scratch.remove().await;
+        outcome.unwrap();
     }
 }

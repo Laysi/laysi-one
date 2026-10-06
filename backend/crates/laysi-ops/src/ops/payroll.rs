@@ -101,14 +101,51 @@ fn month_bounds(month: &str) -> Option<(NaiveDate, NaiveDate)> {
     Some((from, NaiveDate::from_ymd_opt(ny, nm, 1)?.pred_opt()?))
 }
 
-fn resolve_period(
-    period: Option<String>,
-    today: NaiveDate,
-) -> Result<(String, NaiveDate, NaiveDate), OpError> {
-    let period = period.unwrap_or_else(|| today.format("%Y-%m").to_string());
+fn resolve_period(period: String) -> Result<(String, NaiveDate, NaiveDate), OpError> {
     let (from, to) = month_bounds(&period)
         .ok_or_else(|| OpError::BadInput(format!("期別要寫成 YYYY-MM，收到的是「{period}」")))?;
     Ok((period, from, to))
+}
+
+/// Whether a month's salary is paid within that month or early in the next.
+/// Company policy, so it is a `company_setting` row; the values are the words
+/// the screen prints.
+pub(crate) const PAYROLL_TIMING_SETTING: &str = "payroll_timing";
+pub(crate) const PAY_SAME_MONTH: &str = "當月";
+pub(crate) const PAY_NEXT_MONTH: &str = "次月";
+pub(crate) const PAYROLL_TIMINGS: [&str; 2] = [PAY_SAME_MONTH, PAY_NEXT_MONTH];
+
+/// The period due on `today`: the month `today` falls in, or the month before
+/// it for a company that pays in the following month. Any other value reads as
+/// the first, which is how every installation ran before the setting existed.
+fn due_period(timing: &str, today: NaiveDate) -> String {
+    let month = match timing.trim() == PAY_NEXT_MONTH {
+        true => today
+            .with_day(1)
+            .and_then(|first| first.pred_opt())
+            .unwrap_or(today),
+        false => today,
+    };
+    month.format("%Y-%m").to_string()
+}
+
+/// [`due_period`] under the company's own setting. The payroll screen's
+/// default, `run_payroll`'s default and the HR dashboard's reminder all go
+/// through here, so the three cannot name different months.
+pub(crate) async fn due_period_of(ctx: &OpCtx) -> Result<String, OpError> {
+    let timing = ctx
+        .store
+        .company_setting(PAYROLL_TIMING_SETTING)
+        .await?
+        .unwrap_or_default();
+    Ok(due_period(&timing, ctx.today))
+}
+
+/// The due period when it has no run yet, `None` once it has one. A run for
+/// any other month neither raises nor clears it.
+pub(crate) async fn unpaid_due_period(ctx: &OpCtx) -> Result<Option<String>, OpError> {
+    let due = due_period_of(ctx).await?;
+    Ok(ctx.store.payroll_run(&due).await?.is_none().then_some(due))
 }
 
 /// Withholding rate for salary income.
@@ -725,16 +762,8 @@ impl Operation for GetPayrollSummary {
         let detail_visible = ctx.actor_role == crate::ROLE_BOSS;
         let period_label = selected.clone().unwrap_or_else(|| "—".into());
 
-        // Same question the HR dashboard asks, asked the same way: is there a
-        // run for this month? Scanning the recent-runs list would answer it
-        // from a window instead of from the table.
-        let this_month = ctx.today.format("%Y-%m").to_string();
-        let next_period = ctx
-            .store
-            .payroll_run(&this_month)
-            .await?
-            .is_none()
-            .then_some(this_month);
+        // Same question the HR dashboard asks, through the same function.
+        let next_period = unpaid_due_period(ctx).await?;
 
         let summary = match picked.is_empty() {
             false => format!(
@@ -775,7 +804,7 @@ impl Operation for GetPayrollSummary {
                     "逐人薪資明細限負責人檢視。目前身分可檢視彙總，無法檢視個別金額。"
                 },
                 "actor_role": ctx.actor_role,
-                // What the run form should start on: the current month when it
+                // What the run form should start on: the due period when it
                 // has no run yet. Nothing to suggest once it is paid — the
                 // next period is not due until the month turns.
                 "next_period": next_period,
@@ -829,7 +858,7 @@ impl Operation for ListPayslips {
             })
         })?;
 
-        let (_, period_start, period_end) = resolve_period(Some(run.period.clone()), ctx.today)?;
+        let (_, period_start, period_end) = resolve_period(run.period.clone())?;
         let slips = ctx.store.payslips(&run.period).await?;
         // Every run of the period, because payslips are listed by period and a
         // late joiner is paid by a second run.
@@ -926,7 +955,8 @@ struct RunPayroll;
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct RunPayrollInput {
-    /// Period (YYYY-MM). Defaults to this month.
+    /// Period (YYYY-MM). Defaults to the period due under the company's payroll
+    /// timing: this month, or last month for a company that pays in the next.
     #[serde(default)]
     pub period: Option<String>,
     /// Payment date (YYYY-MM-DD). Defaults to today; withholding resolves on it.
@@ -958,7 +988,11 @@ impl Operation for RunPayroll {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: RunPayrollInput = parse(input)?;
-        let (period, from, to) = resolve_period(i.period, ctx.today)?;
+        let period = match i.period {
+            Some(p) => p,
+            None => due_period_of(ctx).await?,
+        };
+        let (period, from, to) = resolve_period(period)?;
         let pay_on = i.pay_on.unwrap_or(ctx.today);
 
         // A period can be paid more than once (0054). What may not happen is
@@ -1257,7 +1291,7 @@ impl Operation for VoidPayrollRun {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: VoidPayrollRunInput = parse(input)?;
         let reason = crate::ops::ledger::require_void_reason(&i.reason)?;
-        let (period, _, _) = resolve_period(Some(i.period), ctx.today)?;
+        let (period, _, _) = resolve_period(i.period)?;
 
         let voided = ctx.store.void_payroll_run(&period).await?;
         let vouchers = match voided.voucher_nos.is_empty() {
@@ -1425,8 +1459,19 @@ mod tests {
             (d(2026, 12, 1), d(2026, 12, 31))
         );
         assert!(month_bounds("2026/07").is_none());
-        assert!(resolve_period(Some("七月".into()), d(2026, 1, 1)).is_err());
-        assert_eq!(resolve_period(None, d(2026, 7, 26)).unwrap().0, "2026-07");
+        assert!(resolve_period("七月".into()).is_err());
+    }
+
+    /// A company that pays in the following month is computing last month's
+    /// salary, across a year boundary too.
+    #[test]
+    fn the_due_period_follows_the_payroll_timing() {
+        assert_eq!(due_period(PAY_SAME_MONTH, d(2026, 10, 5)), "2026-10");
+        assert_eq!(due_period(PAY_NEXT_MONTH, d(2026, 10, 5)), "2026-09");
+        assert_eq!(due_period(PAY_NEXT_MONTH, d(2026, 1, 5)), "2025-12");
+        assert_eq!(due_period(PAY_NEXT_MONTH, d(2026, 3, 31)), "2026-02");
+        // A row that is missing or holds something else behaves as before.
+        assert_eq!(due_period("", d(2026, 7, 26)), "2026-07");
     }
 
     /// A withholding standard with no salary code must error rather than

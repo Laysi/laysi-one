@@ -413,6 +413,24 @@ textarea {
   color: var(--color-accent-deep);
 }
 
+.period-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.period-picker__years,
+.period-picker__months {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+}
+
+.period-picker ~ .section-note {
+  white-space: nowrap;
+}
+
 .tag {
   font-size: var(--text-sm);
   white-space: nowrap;

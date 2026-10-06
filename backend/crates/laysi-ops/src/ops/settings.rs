@@ -29,6 +29,9 @@
 //! build keeps it empty, which the migration coverage test enforces.
 
 use crate::ops::employees::{BASIS_MONTHLY, INSURED_EMPLOYEE};
+use crate::ops::payroll::{
+    PAYROLL_TIMINGS, PAYROLL_TIMING_SETTING, PAY_NEXT_MONTH, PAY_SAME_MONTH,
+};
 use crate::ops::webhook;
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
@@ -246,6 +249,7 @@ fn setting_options(code: &str) -> Vec<&'static str> {
         "punch_correction_policy" => crate::ops::attendance::CORRECTION_POLICIES.to_vec(),
         OWNER_SELF_DECIDE_SETTING => SELF_DECIDE_POLICIES.to_vec(),
         "fiscal_year" => FISCAL_MONTHS.to_vec(),
+        PAYROLL_TIMING_SETTING => PAYROLL_TIMINGS.to_vec(),
         BRAND_DISPLAY_SETTING => BRAND_DISPLAYS.to_vec(),
         _ => Vec::new(),
     }
@@ -407,6 +411,9 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
                 BRAND_DISPLAYS[0], BRAND_DISPLAYS[1], BRAND_DISPLAYS[2]
             )))
         }
+        PAYROLL_TIMING_SETTING if !PAYROLL_TIMINGS.contains(&value) => Err(OpError::BadInput(
+            format!("發薪時點填「{PAY_SAME_MONTH}」或「{PAY_NEXT_MONTH}」，收到「{value}」"),
+        )),
         OWNER_SELF_DECIDE_SETTING if !SELF_DECIDE_POLICIES.contains(&value) => {
             Err(OpError::BadInput(format!(
                 "負責人自行核決填「{SELF_DECIDE_OFF}」或「{SELF_DECIDE_ON}」，收到「{value}」"
@@ -2288,6 +2295,26 @@ mod tests {
             setting_options(OWNER_SELF_DECIDE_SETTING),
             SELF_DECIDE_POLICIES
         );
+    }
+
+    /// Two answers and no blank: a cleared timing would leave the payroll
+    /// screen and the HR dashboard guessing which month is due.
+    #[test]
+    fn payroll_timing_takes_its_two_answers_only() {
+        for good in PAYROLL_TIMINGS {
+            assert!(validate_setting(PAYROLL_TIMING_SETTING, good).is_ok());
+        }
+        for bad in ["", "下月", "10 號"] {
+            let err = validate_setting(PAYROLL_TIMING_SETTING, bad)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(PAY_SAME_MONTH) && err.contains(PAY_NEXT_MONTH),
+                "錯誤訊息要列出兩個可用值：{err}"
+            );
+        }
+        assert!(!CLEARABLE_SETTINGS.contains(&PAYROLL_TIMING_SETTING));
+        assert_eq!(setting_options(PAYROLL_TIMING_SETTING), PAYROLL_TIMINGS);
     }
 
     #[test]

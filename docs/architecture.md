@@ -1401,7 +1401,7 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 （權數 1、2、1、2、1、2、4、1，逐位數字相乘後各位數相加，總和被 5 整除；第七碼
 為 7 時另接受總和加一後整除），對 `fiscal_year` 只收 1 到 12，對 `work_start`／
 `work_end` 只收 `HH:MM`（兩位小時、兩位分鐘的 24 小時制），對兩個分鐘數只收整數，
-對 `punch_correction_policy` 與 `owner_self_decide` 只收各自的兩個值。驗在後端而不只在精靈裡，因為 MCP 與
+對 `punch_correction_policy`、`owner_self_decide` 與 `payroll_timing` 只收各自的兩個值。驗在後端而不只在精靈裡，因為 MCP 與
 未來的匯入程式走的是同一個操作。這些值不是法規數值，是公司自己的登記事實與決定，
 所以留在 `company_setting` 而不進規則檔。
 
@@ -1782,7 +1782,7 @@ column，因此不可能與上面的區間不一致。
 
 | name | risk | input | output 重點 |
 |---|---|---|---|
-| `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）與人資／財務銜接狀態 |
+| `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）、應計期別尚未計算薪資的提醒與人資／財務銜接狀態 |
 | `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`relations` 供眷屬的關係下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_employee_documents` | ReadOnly | `{ emp_no }` | 該員工的附件清單與可用類型；內容要另外取回 |
 | `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
@@ -1792,9 +1792,9 @@ column，因此不可能與上面的區間不一致。
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
 | `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
-| `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額 |
+| `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額；`next_period` 是尚未計算的應計期別，算過就是 `null` |
 | `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳；重算用薪資單存下的 `health_dependents` 與投保期間（`insured_from`／`insured_to`），不用現在的眷屬名單與離職日 |
-| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents`；到職與離職當月勞保、勞退按日計，月中離職健保不收，投保期間存進 `payslip.insured_from`／`insured_to` |
+| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；`period` 不帶時為應計期別；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents`；到職與離職當月勞保、勞退按日計，月中離職健保不收，投保期間存進 `payslip.insured_from`／`insured_to` |
 | `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
 | `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額；費率、`health_dependents`（計入的眷口）與 `health_dependents_covered`（在保的眷屬）一律以 `as_of` 所在月份的月底計，回應的 `as_of` 是那一天；`labor_days`／`pension_days`（整月為 null）與 `health_charged` 是該月按日計的結果；`dependents_cap` 供試算的眷屬下拉 |
 | `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, dependents?, as_of? }` | 單一級距試算與三份 ruleset；`dependents` 是在保眷屬人數，回 `health.dependents_charged`；`insured_as = "owner"` 另回 `owner_ruleset` |
@@ -1833,6 +1833,17 @@ ruleset 的上限比較。
 這一頁的主體。`payroll_reconciliation.note`、`table_note`、`source_note` 與逐列的
 `source_note` 一併移除：對帳結論由差額欄位自己說，稅額缺值與「可能為多人合併」
 都已經是該列上的標記。
+
+**應計期別由發薪時點決定。** `company_setting.payroll_timing` 是「當月」或「次月」，
+`payroll::due_period` 依它與今天算出應計期別：當月是今天所在的月份，次月是前一個月
+（2026-01 的前一個月是 2025-12）。薪資作業的期別預設（`get_payroll_summary` 的
+`next_period`）、`run_payroll` 不帶期別時的預設，以及人資總覽的「尚未計算薪資」待辦，
+三處都經 `unpaid_due_period`，不各自寫一份。原本三處都問「本月算過沒有」，次月發薪
+（10 月初發 9 月薪）的公司打開薪資作業看到的是 `2026-10`；期別決定保費的期末日與出勤、
+加班、休假的讀取範圍，沒改到就算成另一個月，而算完 9 月之後人資總覽整個 10 月掛著一則
+消不掉的提醒。**不由計算紀錄推導**：第一次計薪時沒有紀錄可看，而且次月發薪的公司照樣
+整月被提醒本月尚未計算。種子是「當月」，與原本的行為相同。期別欄空著時計算按鈕不能按
+——原本空著按下去由後端補成本月，按鈕上寫的卻是「計算薪資並產生傳票」而不是補算。
 
 **一期不只一次計算。** `payroll_run.period` 沒有 UNIQUE，讓計薪之後才到職
 的人仍領得到那幾天的錢，`run_payroll` 改成跳過已經持有薪資單的人。但
@@ -2107,6 +2118,17 @@ NULL。`revoke_my_api_token` 把員工直接寫進 `UPDATE ... WHERE` 與後續�
 `yyyy／月／dd`）由瀏覽器語系決定、頁面改不動，但那只是佔位字樣：值一律是
 ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日期挑選器是這個型別
 真正帶來的東西。時間欄的兩個理由（12 小時制、收不到秒）在日期上都不成立。
+
+**月份切換一律用 `components/PeriodPicker`**（薪資作業、出勤與休假、我的薪資單）。
+原本是一個月一顆 chip 排成一列且不換行，薪資算過兩年就是 24 顆，整頁被撐出水平
+捲軸。元件把清單拆成「年份」與「該年的月份」上下兩列，一年最多十二顆，每一列都
+可以換行；只有一個年份時不畫年份那一列，點年份跳到該年最近的一期。年份超過五個時
+只畫最近三年的 chip，更早的收進同一列最前面的「更早」下拉選單（由新到舊），選到的
+年份由選單本身亮起——不收的話，用到第十年時手機上光是年份與月份就有六列，內容要
+往下捲才看得到。**目前顯示的
+期別一定在清單上**：出勤的 `months` 只列有打卡的月份，預設顯示的本月還沒有打卡時
+不在其中，於是沒有任何一顆亮著，切到別的月份之後也回不到本月。`Attendance.tsx`
+因此記住第一次載入時後端給的本月，一併交給元件。
 
 順帶一提，勞基法第 30 條第 7 項寫的是出勤紀錄「應逐日記載勞工出勤情形**至分鐘
 為止**」，也就是到分鐘即已足夠；記到秒是超過而不是符合。程式與畫面因此都不宣稱
@@ -3158,6 +3180,16 @@ compose 把 `/etc/machine-id` 唯讀掛進 `api` 與 `mcp`，**兩個服務都�
 可以處理。另有一個滾動的 `nonce`：每次回應發一個、下次必須帶回來，兩份複本會互相沖銷。
 **只計數不擋**——從昨天的備份還原與整份複製長得一模一樣，用啟發式把客戶鎖在自己的帳本外
 面是更嚴重的錯，所以那是後台上的一個數字，由人決定。
+
+**同一個資料庫一次只有一個檢查在途**。`api` 與 `mcp` 都跑每日檢查迴圈，同時建立的兩個
+容器每 24 小時同一刻到期；兩邊各自讀 nonce 再送出，後到的那一次帶的就是已經被換掉的
+nonce，授權後台因此每天記一筆「疑似重複安裝」（#135）。兩份回應存回的先後顛倒時，資料庫
+留下的也不是授權伺服器最後發出的那一個，下一次單獨檢查同樣對不上。所以 `check_now` 與
+`check_if_due` 都經過 `Store::lock_license`：讀 nonce、送出、存回在同一個交易裡，
+`license_state` 那一列 `FOR UPDATE`，後到的程序等前一個存完才讀；每日檢查在鎖內重判是否
+到期，等到的那一個看到剛檢查過就不送。持鎖期間包含一次最長 20 秒的請求，而
+`license_state` 只有這條路會寫，`FOR UPDATE` 不擋一般讀取。只讓 `api` 跑迴圈擋不住
+「立即驗證」與迴圈相撞，也擋不住存回順序顛倒。
 
 ### 啟用在建立系統管理員帳號之前
 

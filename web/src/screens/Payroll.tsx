@@ -14,6 +14,7 @@ import {
   type PayslipList,
 } from '../api/client';
 import { DateField } from '../components/DateField';
+import { PeriodPicker } from '../components/PeriodPicker';
 import { RulesetNote } from '../components/RulesetNote';
 
 interface Props {
@@ -90,10 +91,10 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
       const d = await callOp(
                         'run_payroll',
                         {
-            ...(runPeriod.trim() ? { period: runPeriod.trim() } : {}),
+            period: runPeriod.trim(),
             ...(payOn ? { pay_on: payOn } : {}),
           },
-                        `計算 ${runPeriod.trim() || '本期'} 薪資`,
+                        `計算 ${runPeriod.trim()} 薪資`,
                         payrollRunResult,
                       );
       setResult(d);
@@ -155,15 +156,7 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
       {summary && (
         <>
           <div className="toolbar">
-            {summary.periods.map((p) => (
-              <button
-                key={p}
-                className={`chip${p === summary.period ? ' chip--on' : ''}`}
-                onClick={() => setPeriod(p)}
-              >
-                {p}
-              </button>
-            ))}
+            <PeriodPicker periods={summary.periods} value={summary.period} onChange={setPeriod} />
             <span className="spacer" />
             <span className="section-note">
               {run0 ? `${run0.headcount} 人 · 給付日 ${run0.pay_on}` : ''}
@@ -417,7 +410,7 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
               </div>
               <button
                 className="btn"
-                disabled={busy}
+                disabled={busy || runPeriod.trim() === ''}
                 onClick={() => void run()}
               >
                 {busy ? '計算中…' : alreadyRun ? '補算並產生傳票' : '計算薪資並產生傳票'}
