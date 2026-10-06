@@ -20,6 +20,7 @@
 //! single employee's employer share therefore exceeds twice their own, and the
 //! screen says how both are counted.
 
+use crate::ops::attendance::month_span;
 #[cfg(test)]
 use crate::ops::employees::BASIS_MONTHLY;
 use crate::ops::employees::{insured_as_label, INSURED_EMPLOYEE, INSURED_OWNER};
@@ -27,7 +28,7 @@ use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk}
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use laysi_domain::Money;
-use laysi_regulation::{Contribution, Ruleset};
+use laysi_regulation::{Contribution, MonthPart, Ruleset};
 use laysi_store::Employee;
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
@@ -82,6 +83,63 @@ impl Premiums {
     }
 }
 
+/// How much of a month a person is charged for. Labour insurance and pension
+/// go by the day in the month of enrolment or withdrawal; health insurance is
+/// the whole month or none of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Coverage {
+    pub labor: MonthPart,
+    pub pension: MonthPart,
+    /// Insured on the month's last day. Health insurance charges the whole
+    /// month in the month of enrolment and nothing in the month of withdrawal,
+    /// which is the same as charging whoever is insured when the month ends.
+    pub health: bool,
+}
+
+impl Coverage {
+    /// Insured from before the month began until after it ended.
+    pub const WHOLE: Coverage = Coverage {
+        labor: MonthPart::WHOLE,
+        pension: MonthPart::WHOLE,
+        health: true,
+    };
+
+    /// Coverage for the month from `month_start` to `month_end` of someone
+    /// insured here from `from` to `to`, both counted. The day counts come
+    /// from `partial_month`, resolved on the month's last day like the rates.
+    pub fn of_month(
+        month_start: NaiveDate,
+        month_end: NaiveDate,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Coverage, OpError> {
+        let rs = laysi_regulation::resolve("partial_month", month_end)?;
+        let part = |key| laysi_regulation::month_part(rs, key, month_start, month_end, from, to);
+        Ok(Coverage {
+            labor: part("labor_days_per_month")?,
+            pension: part("pension_days_per_month")?,
+            health: from <= month_end && to >= month_end,
+        })
+    }
+
+    /// Insured here on no day of the month: hired after it, or gone before
+    /// it began. Not a month of joining or leaving.
+    pub fn is_none(self) -> bool {
+        self.labor.days() == Some(0)
+    }
+
+    /// Coverage for a month of an employee enrolled on the day they were hired
+    /// and withdrawn on the day they left, as the law requires.
+    pub fn of_employee(
+        e: &Employee,
+        month_start: NaiveDate,
+        month_end: NaiveDate,
+    ) -> Result<Coverage, OpError> {
+        let left = e.left_on.map_or(month_end, |left| left.min(month_end));
+        Coverage::of_month(month_start, month_end, e.hired_on, left)
+    }
+}
+
 /// Compute the three contributions from the rules in force on a date.
 ///
 /// Each domain resolves separately: the labour ceiling and the health
@@ -96,10 +154,15 @@ impl Premiums {
 /// split either way, which is why only two of the three change.
 ///
 /// `covered_dependants` is how many of the person's dependants were covered
-/// under their health insurance on `as_of` ([`covered_dependants`]); the cap
+/// under their health insurance on `as_of` ([`covered_dependants`]), which
+/// every caller that charges a month passes as that month's last day; the cap
 /// on how many are charged comes from `health_dependents`, which resolves
 /// whatever the count, so a missing version stops payroll instead of
 /// charging nobody.
+///
+/// `cover` is how much of the month is charged ([`Coverage`]). A month with
+/// no health insurance charges no dependants either: they are insured through
+/// the person.
 pub(crate) fn premiums_on(
     as_of: NaiveDate,
     insured_as: &str,
@@ -107,6 +170,7 @@ pub(crate) fn premiums_on(
     health_insured: Money,
     pension_wage: Money,
     covered_dependants: u32,
+    cover: Coverage,
 ) -> Result<Premiums, OpError> {
     let labor_rs = laysi_regulation::resolve("labor_insurance", as_of)?;
     let health_rs = laysi_regulation::resolve("health_insurance", as_of)?;
@@ -118,26 +182,38 @@ pub(crate) fn premiums_on(
     };
 
     let cap = labor_rs.decimal("max_insured_salary")?;
+    let covered_dependants = match cover.health {
+        true => covered_dependants,
+        false => 0,
+    };
+    let health = match owner_rs {
+        Some(owner) => laysi_regulation::health_insurance_owner(
+            health_rs,
+            owner,
+            dependants_rs,
+            health_insured,
+            covered_dependants,
+        )?,
+        None => laysi_regulation::health_insurance(
+            health_rs,
+            dependants_rs,
+            health_insured,
+            covered_dependants,
+        )?,
+    };
     Ok(Premiums {
-        labor: laysi_regulation::labor_insurance(labor_rs, labor_insured)?,
-        health: match owner_rs {
-            Some(owner) => laysi_regulation::health_insurance_owner(
-                health_rs,
-                owner,
-                dependants_rs,
-                health_insured,
-                covered_dependants,
-            )?,
-            None => laysi_regulation::health_insurance(
-                health_rs,
-                dependants_rs,
-                health_insured,
-                covered_dependants,
-            )?,
+        labor: laysi_regulation::labor_insurance(labor_rs, labor_insured, cover.labor)?,
+        health: match cover.health {
+            true => health,
+            false => Contribution {
+                employer: Money::ZERO,
+                employee: Money::ZERO,
+                government: Money::ZERO,
+            },
         },
         pension: match owner_rs {
-            Some(owner) => laysi_regulation::pension_owner(owner, pension_wage)?,
-            None => laysi_regulation::pension(pension_rs, pension_wage)?,
+            Some(owner) => laysi_regulation::pension_owner(owner, pension_wage, cover.pension)?,
+            None => laysi_regulation::pension(pension_rs, pension_wage, cover.pension)?,
         },
         labor_base: labor_insured.min(cap),
         labor_capped: labor_insured > cap,
@@ -154,7 +230,14 @@ pub(crate) fn premiums_on(
 /// insurance on a date. The premium is charged by the month to whoever is
 /// covered on its last day, so callers pass the period end; the last day
 /// covered counts as covered.
+///
+/// A dependant is covered here only through the employee, so nobody counts
+/// on a day the employee is not employed: someone who left mid-month takes
+/// their dependants with them, whatever dates the list still holds.
 pub(crate) fn covered_dependants(e: &Employee, on: NaiveDate) -> u32 {
+    if e.hired_on > on || e.left_on.is_some_and(|left| left < on) {
+        return 0;
+    }
     let covered = e
         .dependents
         .iter()
@@ -293,7 +376,7 @@ impl Operation for GetInsuranceSummary {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀勞健保與勞退：公司負擔、員工自付、逐人投保級距、健保眷口數與三項保費。費率、上限與平均眷口數依投保期間適用的規則解析。"
+        "讀勞健保與勞退：公司負擔、員工自付、逐人投保級距、健保眷口數與三項保費。費率與在保眷屬以指定日期所在月份的月底計，與該月薪資單相同。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::AsOfInput>()
@@ -301,8 +384,22 @@ impl Operation for GetInsuranceSummary {
 
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: crate::AsOfInput = parse(input)?;
-        let as_of = i.as_of.unwrap_or(ctx.today);
-        let staff = ctx.store.employees(false, None).await?;
+        // The whole month, judged on its last day as run_payroll judges the
+        // period: a dependant enrolled later in the month is charged on that
+        // month's payslip, and so is someone hired or leaving in it by the day,
+        // so each row has to count them already.
+        let day = i.as_of.unwrap_or(ctx.today);
+        let (month_start, as_of) = month_span(&day.format("%Y-%m").to_string());
+        // Whoever left during the month is still charged for its first days,
+        // as the payslip charges them, whether or not the roster has marked
+        // them as left yet; whoever left before it is not on the page.
+        let staff: Vec<Employee> = ctx
+            .store
+            .employees(true, None)
+            .await?
+            .into_iter()
+            .filter(|e| e.status != "left" || e.left_on.is_some_and(|left| left >= month_start))
+            .collect();
 
         let mut rows = Vec::with_capacity(staff.len());
         let mut labor_er = Money::ZERO;
@@ -314,10 +411,15 @@ impl Operation for GetInsuranceSummary {
         let mut unfiled = Vec::new();
         let mut sets: Option<(Value, Value, Value)> = None;
         let mut owner_set: Option<Value> = None;
+        let mut partial = 0usize;
 
         for e in &staff {
             let missing = missing_brackets(e);
             let covered = covered_dependants(e, as_of);
+            let cover = Coverage::of_employee(e, month_start, as_of)?;
+            if cover != Coverage::WHOLE && !cover.is_none() {
+                partial += 1;
+            }
             let p = premiums_on(
                 as_of,
                 &e.insured_as,
@@ -325,6 +427,7 @@ impl Operation for GetInsuranceSummary {
                 e.health_insured_salary,
                 e.pension_wage,
                 covered,
+                cover,
             )?;
             if owner_set.is_none() {
                 owner_set = p.owner_rs.map(ruleset_json);
@@ -381,6 +484,11 @@ impl Operation for GetInsuranceSummary {
                 "pension_employer": p.pension.to_string(),
                 "employer_total": p.employer_total().to_string(),
                 "employee_total": p.employee_total().to_string(),
+                // Days charged in a month of hiring or leaving, null for the
+                // whole month; health insurance is the month or nothing.
+                "labor_days": cover.labor.days(),
+                "pension_days": cover.pension.days(),
+                "health_charged": cover.health,
             }));
         }
 
@@ -388,7 +496,15 @@ impl Operation for GetInsuranceSummary {
         let (labor_set, health_set, pension_set) = match sets {
             Some(s) => s,
             None => {
-                let p = premiums_on(as_of, "", Money::ZERO, Money::ZERO, Money::ZERO, 0)?;
+                let p = premiums_on(
+                    as_of,
+                    "",
+                    Money::ZERO,
+                    Money::ZERO,
+                    Money::ZERO,
+                    0,
+                    Coverage::WHOLE,
+                )?;
                 (
                     ruleset_json(p.labor_rs),
                     ruleset_json(p.health_rs),
@@ -464,6 +580,27 @@ impl Operation for GetInsuranceSummary {
                 ),
                 "source": owner_rs.source_note,
                 "version": owner_rs.version,
+            }));
+        }
+
+        // Only in a month somebody joins or leaves, for the same reason.
+        if partial > 0 {
+            let days_rs = laysi_regulation::resolve("partial_month", as_of)?;
+            let labor_days = days_rs.decimal("labor_days_per_month")?;
+            let pension_days = days_rs.decimal("pension_days_per_month")?;
+            let by_day = match labor_days == pension_days {
+                true => format!("勞保與勞退按日計，每月以 {labor_days} 日計"),
+                false => format!(
+                    "勞保按日計，每月以 {labor_days} 日計；勞退按日計，每月以 {pension_days} 日計"
+                ),
+            };
+            notes.as_array_mut().expect("剛才建的是陣列").push(json!({
+                "title": "到職與離職當月",
+                "body": format!(
+                    "{partial} 位本月到職或離職：{by_day}；健保於投保當月收全月，退保當月免繳。"
+                ),
+                "source": days_rs.source_note,
+                "version": days_rs.version,
             }));
         }
 
@@ -593,6 +730,7 @@ impl Operation for ComputeInsurance {
             health,
             pension_wage,
             i.dependents,
+            Coverage::WHOLE,
         )?;
 
         let summary = format!(
@@ -689,6 +827,7 @@ mod tests {
             n("53000"),
             n("53000"),
             0,
+            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(p.labor.employer, n("3527"), "公司負擔勞保");
@@ -717,6 +856,7 @@ mod tests {
             n("53000"),
             n("53000"),
             0,
+            Coverage::WHOLE,
         )
         .unwrap();
         let boss = premiums_on(
@@ -726,6 +866,7 @@ mod tests {
             n("53000"),
             n("53000"),
             0,
+            Coverage::WHOLE,
         )
         .unwrap();
 
@@ -762,6 +903,7 @@ mod tests {
             n("53000"),
             n("53000"),
             0,
+            Coverage::WHOLE,
         )
         .unwrap();
         let at_cap = premiums_on(
@@ -771,6 +913,7 @@ mod tests {
             n("53000"),
             n("53000"),
             0,
+            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(capped.labor, at_cap.labor);
@@ -788,7 +931,7 @@ mod tests {
     #[test]
     fn a_different_ruleset_gives_the_same_employee_a_different_premium() {
         let base = laysi_regulation::resolve("labor_insurance", d(2026, 7, 26)).unwrap();
-        let before = laysi_regulation::labor_insurance(base, n("45800")).unwrap();
+        let before = laysi_regulation::labor_insurance(base, n("45800"), MonthPart::WHOLE).unwrap();
         assert_eq!(before.employer, n("3527"));
 
         // Simulate 2027: rate raised to 12%, ceiling raised to 48,200.
@@ -798,14 +941,14 @@ mod tests {
         next.payload["premium_rate"] = json!("0.12");
         next.payload["max_insured_salary"] = json!("48200");
 
-        let after = laysi_regulation::labor_insurance(&next, n("48200")).unwrap();
+        let after = laysi_regulation::labor_insurance(&next, n("48200"), MonthPart::WHOLE).unwrap();
         // 48,200 × 0.12 × 0.70 = 4,048.8 → 4,049
         assert_eq!(after.employer, n("4049"));
         assert_ne!(after.employer, before.employer, "換規則就要換答案");
 
         // The same employee under the old rules is unchanged.
         assert_eq!(
-            laysi_regulation::labor_insurance(base, n("45800"))
+            laysi_regulation::labor_insurance(base, n("45800"), MonthPart::WHOLE)
                 .unwrap()
                 .employer,
             n("3527")
@@ -826,7 +969,7 @@ mod tests {
         let mut pnext = pbase.clone();
         pnext.payload["employer_rate"] = json!("0.08");
         assert_eq!(
-            laysi_regulation::pension(&pnext, n("53000")).unwrap(),
+            laysi_regulation::pension(&pnext, n("53000"), MonthPart::WHOLE).unwrap(),
             n("4240")
         );
     }
@@ -960,6 +1103,55 @@ mod tests {
         assert_eq!(covered_dependants(&e, d(2026, 10, 31)), 3, "10 月底");
     }
 
+    /// A month of hiring or leaving is charged by the day, and health
+    /// insurance only when the employee is still insured on its last day. A
+    /// month the employee is insured on no day is neither.
+    #[test]
+    fn coverage_follows_the_hiring_and_leaving_dates() {
+        let mut e = test_employee("active", n("53000"), n("45800"), n("53000"), n("53000"));
+        let (start, end) = (d(2026, 10, 1), d(2026, 10, 31));
+        let cover = |e: &Employee| Coverage::of_employee(e, start, end).unwrap();
+        assert_eq!(cover(&e), Coverage::WHOLE);
+
+        e.hired_on = d(2026, 10, 20);
+        let c = cover(&e);
+        assert_eq!(
+            (c.labor.days(), c.pension.days(), c.health),
+            (Some(11), Some(11), true)
+        );
+        assert!(!c.is_none());
+
+        (e.hired_on, e.left_on) = (d(2026, 1, 1), Some(d(2026, 10, 15)));
+        let c = cover(&e);
+        assert_eq!(
+            (c.labor.days(), c.pension.days(), c.health),
+            (Some(15), Some(15), false)
+        );
+        assert!(!c.is_none());
+
+        (e.hired_on, e.left_on) = (d(2026, 11, 2), None);
+        let c = cover(&e);
+        assert!(c.is_none(), "下個月才到職");
+        assert!(!c.health);
+    }
+
+    /// Dependants are covered through the employee, so a month that ends after
+    /// the employee left, or before they joined, counts none of them. Leaving
+    /// on the last day still counts the month.
+    #[test]
+    fn dependants_go_with_the_employee() {
+        let mut e = test_employee("left", n("53000"), n("45800"), n("53000"), n("53000"));
+        e.dependents = vec![dependant(d(2026, 1, 1), None)];
+        e.left_on = Some(d(2026, 10, 15));
+        assert_eq!(covered_dependants(&e, d(2026, 10, 31)), 0, "10/15 離職");
+        assert_eq!(covered_dependants(&e, d(2026, 9, 30)), 1, "9 月底仍在職");
+        e.left_on = Some(d(2026, 10, 31));
+        assert_eq!(covered_dependants(&e, d(2026, 10, 31)), 1, "月底離職");
+        e.left_on = None;
+        e.hired_on = d(2026, 11, 2);
+        assert_eq!(covered_dependants(&e, d(2026, 10, 31)), 0, "11 月才到職");
+    }
+
     /// The employee's health deduction is a head per covered dependant on top
     /// of their own; the employer share and labour insurance do not move.
     #[test]
@@ -971,6 +1163,7 @@ mod tests {
             n("53000"),
             n("53000"),
             0,
+            Coverage::WHOLE,
         )
         .unwrap();
         let two = premiums_on(
@@ -980,6 +1173,7 @@ mod tests {
             n("53000"),
             n("53000"),
             2,
+            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(two.health.employee, n("2466"), "822 × 3");
@@ -994,6 +1188,7 @@ mod tests {
             n("53000"),
             n("53000"),
             5,
+            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(five.health_dependants, 3, "超過上限以上限計");
@@ -1011,6 +1206,7 @@ mod tests {
             n("53000"),
             n("53000"),
             0,
+            Coverage::WHOLE,
         )
         .unwrap_err();
         assert!(matches!(err, OpError::Regulation(_)));

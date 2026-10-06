@@ -6795,6 +6795,7 @@ impl Store {
             "SELECT p.period, p.pay_on, p.headcount, p.gross_total, p.deduction_total,
                     p.net_total, p.employer_total, p.voucher_no, v.status AS voucher_status,
                     p.labor_version, p.health_version, p.pension_version, p.withholding_version,
+                    p.dependents_version, p.partial_month_version,
                     p.note, p.created_at, p.created_by
                FROM payroll_run p
                LEFT JOIN voucher v ON v.no = p.voucher_no
@@ -6860,14 +6861,14 @@ impl Store {
         Ok(sqlx::query(
             "SELECT p.period, p.pay_on,
                     p.labor_version, p.health_version, p.pension_version,
-                    p.withholding_version,
+                    p.withholding_version, p.dependents_version, p.partial_month_version,
                     s.employee_id, e.emp_no, e.name, e.title, e.insured_as, d.label AS dept_label,
                     s.base_salary, s.overtime, s.allowance, s.gross,
                     s.labor_insured_salary, s.health_insured_salary, s.pension_wage,
                     s.labor_employee, s.health_employee, s.income_tax,
                     s.labor_employer, s.health_employer, s.pension_employer,
                     s.deduction, s.net, s.paid_days, s.month_days, s.note,
-                    s.health_dependents
+                    s.health_dependents, s.insured_from, s.insured_to
                FROM payslip s
                JOIN payroll_run p         ON p.id = s.run_id
                JOIN employee e            ON e.id = s.employee_id
@@ -7033,8 +7034,9 @@ impl Store {
             "INSERT INTO payroll_run
                (period, pay_on, headcount, gross_total, deduction_total, net_total,
                 employer_total, voucher_no, labor_version, health_version,
-                pension_version, withholding_version, note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id",
+                pension_version, withholding_version, dependents_version,
+                partial_month_version, note, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id",
         )
         .bind(req.period)
         .bind(req.pay_on)
@@ -7048,6 +7050,8 @@ impl Store {
         .bind(req.health_version)
         .bind(req.pension_version)
         .bind(req.withholding_version)
+        .bind(req.dependents_version)
+        .bind(req.partial_month_version)
         .bind(req.note)
         .bind(req.actor)
         .fetch_one(&mut *tx)
@@ -7061,8 +7065,10 @@ impl Store {
                     labor_insured_salary, health_insured_salary, pension_wage,
                     labor_employee, health_employee, income_tax,
                     labor_employer, health_employer, pension_employer,
-                    deduction, net, paid_days, month_days, note, health_dependents)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+                    deduction, net, paid_days, month_days, note, health_dependents,
+                    insured_from, insured_to)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+                         $22,$23)",
             )
             .bind(run_id)
             .bind(s.employee_id)
@@ -7085,6 +7091,8 @@ impl Store {
             .bind(s.month_days)
             .bind(&s.note)
             .bind(s.health_dependents)
+            .bind(s.insured_from)
+            .bind(s.insured_to)
             .execute(&mut *tx)
             .await?;
 
@@ -9059,6 +9067,9 @@ pub struct PayrollRun {
     pub health_version: String,
     pub pension_version: String,
     pub withholding_version: String,
+    /// `None` on a run computed before these two were recorded.
+    pub dependents_version: Option<String>,
+    pub partial_month_version: Option<String>,
     pub note: String,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
@@ -9072,6 +9083,9 @@ pub struct Payslip {
     pub health_version: String,
     pub pension_version: String,
     pub withholding_version: String,
+    /// `None` on a run computed before these two were recorded.
+    pub dependents_version: Option<String>,
+    pub partial_month_version: Option<String>,
     pub employee_id: i32,
     pub emp_no: String,
     pub name: String,
@@ -9104,6 +9118,10 @@ pub struct Payslip {
     /// not counting the employee. Stored like the brackets, so recomputing
     /// the slip uses what was on file when it was computed.
     pub health_dependents: i32,
+    /// First and last day of the period the person was insured here, both
+    /// counted. `None` on a payslip computed before the span was kept, which
+    /// charged the whole month.
+    pub insured_span: Option<(NaiveDate, NaiveDate)>,
 }
 
 /// A payslip to be written. Every amount is computed by `laysi-ops` from
@@ -9132,6 +9150,11 @@ pub struct NewPayslip {
     pub note: String,
     /// Dependants charged on the health deduction, after the cap.
     pub health_dependents: i32,
+    /// First and last day of the period the person was insured here, which
+    /// set the days labour insurance and pension are charged for and whether
+    /// health insurance is.
+    pub insured_from: NaiveDate,
+    pub insured_to: NaiveDate,
 }
 
 pub struct RecordPayroll<'a> {
@@ -9147,6 +9170,8 @@ pub struct RecordPayroll<'a> {
     pub health_version: &'a str,
     pub pension_version: &'a str,
     pub withholding_version: &'a str,
+    pub dependents_version: &'a str,
+    pub partial_month_version: &'a str,
     pub note: &'a str,
     pub actor: &'a str,
 }
@@ -10131,6 +10156,8 @@ fn row_to_payroll_run(r: &PgRow) -> PayrollRun {
         health_version: r.get("health_version"),
         pension_version: r.get("pension_version"),
         withholding_version: r.get("withholding_version"),
+        dependents_version: r.get("dependents_version"),
+        partial_month_version: r.get("partial_month_version"),
         note: r.get("note"),
         created_at: r.get("created_at"),
         created_by: r.get("created_by"),
@@ -10145,6 +10172,8 @@ fn row_to_payslip(r: &PgRow) -> Payslip {
         health_version: r.get("health_version"),
         pension_version: r.get("pension_version"),
         withholding_version: r.get("withholding_version"),
+        dependents_version: r.get("dependents_version"),
+        partial_month_version: r.get("partial_month_version"),
         employee_id: r.get("employee_id"),
         emp_no: r.get("emp_no"),
         name: r.get("name"),
@@ -10170,6 +10199,9 @@ fn row_to_payslip(r: &PgRow) -> Payslip {
         month_days: r.get("month_days"),
         note: r.get("note"),
         health_dependents: r.get("health_dependents"),
+        insured_span: r
+            .get::<Option<NaiveDate>, _>("insured_from")
+            .zip(r.get::<Option<NaiveDate>, _>("insured_to")),
     }
 }
 

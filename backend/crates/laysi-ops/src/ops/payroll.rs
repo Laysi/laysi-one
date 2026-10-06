@@ -53,7 +53,7 @@ use crate::ops::attendance::{
 #[cfg(test)]
 use crate::ops::employees::INSURED_EMPLOYEE;
 use crate::ops::employees::{pay_basis_label, service_months, BASIS_HOURLY, BASIS_MONTHLY};
-use crate::ops::insurance::{covered_dependants, percent, premiums_on, ruleset_json};
+use crate::ops::insurance::{covered_dependants, percent, premiums_on, ruleset_json, Coverage};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -378,13 +378,36 @@ fn attendance_check(
     }))
 }
 
+/// The rule versions one payslip was computed under.
+#[derive(Clone)]
+struct Versions {
+    labor: String,
+    health: String,
+    pension: String,
+    withholding: String,
+    dependents: String,
+    partial_month: String,
+}
+
+impl Versions {
+    /// The versions as the run note and the audit summary name them.
+    fn sentence(&self) -> String {
+        format!(
+            "依勞保 {}、健保 {}、勞退 {}、扣繳 {}、健保眷屬計費 {}、不足月計費 {} 規則",
+            self.labor,
+            self.health,
+            self.pension,
+            self.withholding,
+            self.dependents,
+            self.partial_month
+        )
+    }
+}
+
 /// A computed payslip together with the rule versions used to produce it.
 struct Computed {
     slip: NewPayslip,
-    labor_version: String,
-    health_version: String,
-    pension_version: String,
-    withholding_version: String,
+    versions: Versions,
     /// Floor when monthly salary is below the statutory minimum wage.
     /// `None` means compliant.
     below_minimum: Option<Money>,
@@ -458,7 +481,11 @@ fn compute_one(
     let gross = base + overtime;
 
     // Premiums resolve on the period end: the version in force for this period,
-    // and the dependants covered on its last day.
+    // the dependants covered on its last day, and the days of it the person
+    // was insured here, from the hiring and leaving dates.
+    let insured_from = e.hired_on.max(from);
+    let insured_to = e.left_on.map_or(to, |left| left.min(to));
+    let cover = Coverage::of_month(from, to, insured_from, insured_to)?;
     let p = premiums_on(
         to,
         &e.insured_as,
@@ -466,6 +493,7 @@ fn compute_one(
         e.health_insured_salary,
         e.pension_wage,
         covered_dependants(e, to),
+        cover,
     )?;
 
     // Withholding resolves on the payment date: the obligation arises then.
@@ -500,6 +528,12 @@ fn compute_one(
         (false, true) => format!("在職 {days}／{month_days} 日，按曆日比例計薪"),
         (false, false) => String::new(),
     };
+    if let Some(cover_note) = coverage_note(cover) {
+        if !note.is_empty() {
+            note.push('；');
+        }
+        note.push_str(&cover_note);
+    }
     let leave_note: Vec<String> = leave_amounts
         .iter()
         .map(|(kind, qty, amount)| match hourly {
@@ -548,13 +582,40 @@ fn compute_one(
             month_days,
             note,
             health_dependents: i32::try_from(p.health_dependants).unwrap_or(i32::MAX),
+            insured_from,
+            insured_to,
         },
-        labor_version: p.labor_rs.version.clone(),
-        health_version: p.health_rs.version.clone(),
-        pension_version: p.pension_rs.version.clone(),
-        withholding_version: wht.version.clone(),
+        versions: Versions {
+            labor: p.labor_rs.version.clone(),
+            health: p.health_rs.version.clone(),
+            pension: p.pension_rs.version.clone(),
+            withholding: wht.version.clone(),
+            dependents: p.dependants_rs.version.clone(),
+            partial_month: laysi_regulation::resolve("partial_month", to)?
+                .version
+                .clone(),
+        },
         below_minimum,
     })
+}
+
+/// What a month not insured in full charged, for the payslip note. `None`
+/// for a whole month.
+fn coverage_note(cover: Coverage) -> Option<String> {
+    let mut parts = match (cover.labor.days(), cover.pension.days()) {
+        (Some(labor), Some(pension)) if labor == pension => {
+            vec![format!("勞保與勞退按 {labor} 日計")]
+        }
+        (labor, pension) => labor
+            .map(|d| format!("勞保按 {d} 日計"))
+            .into_iter()
+            .chain(pension.map(|d| format!("勞退按 {d} 日計")))
+            .collect(),
+    };
+    if !cover.health {
+        parts.push("健保退保當月免繳".to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join("，"))
 }
 
 /// JSON shape of a payroll period, without per-person amounts.
@@ -576,6 +637,8 @@ fn run_json(r: &laysi_store::PayrollRun) -> Value {
             "health_insurance": r.health_version,
             "pension": r.pension_version,
             "withholding": r.withholding_version,
+            "health_dependents": r.dependents_version,
+            "partial_month": r.partial_month_version,
         },
         "note": r.note,
         "created_at": r.created_at,
@@ -766,7 +829,7 @@ impl Operation for ListPayslips {
             })
         })?;
 
-        let (_, _, period_end) = resolve_period(Some(run.period.clone()), ctx.today)?;
+        let (_, period_start, period_end) = resolve_period(Some(run.period.clone()), ctx.today)?;
         let slips = ctx.store.payslips(&run.period).await?;
         // Every run of the period, because payslips are listed by period and a
         // late joiner is paid by a second run.
@@ -779,8 +842,13 @@ impl Operation for ListPayslips {
             // Recompute from the same rules. What was stored is the result at the
             // time; recomputation is a second path, and a mismatch is stated on
             // screen as with AR ageing and depreciation.
-            // The dependants the slip charged, as stored: the list on file may
-            // have changed since, and what is being checked is the rules.
+            // The dependants the slip charged and the days it was insured, as
+            // stored: the list and the leaving date on file may have changed
+            // since, and what is being checked is the rules.
+            let cover = match s.insured_span {
+                Some((first, last)) => Coverage::of_month(period_start, period_end, first, last)?,
+                None => Coverage::WHOLE,
+            };
             let p = premiums_on(
                 period_end,
                 &s.insured_as,
@@ -788,6 +856,7 @@ impl Operation for ListPayslips {
                 s.health_insured_salary,
                 s.pension_wage,
                 u32::try_from(s.health_dependents).unwrap_or(0),
+                cover,
             )?;
             let same = p.labor.employee == s.labor_employee
                 && p.labor.employer == s.labor_employer
@@ -881,7 +950,7 @@ impl Operation for RunPayroll {
         Risk::HighRisk
     }
     fn summary(&self) -> &'static str {
-        "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下用的四個規則版本。已計薪的人不會再算一次，同一期可以為後來到職或漏算的人補算，各自產生一張傳票。"
+        "計算某一期的薪資並產生待過帳傳票（借 6111 薪資支出逐部門／貸 2117 代扣款／貸 1102 銀行存款）。保費依期末日、扣繳依給付日解析規則，每一期都記下計算所依的每一個規則版本。已計薪的人不會再算一次，同一期可以為後來到職或漏算的人補算，各自產生一張傳票。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<RunPayrollInput>()
@@ -962,7 +1031,7 @@ impl Operation for RunPayroll {
         let mut slips: Vec<NewPayslip> = Vec::new();
         let mut warnings: Vec<Value> = Vec::new();
         let mut skipped: Vec<Value> = Vec::new();
-        let mut versions: Option<(String, String, String, String)> = None;
+        let mut versions: Option<Versions> = None;
 
         for e in &staff {
             if already_paid.contains(&e.id) {
@@ -1035,17 +1104,12 @@ impl Operation for RunPayroll {
                 }));
             }
             if versions.is_none() {
-                versions = Some((
-                    c.labor_version.clone(),
-                    c.health_version.clone(),
-                    c.pension_version.clone(),
-                    c.withholding_version.clone(),
-                ));
+                versions = Some(c.versions.clone());
             }
             slips.push(c.slip);
         }
 
-        let (labor_v, health_v, pension_v, wht_v) = versions.ok_or_else(|| {
+        let v = versions.ok_or_else(|| {
             // Somebody left out for a reason other than having been paid is
             // the answer to why nobody is being paid. Reporting them as all
             // paid would hide the one person who is waiting on something.
@@ -1083,9 +1147,7 @@ impl Operation for RunPayroll {
             money(tax)
         );
 
-        let note = i.note.clone().unwrap_or_else(|| {
-            format!("依勞保 {labor_v}、健保 {health_v}、勞退 {pension_v}、扣繳 {wht_v} 規則")
-        });
+        let note = i.note.clone().unwrap_or_else(|| v.sentence());
 
         let run = ctx
             .store
@@ -1096,10 +1158,12 @@ impl Operation for RunPayroll {
                 bank_account_id,
                 income_code: SALARY_INCOME_CODE,
                 deduction_memo: &deduction_memo,
-                labor_version: &labor_v,
-                health_version: &health_v,
-                pension_version: &pension_v,
-                withholding_version: &wht_v,
+                labor_version: &v.labor,
+                health_version: &v.health,
+                pension_version: &v.pension,
+                withholding_version: &v.withholding,
+                dependents_version: &v.dependents,
+                partial_month_version: &v.partial_month,
                 note: &note,
                 actor: &ctx.actor,
             })
@@ -1111,12 +1175,13 @@ impl Operation for RunPayroll {
         // The audit summary names the versions: which rules a period was
         // computed under must be visible from the audit trail alone.
         let summary = format!(
-            "{period} 薪資作業 · {} 人應發 {} 代扣 {} 實發 {} · 公司另負擔 {} · 依勞保 {labor_v}、健保 {health_v}、勞退 {pension_v}、扣繳 {wht_v} 規則 · {voucher_no} 待過帳",
+            "{period} 薪資作業 · {} 人應發 {} 代扣 {} 實發 {} · 公司另負擔 {} · {} · {voucher_no} 待過帳",
             run.headcount,
             money(run.gross_total),
             money(run.deduction_total),
             money(run.net_total),
             money(run.employer_total),
+            v.sentence(),
         );
 
         let wht_rs = laysi_regulation::resolve("withholding", pay_on)?;
@@ -1261,6 +1326,7 @@ mod tests {
             n("53000"),
             n("53000"),
             0,
+            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(p.labor.employee, n("1008"));
@@ -1675,6 +1741,87 @@ mod tests {
         );
     }
 
+    /// Someone who left mid-month is charged labour insurance and pension by
+    /// the day and no health insurance, for themselves or for the dependants
+    /// still on their list: the month is charged to whoever insures them on
+    /// its last day.
+    #[test]
+    fn a_mid_month_leaver_pays_by_the_day_and_no_health_insurance() {
+        let mut e = emp(d(2025, 3, 3), Some(d(2026, 6, 15)));
+        e.dependents = vec![laysi_store::EmployeeDependent {
+            id: 0,
+            name: "眷屬".into(),
+            relation: "child".into(),
+            id_no: String::new(),
+            birthday: None,
+            health_enrolled_from: d(2026, 1, 1),
+            health_enrolled_until: None,
+        }];
+        let (from, to) = (d(2026, 6, 1), d(2026, 6, 30));
+        let pay = |e: &Employee| {
+            compute_one(
+                e,
+                from,
+                to,
+                d(2026, 7, 5),
+                Money::ZERO,
+                Money::ZERO,
+                &BTreeMap::new(),
+            )
+            .unwrap()
+            .slip
+        };
+        let slip = pay(&e);
+        assert_eq!(slip.labor_employee, n("504"), "1,007.6 × 15/30");
+        assert_eq!(slip.labor_employer, n("1763"), "3,526.6 × 15/30");
+        assert_eq!(slip.pension_employer, n("1590"), "3,180 × 15/30");
+        assert_eq!(slip.health_employee, Money::ZERO, "退保當月免繳");
+        assert_eq!(slip.health_employer, Money::ZERO);
+        assert_eq!(slip.health_dependents, 0, "眷屬跟著本人退保");
+        assert_eq!(slip.deduction, n("504") + slip.income_tax);
+        assert_eq!((slip.insured_from, slip.insured_to), (from, d(2026, 6, 15)));
+        assert_eq!(
+            slip.note,
+            "在職 15／30 日，按曆日比例計薪；勞保與勞退按 15 日計，健保退保當月免繳"
+        );
+
+        // Leaving on the last day is insured on it: a whole month.
+        e.left_on = Some(to);
+        let slip = pay(&e);
+        assert_eq!(slip.labor_employee, n("1008"));
+        assert_eq!(slip.health_employee, n("1644"), "本人與眷屬各 822");
+        assert_eq!(slip.note, "");
+    }
+
+    /// Someone hired mid-month is charged labour insurance and pension from
+    /// the hiring day on a thirty-day month, and the whole month of health
+    /// insurance, since they are insured here on its last day.
+    #[test]
+    fn a_mid_month_hire_pays_by_the_day_and_a_whole_month_of_health() {
+        let e = emp(d(2026, 6, 20), None);
+        let (from, to) = (d(2026, 6, 1), d(2026, 6, 30));
+        let slip = compute_one(
+            &e,
+            from,
+            to,
+            d(2026, 7, 5),
+            Money::ZERO,
+            Money::ZERO,
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .slip;
+        assert_eq!(slip.labor_employee, n("369"), "1,007.6 × 11/30");
+        assert_eq!(slip.labor_employer, n("1293"), "3,526.6 × 11/30");
+        assert_eq!(slip.pension_employer, n("1166"), "3,180 × 11/30");
+        assert_eq!(slip.health_employee, n("822"), "投保當月繳全月");
+        assert_eq!(slip.health_employer, n("2647"));
+        assert_eq!(
+            slip.note,
+            "在職 11／30 日，按曆日比例計薪；勞保與勞退按 11 日計"
+        );
+    }
+
     /// A request that starts in December is split over all its dates, but only
     /// January's are priced: December belongs to last year's payroll, and this
     /// database has no ruleset for it.
@@ -1730,7 +1877,7 @@ mod tests {
         );
         assert_eq!(
             c.slip.note,
-            "時薪制，本期正常工時 40.64 小時；病假 4 小時計 400"
+            "時薪制，本期正常工時 40.64 小時；勞保與勞退按 27 日計；病假 4 小時計 400"
         );
     }
 }

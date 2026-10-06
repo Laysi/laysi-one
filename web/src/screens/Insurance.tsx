@@ -149,6 +149,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
                       {r.brackets_missing && (
                         <span className="tag tag--bad tag--static">尚未設定投保級距</span>
                       )}
+                      {r.labor_days === 0 && <span className="tag tag--static">本月未投保</span>}
                       <span className="cell-hint cell-hint--block num">
                         {r.emp_no} · {r.dept_label ?? '未指定'} · {r.title}
                         {r.insured_as === 'owner' && ` · ${r.insured_as_label}`}
@@ -176,6 +177,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
                           {money(r.labor_employer)}
                           <span className="cell-hint cell-hint--block num">
                             自付 {money(r.labor_employee)}
+                            {!!r.labor_days && ` · 按 ${r.labor_days} 日計`}
                           </span>
                         </>
                       )}
@@ -190,7 +192,9 @@ export function Insurance({ onToast, reloadKey }: Props) {
                         <>
                           {money(r.health_employer)}
                           <span className="cell-hint cell-hint--block num">
-                            自付 {money(r.health_employee)}
+                            {r.health_charged || r.labor_days === 0
+                              ? `自付 ${money(r.health_employee)}`
+                              : '退保當月免繳'}
                             {r.health_dependents > 0 && ` · 含眷屬 ${r.health_dependents} 口`}
                           </span>
                           {r.health_dependents_covered > r.health_dependents && (
@@ -212,6 +216,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
                           {money(r.pension_employer)}
                           <span className="cell-hint cell-hint--block num">
                             提繳工資 {money(r.pension_wage)}
+                            {!!r.pension_days && ` · 按 ${r.pension_days} 日計`}
                           </span>
                         </>
                       )}

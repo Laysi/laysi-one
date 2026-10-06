@@ -1,0 +1,28 @@
+# Labour insurance and pension for a month not covered in full
+#
+# Both are charged by the day for the month a person is enrolled or withdrawn,
+# and a month counts as a fixed number of days whatever its length. Enrolled on
+# the 10th is (days - 10 + 1) days, enrolled on the 31st is one day, withdrawn
+# on the 15th is 15 days, and covered through the month's last day reaches the
+# end of the count, so February is no shorter: enrolled on 28 February is three
+# days. Both ends are counted.
+#
+# Health insurance has no figure here, only the article in the source note. It
+# is charged for the whole month in the month of enrolment and not at all in the
+# month of withdrawal (National Health Insurance Act art. 30 para. 2), so
+# whoever is insured on the month's last day pays the month.
+#
+# A domain of its own for the same reason as `health_dependents`. Effective from
+# the day the labour pension scheme began rather than the factory year, so a
+# period recomputed under an earlier version still finds it.
+
+domain = "partial_month"
+version = "2005.1"
+effective_from = "2005-07-01"
+source_note = "勞工保險條例施行細則第 28-1 條；勞工退休金條例施行細則第 22 條；全民健康保險法第 30 條第 2 項"
+
+[payload]
+# Days a month counts as for labour insurance.
+labor_days_per_month = "30"
+# Days a month counts as for the employer pension contribution.
+pension_days_per_month = "30"

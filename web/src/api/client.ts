@@ -1955,6 +1955,8 @@ export const payrollRunRow = z.object({
     health_insurance: z.string(),
     pension: z.string(),
     withholding: z.string(),
+    health_dependents: z.string().nullable(),
+    partial_month: z.string().nullable(),
   }),
   note: z.string(),
   created_at: z.string(),
@@ -2101,6 +2103,9 @@ export const insuranceRow = z.object({
   health_bracket_missing: z.boolean(),
   pension_wage_missing: z.boolean(),
   brackets_missing: z.boolean(),
+  labor_days: z.number().nullable(),
+  pension_days: z.number().nullable(),
+  health_charged: z.boolean(),
 });
 export type InsuranceRow = z.infer<typeof insuranceRow>;
 
@@ -2393,6 +2398,8 @@ export const myPayslip = z.object({
     health_insurance: z.string(),
     pension: z.string(),
     withholding: z.string(),
+    health_dependents: z.string().nullable(),
+    partial_month: z.string().nullable(),
   }),
   note: z.string(),
 });

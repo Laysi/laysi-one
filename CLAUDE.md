@@ -675,9 +675,17 @@ HTTP `Date` 標頭）換算到 +08:00。`new Date().getHours()` 讀的是瀏覽�
 三態；關係只有健保法第 2 條的五種，清單是 `ops/employees.rs` 的 `RELATIONS`，測試比對
 migration 的 CHECK。畫面上存過的眷屬不畫 ×：退保填退保日，登記錯人走「登記錯誤，
 刪除」，存檔才刪；個人專區不回眷屬字號與生日，MCP 的名冊整份拿掉眷屬。
-**健保自付額逐口計**：本人一口加期末日在保的眷屬，上限在 `health_dependents` domain
+**健保自付額逐口計**：本人一口加期末日在保的眷屬（員工期末日已離職就不計眷屬），勞健保頁
+同樣看 `as_of` 所在月份的月底；上限在 `health_dependents` domain
 （不在 `health_insurance`，理由同 `owner_insurance`），逐口先取整再加總；雇主負擔仍乘
 平均眷口數。口數存進 `payslip.health_dependents`，`list_payslips` 用存下的口數重算。
+
+**到職與離職當月三項保費各算各的**：勞保與勞退按日計，每月以 30 日計（`partial_month`
+domain，30 不進 Rust），在取整之前乘；健保看月底——月中到職收整月、月中離職整月不收，
+眷屬跟著本人。加退保日由 `hired_on`／`left_on` 推導，`Coverage::of_month` 算一次交給
+`premiums_on`。薪資單存下投保期間（`insured_from`／`insured_to`，舊單為 NULL＝整月），
+`list_payslips` 用存下的期間重算，事後更正離職日不會讓舊薪資單對不上。`payroll_run` 另記
+`health_dependents` 與 `partial_month` 的版本（`dependents_version`／`partial_month_version`）。
 
 **`employee.id_no` 完整保存**，寫入時驗一個英文字母加九碼數字的檢查碼。
 勞保申報與扣繳憑單都要完整字號，擋著只會讓人資另外開一份 Excel。**遮罩是顯示層

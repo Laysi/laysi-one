@@ -272,6 +272,8 @@ fn payslip_json(slip: &Payslip) -> Value {
             "health_insurance": slip.health_version,
             "pension": slip.pension_version,
             "withholding": slip.withholding_version,
+            "health_dependents": slip.dependents_version,
+            "partial_month": slip.partial_month_version,
         },
         "note": slip.note,
     })

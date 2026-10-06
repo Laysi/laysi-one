@@ -157,6 +157,7 @@ government_share = "0.10"
 | `owner_insurance` | `health_employer_share=0` `health_employee_share=1.00` `health_government_share=0` `pension_employer_rate=0` |
 | `leave_pay` | 每個假別一節：`ratio`（工資給付比例）；病假另有 `yearly_days=30` `beyond_ratio=0`，生理假 `separate_days=3`，產假 `min_service_months=6` `short_service_ratio=0.5`。依勞工請假規則、性平法第 14 條、勞基法第 50 條 |
 | `health_dependents` | `max_counted=3`（員工健保自付額計入的眷口數上限，整數）。依健保法第 18 條第 2 項，自 2013-01-01 起 |
+| `partial_month` | `labor_days_per_month=30` `pension_days_per_month=30`（到職與離職當月按日計時一個月算幾日，28～31 的整數）。依勞保條例施行細則第 28-1 條、勞退條例施行細則第 22 條，自 2005-07-01 起 |
 
 驗證基準（**必須寫成單元測試**，數值取自原型的 `ins` / `pay` 區塊）：
 
@@ -232,7 +233,44 @@ pub fn overtime_pay(rs: &Ruleset, hourly_wage: Money, day_type: &str, hours: Mon
 
 **在保眷口數看期末日**：保費按月計，由月底在保的單位收取。`covered_dependants` 數
 `health_enrolled_from <= 期末日` 且退保日為空或 `>= 期末日` 的眷屬（退保日是最後在保日，
-當天仍在保），所以月中退保的那個月不收、月中加保的那個月收。勞健保頁以 `as_of` 計。
+當天仍在保），所以眷屬月中退保的那個月不收、月中加保的那個月收。眷屬掛在員工的健保底下，
+**員工期末日不在職就一位都不計**（`left_on` 早於期末日，或到職日在期末日之後），名單上的
+日期不論——月中離職的員工，眷屬那幾口跟著員工走，員工本人那一口也一樣（見下一段）。
+**勞健保頁以 `as_of` 所在月份的月底計**，費率也在那一天解析，與該月薪資單同一天：以今天
+判斷的話，月中才加保的眷屬在薪資單上計入、在勞健保頁上不計，兩邊的健保自付額就不相符。
+回應的 `as_of` 是那個月底，畫面印的「適用」日期也是它。
+
+### 到職與離職當月：勞保與勞退按日計，健保看月底
+
+三項保費在到職、離職那個月各算各的，`Coverage` 把三件事一起帶進 `premiums_on`：
+
+- **勞保**：加保當日起算到退保當日，每月以 `partial_month.labor_days_per_month`（30）日計
+  （勞保條例施行細則第 28-1 條）。10/10 到職是 `30 − 10 + 1 = 21` 日，31 日到職與 30 日到職
+  同樣 1 日，2/28 到職 3 日；10/15 離職 15 日，做到月底（含 2 月底）是整月。同月到職又離職
+  是兩端相減加一。
+- **勞退**：同一套算法，日數讀 `pension_days_per_month`（勞退條例施行細則第 22 條）。
+- **健保**：投保當月繳全月、退保當月免繳（健保法第 30 條第 2 項），等於月底在保的那個單位收
+  整月。月中到職收整月，月中離職整月不收，眷屬跟著不計；做到月底最後一天算月底在保。
+
+加保日與退保日依法等於到職日與離職日，所以由 `hired_on`／`left_on` 推導，不另設欄位。
+**按日計的部分在取整之前乘**：每一個分擔比例各自算 `月投保薪資 × 費率 × 比例 × 日數 ÷ 30`
+再四捨五入，不是把整月取整之後再折算。日數只在 `laysi_regulation::month_part` 算一次，
+30 不在 Rust 裡；一個月短於 28 或長於 31 日的值在 `month_part` 回錯誤。
+
+**薪資單存下投保期間**（`payslip.insured_from`／`insured_to`，本期在本公司投保的第一天與
+最後一天）：`list_payslips` 重算要知道日數與健保收不收，而離職日事後可能更正——與眷口數同一個
+理由，存事實、重算規則。這兩欄出現之前算的薪資單是 NULL，當時一律收整月，重算也照整月。
+薪資單的備註寫出「勞保與勞退按 N 日計」與「健保退保當月免繳」；勞健保頁逐列回
+`labor_days`／`pension_days`（整月為 null）與 `health_charged`，當月有人到職或離職時多一則
+說明，日數讀自 ruleset。**當月一天都沒投保的人**（到職日在下個月，或離職日早於月初而狀態
+還沒改成已離職）是 0 日，畫面標「本月未投保」，不算進那則說明的人數，也不寫「退保當月免繳」。
+反過來，**本月才離職的人，狀態改成已離職了也照列**：薪資單照收那幾天的勞保與勞退，勞健保頁
+少了這一列，兩邊的合計就不相符；離職日在月初之前的才不列。
+
+**薪資作業記下全部六個版本**：`payroll_run` 原本記勞保、健保、勞退、扣繳四個，
+`dependents_version` 與 `partial_month_version` 補上眷口數上限與日數兩條規則——金額由哪一版
+算出要查得到，回溯修正時才知道哪幾期要重算。兩欄出現之前的薪資作業是 NULL。薪資作業畫面與
+員工的「我的薪資單」都列出這兩個版本，NULL 就不列。
 
 **薪資單存下計入的口數**（`payslip.health_dependents`，已套用上限、不含本人）：
 `list_payslips` 拿存下的級距重算保費再比對，而眷屬名單之後還會改——事後補登一位加保日
@@ -1755,10 +1793,10 @@ column，因此不可能與上面的區間不一致。
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
 | `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額 |
-| `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳；重算用薪資單存下的 `health_dependents`，不用現在的眷屬名單 |
-| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents` |
+| `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳；重算用薪資單存下的 `health_dependents` 與投保期間（`insured_from`／`insured_to`），不用現在的眷屬名單與離職日 |
+| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents`；到職與離職當月勞保、勞退按日計，月中離職健保不收，投保期間存進 `payslip.insured_from`／`insured_to` |
 | `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
-| `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額；`health_dependents`（計入的眷口）與 `health_dependents_covered`（在保的眷屬）以 `as_of` 計；`dependents_cap` 供試算的眷屬下拉 |
+| `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額；費率、`health_dependents`（計入的眷口）與 `health_dependents_covered`（在保的眷屬）一律以 `as_of` 所在月份的月底計，回應的 `as_of` 是那一天；`labor_days`／`pension_days`（整月為 null）與 `health_charged` 是該月按日計的結果；`dependents_cap` 供試算的眷屬下拉 |
 | `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, dependents?, as_of? }` | 單一級距試算與三份 ruleset；`dependents` 是在保眷屬人數，回 `health.dependents_charged`；`insured_as = "owner"` 另回 `owner_ruleset` |
 | `get_hr_compliance` | ReadOnly | `{ as_of? }` | `checks[]`；逐項帶 `checked`、`passed`、ruleset 與差異 |
 | `list_withholding_statements` | BossOnly | `{ year? }` | 逐給付對象年度所得；`table` 稅額缺值保持 `null` |

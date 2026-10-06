@@ -229,6 +229,18 @@ export function MyPayslips({ reloadKey }: Props) {
                     <span className="fact__key">扣繳</span>
                     <span className="fact__value num">{shown.rulesets.withholding}</span>
                   </div>
+                  {shown.rulesets.health_dependents && (
+                    <div className="fact">
+                      <span className="fact__key">健保眷屬計費</span>
+                      <span className="fact__value num">{shown.rulesets.health_dependents}</span>
+                    </div>
+                  )}
+                  {shown.rulesets.partial_month && (
+                    <div className="fact">
+                      <span className="fact__key">不足月計費</span>
+                      <span className="fact__value num">{shown.rulesets.partial_month}</span>
+                    </div>
+                  )}
                 </div>
               </section>
             </div>

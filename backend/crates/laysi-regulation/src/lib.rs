@@ -31,7 +31,7 @@
 //! `effective_from`. Results for earlier dates are unchanged and later dates
 //! pick up the new rules automatically, with no release.
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::{Decimal, RoundingStrategy};
 use std::sync::{OnceLock, RwLock};
 
@@ -89,6 +89,10 @@ const SOURCES: &[(&str, &str)] = &[
         "2013/health_dependents.toml",
         include_str!("../../../regulation/2013/health_dependents.toml"),
     ),
+    (
+        "2005/partial_month.toml",
+        include_str!("../../../regulation/2005/partial_month.toml"),
+    ),
 ];
 
 /// Regulation domains the system knows. A rule file's `domain` must be one
@@ -106,6 +110,7 @@ pub const DOMAINS: &[&str] = &[
     "owner_insurance",
     "leave_pay",
     "health_dependents",
+    "partial_month",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -325,21 +330,101 @@ impl Contribution {
     }
 }
 
-/// Labour insurance ordinary risk premium.
+/// How much of a month a labour insurance premium or a pension contribution
+/// is charged for. Built by [`month_part`]; health insurance has no part of a
+/// month, only a month charged or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonthPart(Option<(u32, u32)>);
+
+impl MonthPart {
+    /// Covered from the first of the month through its last day.
+    pub const WHOLE: MonthPart = MonthPart(None);
+
+    /// Days charged, or `None` for the whole month.
+    pub fn days(self) -> Option<u32> {
+        self.0.map(|(days, _)| days)
+    }
+
+    /// `amount` for this part of the month, before rounding.
+    fn of(self, amount: Money) -> Money {
+        match self.0 {
+            None => amount,
+            Some((days, per_month)) => amount * Money::from(days) / Money::from(per_month),
+        }
+    }
+}
+
+/// The part of a month a person covered from `from` to `to`, both counted, is
+/// charged for, on a month counted as `key` days in `partial_month`.
+///
+/// Covered on the month's first and last day is the whole month. Otherwise an
+/// end inside the month counts from its day of the month, capped at the count
+/// so the 31st counts as the last counted day, and an end at or past the
+/// month's last day counts as the last counted day itself: withdrawn on 28
+/// February is a whole month, enrolled that day is three days of thirty.
+/// Coverage that misses the month entirely is zero days.
+pub fn month_part(
+    rs: &Ruleset,
+    key: &str,
+    month_start: NaiveDate,
+    month_end: NaiveDate,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<MonthPart, RegulationError> {
+    rs.expect_domain("partial_month")?;
+    let count = rs.decimal(key)?;
+    // A month is never counted shorter or longer than a calendar month.
+    let (min, max) = (Money::from(28), Money::from(31));
+    if count != count.trunc() || count < min || count > max {
+        return Err(RegulationError::OutOfRange {
+            domain: rs.domain.clone(),
+            version: rs.version.clone(),
+            key: key.to_string(),
+            value: count,
+            min,
+            max,
+        });
+    }
+    let per_month: u32 = count.trunc().try_into().unwrap_or(u32::MAX);
+    let (from, to) = (from.max(month_start), to.min(month_end));
+    if from > to {
+        return Ok(MonthPart(Some((0, per_month))));
+    }
+    if from == month_start && to == month_end {
+        return Ok(MonthPart::WHOLE);
+    }
+    let first = match from == month_start {
+        true => 1,
+        false => from.day().min(per_month),
+    };
+    let last = match to == month_end {
+        true => per_month,
+        false => to.day().min(per_month),
+    };
+    let days = (last + 1).saturating_sub(first);
+    Ok(match days >= per_month {
+        true => MonthPart::WHOLE,
+        false => MonthPart(Some((days, per_month))),
+    })
+}
+
+/// Labour insurance ordinary risk premium for `part` of a month.
 ///
 /// Salary above the insured ceiling is charged at the ceiling. That means
-/// the bracket is capped, not that the salary was truncated.
+/// the bracket is capped, not that the salary was truncated. A part of a
+/// month is taken before rounding, each share on its own.
 pub fn labor_insurance(
     rs: &Ruleset,
     insured_salary: Money,
+    part: MonthPart,
 ) -> Result<Contribution, RegulationError> {
     rs.expect_domain("labor_insurance")?;
     let cap = rs.decimal("max_insured_salary")?;
     let premium = insured_salary.min(cap) * rs.decimal("premium_rate")?;
     Ok(Contribution {
-        employer: to_dollars(premium * rs.decimal("employer_share")?),
-        employee: to_dollars(premium * rs.decimal("employee_share")?),
-        government: to_dollars(premium * rs.decimal("government_share")?),
+        employer: to_dollars(part.of(premium * rs.decimal("employer_share")?)),
+        employee: to_dollars(part.of(premium * rs.decimal("employee_share")?)),
+        government: to_dollars(part.of(premium * rs.decimal("government_share")?)),
     })
 }
 
@@ -419,10 +504,17 @@ pub fn health_insurance_owner(
     })
 }
 
-/// Employer pension contribution. Borne entirely by the employer.
-pub fn pension(rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError> {
+/// Employer pension contribution for `part` of a month. Borne entirely by
+/// the employer.
+pub fn pension(
+    rs: &Ruleset,
+    contribution_wage: Money,
+    part: MonthPart,
+) -> Result<Money, RegulationError> {
     rs.expect_domain("pension")?;
-    Ok(to_dollars(contribution_wage * rs.decimal("employer_rate")?))
+    Ok(to_dollars(
+        part.of(contribution_wage * rs.decimal("employer_rate")?),
+    ))
 }
 
 /// Pension contributed by the company for a person insured as the employer.
@@ -433,11 +525,12 @@ pub fn pension(rs: &Ruleset, contribution_wage: Money) -> Result<Money, Regulati
 pub fn pension_owner(
     owner_rs: &Ruleset,
     contribution_wage: Money,
+    part: MonthPart,
 ) -> Result<Money, RegulationError> {
     owner_rs.expect_domain("owner_insurance")?;
-    Ok(to_dollars(
-        contribution_wage * owner_rs.decimal("pension_employer_rate")?,
-    ))
+    Ok(to_dollars(part.of(
+        contribution_wage * owner_rs.decimal("pension_employer_rate")?
+    )))
 }
 
 /// VAT amount.
@@ -857,7 +950,7 @@ mod tests {
     #[test]
     fn labor_insurance_matches_the_prototype() {
         let rs = resolve("labor_insurance", d(2026, 7, 25)).unwrap();
-        let c = labor_insurance(rs, dec!(45800)).unwrap();
+        let c = labor_insurance(rs, dec!(45800), MonthPart::WHOLE).unwrap();
         assert_eq!(c.employer, dec!(3527), "公司負擔勞保");
         assert_eq!(c.employee, dec!(1008), "員工自付勞保");
     }
@@ -874,7 +967,108 @@ mod tests {
     #[test]
     fn pension_matches_the_prototype() {
         let rs = resolve("pension", d(2026, 7, 25)).unwrap();
-        assert_eq!(pension(rs, dec!(53000)).unwrap(), dec!(3180));
+        assert_eq!(
+            pension(rs, dec!(53000), MonthPart::WHOLE).unwrap(),
+            dec!(3180)
+        );
+    }
+
+    /// The bureau's day count: a month counts as thirty days whatever its
+    /// length, and both ends are counted.
+    #[test]
+    fn a_part_of_a_month_counts_on_a_thirty_day_month() {
+        let rs = resolve("partial_month", d(2026, 7, 25)).unwrap();
+        let days = |month: (NaiveDate, NaiveDate), from, to| {
+            month_part(rs, "labor_days_per_month", month.0, month.1, from, to)
+                .unwrap()
+                .days()
+        };
+        let oct = (d(2026, 10, 1), d(2026, 10, 31));
+        assert_eq!(days(oct, d(2026, 1, 1), d(2026, 12, 31)), None, "整月");
+        assert_eq!(days(oct, d(2026, 10, 10), oct.1), Some(21), "30 − 10 + 1");
+        assert_eq!(days(oct, d(2026, 10, 30), oct.1), Some(1), "30 日加保");
+        assert_eq!(
+            days(oct, d(2026, 10, 31), oct.1),
+            Some(1),
+            "31 日加保同樣 1 日"
+        );
+        assert_eq!(
+            days(oct, d(2026, 1, 1), d(2026, 10, 15)),
+            Some(15),
+            "15 日退保"
+        );
+        assert_eq!(
+            days(oct, d(2026, 1, 1), d(2026, 10, 30)),
+            None,
+            "30 日退保已滿 30 日"
+        );
+        assert_eq!(
+            days(oct, d(2026, 10, 5), d(2026, 10, 20)),
+            Some(16),
+            "同月到職又離職"
+        );
+        assert_eq!(
+            days(oct, d(2026, 11, 2), d(2026, 12, 31)),
+            Some(0),
+            "下個月才到職"
+        );
+        let feb = (d(2026, 2, 1), d(2026, 2, 28));
+        assert_eq!(days(feb, d(2026, 2, 10), feb.1), Some(21), "2/10 加保");
+        assert_eq!(days(feb, d(2026, 2, 28), feb.1), Some(3), "2/28 加保");
+        assert_eq!(days(feb, d(2025, 1, 1), feb.1), None, "2 月底退保是整月");
+        assert_eq!(days(feb, d(2025, 1, 1), d(2026, 2, 27)), Some(27));
+    }
+
+    /// The part is taken before rounding, each share on its own, so half a
+    /// month is not half of a rounded premium.
+    #[test]
+    fn a_part_of_a_month_is_taken_before_rounding() {
+        let on = d(2026, 10, 31);
+        let parts = resolve("partial_month", on).unwrap();
+        let part = |key| {
+            month_part(
+                parts,
+                key,
+                d(2026, 10, 1),
+                on,
+                d(2026, 1, 1),
+                d(2026, 10, 15),
+            )
+            .unwrap()
+        };
+        let labor = resolve("labor_insurance", on).unwrap();
+        let c = labor_insurance(labor, dec!(45800), part("labor_days_per_month")).unwrap();
+        assert_eq!(c.employee, dec!(504), "1,007.6 × 15/30 = 503.8");
+        assert_eq!(c.employer, dec!(1763), "3,526.6 × 15/30 = 1,763.3");
+        let pension_rs = resolve("pension", on).unwrap();
+        assert_eq!(
+            pension(pension_rs, dec!(53000), part("pension_days_per_month")).unwrap(),
+            dec!(1590)
+        );
+    }
+
+    #[test]
+    fn a_month_counted_outside_a_calendar_month_is_refused() {
+        let factory = resolve("partial_month", d(2026, 7, 25)).unwrap().clone();
+        for bad in ["0", "27", "30.5", "32"] {
+            let mut rs = factory.clone();
+            rs.payload["labor_days_per_month"] = bad.into();
+            let (start, end) = (d(2026, 10, 1), d(2026, 10, 31));
+            assert!(
+                matches!(
+                    month_part(
+                        &rs,
+                        "labor_days_per_month",
+                        start,
+                        end,
+                        start,
+                        d(2026, 10, 15)
+                    ),
+                    Err(RegulationError::OutOfRange { .. })
+                ),
+                "{bad} 應被擋下"
+            );
+        }
     }
 
     #[test]
@@ -883,8 +1077,8 @@ mod tests {
         // The owner earns 120,000 a month; labour insurance still charges the
         // 45,800 ceiling.
         assert_eq!(
-            labor_insurance(rs, dec!(45800)).unwrap(),
-            labor_insurance(rs, dec!(120000)).unwrap()
+            labor_insurance(rs, dec!(45800), MonthPart::WHOLE).unwrap(),
+            labor_insurance(rs, dec!(120000), MonthPart::WHOLE).unwrap()
         );
     }
 
@@ -970,8 +1164,14 @@ mod tests {
         assert_eq!(boss.employee, dec!(2740), "53000 × 5.17% 全額自付");
         assert_eq!(staff.employee, dec!(822), "受僱者只自付三成");
 
-        assert_eq!(pension_owner(owner, dec!(53000)).unwrap(), Money::ZERO);
-        assert!(pension_owner(health, dec!(53000)).is_err(), "領域要對得上");
+        assert_eq!(
+            pension_owner(owner, dec!(53000), MonthPart::WHOLE).unwrap(),
+            Money::ZERO
+        );
+        assert!(
+            pension_owner(health, dec!(53000), MonthPart::WHOLE).is_err(),
+            "領域要對得上"
+        );
     }
 
     /// The employee pays a head for each covered dependant, up to the cap;
@@ -1080,7 +1280,7 @@ mod tests {
     fn a_calculator_refuses_a_ruleset_from_another_domain() {
         let vat_rs = resolve("vat", d(2026, 7, 25)).unwrap();
         assert!(matches!(
-            labor_insurance(vat_rs, dec!(45800)),
+            labor_insurance(vat_rs, dec!(45800), MonthPart::WHOLE),
             Err(RegulationError::WrongDomain {
                 expected: "labor_insurance",
                 ..
@@ -1096,19 +1296,21 @@ mod tests {
     #[test]
     fn a_later_ruleset_takes_over_without_touching_old_results() {
         let base = resolve("labor_insurance", d(2026, 7, 25)).unwrap();
-        let before = labor_insurance(base, dec!(45800)).unwrap();
+        let before = labor_insurance(base, dec!(45800), MonthPart::WHOLE).unwrap();
 
         let mut next = base.clone();
         next.version = "2027.1".into();
         next.effective_from = d(2027, 1, 1);
         next.payload["premium_rate"] = serde_json::json!("0.12");
-        let after = labor_insurance(&next, dec!(45800)).unwrap();
+        let after = labor_insurance(&next, dec!(45800), MonthPart::WHOLE).unwrap();
 
         // Figures computed under the old rules do not move because a new rule
         // appeared.
         assert_eq!(before.employer, dec!(3527));
         assert_eq!(
-            labor_insurance(base, dec!(45800)).unwrap().employer,
+            labor_insurance(base, dec!(45800), MonthPart::WHOLE)
+                .unwrap()
+                .employer,
             dec!(3527)
         );
         // New rule: 45800 x 0.12 x 0.70 = 3847.2, rounded to 3847.

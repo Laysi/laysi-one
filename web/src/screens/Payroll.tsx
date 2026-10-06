@@ -246,6 +246,8 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                       <span className="fact__value num">
                         勞保 {r.rulesets.labor_insurance}　健保 {r.rulesets.health_insurance}　勞退{' '}
                         {r.rulesets.pension}　扣繳 {r.rulesets.withholding}
+                        {r.rulesets.health_dependents && `　健保眷屬計費 ${r.rulesets.health_dependents}`}
+                        {r.rulesets.partial_month && `　不足月計費 ${r.rulesets.partial_month}`}
                       </span>
                     </div>
                     <div className="fact">
