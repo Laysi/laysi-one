@@ -90,10 +90,10 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
       const d = await callOp(
                         'run_payroll',
                         {
-            ...(runPeriod.trim() ? { period: runPeriod.trim() } : {}),
+            period: runPeriod.trim(),
             ...(payOn ? { pay_on: payOn } : {}),
           },
-                        `計算 ${runPeriod.trim() || '本期'} 薪資`,
+                        `計算 ${runPeriod.trim()} 薪資`,
                         payrollRunResult,
                       );
       setResult(d);
@@ -414,7 +414,7 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
               </div>
               <button
                 className="btn"
-                disabled={busy}
+                disabled={busy || runPeriod.trim() === ''}
                 onClick={() => void run()}
               >
                 {busy ? '計算中…' : alreadyRun ? '補算並產生傳票' : '計算薪資並產生傳票'}

@@ -41,6 +41,7 @@ const SERVER_BIN = new URL("../backend/target/debug/laysi-server", import.meta.u
 // tomorrow and every report would close before them.
 const TODAY =
   process.env.TEST_TODAY ?? new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+const DUE_ON = new Date(Date.parse(TODAY) + 30 * 86400 * 1000).toISOString().slice(0, 10);
 const ADMIN_PASSWORD = "Function-Test-2026";
 // Initialisation activates before it creates the account, so this script needs
 // a licence the way a real installation does: an activation key checked against
@@ -107,6 +108,20 @@ async function login(username: string, password: string) {
   if (!body.ok) throw new Error(`登入失敗：${JSON.stringify(body)}`);
   cookie = (res.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
   return body.user;
+}
+
+// Settings are the administrator's; everything around them runs as the owner.
+async function asAdmin(settings: Record<string, string>) {
+  await login("admin", ADMIN_PASSWORD);
+  for (const [code, value] of Object.entries(settings)) {
+    await must("update_company_setting", { code, value });
+  }
+  await login("boss@test.local", BOSS_PASSWORD);
+}
+
+function previousMonth(month: string): string {
+  const [y, m] = month.split("-").map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`;
 }
 
 // Money arrives as decimal strings and must never become a float on the way
@@ -262,10 +277,40 @@ async function main() {
       return `員工編號 ${bossEmployeeNo}`;
     });
 
+    await check("S6", "發薪時點預設當月；改成次月，應計期別與計薪提醒都是上個月", async () => {
+      // Nothing has been paid yet, so this month having no run is a real
+      // state here and not one the check assumes.
+      const thisMonth = TODAY.slice(0, 7);
+      const lastMonth = previousMonth(thisMonth);
+      const reminder = (month: string) => `${month} 尚未計算薪資`;
+      const labels = async () =>
+        ((await must("get_hr_dashboard")).todos as any[]).map((t) => t.label);
+
+      const settings = (await must("get_company_settings")).settings as any[];
+      const timing = settings.find((s) => s.code === "payroll_timing");
+      expect(timing, "公司設定沒有發薪時點");
+      expectEq(timing.value, "當月", "預設的發薪時點");
+      expectEq(JSON.stringify(timing.options), JSON.stringify(["當月", "次月"]), "下拉選項");
+
+      expectEq((await must("get_payroll_summary")).next_period, thisMonth, "當月發薪的應計期別");
+      expect((await labels()).includes(reminder(thisMonth)), "當月發薪時沒有提醒本月計薪");
+
+      try {
+        await asAdmin({ payroll_timing: "次月" });
+        expectEq((await must("get_payroll_summary")).next_period, lastMonth, "次月發薪的應計期別");
+        const todos = await labels();
+        expect(todos.includes(reminder(lastMonth)), `沒有提醒上個月計薪：${todos.join("、")}`);
+        expect(!todos.includes(reminder(thisMonth)), "次月發薪仍提醒本月計薪");
+      } finally {
+        await asAdmin({ payroll_timing: "當月" });
+      }
+      return `當月 → ${thisMonth}，次月 → ${lastMonth}`;
+    });
+
     console.log("\nT 營業稅拆分");
     await check("T1", "只給含稅金額，未稅與稅額由稅率算出", async () => {
       const data = await must("create_ar_invoice", {
-        invoice_no: "AR-001", customer: "甲客戶", issued_on: TODAY, due_on: "2026-09-30",
+        invoice_no: "AR-001", customer: "甲客戶", issued_on: TODAY, due_on: DUE_ON,
         amount: "10500", revenue_account_code: "4111",
       });
       expectEq(money(data.net_amount), 1000000, "未稅金額");
@@ -276,7 +321,7 @@ async function main() {
 
     await check("T2", "只給未稅金額，含稅與稅額由稅率算出", async () => {
       const data = await must("create_ar_invoice", {
-        invoice_no: "AR-002", customer: "乙客戶", issued_on: TODAY, due_on: "2026-09-30",
+        invoice_no: "AR-002", customer: "乙客戶", issued_on: TODAY, due_on: DUE_ON,
         net_amount: "20000", revenue_account_code: "4111",
       });
       expectEq(money(data.invoice.amount), 2100000, "含稅金額");
@@ -286,7 +331,7 @@ async function main() {
 
     await check("T3", "零稅率明確寫 0，不是靠旗標", async () => {
       const data = await must("create_ar_invoice", {
-        invoice_no: "AR-003", customer: "丙客戶（外銷）", issued_on: TODAY, due_on: "2026-09-30",
+        invoice_no: "AR-003", customer: "丙客戶（外銷）", issued_on: TODAY, due_on: DUE_ON,
         amount: "30000", tax_amount: "0", revenue_account_code: "4111",
       });
       expectEq(money(data.net_amount), 3000000, "未稅金額應等於含稅金額");
@@ -296,7 +341,7 @@ async function main() {
 
     await check("T4", "應收單的傳票把稅額拆到 2211", async () => {
       const data = await must("create_ar_invoice", {
-        invoice_no: "AR-004", customer: "丁客戶", issued_on: TODAY, due_on: "2026-09-30",
+        invoice_no: "AR-004", customer: "丁客戶", issued_on: TODAY, due_on: DUE_ON,
         amount: "10500", revenue_account_code: "4111",
       });
       const lines = data.voucher?.lines ?? [];
@@ -583,10 +628,11 @@ async function main() {
       expect(dry.error!.message.includes(empNo), dry.error!.message);
       expect(dry.error!.message.includes("打卡"), dry.error!.message);
 
-      // 09:00 to 18:00 with no break is nine hours; 200 x 9 = 1,800.
+      // 09:00 to 18:00 with no break is nine hours; 200 x 9 = 1,800. The day
+      // is the hire date, the one day of the period never ahead of TODAY.
       for (const [kind, at] of [["in", "09:00:00"], ["out", "18:00:00"]]) {
         await must("correct_punch", {
-          emp_no: empNo, punched_on: `${period}-02`, kind, at, note: "測試補登",
+          emp_no: empNo, punched_on: hire, kind, at, note: "測試補登",
         });
       }
       const paid = await must("run_payroll", { period, pay_on: TODAY });
@@ -617,6 +663,28 @@ async function main() {
       expect(boss.health.owner_ruleset, "沒有回報依哪一版負責人規則計算");
       expect(!staff.health.owner_ruleset, "受僱者不該帶負責人規則");
       return `健保自付 ${boss.health.employee} · 勞退 ${boss.pension.employer} · 依 ${boss.health.owner_ruleset.version}`;
+    });
+
+    await check("H14", "次月發薪時，不帶期別算的是上個月，算完提醒就消失", async () => {
+      // Runs before anyone with no salary joins the roster, and before
+      // anyone hired this month would be in last month's run.
+      const lastMonth = previousMonth(TODAY.slice(0, 7));
+      const reminder = `${lastMonth} 尚未計算薪資`;
+      try {
+        await asAdmin({ payroll_timing: "次月" });
+        expectEq((await must("get_payroll_summary")).next_period, lastMonth, "算之前的應計期別");
+        const data = await must("run_payroll", { pay_on: TODAY });
+        expectEq(data.run.period, lastMonth, "不帶期別時計算的期別");
+        expectEq(data.run.headcount, 2, "計薪人數");
+        expectEq((await must("get_payroll_summary")).next_period, null, "算過之後的應計期別");
+        const todos = ((await must("get_hr_dashboard")).todos as any[]).map((t) => t.label);
+        expect(!todos.includes(reminder), "算過之後仍提醒上個月計薪");
+        // Leave the books as the checks after this one expect them.
+        await must("void_payroll_run", { period: lastMonth, reason: "測試" });
+        return `${data.run.period} · ${data.run.voucher_no} 已作廢`;
+      } finally {
+        await asAdmin({ payroll_timing: "當月" });
+      }
     });
 
     await check("H11", "負責人的健保投保金額低於受僱員工最高者會被檢核出來", async () => {
@@ -677,13 +745,6 @@ async function main() {
         punched_on: TODAY, kind: "in", at: "09:00", reason: "同名申請",
       });
 
-      const asAdmin = async (settings: Record<string, string>) => {
-        await login("admin", ADMIN_PASSWORD);
-        for (const [code, value] of Object.entries(settings)) {
-          await must("update_company_setting", { code, value });
-        }
-        await login("boss@test.local", BOSS_PASSWORD);
-      };
       let own: any;
       let auto: any;
       await asAdmin({ owner_self_decide: "可自行核決" });
@@ -989,7 +1050,7 @@ async function main() {
 
     await check("D3", "超過 25 MB 的文件不以 base64 回傳，只驗證雜湊照常", async () => {
       const inline = await op("get_document", { doc_no: bigNo, include_content: true });
-      expect(!inline.ok && /下載連結/.test(inline.error?.message ?? ""), `竟然回傳了內容：${JSON.stringify(inline.error)}`);
+      expect(!inline.ok && /文件管理/.test(inline.error?.message ?? ""), `竟然回傳了內容：${JSON.stringify(inline.error)}`);
       const verified = await op("get_document", { doc_no: bigNo });
       expect(verified.ok, JSON.stringify(verified.error));
       expectEq(verified.data.verified, true, "雜湊比對");
