@@ -583,7 +583,9 @@ impl Operation for GetInsuranceSummary {
             }));
         }
 
-        // Only in a month somebody joins or leaves, for the same reason.
+        // Only in a month somebody is insured for part of it, for the same
+        // reason. A hire on the 1st or a leaver on the last day pays a whole
+        // month and is not counted.
         if partial > 0 {
             let days_rs = laysi_regulation::resolve("partial_month", as_of)?;
             let labor_days = days_rs.decimal("labor_days_per_month")?;
@@ -597,7 +599,7 @@ impl Operation for GetInsuranceSummary {
             notes.as_array_mut().expect("剛才建的是陣列").push(json!({
                 "title": "到職與離職當月",
                 "body": format!(
-                    "{partial} 位本月到職或離職：{by_day}；健保於投保當月收全月，退保當月免繳。"
+                    "{partial} 位本月投保不足月：{by_day}；健保於投保當月收全月，退保當月免繳。"
                 ),
                 "source": days_rs.source_note,
                 "version": days_rs.version,

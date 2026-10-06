@@ -794,7 +794,7 @@ async function main() {
       ).length;
       const note = insurance.notes.find((n: any) => n.title === "到職與離職當月");
       expect(note, "本月有人離職，卻沒有到職與離職當月的說明");
-      expectEq(Number.parseInt(note.body, 10), partial, "說明裡到職或離職的人數");
+      expectEq(Number.parseInt(note.body, 10), partial, "說明裡投保不足月的人數");
 
       // The same month on the payslips: a second run of the period pays the
       // two people above, and each slip agrees with its row and with itself.
