@@ -8,6 +8,7 @@ import {
   trimDecimal,
   type MyPayslipList,
 } from '../api/client';
+import { PeriodPicker } from '../components/PeriodPicker';
 
 interface Props {
   reloadKey: number;
@@ -69,15 +70,7 @@ export function MyPayslips({ reloadKey }: Props) {
       ) : (
         <>
           <div className="toolbar">
-            {data.periods.map((p) => (
-              <button
-                key={p}
-                className={`chip${shown?.period === p ? ' chip--on' : ''}`}
-                onClick={() => setPeriod(p)}
-              >
-                {p}
-              </button>
-            ))}
+            <PeriodPicker periods={data.periods} value={shown?.period} onChange={setPeriod} />
           </div>
 
           <div className="table-scroll">
