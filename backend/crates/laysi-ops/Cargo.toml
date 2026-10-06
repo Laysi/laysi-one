@@ -31,3 +31,10 @@ serde_path_to_error.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+# Two processes checking in against a stand-in licence server, on a database
+# of their own; see the tests in src/ops/license.rs.
+axum.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["net", "time"] }
