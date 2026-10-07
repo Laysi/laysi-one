@@ -504,6 +504,48 @@ async fn take_back(database_url: &str) -> anyhow::Result<()> {
     .await?;
     let (overtime, _) = payslip(&store, "2026-12", &emp_no).await?;
     ensure!(overtime > Money::ZERO, "重新計算後應計入核准的加班");
+
+    // Two people deciding one request at once: the second waits for the
+    // first and is told what it decided, in words.
+    let contested = no_of(
+        &run.ok(&me, "request_leave", day("2026-12-16")).await?,
+        "leave_no",
+    )?;
+    let mut first = store.pool().begin().await?;
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *first)
+        .await?;
+    sqlx::query(
+        "UPDATE leave_request
+            SET status = 'rejected', decided_by = '測試', decided_role = 'hr',
+                decided_at = now()
+          WHERE leave_no = $1",
+    )
+    .bind(&contested)
+    .execute(&mut *first)
+    .await?;
+    let second = ctx(&store, "負責人", ROLE_BOSS, None);
+    let deciding = tokio::spawn({
+        let no = contested.clone();
+        async move {
+            Registry::new()
+                .dispatch(
+                    &second,
+                    "decide_leave_request",
+                    json!({ "leave_no": no, "approve": false }),
+                )
+                .await
+        }
+    });
+    ensure!(blocked_by(&store, holder).await?, "第二位沒有等第一位提交");
+    first.commit().await?;
+    match deciding.await? {
+        Err(OpError::Store(e)) => ensure!(
+            e.to_string() == format!("休假單 {contested} 已為「已駁回」，只有等簽核的單可以簽核"),
+            "{e}"
+        ),
+        other => bail!("第二位應被告知單據已駁回，實際為 {other:?}"),
+    }
     Ok(())
 }
 
@@ -512,6 +554,9 @@ async fn take_back(database_url: &str) -> anyhow::Result<()> {
 /// run to refuse and write nothing. Then compute the period again.
 async fn race(store: &Store, change: &str, no: &str, period: &str) -> anyhow::Result<()> {
     let mut held = store.pool().begin().await?;
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(laysi_store::PAYROLL_INPUT_LOCK_KEY)
         .execute(&mut *held)
@@ -527,20 +572,7 @@ async fn race(store: &Store, change: &str, no: &str, period: &str) -> anyhow::Re
         let input = input.clone();
         async move { Registry::new().dispatch(&payer, "run_payroll", input).await }
     });
-    let mut waiting = false;
-    for _ in 0..200 {
-        let blocked: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity
-              WHERE datname = current_database() AND wait_event_type = 'Lock'",
-        )
-        .fetch_one(store.pool())
-        .await?;
-        if blocked > 0 {
-            waiting = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    let waiting = blocked_by(store, holder).await?;
     held.commit().await?;
     ensure!(waiting, "計薪沒有等在計薪鎖上");
     match paying.await? {
@@ -560,4 +592,24 @@ async fn race(store: &Store, change: &str, no: &str, period: &str) -> anyhow::Re
         .await
         .map_err(|e| anyhow::anyhow!("重新計算應成功，實際為：{e}"))?;
     Ok(())
+}
+
+/// Whether a session comes to wait on a lock held by backend `holder`, polled
+/// for up to ten seconds. Naming the holder keeps an unrelated wait elsewhere
+/// in the database from releasing the held transaction early.
+async fn blocked_by(store: &Store, holder: i32) -> anyhow::Result<bool> {
+    for _ in 0..200 {
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+              WHERE $1 = ANY(pg_blocking_pids(pid))",
+        )
+        .bind(holder)
+        .fetch_one(store.pool())
+        .await?;
+        if blocked > 0 {
+            return Ok(true);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(false)
 }
