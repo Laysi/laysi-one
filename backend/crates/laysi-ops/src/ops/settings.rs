@@ -921,6 +921,7 @@ async fn link_employee(
             pension_wage: None,
             id_no: "",
             bank_accounts: None,
+            dependents: None,
             note: "",
             actor: &ctx.actor,
             keep_active_role: crate::ROLE_ADMIN,

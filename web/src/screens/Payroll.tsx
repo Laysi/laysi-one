@@ -239,6 +239,8 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                       <span className="fact__value num">
                         勞保 {r.rulesets.labor_insurance}　健保 {r.rulesets.health_insurance}　勞退{' '}
                         {r.rulesets.pension}　扣繳 {r.rulesets.withholding}
+                        {r.rulesets.health_dependents && `　健保眷屬計費 ${r.rulesets.health_dependents}`}
+                        {r.rulesets.partial_month && `　不足月計費 ${r.rulesets.partial_month}`}
                       </span>
                     </div>
                     <div className="fact">
@@ -355,7 +357,8 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                         <td className="num align-right">
                           {money(s.deduction)}
                           <span className="cell-hint cell-hint--block num">
-                            勞保 {money(s.labor_employee)} · 健保 {money(s.health_employee)} · 稅{' '}
+                            勞保 {money(s.labor_employee)} · 健保 {money(s.health_employee)}
+                            {s.health_dependents > 0 && `（含眷屬 ${s.health_dependents} 口）`} · 稅{' '}
                             {money(s.income_tax)}
                           </span>
                         </td>

@@ -77,6 +77,10 @@ const DUPLICATE_MESSAGES: &[(&str, &str)] = &[
         "一位員工只能有一個薪轉帳戶，請先取消原本的標記。",
     ),
     (
+        "employee_dependent_id_no_idx",
+        "同一位員工的兩位眷屬登記了相同的身分證字號，請更正其中一位。",
+    ),
+    (
         "budget_version_code_account_code_dept_id_key",
         "這個科目在本版預算已經編過了，請改用編輯。",
     ),
@@ -5865,6 +5869,7 @@ impl Store {
         .get("id");
 
         replace_bank_accounts(&mut tx, employee_id, &req).await?;
+        replace_dependents(&mut tx, employee_id, &req).await?;
 
         tx.commit().await?;
         self.employee(&emp_no).await
@@ -5934,6 +5939,7 @@ impl Store {
         .await?;
 
         replace_bank_accounts(&mut tx, employee_id, &req).await?;
+        replace_dependents(&mut tx, employee_id, &req).await?;
 
         let closed = if req.status == "left" && was_left != "left" {
             close_access(&mut tx, employee_id, &name, req.actor, req.keep_active_role).await?
@@ -5972,8 +5978,52 @@ impl Store {
         .iter()
         .map(row_to_employee)
         .collect();
-        self.attach_bank_accounts(&mut staff).await?;
+        self.attach_lists(&mut staff).await?;
         Ok(staff)
+    }
+
+    /// Fill in the per-person lists a row read from `employee` leaves empty.
+    /// Every read of an employee goes through here, so none of them can hold
+    /// one list and not the other.
+    async fn attach_lists(&self, staff: &mut [Employee]) -> Result<()> {
+        self.attach_bank_accounts(staff).await?;
+        self.attach_dependents(staff).await
+    }
+
+    /// Fill in [`Employee::dependents`], in the order they were entered. One
+    /// query for the whole roster, for the reason given on
+    /// [`Self::attach_bank_accounts`].
+    async fn attach_dependents(&self, staff: &mut [Employee]) -> Result<()> {
+        if staff.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<i32> = staff.iter().map(|e| e.id).collect();
+        let rows = sqlx::query(
+            "SELECT employee_id, id, name, relation, id_no, birthday,
+                    health_enrolled_from, health_enrolled_until
+               FROM employee_dependent
+              WHERE employee_id = ANY($1)
+              ORDER BY employee_id, id",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await?;
+        for employee in staff.iter_mut() {
+            employee.dependents = rows
+                .iter()
+                .filter(|r| r.get::<i32, _>("employee_id") == employee.id)
+                .map(|r| EmployeeDependent {
+                    id: r.get("id"),
+                    name: r.get("name"),
+                    relation: r.get("relation"),
+                    id_no: r.get("id_no"),
+                    birthday: r.get("birthday"),
+                    health_enrolled_from: r.get("health_enrolled_from"),
+                    health_enrolled_until: r.get("health_enrolled_until"),
+                })
+                .collect();
+        }
+        Ok(())
     }
 
     /// Fill in [`Employee::bank_accounts`]. One query for the whole roster: a
@@ -6029,8 +6079,7 @@ impl Store {
         .ok_or_else(|| StoreError::EmployeeNotFound {
             no: emp_no.to_string(),
         })?;
-        self.attach_bank_accounts(std::slice::from_mut(&mut found))
-            .await?;
+        self.attach_lists(std::slice::from_mut(&mut found)).await?;
         Ok(found)
     }
 
@@ -6054,8 +6103,7 @@ impl Store {
         .as_ref()
         .map(row_to_employee);
         if let Some(employee) = found.as_mut() {
-            self.attach_bank_accounts(std::slice::from_mut(employee))
-                .await?;
+            self.attach_lists(std::slice::from_mut(employee)).await?;
         }
         Ok(found)
     }
@@ -6747,6 +6795,7 @@ impl Store {
             "SELECT p.period, p.pay_on, p.headcount, p.gross_total, p.deduction_total,
                     p.net_total, p.employer_total, p.voucher_no, v.status AS voucher_status,
                     p.labor_version, p.health_version, p.pension_version, p.withholding_version,
+                    p.dependents_version, p.partial_month_version,
                     p.note, p.created_at, p.created_by
                FROM payroll_run p
                LEFT JOIN voucher v ON v.no = p.voucher_no
@@ -6812,13 +6861,14 @@ impl Store {
         Ok(sqlx::query(
             "SELECT p.period, p.pay_on,
                     p.labor_version, p.health_version, p.pension_version,
-                    p.withholding_version,
+                    p.withholding_version, p.dependents_version, p.partial_month_version,
                     s.employee_id, e.emp_no, e.name, e.title, e.insured_as, d.label AS dept_label,
                     s.base_salary, s.overtime, s.allowance, s.gross,
                     s.labor_insured_salary, s.health_insured_salary, s.pension_wage,
                     s.labor_employee, s.health_employee, s.income_tax,
                     s.labor_employer, s.health_employer, s.pension_employer,
-                    s.deduction, s.net, s.paid_days, s.month_days, s.note
+                    s.deduction, s.net, s.paid_days, s.month_days, s.note,
+                    s.health_dependents, s.insured_from, s.insured_to
                FROM payslip s
                JOIN payroll_run p         ON p.id = s.run_id
                JOIN employee e            ON e.id = s.employee_id
@@ -6984,8 +7034,9 @@ impl Store {
             "INSERT INTO payroll_run
                (period, pay_on, headcount, gross_total, deduction_total, net_total,
                 employer_total, voucher_no, labor_version, health_version,
-                pension_version, withholding_version, note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id",
+                pension_version, withholding_version, dependents_version,
+                partial_month_version, note, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id",
         )
         .bind(req.period)
         .bind(req.pay_on)
@@ -6999,6 +7050,8 @@ impl Store {
         .bind(req.health_version)
         .bind(req.pension_version)
         .bind(req.withholding_version)
+        .bind(req.dependents_version)
+        .bind(req.partial_month_version)
         .bind(req.note)
         .bind(req.actor)
         .fetch_one(&mut *tx)
@@ -7012,8 +7065,10 @@ impl Store {
                     labor_insured_salary, health_insured_salary, pension_wage,
                     labor_employee, health_employee, income_tax,
                     labor_employer, health_employer, pension_employer,
-                    deduction, net, paid_days, month_days, note)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+                    deduction, net, paid_days, month_days, note, health_dependents,
+                    insured_from, insured_to)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+                         $22,$23)",
             )
             .bind(run_id)
             .bind(s.employee_id)
@@ -7035,6 +7090,9 @@ impl Store {
             .bind(s.paid_days)
             .bind(s.month_days)
             .bind(&s.note)
+            .bind(s.health_dependents)
+            .bind(s.insured_from)
+            .bind(s.insured_to)
             .execute(&mut *tx)
             .await?;
 
@@ -8704,7 +8762,36 @@ pub struct Employee {
     /// `attach_bank_accounts`, so a row read without it holds an empty list
     /// rather than a wrong one.
     pub bank_accounts: Vec<EmployeeBankAccount>,
+    /// Every dependant on file, in the order entered. Loaded by
+    /// `attach_dependents`, on the same terms as `bank_accounts`.
+    pub dependents: Vec<EmployeeDependent>,
     pub note: String,
+}
+
+/// One person on an employee's dependants list.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmployeeDependent {
+    pub id: i32,
+    pub name: String,
+    /// One of the codes in the `employee_dependent_relation_check` CHECK.
+    pub relation: String,
+    /// Upper case; blank while it has not been collected.
+    pub id_no: String,
+    pub birthday: Option<NaiveDate>,
+    /// First day covered under this employee's health insurance.
+    pub health_enrolled_from: NaiveDate,
+    /// Last day covered; `None` while still covered.
+    pub health_enrolled_until: Option<NaiveDate>,
+}
+
+/// One dependant as the caller wants it stored.
+pub struct WriteEmployeeDependent<'a> {
+    pub name: &'a str,
+    pub relation: &'a str,
+    pub id_no: &'a str,
+    pub birthday: Option<NaiveDate>,
+    pub health_enrolled_from: NaiveDate,
+    pub health_enrolled_until: Option<NaiveDate>,
 }
 
 /// One bank account belonging to one employee.
@@ -8750,6 +8837,8 @@ pub struct WriteEmployee<'a> {
     /// `None` leaves the accounts on file alone; `Some` replaces the whole
     /// set, the same shape the edit drawer sends back.
     pub bank_accounts: Option<&'a [WriteEmployeeBankAccount<'a>]>,
+    /// The dependants list, in the same three states as `bank_accounts`.
+    pub dependents: Option<&'a [WriteEmployeeDependent<'a>]>,
     pub note: &'a str,
     pub actor: &'a str,
     /// Role that must keep one active login. Setting a status of `left` closes
@@ -8978,6 +9067,9 @@ pub struct PayrollRun {
     pub health_version: String,
     pub pension_version: String,
     pub withholding_version: String,
+    /// `None` on a run computed before these two were recorded.
+    pub dependents_version: Option<String>,
+    pub partial_month_version: Option<String>,
     pub note: String,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
@@ -8991,6 +9083,9 @@ pub struct Payslip {
     pub health_version: String,
     pub pension_version: String,
     pub withholding_version: String,
+    /// `None` on a run computed before these two were recorded.
+    pub dependents_version: Option<String>,
+    pub partial_month_version: Option<String>,
     pub employee_id: i32,
     pub emp_no: String,
     pub name: String,
@@ -9019,6 +9114,14 @@ pub struct Payslip {
     pub paid_days: Money,
     pub month_days: Money,
     pub note: String,
+    /// Dependants the health deduction was charged for, after the cap and
+    /// not counting the employee. Stored like the brackets, so recomputing
+    /// the slip uses what was on file when it was computed.
+    pub health_dependents: i32,
+    /// First and last day of the period the person was insured here, both
+    /// counted. `None` on a payslip computed before the span was kept, which
+    /// charged the whole month.
+    pub insured_span: Option<(NaiveDate, NaiveDate)>,
 }
 
 /// A payslip to be written. Every amount is computed by `laysi-ops` from
@@ -9045,6 +9148,13 @@ pub struct NewPayslip {
     pub paid_days: Money,
     pub month_days: Money,
     pub note: String,
+    /// Dependants charged on the health deduction, after the cap.
+    pub health_dependents: i32,
+    /// First and last day of the period the person was insured here, which
+    /// set the days labour insurance and pension are charged for and whether
+    /// health insurance is.
+    pub insured_from: NaiveDate,
+    pub insured_to: NaiveDate,
 }
 
 pub struct RecordPayroll<'a> {
@@ -9060,6 +9170,8 @@ pub struct RecordPayroll<'a> {
     pub health_version: &'a str,
     pub pension_version: &'a str,
     pub withholding_version: &'a str,
+    pub dependents_version: &'a str,
+    pub partial_month_version: &'a str,
     pub note: &'a str,
     pub actor: &'a str,
 }
@@ -9274,6 +9386,41 @@ async fn replace_bank_accounts(
         .bind(account.account_no)
         .bind(account.is_payroll)
         .bind(account.note)
+        .bind(req.actor)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Replace every dependant on file for one employee, with the same three
+/// states and for the same reasons as [`replace_bank_accounts`].
+async fn replace_dependents(
+    tx: &mut Tx<'_>,
+    employee_id: i32,
+    req: &WriteEmployee<'_>,
+) -> Result<()> {
+    let Some(dependents) = req.dependents else {
+        return Ok(());
+    };
+    sqlx::query("DELETE FROM employee_dependent WHERE employee_id = $1")
+        .bind(employee_id)
+        .execute(&mut **tx)
+        .await?;
+    for dependent in dependents {
+        sqlx::query(
+            "INSERT INTO employee_dependent
+                (employee_id, name, relation, id_no, birthday,
+                 health_enrolled_from, health_enrolled_until, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        )
+        .bind(employee_id)
+        .bind(dependent.name)
+        .bind(dependent.relation)
+        .bind(dependent.id_no)
+        .bind(dependent.birthday)
+        .bind(dependent.health_enrolled_from)
+        .bind(dependent.health_enrolled_until)
         .bind(req.actor)
         .execute(&mut **tx)
         .await?;
@@ -9673,6 +9820,7 @@ fn row_to_employee(r: &PgRow) -> Employee {
         pension_wage: r.get("pension_wage"),
         id_no: r.get("id_no"),
         bank_accounts: Vec::new(),
+        dependents: Vec::new(),
         note: r.get("note"),
     }
 }
@@ -10008,6 +10156,8 @@ fn row_to_payroll_run(r: &PgRow) -> PayrollRun {
         health_version: r.get("health_version"),
         pension_version: r.get("pension_version"),
         withholding_version: r.get("withholding_version"),
+        dependents_version: r.get("dependents_version"),
+        partial_month_version: r.get("partial_month_version"),
         note: r.get("note"),
         created_at: r.get("created_at"),
         created_by: r.get("created_by"),
@@ -10022,6 +10172,8 @@ fn row_to_payslip(r: &PgRow) -> Payslip {
         health_version: r.get("health_version"),
         pension_version: r.get("pension_version"),
         withholding_version: r.get("withholding_version"),
+        dependents_version: r.get("dependents_version"),
+        partial_month_version: r.get("partial_month_version"),
         employee_id: r.get("employee_id"),
         emp_no: r.get("emp_no"),
         name: r.get("name"),
@@ -10046,6 +10198,10 @@ fn row_to_payslip(r: &PgRow) -> Payslip {
         paid_days: r.get("paid_days"),
         month_days: r.get("month_days"),
         note: r.get("note"),
+        health_dependents: r.get("health_dependents"),
+        insured_span: r
+            .get::<Option<NaiveDate>, _>("insured_from")
+            .zip(r.get::<Option<NaiveDate>, _>("insured_to")),
     }
 }
 
@@ -10995,6 +11151,7 @@ mod tests {
                 pension_wage: None,
                 id_no: "",
                 bank_accounts: None,
+                dependents: None,
                 note: "",
                 actor: "測試",
                 keep_active_role: "admin",
@@ -11095,6 +11252,7 @@ mod tests {
                 pension_wage: None,
                 id_no: "",
                 bank_accounts: accounts,
+                dependents: None,
                 note: "",
                 actor: "測試",
                 keep_active_role: "admin",
@@ -11162,6 +11320,273 @@ mod tests {
             .execute(&store.pool)
             .await
             .expect("應可清掉測試資料");
+    }
+
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// dependents_replace_as_a_set -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可套用 migrations 的 PostgreSQL"]
+    async fn dependents_replace_as_a_set() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("請設定 TEST_DATABASE_URL 後再執行");
+        let store = Store::connect(&database_url, 2)
+            .await
+            .expect("應可連上測試資料庫");
+        store.migrate().await.expect("測試資料庫 migrations 應成功");
+
+        let emp_no = format!("T{}", &Uuid::new_v4().simple().to_string()[..8]);
+        fn write<'a>(
+            emp_no: &'a str,
+            dependents: Option<&'a [WriteEmployeeDependent<'a>]>,
+        ) -> WriteEmployee<'a> {
+            WriteEmployee {
+                emp_no,
+                name: "眷屬測試",
+                dept_code: None,
+                title: "",
+                employment_type: "full_time",
+                pay_basis: "monthly",
+                insured_as: "employee",
+                birthday: None,
+                hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                left_on: None,
+                status: "active",
+                base_salary: None,
+                labor_insured_salary: None,
+                health_insured_salary: None,
+                pension_wage: None,
+                id_no: "",
+                bank_accounts: None,
+                dependents,
+                note: "",
+                actor: "測試",
+                keep_active_role: "admin",
+            }
+        }
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day);
+        let march = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+
+        let created = store
+            .create_employee(write(
+                &emp_no,
+                Some(&[
+                    WriteEmployeeDependent {
+                        name: "王太太",
+                        relation: "spouse",
+                        id_no: "B223456782",
+                        birthday: d(1990, 5, 2),
+                        health_enrolled_from: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                        health_enrolled_until: None,
+                    },
+                    WriteEmployeeDependent {
+                        name: "王小寶",
+                        relation: "child",
+                        id_no: "",
+                        birthday: d(2026, 3, 1),
+                        health_enrolled_from: march,
+                        health_enrolled_until: None,
+                    },
+                ]),
+            ))
+            .await
+            .expect("應可建立員工與眷屬");
+        assert_eq!(created.dependents.len(), 2);
+        assert_eq!(created.dependents[0].name, "王太太", "依輸入順序");
+        assert_eq!(created.dependents[1].health_enrolled_from, march);
+
+        // Omitting the list leaves what is on file alone.
+        let untouched = store
+            .update_employee(write(&emp_no, None))
+            .await
+            .expect("應可只更新其他欄位");
+        assert_eq!(untouched.employee.dependents.len(), 2);
+
+        let replaced = store
+            .update_employee(write(
+                &emp_no,
+                Some(&[WriteEmployeeDependent {
+                    name: "王小寶",
+                    relation: "child",
+                    id_no: "",
+                    birthday: d(2026, 3, 1),
+                    health_enrolled_from: march,
+                    health_enrolled_until: d(2026, 9, 30),
+                }]),
+            ))
+            .await
+            .expect("應可整份取代");
+        assert_eq!(replaced.employee.dependents.len(), 1);
+        assert_eq!(
+            replaced.employee.dependents[0].health_enrolled_until,
+            d(2026, 9, 30)
+        );
+
+        // Reading one employee and reading the roster must agree.
+        let by_id = store
+            .employee_by_id(replaced.employee.id)
+            .await
+            .expect("應查得到員工")
+            .expect("員工應存在");
+        assert_eq!(by_id.dependents.len(), 1);
+        let roster = store.employees(true, Some(&emp_no)).await.expect("名冊");
+        assert_eq!(roster[0].dependents.len(), 1);
+
+        let emptied = store
+            .update_employee(write(&emp_no, Some(&[])))
+            .await
+            .expect("空清單應刪掉全部眷屬");
+        assert!(emptied.employee.dependents.is_empty());
+
+        // The table's own rules, for whatever writes to it without going
+        // through the operation's checks.
+        let employee_id = emptied.employee.id;
+        // 23514 is a CHECK, 23502 a NOT NULL.
+        let refused = [
+            (
+                "不在清單內的關係",
+                "甲",
+                "cousin",
+                "",
+                d(2026, 3, 1),
+                None,
+                "23514",
+            ),
+            (
+                "兄弟姊妹",
+                "甲",
+                "sibling",
+                "",
+                d(2026, 3, 1),
+                None,
+                "23514",
+            ),
+            (
+                "退保日早於加保日",
+                "甲",
+                "child",
+                "",
+                d(2026, 3, 1),
+                d(2026, 2, 28),
+                "23514",
+            ),
+            ("沒有加保日", "甲", "child", "", None, None, "23502"),
+            ("空白姓名", "  ", "child", "", d(2026, 3, 1), None, "23514"),
+            (
+                "小寫字號",
+                "甲",
+                "child",
+                "b223456782",
+                d(2026, 3, 1),
+                None,
+                "23514",
+            ),
+        ];
+        for (why, name, relation, id_no, from, until, expected) in refused {
+            let err = sqlx::query(
+                "INSERT INTO employee_dependent
+                    (employee_id, name, relation, id_no, health_enrolled_from, health_enrolled_until)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(employee_id)
+            .bind(name)
+            .bind(relation)
+            .bind(id_no)
+            .bind(from)
+            .bind(until)
+            .execute(&store.pool)
+            .await
+            .expect_err(why);
+            let code = err.as_database_error().and_then(|db| db.code());
+            assert_eq!(
+                code.as_deref(),
+                Some(expected),
+                "{why}應由資料表擋下：{err}"
+            );
+        }
+        // Same-day cover is a period of one day, not a mistake.
+        sqlx::query(
+            "INSERT INTO employee_dependent
+                (employee_id, name, relation, health_enrolled_from, health_enrolled_until)
+             VALUES ($1, '甲', 'child', $2, $2)",
+        )
+        .bind(employee_id)
+        .bind(d(2026, 3, 1))
+        .execute(&store.pool)
+        .await
+        .expect("同一天加保退保應可存");
+        sqlx::query("DELETE FROM employee_dependent WHERE employee_id = $1")
+            .bind(employee_id)
+            .execute(&store.pool)
+            .await
+            .expect("清掉單日測試列");
+
+        let twice = store
+            .update_employee(write(
+                &emp_no,
+                Some(&[
+                    WriteEmployeeDependent {
+                        name: "王太太",
+                        relation: "spouse",
+                        id_no: "B223456782",
+                        birthday: None,
+                        health_enrolled_from: march,
+                        health_enrolled_until: None,
+                    },
+                    WriteEmployeeDependent {
+                        name: "王媽媽",
+                        relation: "parent",
+                        id_no: "B223456782",
+                        birthday: None,
+                        health_enrolled_from: march,
+                        health_enrolled_until: None,
+                    },
+                ]),
+            ))
+            .await
+            .expect_err("同一員工兩位眷屬同字號應被擋下");
+        assert!(twice.to_string().contains("相同的身分證字號"), "{twice}");
+
+        // A blank number is one not collected yet, and may repeat.
+        let blanks = store
+            .update_employee(write(
+                &emp_no,
+                Some(&[
+                    WriteEmployeeDependent {
+                        name: "王爸爸",
+                        relation: "parent",
+                        id_no: "",
+                        birthday: None,
+                        health_enrolled_from: march,
+                        health_enrolled_until: None,
+                    },
+                    WriteEmployeeDependent {
+                        name: "王媽媽",
+                        relation: "parent",
+                        id_no: "",
+                        birthday: None,
+                        health_enrolled_from: march,
+                        health_enrolled_until: None,
+                    },
+                ]),
+            ))
+            .await
+            .expect("兩位都還沒登錄字號應可存");
+        assert_eq!(blanks.employee.dependents.len(), 2);
+
+        // Deleting the employee takes the dependants along.
+        sqlx::query("DELETE FROM employee WHERE emp_no = $1")
+            .bind(&emp_no)
+            .execute(&store.pool)
+            .await
+            .expect("應可清掉測試資料");
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM employee_dependent WHERE employee_id = $1")
+                .bind(employee_id)
+                .fetch_one(&store.pool)
+                .await
+                .expect("計數");
+        assert_eq!(left, 0);
     }
 
     /// Run with:
@@ -11851,6 +12276,7 @@ mod tests {
                 pension_wage: None,
                 id_no: "",
                 bank_accounts: None,
+                dependents: None,
                 note: "並行配號測試",
                 actor: "測試",
                 keep_active_role: "admin",

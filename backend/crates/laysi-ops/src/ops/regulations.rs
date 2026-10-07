@@ -24,7 +24,7 @@
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::NaiveDate;
-use laysi_regulation::{Money, Ruleset};
+use laysi_regulation::{Money, MonthPart, Ruleset};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -53,6 +53,8 @@ fn domain_label(domain: &str) -> &'static str {
         "overtime" => "延長工時",
         "owner_insurance" => "負責人投保",
         "leave_pay" => "請假工資",
+        "health_dependents" => "健保眷屬計費",
+        "partial_month" => "不足月計費",
         other => {
             debug_assert!(false, "法規領域 {other} 沒有顯示名稱");
             "其他"
@@ -73,6 +75,9 @@ const FIELDS: &[(&str, &str)] = &[
     ("premium_rate", "普通事故保險費率"),
     ("rate", "費率"),
     ("avg_dependents", "平均眷口數"),
+    ("max_counted", "計費眷口數上限"),
+    ("labor_days_per_month", "勞保：每月計費日數"),
+    ("pension_days_per_month", "勞退：每月提繳日數"),
     ("employer_rate", "雇主提繳率"),
     ("employer_share", "雇主負擔比率"),
     ("employee_share", "員工負擔比率"),
@@ -284,13 +289,23 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
     let one = Money::ONE;
     match rs.domain.as_str() {
         "labor_insurance" => {
-            laysi_regulation::labor_insurance(rs, one)?;
+            laysi_regulation::labor_insurance(rs, one, MonthPart::WHOLE)?;
         }
         "health_insurance" => {
-            laysi_regulation::health_insurance(rs, one)?;
+            let dependants = laysi_regulation::resolve("health_dependents", rs.effective_from)?;
+            laysi_regulation::health_insurance(rs, dependants, one, 1)?;
+        }
+        "health_dependents" => {
+            laysi_regulation::dependants_charged(rs, 1)?;
+        }
+        "partial_month" => {
+            let (start, end) = (rs.effective_from, rs.effective_from);
+            for key in ["labor_days_per_month", "pension_days_per_month"] {
+                laysi_regulation::month_part(rs, key, start, end, start, end)?;
+            }
         }
         "pension" => {
-            laysi_regulation::pension(rs, one)?;
+            laysi_regulation::pension(rs, one, MonthPart::WHOLE)?;
         }
         "vat" => {
             laysi_regulation::vat(rs, one)?;
@@ -302,8 +317,9 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
         }
         "owner_insurance" => {
             let health = laysi_regulation::resolve("health_insurance", rs.effective_from)?;
-            laysi_regulation::health_insurance_owner(health, rs, one)?;
-            laysi_regulation::pension_owner(rs, one)?;
+            let dependants = laysi_regulation::resolve("health_dependents", rs.effective_from)?;
+            laysi_regulation::health_insurance_owner(health, rs, dependants, one, 1)?;
+            laysi_regulation::pension_owner(rs, one, MonthPart::WHOLE)?;
         }
         "annual_leave" => {
             laysi_regulation::annual_leave_days(rs, 132)?;

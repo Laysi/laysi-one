@@ -1766,6 +1766,23 @@ export const employeeBankAccountRow = z.object({
 });
 export type EmployeeBankAccountRow = z.infer<typeof employeeBankAccountRow>;
 
+export const employeeDependentRow = z.object({
+  name: z.string(),
+  relation: z.string(),
+  relation_label: z.string(),
+  id_no: z.string(),
+  birthday: z.string().nullable(),
+  health_enrolled_from: z.string(),
+  health_enrolled_until: z.string().nullable(),
+});
+export type EmployeeDependentRow = z.infer<typeof employeeDependentRow>;
+
+export const dependentRelation = z.object({
+  code: z.string(),
+  label: z.string(),
+});
+export type DependentRelation = z.infer<typeof dependentRelation>;
+
 export const employeeRow = z.object({
   emp_no: z.string(),
   name: z.string(),
@@ -1795,6 +1812,7 @@ export const employeeRow = z.object({
   health_insured_salary: z.string(),
   pension_wage: z.string(),
   bank_accounts: z.array(employeeBankAccountRow),
+  dependents: z.array(employeeDependentRow),
   note: z.string(),
 });
 export type EmployeeRow = z.infer<typeof employeeRow>;
@@ -1806,6 +1824,7 @@ export const employeeList = z.object({
   leaving: z.number(),
   by_dept: z.array(z.object({ label: z.string(), count: z.number() })),
   departments: z.array(dimensionValue),
+  relations: z.array(dependentRelation),
   avg_service_months: z.number(),
   avg_service_label: z.string(),
   annual_leave_ruleset: rulesetRef,
@@ -1936,6 +1955,8 @@ export const payrollRunRow = z.object({
     health_insurance: z.string(),
     pension: z.string(),
     withholding: z.string(),
+    health_dependents: z.string().nullable(),
+    partial_month: z.string().nullable(),
   }),
   note: z.string(),
   created_at: z.string(),
@@ -1991,6 +2012,7 @@ export const payslipRow = z.object({
   pension_wage: z.string(),
   labor_employee: z.string(),
   health_employee: z.string(),
+  health_dependents: z.number(),
   income_tax: z.string(),
   deduction: z.string(),
   net: z.string(),
@@ -2069,6 +2091,8 @@ export const insuranceRow = z.object({
   labor_employee: z.string(),
   labor_government: z.string(),
   health_insured_salary: z.string(),
+  health_dependents: z.number(),
+  health_dependents_covered: z.number(),
   health_employer: z.string(),
   health_employee: z.string(),
   pension_wage: z.string(),
@@ -2079,6 +2103,9 @@ export const insuranceRow = z.object({
   health_bracket_missing: z.boolean(),
   pension_wage_missing: z.boolean(),
   brackets_missing: z.boolean(),
+  labor_days: z.number().nullable(),
+  pension_days: z.number().nullable(),
+  health_charged: z.boolean(),
 });
 export type InsuranceRow = z.infer<typeof insuranceRow>;
 
@@ -2118,7 +2145,9 @@ export const insuranceSummary = z.object({
     health: rulesetRef,
     pension: rulesetRef,
     owner: rulesetRef.nullable(),
+    dependents: rulesetRef,
   }),
+  dependents_cap: z.number(),
   posted_to_ledger: z.boolean(),
   posting_note: z.string(),
 });
@@ -2146,6 +2175,8 @@ export const insuranceQuote = z.object({
     government: z.string(),
     rate_percent: z.string(),
     avg_dependents: z.string().nullable(),
+    dependents_charged: z.number(),
+    dependents_ruleset: rulesetRef,
     ruleset: rulesetRef,
     owner_ruleset: rulesetRef.nullable(),
   }),
@@ -2295,6 +2326,12 @@ export const myProfile = z.object({
     is_payroll: z.boolean(),
     note: z.string(),
   })),
+  dependents: z.array(z.object({
+    name: z.string(),
+    relation_label: z.string(),
+    health_enrolled_from: z.string(),
+    health_enrolled_until: z.string().nullable(),
+  })),
   privacy_note: z.string(),
 });
 export type MyProfile = z.infer<typeof myProfile>;
@@ -2345,6 +2382,7 @@ export const myPayslip = z.object({
     income_tax: z.string(),
     total: z.string(),
   }),
+  health_dependents: z.number(),
   net: z.string(),
   employer_contributions: z.object({
     labor_insurance: z.string(),
@@ -2360,6 +2398,8 @@ export const myPayslip = z.object({
     health_insurance: z.string(),
     pension: z.string(),
     withholding: z.string(),
+    health_dependents: z.string().nullable(),
+    partial_month: z.string().nullable(),
   }),
   note: z.string(),
 });

@@ -143,7 +143,10 @@ export function MyPayslips({ reloadKey }: Props) {
                   <span className="num">{money(shown.deductions.labor_insurance)}</span>
                 </div>
                 <div className="doc-row doc-row--sub">
-                  <span>健保自付</span>
+                  <span>
+                    健保自付
+                    {shown.health_dependents > 0 && `（含眷屬 ${shown.health_dependents} 口）`}
+                  </span>
                   <span className="num">{money(shown.deductions.health_insurance)}</span>
                 </div>
                 <div className="doc-row doc-row--sub">
@@ -219,6 +222,18 @@ export function MyPayslips({ reloadKey }: Props) {
                     <span className="fact__key">扣繳</span>
                     <span className="fact__value num">{shown.rulesets.withholding}</span>
                   </div>
+                  {shown.rulesets.health_dependents && (
+                    <div className="fact">
+                      <span className="fact__key">健保眷屬計費</span>
+                      <span className="fact__value num">{shown.rulesets.health_dependents}</span>
+                    </div>
+                  )}
+                  {shown.rulesets.partial_month && (
+                    <div className="fact">
+                      <span className="fact__key">不足月計費</span>
+                      <span className="fact__value num">{shown.rulesets.partial_month}</span>
+                    </div>
+                  )}
                 </div>
               </section>
             </div>

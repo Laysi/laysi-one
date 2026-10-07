@@ -204,7 +204,15 @@ fn profile_json(employee: &Employee, months: u32) -> Value {
             "is_payroll": account.is_payroll,
             "note": account.note,
         })).collect::<Vec<_>>(),
-        "privacy_note": "不回身分證字號；銀行帳戶只回銀行名稱與尾碼。",
+        // The same rule as the person's own record: no id number, and no
+        // birthday either, which with a name is most of an identity.
+        "dependents": employee.dependents.iter().map(|d| json!({
+            "name": d.name,
+            "relation_label": crate::ops::employees::relation_label(&d.relation),
+            "health_enrolled_from": d.health_enrolled_from,
+            "health_enrolled_until": d.health_enrolled_until,
+        })).collect::<Vec<_>>(),
+        "privacy_note": "不回本人與眷屬的身分證字號，也不回眷屬生日；銀行帳戶只回銀行名稱與尾碼。",
     })
 }
 
@@ -245,6 +253,8 @@ fn payslip_json(slip: &Payslip) -> Value {
             "income_tax": slip.income_tax.to_string(),
             "total": slip.deduction.to_string(),
         },
+        // Dependants the health deduction includes, besides the person.
+        "health_dependents": slip.health_dependents,
         "net": slip.net.to_string(),
         "employer_contributions": {
             "labor_insurance": slip.labor_employer.to_string(),
@@ -262,6 +272,8 @@ fn payslip_json(slip: &Payslip) -> Value {
             "health_insurance": slip.health_version,
             "pension": slip.pension_version,
             "withholding": slip.withholding_version,
+            "health_dependents": slip.dependents_version,
+            "partial_month": slip.partial_month_version,
         },
         "note": slip.note,
     })
@@ -2328,5 +2340,36 @@ mod tests {
         assert_eq!(masked_account_no("3812-0000-5508"), "尾碼 5508");
         assert_eq!(masked_account_no("5508"), "已遮罩");
         assert_eq!(masked_account_no(""), "已遮罩");
+    }
+
+    /// The person's own screen lists their dependants by name and relation,
+    /// and leaves out what would identify them anywhere else.
+    #[test]
+    fn the_profile_lists_dependants_without_their_id_number_or_birthday() {
+        let mut me = crate::ops::insurance::test_employee(
+            "active",
+            Money::ZERO,
+            Money::ZERO,
+            Money::ZERO,
+            Money::ZERO,
+        );
+        me.dependents = vec![laysi_store::EmployeeDependent {
+            id: 1,
+            name: "王小寶".into(),
+            relation: "child".into(),
+            id_no: "B223456782".into(),
+            birthday: NaiveDate::from_ymd_opt(2026, 3, 1),
+            health_enrolled_from: NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            health_enrolled_until: None,
+        }];
+        let profile = profile_json(&me, 0);
+        let listed = &profile["dependents"][0];
+        assert_eq!(listed["name"], json!("王小寶"));
+        assert_eq!(listed["relation_label"], json!("子女"));
+        assert_eq!(listed["health_enrolled_from"], json!("2026-03-01"));
+        assert!(listed.get("id_no").is_none());
+        assert!(listed.get("birthday").is_none());
+        let text = profile.to_string();
+        assert!(!text.contains("B223456782"), "{text}");
     }
 }
