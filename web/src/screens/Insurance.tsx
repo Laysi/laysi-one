@@ -46,6 +46,7 @@ export function Insurance({ onToast, reloadKey }: Props) {
           insured_salary: salary.trim(),
           insured_as: insuredAs,
           dependents,
+          as_of: data?.as_of,
         },
                         undefined,
                         insuranceQuote,

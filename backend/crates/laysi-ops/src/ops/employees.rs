@@ -516,8 +516,8 @@ impl Operation for ListEmployees {
                 // brackets: the drawer that edits them has to show what it is
                 // about to replace. Self-service sees only the last digits.
                 "bank_accounts": e.bank_accounts,
-                // Health cover and withholding claims are both read from
-                // this list, so the drawer edits it whole.
+                // Health cover is read from this list, so the drawer edits
+                // it whole.
                 "dependents": e.dependents.iter().map(dependent_json).collect::<Vec<_>>(),
                 "note": e.note,
             }));
