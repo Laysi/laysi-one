@@ -306,6 +306,16 @@ pub(crate) fn own_request_refusal(role: &str, subject: &str) -> String {
     }
 }
 
+/// Why a request's own submitter cannot revoke its approval. Somebody else
+/// approved it, so for anyone but the owner a second account already exists.
+pub(crate) fn own_revoke_refusal(role: &str, subject: &str) -> String {
+    if role == crate::ROLE_BOSS {
+        format!("{subject}由本人送出。要自行撤銷，請系統管理員在「基礎設定」把「負責人自行核決」改成「{SELF_DECIDE_ON}」。")
+    } else {
+        format!("{subject}由本人送出，要由另一個帳號撤銷。")
+    }
+}
+
 /// The company's own logo, and where the two places that show a company
 /// identity render it.
 pub const BRAND_LOGO_SETTING: &str = "brand_logo";

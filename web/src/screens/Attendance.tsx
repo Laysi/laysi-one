@@ -3,9 +3,11 @@ import {
   attendancePunchList,
   callOp,
   leaveRequestList,
+  leaveRevocation,
   money,
   OpFailed,
   overtimeRequestList,
+  overtimeRevocation,
   punchCorrectionList,
   trimDecimal,
   wallSpan,
@@ -13,14 +15,17 @@ import {
   type LeaveRequestList,
   type LeaveRequestRow,
   type OvertimeRequestList,
+  type OvertimeRequestRow,
   type PunchCorrectionList,
 } from '../api/client';
+import { CancelledHint } from '../components/CancelledHint';
 import { DateField } from '../components/DateField';
 import { DayMarks } from '../components/DayMarks';
 import { PeriodPicker } from '../components/PeriodPicker';
 import { PunchTrail } from '../components/PunchTrail';
 import { useCurrentUser } from '../auth';
 import { RulesetNote } from '../components/RulesetNote';
+import { TakeBackModal } from '../components/TakeBackModal';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -35,9 +40,14 @@ function validTime(v: string): boolean {
   return h < 24 && min < 60 && sec < 60;
 }
 
-function statusTag(r: LeaveRequestRow): string {
-  if (r.status === 'rejected') return 'tag tag--bad tag--static';
-  if (r.status === 'approved') return 'tag tag--static';
+type Revoking =
+  | { kind: 'leave'; row: LeaveRequestRow }
+  | { kind: 'overtime'; row: OvertimeRequestRow };
+
+function statusTag(status: string): string {
+  if (status === 'rejected') return 'tag tag--bad tag--static';
+  if (status === 'approved') return 'tag tag--static';
+  if (status === 'withdrawn' || status === 'revoked') return 'tag tag--pale tag--static';
   return 'tag tag--warn tag--static';
 }
 
@@ -62,6 +72,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<Record<string, string>>({});
+  const [revoking, setRevoking] = useState<Revoking | null>(null);
 
   const running = useRef<(() => void) | null>(null);
 
@@ -101,6 +112,9 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
   const canDecideFixes = me.permissions.includes('decide_punch_correction');
   const canSeeOvertime = me.permissions.includes('list_overtime_requests');
   const canDecideOvertime = me.permissions.includes('decide_overtime_request');
+  const canDecideLeave = me.permissions.includes('decide_leave_request');
+  const canRevokeLeave = me.permissions.includes('revoke_leave_request');
+  const canRevokeOvertime = me.permissions.includes('revoke_overtime_request');
 
   const runningOvertime = useRef<(() => void) | null>(null);
 
@@ -237,6 +251,37 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
       setNote((n) => ({ ...n, [r.leave_no]: '' }));
       onChanged();
       load();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function revoke(target: Revoking, reason: string) {
+    const no = target.kind === 'leave' ? target.row.leave_no : target.row.request_no;
+    setBusy(`rv-${no}`);
+    try {
+      if (target.kind === 'leave') {
+        await callOp(
+          'revoke_leave_request',
+          { leave_no: no, reason },
+          `撤銷 ${target.row.name} 的${target.row.kind_label}`,
+          leaveRevocation,
+        );
+        load();
+      } else {
+        await callOp(
+          'revoke_overtime_request',
+          { request_no: no, reason },
+          `撤銷 ${target.row.name} 的加班申請`,
+          overtimeRevocation,
+        );
+        loadOvertime();
+      }
+      onToast(`${no} 已撤銷`);
+      setRevoking(null);
+      onChanged();
     } catch (e) {
       onToast(e instanceof OpFailed ? e.error.message : String(e));
     } finally {
@@ -630,7 +675,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                   className={`chip${otDone ? ' chip--on' : ''}`}
                   onClick={() => setOtDone((v) => !v)}
                 >
-                  含已決定
+                  含已處理
                 </button>
                 <span className="spacer" />
                 <span className="section-note">
@@ -680,20 +725,27 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                         <td>
                           {r.status !== 'pending' ? (
                             <>
-                              <span
-                                className={
-                                  r.status === 'rejected'
-                                    ? 'tag tag--bad tag--static'
-                                    : 'tag tag--static'
-                                }
-                              >
-                                {r.status_label}
-                              </span>
+                              <span className={statusTag(r.status)}>{r.status_label}</span>
                               {r.decided_by && (
                                 <span className="cell-hint cell-hint--block">
                                   {r.decided_by}
                                   {r.decision_note ? ` · ${r.decision_note}` : ''}
                                 </span>
+                              )}
+                              {r.cancelled && <CancelledHint cancelled={r.cancelled} />}
+                              {r.status === 'approved' && canRevokeOvertime && (
+                                r.can_revoke ? (
+                                  <button
+                                    className="btn btn--compact btn--secondary"
+                                    onClick={() => setRevoking({ kind: 'overtime', row: r })}
+                                  >
+                                    撤銷
+                                  </button>
+                                ) : (
+                                  <span className="cell-hint cell-hint--block">
+                                    {r.revoke_blocked_reason}
+                                  </span>
+                                )
                               )}
                             </>
                           ) : !canDecideOvertime ? (
@@ -710,14 +762,21 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                                   setOtNote((n) => ({ ...n, [r.request_no]: e.target.value }))
                                 }
                               />
+                              {r.can_approve === false && (
+                                <span className="cell-hint cell-hint--block">
+                                  {r.approve_blocked_reason}
+                                </span>
+                              )}
                               <div className="cell-actions">
-                                <button
-                                  className="btn btn--compact"
-                                  disabled={busy === `ot-${r.request_no}`}
-                                  onClick={() => void decideOvertime(r.request_no, true)}
-                                >
-                                  核准
-                                </button>
+                                {r.can_approve !== false && (
+                                  <button
+                                    className="btn btn--compact"
+                                    disabled={busy === `ot-${r.request_no}`}
+                                    onClick={() => void decideOvertime(r.request_no, true)}
+                                  >
+                                    核准
+                                  </button>
+                                )}
                                 <button
                                   className="btn btn--compact btn--secondary"
                                   disabled={busy === `ot-${r.request_no}`}
@@ -791,7 +850,7 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
               className={`chip${includeDone ? ' chip--on' : ''}`}
               onClick={() => setIncludeDone((v) => !v)}
             >
-              併同顯示已核准與已駁回
+              含已處理
             </button>
             <span className="spacer" />
             <span className="section-note">
@@ -839,19 +898,29 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       </span>
                     </td>
                     <td>
-                      <span className={statusTag(r)}>{r.status_label}</span>
+                      <span className={statusTag(r.status)}>{r.status_label}</span>
                       {r.status !== 'pending' && r.decided_by && (
                         <span className="cell-hint cell-hint--block">
                           {r.decided_by}
                           {r.decision_note && ` · ${r.decision_note}`}
                         </span>
                       )}
+                      {r.cancelled && <CancelledHint cancelled={r.cancelled} />}
                     </td>
                     <td className="align-right">
-                      {r.status === 'pending' && !r.can_decide ? (
+                      {r.status === 'pending' && !canDecideLeave ? (
+                        <span className="cell-muted">由人資決定</span>
+                      ) : r.status === 'pending' && !r.can_decide ? (
                         <span className="cell-muted cell-reason">{r.decide_blocked_reason}</span>
                       ) : r.status === 'pending' ? (
                         <>
+                          {r.can_approve === false && (
+                            <div>
+                              <span className="cell-muted cell-reason">
+                                {r.approve_blocked_reason}
+                              </span>
+                            </div>
+                          )}
                           <input
                             className="entry-input entry-input--code"
                             placeholder="說明"
@@ -860,13 +929,15 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                               setNote((n) => ({ ...n, [r.leave_no]: e.target.value }))
                             }
                           />
-                          <button
-                            className="btn btn--compact"
-                            disabled={busy === r.leave_no}
-                            onClick={() => void decide(r, true)}
-                          >
-                            {busy === r.leave_no ? '處理中…' : '核准'}
-                          </button>
+                          {r.can_approve !== false && (
+                            <button
+                              className="btn btn--compact"
+                              disabled={busy === r.leave_no}
+                              onClick={() => void decide(r, true)}
+                            >
+                              {busy === r.leave_no ? '處理中…' : '核准'}
+                            </button>
+                          )}
                           <button
                             className="btn btn--compact btn--secondary"
                             disabled={busy === r.leave_no}
@@ -875,9 +946,18 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                             駁回
                           </button>
                         </>
-                      ) : (
+                      ) : r.status === 'approved' && canRevokeLeave && r.can_revoke ? (
+                        <button
+                          className="btn btn--compact btn--secondary"
+                          onClick={() => setRevoking({ kind: 'leave', row: r })}
+                        >
+                          撤銷
+                        </button>
+                      ) : r.status === 'approved' && canRevokeLeave ? (
+                        <span className="cell-muted cell-reason">{r.revoke_blocked_reason}</span>
+                      ) : r.status === 'approved' || r.status === 'rejected' ? (
                         <span className="cell-muted">已簽核</span>
-                      )}
+                      ) : null}
                     </td>
                   </tr>
                 ))}
@@ -891,6 +971,28 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
               </tbody>
             </table>
           </div>
+
+          {revoking && (
+            <TakeBackModal
+              title={revoking.kind === 'leave' ? '撤銷休假單' : '撤銷加班申請'}
+              subtitle={
+                revoking.kind === 'leave'
+                  ? `${revoking.row.leave_no} · ${revoking.row.name} · ${revoking.row.kind_label} · ${wallSpan(revoking.row.from_at, revoking.row.to_at)}`
+                  : `${revoking.row.request_no} · ${revoking.row.name} · ${revoking.row.day_type_label} · ${wallSpan(revoking.row.from_at, revoking.row.to_at)}`
+              }
+              warning={
+                revoking.kind === 'leave'
+                  ? '撤銷後無法復原，不再計入特休與薪資。'
+                  : '撤銷後無法復原，不再計入加班費。'
+              }
+              reasonLabel="撤銷理由（必填，申請人看得到）"
+              reasonRequired
+              confirmLabel="確認撤銷"
+              busy={busy !== null}
+              onConfirm={(reason) => void revoke(revoking, reason)}
+              onCancel={() => setRevoking(null)}
+            />
+          )}
 
           <h3 className="section-title section-title--spaced">
             {leave.annual_leave_year} 年特休餘額

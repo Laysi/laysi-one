@@ -7,6 +7,7 @@ interface Props {
   confirmLabel: string;
   busyLabel?: string;
   busy?: boolean;
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -18,6 +19,7 @@ export function ConfirmModal({
   confirmLabel,
   busyLabel,
   busy = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: Props) {
@@ -39,7 +41,11 @@ export function ConfirmModal({
             ← 取消
           </button>
           <span className="spacer" />
-          <button className={`btn${busy ? ' btn--off' : ''}`} disabled={busy} onClick={onConfirm}>
+          <button
+            className={`btn${busy || confirmDisabled ? ' btn--off' : ''}`}
+            disabled={busy || confirmDisabled}
+            onClick={onConfirm}
+          >
             {busy ? (busyLabel ?? '處理中…') : confirmLabel}
           </button>
         </div>

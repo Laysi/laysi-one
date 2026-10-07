@@ -1325,7 +1325,7 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
    `posted → void`；確實發生但記錯的交易則另開反向分錄。
 4. 同一位員工的休假單彼此不得在時間上重疊，加班申請亦然：
    `EXCLUDE USING gist (employee_id WITH =, tsrange(from_at, to_at, '[)') WITH &&)
-   WHERE (status <> 'rejected')`。
+   WHERE (status IN ('pending', 'approved'))`。
 
 ### 一個人不能在同一段時間裡休兩次假
 
@@ -1334,9 +1334,11 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 上下班時間有沒有重疊，兩張申請之間從來沒有比過。
 
 **時段是半開區間 `[)`**，所以前一張到 18:00、後一張從 18:00 開始並存；真正重疊的那
-一秒才擋。**被駁回的單不在約束範圍內**：同一段日期被駁回之後要能重送，而 PostgreSQL 18
-的 `WITHOUT OVERLAPS` 是 `UNIQUE`／`PRIMARY KEY` 的一種，**不收 `WHERE`**，會把重送
-一併擋掉，所以這裡用排除約束而不是它。相等欄位（`employee_id`）與範圍要進同一個 GiST
+一秒才擋。**只有待簽核與已核准的單在約束範圍內**：被駁回、撤回或撤銷之後，同一段日期
+要能重送。條件列舉佔住時數的兩種狀態，而不是排除不佔的那幾種——再多一種狀態時，要先
+決定它站在哪一邊才寫得進 CHECK。PostgreSQL 18 的 `WITHOUT OVERLAPS` 是
+`UNIQUE`／`PRIMARY KEY` 的一種，**不收 `WHERE`**，會把重送一併擋掉，所以這裡用排除
+約束而不是它。相等欄位（`employee_id`）與範圍要進同一個 GiST
 索引，`btree_gist` 因此在 0001 的開頭啟用。
 
 `create_leave_request` 與 `create_overtime_request` 在寫入前各查一次擋路的那張單，
@@ -1684,8 +1686,9 @@ MCP 這一項開著（`needs_confirm`）：草稿本來就是 AI 寫的，讓它
 唯一的匯出路徑——付款單只讀 `ap_bill`。零用金支付的單據貸 1101，錢已經付掉，不建帳單。
 
 **能不能簽由後端回答，不由畫面推**。`list_expense_claims` 逐列附上 `can_approve`
-與 `approve_blocked_reason`，`list_leave_requests` 附上 `can_decide` 與
-`decide_blocked_reason`；`false` 的那一列畫面**畫不出按鈕，改印那一句原因**。原本
+與 `approve_blocked_reason`，`list_leave_requests` 與 `list_overtime_requests` 附上
+`can_decide`／`decide_blocked_reason`、`can_approve`／`approve_blocked_reason` 與
+`can_revoke`／`revoke_blocked_reason`；`false` 的那一列畫面**畫不出按鈕，改印那一句原因**。原本
 按鈕一律是亮的，按下去才回一句拒絕，而頁面上還寫著「無法簽核時，下方會顯示原因」
 ——原因其實是螢幕底部一閃即逝的浮動訊息。規則只有一份（`may_decide` 與
 `decide_leave_request` 本身），畫面讀的是它的結論。
@@ -1736,8 +1739,8 @@ column，因此不可能與上面的區間不一致。
 休假會多算那一天，程式裡以 `ponytail:` 註記。
 
 `decide_leave_request` 順便補上一個對不上的宣告：模組註解說狀態由更新本身判定，
-程式卻是先讀再無條件更新。現在 `UPDATE` 自己帶 `status = 'pending'` 並檢查
-`rows_affected`，兩位主管同時按下去只有一位會成功。
+程式卻是先讀再無條件更新。現在在交易裡以 `FOR UPDATE` 讀那一列再更新，兩位主管同時按
+下去只有一位會成功（見「撤回與撤銷」）。
 
 ### 計薪基準與投保身分
 
@@ -1791,9 +1794,11 @@ column，因此不可能與上面的區間不一致。
 | `get_employee_document` | ReadOnly | `{ emp_no, doc_no, version?, include_content? }` | 重算雜湊比對；不屬於這位員工的編號回查無此附件 |
 | `create_employee_login` | NeedsConfirm | `{ emp_no, email }` | 角色固定一般職員；`{ username, role_name, temporary_password }` |
 | `list_leave_requests` | ReadOnly | `{ include_done?, limit?, month?, emp_no? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度；帶 `month`／`emp_no` 只回碰到該月或該員的單，`other_pending` 是沒列出的待簽核張數 |
-| `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }` |
+| `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }`；單據所在月份到當年年底之間有已計算薪資的期別時不能准假，駁回不受影響 |
+| `revoke_leave_request` | NeedsConfirm | `{ leave_no, reason }` | `{ request }`；只收已核准的單，理由必填；單據所在月份到當年年底之間有已計算薪資的期別時拒絕（見「撤回與撤銷」） |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
-| `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }` |
+| `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }`；加班日所在期別已計算薪資時不能核准，駁回不受影響 |
+| `revoke_overtime_request` | NeedsConfirm | `{ request_no, reason }` | `{ request }`；只收已核准的單，理由必填；加班日所在期別已計算薪資時拒絕 |
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額；`next_period` 是尚未計算的應計期別，算過就是 `null` |
 | `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳；重算用薪資單存下的 `health_dependents` 與投保期間（`insured_from`／`insured_to`），不用現在的眷屬名單與離職日 |
 | `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；`period` 不帶時為應計期別；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents`；到職與離職當月勞保、勞退按日計，月中離職健保不收，投保期間存進 `payslip.insured_from`／`insured_to` |
@@ -2240,8 +2245,8 @@ ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日�
 沒有設定上下班時間時不做重疊檢查——沒有區間就沒有東西可以重疊，而加班時數不需要
 它就算得出來，這一點與休假相反。
 
-**月上限比對的是「未被駁回」的時數，不是「已核准」的時數**：等簽核的那幾小時已經
-被佔住，核准與否不是申請人決定得了的。兩邊因此共用 `committed_overtime_hours()`，
+**月上限比對的是「仍佔住時數」的時數，不是「已核准」的時數**：等簽核的那幾小時已經
+被佔住，核准與否不是申請人決定得了的；被駁回、撤回或撤銷的單把時數還回來。兩邊因此共用 `committed_overtime_hours()`，
 而 `list_my_overtime_requests` 回 `month_hours_left`——畫面原本自己拿上限減去已核准
 時數，於是有單在等簽核時它宣告的可申請時數比 `submit_my_overtime_request` 願意收的
 多，按下送出才被擋。申請畫面在超過該數字時不畫送出鈕，改印還剩多少。
@@ -2250,6 +2255,72 @@ ISO 的 `YYYY-MM-DD`，畫面上顯示日期的地方也一律是 ISO，而日�
 來源可以沿用）。**國定假日與例假不做**：第 39 條與第 40 條
 按日加倍發給而不是按小時計費，而系統沒有國定假日日曆，判定不了某一天屬於哪一種。
 週六與週日一律當休息日，與休假時數的假設同一套；法遵檢核把這一塊列為未檢查。
+
+### 撤回與撤銷
+
+休假單與加班申請原本只有一條路：待簽核到核准或駁回。改期的人只能請簽核者「駁回」當作
+取消，本人的紀錄上留下一張已駁回；核准錯了（例如特休超過額度）則沒有任何辦法，那張單
+照樣進薪資。現在的狀態轉移：
+
+| 從 | 到 | 操作 | 誰 |
+|---|---|---|---|
+| `pending` | `approved`／`rejected` | `decide_*` | 持有 `manage_hr` 的人 |
+| `pending` | `withdrawn` | `withdraw_my_*` | 申請人本人 |
+| `approved` | `revoked` | `revoke_*` | 持有 `manage_hr` 的人，理由必填 |
+
+**兩個狀態，不是一個 `cancelled`**：撤回的是還沒人決定過的單，`decided_at` 維持
+NULL；撤銷的是一個核准，原本的核准留在 `decided_*`，誰、何時、為什麼撤銷寫在
+`cancelled_by`／`cancelled_role`／`cancelled_at`／`cancel_reason`。兩條 CHECK 把欄位
+與狀態綁在一起：`decided_at` 為 NULL 恰好是待簽核或已撤回，`cancelled_at` 有值恰好是
+已撤回或已撤銷。回應裡四欄合成一個 `cancelled` 物件，沒撤的單是 `null`。**撤回與撤銷
+都不能復原**，同一段時間要重新申請，拿到新的單號；排除約束只看待簽核與已核准，所以
+重送不會被原本那張擋住。
+
+**撤回是自助操作**，輸入只有單號與選填的理由，所屬員工由 `ctx.employee_id` 決定並寫進
+`UPDATE` 的 `WHERE`，別人的單號回「查無休假單」——拒絕會確認那個編號存在。
+**已核准的單本人撤不回**，訊息指向人資：核准之後那張單已經是薪資的輸入。
+
+**撤銷沿用核准的職責分離**：申請人不得撤銷本人的單（撤銷一張事假等於不扣那天的工資），
+`deciding_as(ctx)` 交給 store，公司設定 `owner_self_decide` 開著時負責人例外。拒絕訊息
+由 `own_revoke_refusal` 依角色組，負責人指向「基礎設定」；其他角色只說要由另一個帳號
+撤銷——那張單是別人核准的，第二個帳號一定存在。
+
+**計薪之後不改**：核准與撤銷都會改變薪資讀到的東西，所以讀過這張單的薪資作業只要有
+一期還在，兩者都拒絕。駁回不改變任何薪資讀到的東西，照常可以做——列表因此另回
+`can_approve`／`approve_blocked_reason`，畫面在已計算的期別只畫駁回鈕，核准的位置印原因。
+
+- 加班：加班日所在的那一期（`overtime_payroll_span`）。
+- 休假：單據碰到的每一個月，**一直到最後一天所在年度的 12 月**（`leave_payroll_span`）。
+  病假的 30 日與生理假的 3 日按曆年從 1/1 起算，`run_payroll` 讀當年 1/1 起的休假單，
+  所以 11 月的薪資也讀過 3 月的病假；只看 3 月會讓已經算好的 11 月與它讀過的資料不一致。
+  期別通常依序計算，前一期沒算、後一期已算的情形少見，這條範圍在那時才多擋一些。
+
+擋下的訊息分兩種（`payroll_blocker`，動作是「核准」或「撤銷」）：該期傳票都還是待過帳
+時，說「{期別} 已計算薪資，{動作}前請先到「薪資作業」作廢」——作廢、核准或撤銷、重新計算；
+有任何一張已過帳時，說「{期別} 的薪資已過帳，無法{動作}；差額請在下一期補發或補扣」，與
+`void_payroll_run` 的拒絕同一句出路，不把人送去另一個必定拒絕的畫面。列表的
+`approve_blocked_reason`／`revoke_blocked_reason` 由同一個函式產生，畫面印的就是按下去
+會收到的那一句。
+
+**決定、撤銷與計薪互斥**：`run_payroll` 在寫入的交易之外讀休假與加班，核准或撤銷可能剛好
+落在讀與寫之間。三方因此共用一把交易層級的 advisory lock（`PAYROLL_INPUT_LOCK_KEY`）：
+`decide_*`（核准時）與 `revoke_*` 先以 `FOR UPDATE` 鎖住單據、再拿這把鎖才去找已計算的
+期別；`record_payroll_run` 在寫入的交易開頭拿這把鎖，比對當下已核准的單號與這次算進去的
+（`leave_span`／`leave_nos`、`overtime_span`／`overtime_nos`，`confirm_priced_requests`）。
+先提交的那一方，後者一定看得到：決定或撤銷先提交，計薪回「{單號} 在計算期間被核准或撤銷，
+請重新計算本期薪資」且什麼都不寫；計薪先提交，核准與撤銷照常被擋下。比的是整個集合而不是
+鎖住讀到的那幾列：計薪讀完之後才送出又被核准的單，它根本沒讀到，鎖不住。測試是
+`requests_are_taken_back_until_payroll_reads_them` 的最後兩段，用另一條連線拿著同一把鎖把
+撤銷與核准停在未提交，等計薪卡在鎖上再放行。
+
+兩位主管同時決定同一張單，第二位等第一位提交，再讀到已決定的狀態被拒；拒絕訊息說出
+目前的狀態（「已為「已駁回」，只有等簽核的單可以簽核」），不印內部代碼。
+
+**「還佔著時數」只有一個判斷**：`holds_hours(status)`（待簽核或已核准）。逐日明細掛假
+（`mark_days`）、每月加班上限的累計（`committed_overtime_hours`）與送出前的重疊預查
+都用這一條，與排除約束的 `WHERE` 是同一組狀態。計薪與特休已休天數本來就只認已核准。
+
+撤回與撤銷四個操作對 AI 預設關閉。
 
 ### 補登申請
 
@@ -2296,7 +2367,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 
 **每一天都說得出它是什麼：出勤、請假、非工作日或曠職**（`mark_days`）。原本員工端的
 曠職日、端午節與已准事假是三列一模一樣的空白，人資端的明細則直接沒有那一天。
-`mark_days` 在 `month_days` 之上掛上碰到該日的休假單（待簽核與已核准，駁回的不算）與
+`mark_days` 在 `month_days` 之上掛上碰到該日的休假單（待簽核與已核准，駁回、撤回與撤銷的不算）與
 該日的請假時數，並標出曠職：工作日曆說是工作日、已經過完、沒有任何打卡、也沒有休假單。
 **待簽核的單與審核中的補登也擋掉曠職**——准不准是簽核的人要回答的問題，先標曠職等於
 替他回答；送了補登就是本人說那天有到。
@@ -2369,8 +2440,10 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`、`schedule`，以及表單預設日期 `next_workday`（今天起第一個工作日，依工作日曆） |
 | `preview_leave` | ReadOnly | `{ from_at, to_at }` | `{ hours, days, off_days }`；與 `request_leave` 共用 `leave_worth`，送出前顯示的就是會存下的數字 |
 | `request_leave` | NeedsConfirm | `{ kind, from_at, to_at, reason? }` | `{ request, schedule }`，編號 `LV{西元年月}-{三碼}`；時數與天數由後端算 |
+| `withdraw_my_leave_request` | NeedsConfirm | `{ leave_no, reason? }` | `{ request }`；只收本人仍在等簽核的單，別人的單號回查無此單 |
 | `list_my_overtime_requests` | ReadOnly | `{}` | 本人加班單、本月已核准時數、上限與尚可申請時數、`day_types`、`calendar`（日別與星期推得的不同的日期，畫面據以顯示加班日） |
 | `submit_my_overtime_request` | NeedsConfirm | `{ from_at, to_at, reason? }` | `{ request }`，編號 `OT{西元年月}-{三碼}`；時數為區間長度扣掉休息時間，日別由工作日曆決定 |
+| `withdraw_my_overtime_request` | NeedsConfirm | `{ request_no, reason? }` | `{ request }`；只收本人仍在等簽核的單，別人的單號回查無此單 |
 | `list_my_expense_claims` | ReadOnly | `{}` | 本人送出的報支與逐關進度 |
 | `submit_my_expense_claim` | NeedsConfirm | `{ title, amount, spent_on?, pay_method?, memo? }` | `{ claim }`，編號 `EX{西元年月}-{三碼}` |
 | `attach_my_expense_receipt` | NeedsConfirm | `{ claim_no, file_name, content_base64 }` | `{ receipt, receipts }`，收據進 RustFS |
@@ -2389,7 +2462,9 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 `ops/selfservice.rs` 的 `no_self_service_input_can_select_another_employee`
 測試把每一個自助操作的 `Input` 屬性集合**逐字釘死**（`request_leave` 只有
 `kind`／`from_at`／`to_at`／`reason`，`submit_my_overtime_request` 只有
-`from_at`／`to_at`／`reason`——日別由工作日曆決定，申請人填不進來，`submit_my_expense_claim` 只有
+`from_at`／`to_at`／`reason`——日別由工作日曆決定，申請人填不進來，
+`withdraw_my_leave_request`／`withdraw_my_overtime_request` 只有單號與 `reason`——
+單號指向的單屬於某個人，所以員工寫進 `WHERE`，`submit_my_expense_claim` 只有
 `title`／`amount`／`spent_on`／`pay_method`／`memo`，`punch_clock` 只有
 `kind`／`note`，`list_my_punches` 只有 `month`——那是期別不是人——其餘四個是
 空集合），另加一份

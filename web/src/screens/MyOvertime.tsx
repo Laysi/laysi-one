@@ -4,28 +4,58 @@ import {
   callOp,
   money,
   myOvertimeList,
+  myOvertimeWithdrawal,
   OpFailed,
   trimDecimal,
   wallSpan,
   type MyOvertimeList,
+  type OvertimeRequestRow,
 } from '../api/client';
 import type { ScreenId } from '../nav';
+import { useCurrentUser } from '../auth';
+import { CancelledHint } from '../components/CancelledHint';
 import { RulesetNote } from '../components/RulesetNote';
+import { TakeBackModal } from '../components/TakeBackModal';
 
 interface Props {
   onGo: (screen: ScreenId) => void;
+  onToast: (msg: string) => void;
+  onChanged: () => void;
   reloadKey: number;
 }
 
 function statusTag(status: string): string {
   if (status === 'rejected') return 'tag tag--bad tag--static';
   if (status === 'approved') return 'tag tag--static';
+  if (status === 'withdrawn' || status === 'revoked') return 'tag tag--pale tag--static';
   return 'tag tag--warn tag--static';
 }
 
-export function MyOvertime({ onGo, reloadKey }: Props) {
+export function MyOvertime({ onGo, onToast, onChanged, reloadKey }: Props) {
   const [data, setData] = useState<MyOvertimeList | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [asking, setAsking] = useState<OvertimeRequestRow | null>(null);
+  const [busy, setBusy] = useState(false);
+  const canWithdraw = useCurrentUser().permissions.includes('withdraw_my_overtime_request');
+
+  async function withdraw(r: OvertimeRequestRow, reason: string) {
+    setBusy(true);
+    try {
+      await callOp(
+        'withdraw_my_overtime_request',
+        { request_no: r.request_no, ...(reason ? { reason } : {}) },
+        `撤回加班申請 ${r.request_no}`,
+        myOvertimeWithdrawal,
+      );
+      onToast(`${r.request_no} 已撤回`);
+      setAsking(null);
+      onChanged();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     let live = true;
@@ -134,8 +164,17 @@ export function MyOvertime({ onGo, reloadKey }: Props) {
                         {r.decision_note && ` · ${r.decision_note}`}
                       </span>
                     )}
+                    {r.cancelled && <CancelledHint cancelled={r.cancelled} />}
                     {r.status === 'pending' && (
                       <span className="cell-hint cell-hint--block">待主管簽核</span>
+                    )}
+                    {r.status === 'pending' && canWithdraw && (
+                      <button
+                        className="btn btn--compact btn--secondary"
+                        onClick={() => setAsking(r)}
+                      >
+                        撤回
+                      </button>
                     )}
                   </td>
                 </tr>
@@ -151,6 +190,20 @@ export function MyOvertime({ onGo, reloadKey }: Props) {
           </table>
         </div>
       </section>
+
+      {asking && (
+        <TakeBackModal
+          title="撤回加班申請"
+          subtitle={`${asking.request_no} · ${asking.day_type_label} · ${wallSpan(asking.from_at, asking.to_at)}`}
+          warning="撤回後無法復原，同一段時間要加班請重新申請。"
+          reasonLabel="理由（選填）"
+          reasonRequired={false}
+          confirmLabel="確認撤回"
+          busy={busy}
+          onConfirm={(reason) => void withdraw(asking, reason)}
+          onCancel={() => setAsking(null)}
+        />
+      )}
 
       <RulesetNote items={[{ label: '加班費', source: data.ruleset.source_note }]} />
     </div>

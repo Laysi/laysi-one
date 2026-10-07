@@ -1893,6 +1893,14 @@ export const annualLeaveBalance = z.object({
 });
 export type AnnualLeaveBalance = z.infer<typeof annualLeaveBalance>;
 
+export const cancellation = z.object({
+  by: z.string(),
+  role: z.string(),
+  at: z.string(),
+  reason: z.string(),
+});
+export type Cancellation = z.infer<typeof cancellation>;
+
 export const leaveRequestRow = z.object({
   leave_no: z.string(),
   emp_no: z.string(),
@@ -1913,11 +1921,16 @@ export const leaveRequestRow = z.object({
   decided_role: z.string(),
   decided_at: z.string().nullable(),
   decision_note: z.string(),
+  cancelled: cancellation.nullable(),
   created_at: z.string(),
   created_by: z.string(),
   annual_leave: annualLeaveBalance.nullable(),
   can_decide: z.boolean().optional(),
   decide_blocked_reason: z.string().nullable().optional(),
+  can_approve: z.boolean().optional(),
+  approve_blocked_reason: z.string().nullable().optional(),
+  can_revoke: z.boolean().optional(),
+  revoke_blocked_reason: z.string().nullable().optional(),
 });
 export type LeaveRequestRow = z.infer<typeof leaveRequestRow>;
 
@@ -2364,6 +2377,7 @@ export const myLeaveRequest = z.object({
   decided_role: z.string(),
   decided_at: z.string().nullable(),
   decision_note: z.string(),
+  cancelled: cancellation.nullable(),
   created_at: z.string(),
   created_by: z.string(),
 });
@@ -2485,10 +2499,15 @@ export const overtimeRequestRow = z.object({
   decided_role: z.string(),
   decided_at: z.string().nullable(),
   decision_note: z.string(),
+  cancelled: cancellation.nullable(),
   created_at: z.string(),
   created_by: z.string(),
   can_decide: z.boolean().optional(),
   decide_blocked_reason: z.string().nullable().optional(),
+  can_approve: z.boolean().optional(),
+  approve_blocked_reason: z.string().nullable().optional(),
+  can_revoke: z.boolean().optional(),
+  revoke_blocked_reason: z.string().nullable().optional(),
 });
 export type OvertimeRequestRow = z.infer<typeof overtimeRequestRow>;
 
@@ -2605,6 +2624,20 @@ export const myLeaveResult = z.object({
   scope_note: z.string(),
 });
 export type MyLeaveResult = z.infer<typeof myLeaveResult>;
+
+export const myLeaveWithdrawal = z.object({
+  request: myLeaveRequest,
+  scope_note: z.string(),
+});
+
+export const myOvertimeWithdrawal = z.object({
+  request: overtimeRequestRow,
+  scope_note: z.string(),
+});
+
+export const leaveRevocation = z.object({ request: leaveRequestRow });
+
+export const overtimeRevocation = z.object({ request: overtimeRequestRow });
 
 export const leavePreview = z.object({
   hours: z.string(),

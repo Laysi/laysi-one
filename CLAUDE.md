@@ -247,10 +247,10 @@ workspace**：它多租戶、經銷商與代理商在那裡開立啟動金鑰，
 `post_voucher` 走這條路徑；直接插入 `status='posted'` 的傳票會被 trigger 擋下。
 
 **第四條的三個細節**：時段是半開區間，所以前一張到 18:00、後一張從 18:00 開始不算
-重疊；**被駁回的單不在約束範圍內**（`WHERE status <> 'rejected'`），同一段日期被駁回
-之後可以重送；相等欄位與範圍要放進同一個 GiST 索引，所以 0001 開頭啟用 `btree_gist`。
-PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收 `WHERE`**，那會讓駁回過的單也
-擋住重送，所以這裡用排除約束。`create_leave_request`／`create_overtime_request` 在寫入
+重疊；**只有待簽核與已核准的單在約束範圍內**（`WHERE status IN ('pending', 'approved')`），
+同一段日期被駁回、撤回或撤銷之後可以重送；相等欄位與範圍要放進同一個 GiST 索引，所以
+0001 開頭啟用 `btree_gist`。PostgreSQL 18 的 `WITHOUT OVERLAPS` 寫起來較短但**不收
+`WHERE`**，那會讓駁回過的單也擋住重送，所以這裡用排除約束。`create_leave_request`／`create_overtime_request` 在寫入
 前先查一次，那一步只決定錯誤訊息說什麼，保證來自約束本身。
 
 ## 慣例
@@ -392,7 +392,7 @@ skill，本節只定政策；兩者衝突時以本節為準（內文格式用下
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
-RustFS 物件儲存，以及 **37 個畫面、139 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、143 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -939,6 +939,19 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 那兩種日子按日加倍發給，而規則庫沒有國定假日日曆，判定不了某一天屬於哪一種；週六與
 週日一律當休息日，與休假時數的假設同一套。打卡推導出的加班仍然只有時數。
 
+**休假與加班撤得回來，但只到計薪為止**：本人撤回等簽核的單（`withdraw_my_*` →
+`withdrawn`），持有 `manage_hr` 的人撤銷已核准的單（`revoke_*` → `revoked`，理由必填，
+申請人不得撤銷本人的單，例外同 `owner_decides_own`）。**兩個狀態不合併**：撤回時
+`decided_at` 仍是 NULL，撤銷保留原本的核准，撤銷者另寫在 `cancelled_*`。**讀過那張單的
+薪資作業還在，核准與撤銷都拒絕**（駁回照常）：加班看加班日那一期，休假看碰到的月份一直到
+當年 12 月——病假與生理假按曆年累計，後面的期別也讀過它。拒絕訊息由 store 的
+`payroll_blocker` 產生，清單的 `approve_blocked_reason`／`revoke_blocked_reason` 是同一句；
+已過帳的期別另說「差額請在下一期補發或補扣」，不指向作廢。計薪在交易外讀單據，所以核准、
+撤銷與 `record_payroll_run` 共用 advisory lock `PAYROLL_INPUT_LOCK_KEY`，計薪寫入前在鎖內
+比對已核准的單號集合——先提交的那方，另一方一定看得到。「還佔著時數」一律問
+`holds_hours()`（待簽核或已核准），與排除約束同一組狀態，**不要再寫 `status <> 'rejected'`**。
+加班核准後狀態顯示「已核准」，休假是「已准假」（`overtime_status_label`／`leave_status_label`）。
+
 **底薪 0 表示尚未設定，不是不給薪**（CHECK 是 `base_salary >= 0`）。人先存在，薪資
 之後才談定；該擋的地方在計薪，`run_payroll` 遇到 0 底薪回「尚未設定底薪」而不是發出
 0 元薪資單。**`create_user_account` 一定會有一筆員工主檔，
@@ -1050,7 +1063,7 @@ CHECK 把不變量釘住；同一個時區常數是 `laysi_domain::BUSINESS_UTC_
 `get_hr_compliance` 的 `checked` 與 `passed` 是兩件事，沒收錄的規則一律
 `checked = false` 並附 `not_checked_reason`。
 
-**員工自助的授權靠輸入形狀，不靠 `Risk`**：十二個自助操作**都不接受任何指定
+**員工自助的授權靠輸入形狀，不靠 `Risk`**：自助操作**都不接受任何指定
 對象的參數**，對象由可信 session 的 `ctx.employee_id` 決定。`selfservice.rs` 的
 `no_self_service_input_can_select_another_employee` 把每個操作的 `Input` 欄位集合
 逐字釘死：**加任何一個欄位都會讓測試紅**。`submit_my_expense_claim` 之所以不共用

@@ -1182,6 +1182,17 @@ impl Operation for RunPayroll {
         );
 
         let note = i.note.clone().unwrap_or_else(|| v.sentence());
+        // What this run priced, so the write can confirm nothing was approved
+        // or revoked in the meantime.
+        let leave_nos: Vec<String> = leaves
+            .iter()
+            .filter(|l| l.status == "approved")
+            .map(|l| l.leave_no.clone())
+            .collect();
+        let overtime_nos: Vec<String> = approved_overtime
+            .iter()
+            .map(|o| o.request_no.clone())
+            .collect();
 
         let run = ctx
             .store
@@ -1200,6 +1211,10 @@ impl Operation for RunPayroll {
                 partial_month_version: &v.partial_month,
                 note: &note,
                 actor: &ctx.actor,
+                leave_span: (year_start, to),
+                leave_nos: &leave_nos,
+                overtime_span: (from, to),
+                overtime_nos: &overtime_nos,
             })
             .await?;
 
@@ -1680,6 +1695,7 @@ mod tests {
             decided_role: String::new(),
             decided_at: None,
             decision_note: String::new(),
+            cancelled: None,
             created_at: Utc::now(),
             created_by: String::new(),
         }

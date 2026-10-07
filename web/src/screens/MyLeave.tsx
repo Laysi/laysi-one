@@ -3,28 +3,58 @@ import {
   businessDate,
   callOp,
   myLeaveList,
+  myLeaveWithdrawal,
   OpFailed,
   trimDecimal,
   wallSpan,
   type MyLeaveList,
+  type MyLeaveRequest,
 } from '../api/client';
 import type { ScreenId } from '../nav';
+import { useCurrentUser } from '../auth';
+import { CancelledHint } from '../components/CancelledHint';
 import { RulesetNote } from '../components/RulesetNote';
+import { TakeBackModal } from '../components/TakeBackModal';
 
 interface Props {
   onGo: (screen: ScreenId) => void;
+  onToast: (msg: string) => void;
+  onChanged: () => void;
   reloadKey: number;
 }
 
 function statusTag(status: string): string {
   if (status === 'rejected') return 'tag tag--bad tag--static';
   if (status === 'approved') return 'tag tag--static';
+  if (status === 'withdrawn' || status === 'revoked') return 'tag tag--pale tag--static';
   return 'tag tag--warn tag--static';
 }
 
-export function MyLeave({ onGo, reloadKey }: Props) {
+export function MyLeave({ onGo, onToast, onChanged, reloadKey }: Props) {
   const [data, setData] = useState<MyLeaveList | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [asking, setAsking] = useState<MyLeaveRequest | null>(null);
+  const [busy, setBusy] = useState(false);
+  const canWithdraw = useCurrentUser().permissions.includes('withdraw_my_leave_request');
+
+  async function withdraw(r: MyLeaveRequest, reason: string) {
+    setBusy(true);
+    try {
+      await callOp(
+        'withdraw_my_leave_request',
+        { leave_no: r.leave_no, ...(reason ? { reason } : {}) },
+        `撤回休假單 ${r.leave_no}`,
+        myLeaveWithdrawal,
+      );
+      onToast(`${r.leave_no} 已撤回`);
+      setAsking(null);
+      onChanged();
+    } catch (e) {
+      onToast(e instanceof OpFailed ? e.error.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     let live = true;
@@ -129,8 +159,17 @@ export function MyLeave({ onGo, reloadKey }: Props) {
                         {r.decision_note && ` · ${r.decision_note}`}
                       </span>
                     )}
+                    {r.cancelled && <CancelledHint cancelled={r.cancelled} />}
                     {r.status === 'pending' && (
                       <span className="cell-hint cell-hint--block">待主管簽核</span>
+                    )}
+                    {r.status === 'pending' && canWithdraw && (
+                      <button
+                        className="btn btn--compact btn--secondary"
+                        onClick={() => setAsking(r)}
+                      >
+                        撤回
+                      </button>
                     )}
                   </td>
                 </tr>
@@ -145,6 +184,20 @@ export function MyLeave({ onGo, reloadKey }: Props) {
             </tbody>
           </table>
         </div>
+
+        {asking && (
+          <TakeBackModal
+            title="撤回休假單"
+            subtitle={`${asking.leave_no} · ${asking.kind_label} · ${wallSpan(asking.from_at, asking.to_at)}`}
+            warning="撤回後無法復原，同一段時間要休假請重新申請。"
+            reasonLabel="理由（選填）"
+            reasonRequired={false}
+            confirmLabel="確認撤回"
+            busy={busy}
+            onConfirm={(reason) => void withdraw(asking, reason)}
+            onCancel={() => setAsking(null)}
+          />
+        )}
 
         <p className="hint">{al.note}</p>
         <RulesetNote
