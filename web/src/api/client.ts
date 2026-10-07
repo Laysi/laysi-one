@@ -1806,6 +1806,8 @@ export const employeeRow = z.object({
   annual_leave_days: z.number(),
   annual_leave_taken: z.string(),
   annual_leave_left: z.string(),
+  annual_leave_from: z.string(),
+  annual_leave_to: z.string(),
   id_no: z.string(),
   base_salary: z.string(),
   labor_insured_salary: z.string(),
@@ -1890,6 +1892,8 @@ export const annualLeaveBalance = z.object({
   entitlement: z.string(),
   taken: z.string(),
   remaining: z.string(),
+  from_on: z.string(),
+  to_on: z.string(),
 });
 export type AnnualLeaveBalance = z.infer<typeof annualLeaveBalance>;
 
@@ -1946,7 +1950,6 @@ export const leaveRequestList = z.object({
   pending_count: z.number(),
   other_pending: z.number(),
   annual_leave_balances: z.array(leaveBalanceRow),
-  annual_leave_year: z.number(),
   annual_leave_ruleset: rulesetRef,
   annual_leave_quota_stored: z.boolean(),
   annual_leave_note: z.string(),
@@ -2349,11 +2352,7 @@ export const myProfile = z.object({
 });
 export type MyProfile = z.infer<typeof myProfile>;
 
-export const myAnnualLeave = z.object({
-  year: z.number(),
-  entitlement: z.string(),
-  taken: z.string(),
-  remaining: z.string(),
+export const myAnnualLeave = annualLeaveBalance.extend({
   ruleset: rulesetRef,
   quota_stored: z.boolean(),
   note: z.string(),

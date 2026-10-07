@@ -1774,6 +1774,33 @@ column，因此不可能與上面的區間不一致。
 是兩個並列的下限，互不涵蓋。時薪拿去比月薪下限必定不合格，月薪拿去比時薪下限則永遠
 合格——兩種寫法都讓那個檢核項目說不出任何事。
 
+**特休年度從到職日起算（週年制），額度與已休算同一段區間**。原本額度依到今天為止的
+年資取級距、已休卻依 `from_on` 的曆年加總，一過到職週年，上一年度用掉的天數就從新年度
+的額度裡扣，而員工照那個數字排假、人資照它核假。
+- **區間**：`laysi_regulation::annual_leave_year` 以年資月數回答 `[起, 迄)`——`annual_leave`
+  每個級距的月數與每個滿週年都是起點，所以未滿六個月是一段（額度 0）、六個月到一年是一段
+  （3 日），之後每滿一年一段。`ops/attendance.rs` 的 `annual_leave_year()` 換成日期，起日
+  與 `service_months()` 同一套曆法：月底到職而某個月沒有那一天時，從次月 1 日起算，名冊印的
+  年資與區間不差一天。額度仍以查詢當日的 `annual_leave` ruleset 計算；離職員工停在離職那天
+  所在的年度。
+- **已休**：只加總 `status = 'approved'` 的特休落在區間內的日期，撤回、撤銷與待簽核都不算。
+  跨區間的單由 `leave_by_date()` 拆開，與計薪攤日是同一個函式；天數存到兩位小數，所以每一段
+  取「區間結束時的累計值」減「區間開始前的累計值」（各自取兩位），相鄰兩段加起來恆等於單上
+  存的天數。
+- **拆法在送出當下定案**：`leave_request_day` 一張單一個日期一列，存那一天的上班秒數，與
+  `hours`／`days` 在同一個交易寫入（`WorkSchedule::leave_seconds_by_date`）。`leave_by_date()`
+  只讀這張表，不讀現行的上下班時間與工作日曆——原本每次讀取都依現行設定重拆，清掉上班時間
+  之後整張單落到第一天，跨週年的單就有一天從一個特休年度搬到另一個，計薪的期別也一樣會搬。
+  表建立之前的單由建表的那份 migration 依當時的上下班時間與工作日曆以 SQL 補寫，算法與
+  `leave_seconds_by_date` 相同（`tests/annual_leave_year.rs` 比對兩者）；那一刻每一天都沒有
+  上班時數的單沒有列，讀成整張落在第一天。工作日曆事後改動要不要改寫這張表由 #143 決定。
+- **四處同一個答案**：休假頁、名冊、個人專區／我的休假／休假申請、法遵檢核都走
+  `annual_balances()`／`annual_balance()`，同一人同一天回同一組數字，回應帶區間起訖
+  （`from_on`／`to_on`，名冊是 `annual_leave_from`／`annual_leave_to`），畫面印出區間。
+  休假頁上每張特休單附的是**該單開始那天**所在年度的餘額——週年之後才休的單比的是新年度。
+- **不在系統裡**：曆年制（公司選擇以曆年計算並按比例給予）與年度終結未休日數的折發或遞延；
+  `annual_leave` 的 `settlement` 只是說明。
+
 **特休不檢核兼職與時薪員工**：部分工時的特休按約定工時比例給予，而本系統沒有記錄
 約定工時。以全時額度去比，等於每一個兼職員工都通過。檢核項目照實把他們排除並在
 `scope_note` 說有幾位。
@@ -1788,12 +1815,12 @@ column，因此不可能與上面的區間不一致。
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）、應計期別尚未計算薪資的提醒與人資／財務銜接狀態 |
-| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`relations` 供眷屬的關係下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
+| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度與所在特休年度的起訖、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`relations` 供眷屬的關係下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_employee_documents` | ReadOnly | `{ emp_no }` | 該員工的附件清單與可用類型；內容要另外取回 |
 | `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
 | `get_employee_document` | ReadOnly | `{ emp_no, doc_no, version?, include_content? }` | 重算雜湊比對；不屬於這位員工的編號回查無此附件 |
 | `create_employee_login` | NeedsConfirm | `{ emp_no, email }` | 角色固定一般職員；`{ username, role_name, temporary_password }` |
-| `list_leave_requests` | ReadOnly | `{ include_done?, limit?, month?, emp_no? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度；帶 `month`／`emp_no` 只回碰到該月或該員的單，`other_pending` 是沒列出的待簽核張數 |
+| `list_leave_requests` | ReadOnly | `{ include_done?, limit?, month?, emp_no? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度（含特休年度起訖），每張特休單另附該單開始那天所在年度的餘額；帶 `month`／`emp_no` 只回碰到該月或該員的單，`other_pending` 是沒列出的待簽核張數 |
 | `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }`；單據所在月份到當年年底之間有已計算薪資的期別時不能准假，駁回不受影響 |
 | `revoke_leave_request` | NeedsConfirm | `{ leave_no, reason }` | `{ request }`；只收已核准的單，理由必填；單據所在月份到當年年底之間有已計算薪資的期別時拒絕（見「撤回與撤銷」） |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
@@ -1883,8 +1910,8 @@ ruleset 的上限比較。
 
 **計薪讀已核准的休假單，給付比例在 `leave_pay`。** 原本 `compute_one` 只按曆日比例與
 打卡工時算，事假、病假照發全薪，而時薪員工的特休與病假一毛不給。現在每張已准的單
-依各日的上班時間比例分攤到它碰到的每一天——分攤的是單上存下的時數與天數，送出當下
-就定了——再由 `laysi_regulation::leave_paid_days` 依各日適用的 `leave_pay` 回答那一天
+依送出當下記下的各日上班時數比例（`leave_request_day`）分攤到它碰到的每一天——分攤的
+是單上存下的時數與天數，兩者與拆法都在送出當下定了——再由 `laysi_regulation::leave_paid_days` 依各日適用的 `leave_pay` 回答那一天
 付了幾天的工資。月薪制扣掉沒付的那一份，一日是月薪除以當月曆日，與到職當月按曆日
 比例計薪同一套；時薪制加上付了的那一份時數。每個假別各自四捨五入成一筆，寫進薪資單
 備註，所以備註加得起來等於本薪的變動。
@@ -2435,9 +2462,9 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 
 | name | risk | input | output 重點 |
 |---|---|---|---|
-| `get_my_home` | ReadOnly | `{}` | 本人基本資料（含眷屬的姓名、關係與投保期間，不含字號與生日）、年資、本月出勤、特休餘額、送出的單走到哪 |
+| `get_my_home` | ReadOnly | `{}` | 本人基本資料（含眷屬的姓名、關係與投保期間，不含字號與生日）、年資、本月出勤、特休餘額與特休年度起訖、送出的單走到哪 |
 | `list_my_payslips` | ReadOnly | `{}` | **只有本人的**薪資單 |
-| `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘、`leave_kinds`、`schedule`，以及表單預設日期 `next_workday`（今天起第一個工作日，依工作日曆） |
+| `list_my_leave_requests` | ReadOnly | `{}` | 本人請假單、特休額度／已休／剩餘與特休年度起訖、`leave_kinds`、`schedule`，以及表單預設日期 `next_workday`（今天起第一個工作日，依工作日曆） |
 | `preview_leave` | ReadOnly | `{ from_at, to_at }` | `{ hours, days, off_days }`；與 `request_leave` 共用 `leave_worth`，送出前顯示的就是會存下的數字 |
 | `request_leave` | NeedsConfirm | `{ kind, from_at, to_at, reason? }` | `{ request, schedule }`，編號 `LV{西元年月}-{三碼}`；時數與天數由後端算 |
 | `withdraw_my_leave_request` | NeedsConfirm | `{ leave_no, reason? }` | `{ request }`；只收本人仍在等簽核的單，別人的單號回查無此單 |

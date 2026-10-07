@@ -647,6 +647,9 @@ export function Employees({
                         <span className="cell-hint cell-hint--block num">
                           額度 {e.annual_leave_days} · 已休 {trimDecimal(e.annual_leave_taken)}
                         </span>
+                        <span className="cell-hint cell-hint--block num">
+                          {e.annual_leave_from} 起
+                        </span>
                       </td>
                       <td>
                         {e.status === 'active' ? (

@@ -46,6 +46,8 @@ const row = {
   annual_leave_days: 10,
   annual_leave_taken: "3",
   annual_leave_left: "7",
+  annual_leave_from: "2026-03-01",
+  annual_leave_to: "2027-02-28",
   id_no: "A123456789",
   base_salary: "80000",
   labor_insured_salary: "45800",

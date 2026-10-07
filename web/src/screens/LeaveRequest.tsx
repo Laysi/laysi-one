@@ -136,10 +136,13 @@ export function LeaveRequest({ onToast, onGo, reloadKey, onChanged }: Props) {
 
       <div className="stat-grid stat-grid--two">
         <div className="card stat-card">
-          <div className="stat-card__kicker">{al.year} 年特休餘額</div>
+          <div className="stat-card__kicker">特休餘額</div>
           <div className="stat-card__value num">{trimDecimal(al.remaining)}</div>
           <div className="stat-card__note num">
             日 · 額度 {trimDecimal(al.entitlement)}、已休 {trimDecimal(al.taken)}
+          </div>
+          <div className="stat-card__note num">
+            {al.from_on}～{al.to_on}
           </div>
         </div>
         <div className="card stat-card">

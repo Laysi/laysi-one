@@ -11,14 +11,15 @@
 //! The tool grant already promises as much, and a model has no filing errand
 //! that needs any of them.
 //!
-//! Annual leave entitlement is `annual_leave_days(ruleset, service_months)`,
-//! never stored; days taken are summed from `leave_request`.
+//! Annual leave entitlement and days taken come from
+//! [`annual_balances`], the same answer every screen gives; neither is stored.
 //!
 //! Each of the four HR-to-finance links on the dashboard carries an
 //! `implemented` flag: the ones that are wired report their evidence (voucher
 //! number, reconciliation result), the ones that are not state what is
 //! missing.
 
+use crate::ops::attendance::annual_balances;
 use crate::ops::documents::{
     document_json, human_size, kind_label, short_checksum, EMPLOYEE_KINDS, EMPLOYEE_LINK_TYPE,
 };
@@ -26,7 +27,6 @@ use crate::{money, parse, schema_of, Channel, OpCtx, OpError, OpOutcome, Operati
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::{Datelike, NaiveDate};
-use laysi_domain::Money;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES};
 use laysi_store::{EmployeeDependent, ReserveDocument};
 use schemars::JsonSchema;
@@ -436,7 +436,9 @@ impl Operation for ListEmployees {
         let rs = laysi_regulation::resolve("annual_leave", ctx.today)?;
         let labor = laysi_regulation::resolve("labor_insurance", ctx.today)?;
         let wage = laysi_regulation::resolve("minimum_wage", ctx.today)?;
-        let taken = ctx.store.annual_leave_taken(ctx.today.year()).await?;
+        let asks: Vec<(&laysi_store::Employee, NaiveDate)> =
+            staff.iter().map(|e| (e, ctx.today)).collect();
+        let balances = annual_balances(ctx, rs, &asks).await?;
         // The roster's own department picker. Reading it from list_dimensions
         // would put the roster behind a second permission, and that permission
         // also opens the settings screen.
@@ -454,14 +456,8 @@ impl Operation for ListEmployees {
         let mut months_total = 0u32;
         let mut active = 0usize;
 
-        for e in &staff {
+        for (e, annual) in staff.iter().zip(&balances) {
             let months = service_months(e.hired_on, ctx.today);
-            let quota = laysi_regulation::annual_leave_days(rs, months)?;
-            let used = taken
-                .iter()
-                .find(|(id, _)| *id == e.id)
-                .map(|(_, d)| *d)
-                .unwrap_or(Money::ZERO);
 
             if e.status != "left" {
                 active += 1;
@@ -496,9 +492,11 @@ impl Operation for ListEmployees {
                 "service_months": months,
                 "service_label": service_label(months),
                 // Leave entitlement is computed from the rules, not stored.
-                "annual_leave_days": quota,
-                "annual_leave_taken": used.to_string(),
-                "annual_leave_left": (Money::from(quota) - used).to_string(),
+                "annual_leave_days": annual.year.days,
+                "annual_leave_taken": annual.taken.to_string(),
+                "annual_leave_left": annual.remaining().to_string(),
+                "annual_leave_from": annual.year.from,
+                "annual_leave_to": annual.year.to,
                 // Masking is a display decision; the roster returns what is
                 // stored, and the screen decides whether to show it.
                 "id_no": e.id_no,
