@@ -382,6 +382,32 @@ async fn take_back(database_url: &str) -> anyhow::Result<()> {
         twice == format!("休假單 {late} 已為「已駁回」，只有等簽核的單可以簽核"),
         "{twice}"
     );
+    let late_overtime = no_of(
+        &run.ok(
+            &me,
+            "submit_my_overtime_request",
+            json!({ "from_at": "2026-10-15T18:00:00", "to_at": "2026-10-15T20:00:00" }),
+        )
+        .await?,
+        "request_no",
+    )?;
+    let refused = run
+        .refused(
+            &boss,
+            "decide_overtime_request",
+            json!({ "request_no": late_overtime, "approve": true }),
+        )
+        .await?;
+    ensure!(
+        refused == "2026-10 已計算薪資，核准前請先到「薪資作業」作廢",
+        "{refused}"
+    );
+    run.ok(
+        &boss,
+        "decide_overtime_request",
+        json!({ "request_no": late_overtime, "approve": false }),
+    )
+    .await?;
 
     run.ok(
         &boss,
