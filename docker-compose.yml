@@ -84,7 +84,7 @@ services:
   # RustFS: an S3-compatible object store written in Rust, holding scanned
   # documents and attachments. 9000 is the S3 API, 9001 the admin console.
   rustfs:
-    image: rustfs/rustfs:1.0.0-rc.3
+    image: rustfs/rustfs:1.0.1
     restart: unless-stopped
     environment:
       RUSTFS_VOLUMES: /data
