@@ -1245,23 +1245,53 @@ async function main() {
       return `${no} 撤回重送、核准、撤銷，同一段時間再送一次`;
     });
 
-    await check("L3", "單據所在期別已計算薪資時，核准被擋下並指向薪資作業，駁回照常", async () => {
+    await check("L3", "本期已有薪資單的人，核准被擋下並指向薪資作業，駁回照常；計薪之後才建檔的人照常核准與撤銷", async () => {
       const day = await workday(0, 2);
-      const leaveNo = await asNamesake(async () =>
-        (await must("request_leave", { kind: "personal", from_at: `${day}T09:00:00`, to_at: `${day}T12:00:00` }))
-          .request.leave_no,
-      );
-      const refused = await op("decide_leave_request", { leave_no: leaveNo, approve: true });
-      expect(!refused.ok, "已計薪的期別竟然核准得了");
-      expect(refused.error!.message.startsWith(day.slice(0, 7)), refused.error!.message);
-      const listed = await must("list_leave_requests", { month: day.slice(0, 7) });
-      const row = listed.requests.find((r: any) => r.leave_no === leaveNo);
-      expectEq(row.can_decide, true, "可以簽核");
-      expectEq(row.can_approve, false, "可以核准");
-      expectEq(row.approve_blocked_reason, refused.error!.message, "清單上的原因與拒絕訊息");
-      const rejected = await must("decide_leave_request", { leave_no: leaveNo, approve: false, note: "已計薪" });
-      expectEq(rejected.request.status, "rejected", "駁回後的狀態");
-      return refused.error!.message;
+      const month = day.slice(0, 7);
+      const morning = { kind: "personal", from_at: `${day}T09:00:00`, to_at: `${day}T12:00:00` };
+      const findRow = async (leaveNo: string) =>
+        (await must("list_leave_requests", { month })).requests.find((r: any) => r.leave_no === leaveNo);
+
+      // The namesake was put on the roster after this month was computed.
+      const unpaid = await asNamesake(async () => (await must("request_leave", morning)).request.leave_no);
+      const open = await findRow(unpaid);
+      expectEq(open.can_approve, true, "計薪之後才建檔的人可以核准");
+      expectEq(open.approve_blocked_reason, null, "計薪之後才建檔的人的原因");
+      await must("decide_leave_request", { leave_no: unpaid, approve: true });
+      await must("revoke_leave_request", { leave_no: unpaid, reason: "測試撤銷" });
+
+      // The owner (E001) holds a payslip of this month since H5. Deciding
+      // their own request takes owner_self_decide; the two sessions are
+      // swapped rather than signed in again, which the login rate limit
+      // refuses this late in the run.
+      const owner = cookie;
+      await login("admin", ADMIN_PASSWORD);
+      const admin = cookie;
+      cookie = owner;
+      const selfDecide = async (value: string) => {
+        cookie = admin;
+        try {
+          await must("update_company_setting", { code: "owner_self_decide", value });
+        } finally {
+          cookie = owner;
+        }
+      };
+      await selfDecide("可自行核決");
+      try {
+        const leaveNo = (await must("request_leave", morning)).request.leave_no;
+        const refused = await op("decide_leave_request", { leave_no: leaveNo, approve: true });
+        expect(!refused.ok, "已計薪的期別竟然核准得了");
+        expect(refused.error!.message.startsWith(month), refused.error!.message);
+        const row = await findRow(leaveNo);
+        expectEq(row.can_decide, true, "可以簽核");
+        expectEq(row.can_approve, false, "可以核准");
+        expectEq(row.approve_blocked_reason, refused.error!.message, "清單上的原因與拒絕訊息");
+        const rejected = await must("decide_leave_request", { leave_no: leaveNo, approve: false, note: "已計薪" });
+        expectEq(rejected.request.status, "rejected", "駁回後的狀態");
+        return `${unpaid} 核准並撤銷 · ${refused.error!.message}`;
+      } finally {
+        await selfDecide("由他人簽核");
+      }
     });
 
     console.log("\nD 文件下載連結");

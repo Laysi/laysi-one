@@ -1821,11 +1821,11 @@ column，因此不可能與上面的區間不一致。
 | `get_employee_document` | ReadOnly | `{ emp_no, doc_no, version?, include_content? }` | 重算雜湊比對；不屬於這位員工的編號回查無此附件 |
 | `create_employee_login` | NeedsConfirm | `{ emp_no, email }` | 角色固定一般職員；`{ username, role_name, temporary_password }` |
 | `list_leave_requests` | ReadOnly | `{ include_done?, limit?, month?, emp_no? }` | 請假單與依 `annual_leave` ruleset 現算的逐人額度（含特休年度起訖），每張特休單另附該單開始那天所在年度的餘額；帶 `month`／`emp_no` 只回碰到該月或該員的單，`other_pending` 是沒列出的待簽核張數 |
-| `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }`；單據所在月份到當年年底之間有已計算薪資的期別時不能准假，駁回不受影響 |
-| `revoke_leave_request` | NeedsConfirm | `{ leave_no, reason }` | `{ request }`；只收已核准的單，理由必填；單據所在月份到當年年底之間有已計算薪資的期別時拒絕（見「撤回與撤銷」） |
+| `decide_leave_request` | NeedsConfirm | `{ leave_no, approve, note? }` | `{ request, action }`；單據所在月份到當年年底之間，申請人在任一期已有薪資單時不能准假，駁回不受影響 |
+| `revoke_leave_request` | NeedsConfirm | `{ leave_no, reason }` | `{ request }`；只收已核准的單，理由必填；單據所在月份到當年年底之間，申請人在任一期已有薪資單時拒絕（見「撤回與撤銷」） |
 | `list_overtime_requests` | ReadOnly | `{ month?, include_done? }` | 加班申請、逐人本月已核准時數與加班費，加班費現算 |
-| `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }`；加班日所在期別已計算薪資時不能核准，駁回不受影響 |
-| `revoke_overtime_request` | NeedsConfirm | `{ request_no, reason }` | `{ request }`；只收已核准的單，理由必填；加班日所在期別已計算薪資時拒絕 |
+| `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }`；申請人在加班日所在期別已有薪資單時不能核准，駁回不受影響 |
+| `revoke_overtime_request` | NeedsConfirm | `{ request_no, reason }` | `{ request }`；只收已核准的單，理由必填；申請人在加班日所在期別已有薪資單時拒絕 |
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額；`next_period` 是尚未計算的應計期別，算過就是 `null` |
 | `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳；重算用薪資單存下的 `health_dependents` 與投保期間（`insured_from`／`insured_to`），不用現在的眷屬名單與離職日 |
 | `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；`period` 不帶時為應計期別；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents`；到職與離職當月勞保、勞退按日計，月中離職健保不收，投保期間存進 `payslip.insured_from`／`insured_to` |
@@ -2322,10 +2322,19 @@ NULL；撤銷的是一個核准，原本的核准留在 `decided_*`，誰、何�
   所以 11 月的薪資也讀過 3 月的病假；只看 3 月會讓已經算好的 11 月與它讀過的資料不一致。
   期別通常依序計算，前一期沒算、後一期已算的情形少見，這條範圍在那時才多擋一些。
 
+**「讀過」看的是申請人本人在那一期有沒有薪資單**（`PayrollPeriodState.paid`，該期每一次
+計算的薪資單合起來），不是那一期有沒有算過。計薪之後才建檔的人、第一次計算被跳過的人（例如
+時薪制當時還沒有完整打卡），那一期沒有任何一次計算讀過這些人的單；同一期的下一次計算補發時
+才讀，所以這些人的單照常核准與撤銷，已過帳的期別也一樣——補算是那裡唯一的路。補發之後，
+同一條規則對這些人生效。只看期別有沒有算過的話，補發出來的薪資單會少掉加班費、不扣請假的
+工資，而唯一的修法是把整期連同其他人一起作廢，已過帳的期別連作廢都不行。
+
 擋下的訊息分兩種（`payroll_blocker`，動作是「核准」或「撤銷」）：該期傳票都還是待過帳
 時，說「{期別} 已計算薪資，{動作}前請先到「薪資作業」作廢」——作廢、核准或撤銷、重新計算；
 有任何一張已過帳時，說「{期別} 的薪資已過帳，無法{動作}；差額請在下一期補發或補扣」，與
-`void_payroll_run` 的拒絕同一句出路，不把人送去另一個必定拒絕的畫面。列表的
+`void_payroll_run` 的拒絕同一句出路，不把人送去另一個必定拒絕的畫面。過帳看的是整期而不是
+申請人那一次計算：作廢一次拿掉該期每一次計算，補發那一次的傳票還是待過帳，前一次已過帳就作廢
+不了。列表的
 `approve_blocked_reason`／`revoke_blocked_reason` 由同一個函式產生，畫面印的就是按下去
 會收到的那一句。
 
