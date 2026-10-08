@@ -696,6 +696,13 @@ domain，30 不進 Rust），在取整之前乘；健保看月底——月中到
 才寫資料庫；取回時一定重算雜湊比對，對不上就不交出內容。**沒有 OCR**——`ocr_status`
 整欄已經刪掉，它是由 MIME 型別推出來、沒有任何判斷讀它的常數。
 
+**文件 bucket 每次啟動都固定為 `strict` 存檔模式**（`ObjectStore::ensure_bucket`，每個
+行程第一次呼叫時）：RustFS 的 `relaxed` 回 200 時 `xl.meta` 還沒落盤，單機斷電會永久遺失
+已確認的版本，而 rc.2 起新建的 bucket 預設就是它，升級不會改回來。寫在 bucket 上，不清掉
+bucket 的值去跟隨全域預設——那個預設改過兩次。失敗不擋啟動也不擋上傳，之後的上傳每分鐘
+至多再試一次直到成功；`/healthz` 的管理員詳情以 `rustfs.durability` 回報。**不要在
+compose 另設 `RUSTFS_*_DURABILITY_MODE`**，同一件事會有兩個機制。
+
 **檔案走上傳連結，不走操作輸入**：base64 放在參數裡，AI 得逐字寫出整份檔案，1 MB
 就超過單次輸出上限。`request_upload_link` 發一條 10 分鐘、20 個檔的連結，檔案
 `POST` 到 `/v1/uploads/{secret}`（`/v1/auth/*` 之外第二個手寫路由，只寫暫存區），

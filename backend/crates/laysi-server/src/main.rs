@@ -29,6 +29,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use laysi_ops::{OpCtx, Registry};
+use laysi_store::storage::STRICT_DURABILITY;
 use laysi_store::{ObjectStore, Store};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -347,6 +348,10 @@ async fn main() -> anyhow::Result<()> {
     // document module does. A failed connection logs a warning and both
     // `/healthz` and the document screen report it, rather than stopping the
     // whole system for the sake of attachments.
+    //
+    // The same call pins the bucket to strict durability, and failing that
+    // does not refuse the boot either: uploads retry it, and `/healthz`
+    // reports the mode.
     let objects = match ObjectStore::from_env() {
         Ok(o) => {
             match o.ensure_bucket().await {
@@ -585,6 +590,9 @@ async fn healthz(State(s): State<Shared>, headers: HeaderMap) -> Response {
     if admin_session(&s, &headers).await {
         body["db"] = json!({ "ok": db_ok, "migration": migration });
         body["rustfs"] = rustfs;
+        if let Some(objects) = &s.objects {
+            body["rustfs"]["durability"] = probe_durability(objects).await;
+        }
         body["operations"] = json!(s.registry.len());
     }
 
@@ -638,6 +646,23 @@ async fn probe_rustfs(s: &Shared) -> Value {
         "error": h.error,
         "probe": "s3:ListBuckets",
     })
+}
+
+/// The bucket's durability mode, asked live rather than remembered from
+/// startup: the RustFS console can change it afterwards, and a pin that
+/// failed at startup should show as failed until it is not.
+async fn probe_durability(objects: &ObjectStore) -> Value {
+    match objects.durability().await {
+        Ok(mode) => json!({
+            "mode": mode,
+            "pinned": mode.as_deref() == Some(STRICT_DURABILITY),
+        }),
+        Err(e) => json!({
+            "mode": null,
+            "pinned": false,
+            "error": e.to_string(),
+        }),
+    }
 }
 
 async fn meta(State(s): State<Shared>, headers: HeaderMap) -> Response {
