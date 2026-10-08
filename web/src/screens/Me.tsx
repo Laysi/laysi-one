@@ -57,7 +57,10 @@ export function Me({ onGo, reloadKey }: Props) {
           <div className="stat-card__kicker">特休餘額</div>
           <div className="stat-card__value num">{trimDecimal(al.remaining)}</div>
           <div className="stat-card__note num">
-            日 · {al.year} 年額度 {trimDecimal(al.entitlement)}、已休 {trimDecimal(al.taken)}
+            日 · 額度 {trimDecimal(al.entitlement)}、已休 {trimDecimal(al.taken)}
+          </div>
+          <div className="stat-card__note num">
+            {al.from_on}～{al.to_on}
           </div>
         </div>
         <div className="card stat-card">

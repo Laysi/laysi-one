@@ -10,8 +10,10 @@
 //! answer to "was this person late" is *not asked*, not "no".
 //!
 //! The database stores only approved annual leave days. The entitlement is
-//! derived from the `annual_leave` ruleset and completed months of service;
-//! for departed employees service stops at the termination date.
+//! derived from the `annual_leave` ruleset and completed months of service,
+//! and belongs to an annual leave year counted from the hire date
+//! ([`annual_leave_year`]); days taken are the approved days on that year's
+//! dates. For departed employees service stops at the termination date.
 //!
 //! [`DecideLeaveRequest`] does not read the status first at the operation
 //! layer. Whether the request is still pending is decided by the store during
@@ -30,7 +32,7 @@ use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
 use laysi_store::{
     leave_payroll_span, overtime_payroll_span, overtime_status_label, payroll_blocker,
-    AttendancePunch, LeaveRequest, OvertimeRequest, PayrollPeriodState, PunchCorrection,
+    AttendancePunch, Employee, LeaveRequest, OvertimeRequest, PayrollPeriodState, PunchCorrection,
 };
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
@@ -429,18 +431,38 @@ impl WorkSchedule {
     /// turns a range into hours and there is nothing to fall back on that
     /// would not amount to inventing a working day.
     pub fn leave_seconds(&self, from: NaiveDateTime, to: NaiveDateTime) -> Option<i64> {
+        Some(
+            self.leave_seconds_by_date(from, to)?
+                .iter()
+                .map(|(_, seconds)| seconds)
+                .sum(),
+        )
+    }
+
+    /// [`leave_seconds`](Self::leave_seconds) date by date, leaving out the
+    /// dates that contribute nothing. A request stores this when it is sent,
+    /// and the migration that added that table repeats the arithmetic in SQL
+    /// for the requests sent before it.
+    pub fn leave_seconds_by_date(
+        &self,
+        from: NaiveDateTime,
+        to: NaiveDateTime,
+    ) -> Option<Vec<(NaiveDate, i64)>> {
         let (starts_at, ends_at) = (self.starts_at?, self.ends_at?);
-        let mut total = 0;
+        let mut days = Vec::new();
         let mut day = from.date();
         while day <= to.date() {
             if self.day_kind(day).works() {
                 let open = day.and_time(starts_at).max(from);
                 let close = day.and_time(ends_at).min(to);
-                total += (close - open).num_seconds().max(0) - self.break_seconds(open, close);
+                let seconds = (close - open).num_seconds().max(0) - self.break_seconds(open, close);
+                if seconds > 0 {
+                    days.push((day, seconds));
+                }
             }
             day = day.succ_opt()?;
         }
-        Some(total)
+        Some(days)
     }
 
     pub fn json(&self) -> Value {
@@ -872,33 +894,186 @@ pub(crate) fn holds_hours(status: &str) -> bool {
     matches!(status, "pending" | "approved")
 }
 
-#[derive(Clone, Copy)]
-struct AnnualBalance {
-    entitlement: Money,
-    taken: Money,
+/// One date's part of a leave request.
+pub(crate) struct LeaveDate {
+    pub date: NaiveDate,
+    pub days: Money,
+    pub hours: Money,
 }
 
-impl AnnualBalance {
-    fn remaining(self) -> Money {
-        self.entitlement - self.taken
+/// A request's stored days and hours spread over its dates in proportion to
+/// the working seconds recorded for each when it was sent. Neither the
+/// working window nor the calendar is read again, so changing either later
+/// does not move a request's days between payroll periods or annual leave
+/// years.
+pub(crate) fn leave_by_date(l: &LeaveRequest) -> Vec<LeaveDate> {
+    let total: i64 = l.day_seconds.iter().map(|(_, seconds)| seconds).sum();
+    if total <= 0 {
+        // Nothing recorded to split by: the whole request sits on its first
+        // date, and the stored total is still right.
+        return vec![LeaveDate {
+            date: l.from_on,
+            days: l.days,
+            hours: l.hours,
+        }];
+    }
+    l.day_seconds
+        .iter()
+        .map(|(date, seconds)| {
+            let share = Decimal::from(*seconds) / Decimal::from(total);
+            LeaveDate {
+                date: *date,
+                days: l.days * share,
+                hours: l.hours * share,
+            }
+        })
+        .collect()
+}
+
+/// The first date on which `months` of service are complete, by the same
+/// arithmetic as [`service_months`]: a hire on the 31st completes a month
+/// that has no 31st on the 1st of the next one.
+fn service_reached(hired: NaiveDate, months: u32) -> NaiveDate {
+    match hired.checked_add_months(Months::new(months)) {
+        Some(day) if day.day() < hired.day() => day.succ_opt().unwrap_or(day),
+        Some(day) => day,
+        None => NaiveDate::MAX,
     }
 }
 
-fn annual_entitlement(
-    rs: &Ruleset,
-    hired_on: NaiveDate,
-    earned_through: NaiveDate,
-) -> Result<Money, laysi_regulation::RegulationError> {
-    annual_entitlement_for_service(rs, service_months(hired_on, earned_through))
+/// The annual leave year an entitlement belongs to, counted from the hire
+/// date, and the days it grants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AnnualLeaveYear {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    pub days: u32,
 }
 
-fn annual_entitlement_for_service(
+/// The annual leave year `on` falls in. Service stops at the termination
+/// date, so a departed employee stays in the year they left in.
+pub(crate) fn annual_leave_year(
     rs: &Ruleset,
-    months: u32,
-) -> Result<Money, laysi_regulation::RegulationError> {
-    Ok(Money::from(laysi_regulation::annual_leave_days(
-        rs, months,
-    )?))
+    hired_on: NaiveDate,
+    left_on: Option<NaiveDate>,
+    on: NaiveDate,
+) -> Result<AnnualLeaveYear, laysi_regulation::RegulationError> {
+    let on = left_on.map_or(on, |left| left.min(on));
+    let (start, end) = laysi_regulation::annual_leave_year(rs, service_months(hired_on, on))?;
+    let next = service_reached(hired_on, end);
+    Ok(AnnualLeaveYear {
+        from: service_reached(hired_on, start),
+        to: next.pred_opt().unwrap_or(next),
+        days: laysi_regulation::annual_leave_days(rs, start)?,
+    })
+}
+
+/// Approved annual leave days on the dates of `year`. A request that crosses
+/// into another year counts only its dates inside this one.
+///
+/// Requests store days to two places, and a third of one does not add back
+/// up to it. Each request's part is therefore the rounded running total at
+/// the end of the year less the rounded one before it starts, so the parts in
+/// adjacent years always add up to the stored days.
+pub(crate) fn annual_leave_taken(year: &AnnualLeaveYear, requests: &[&LeaveRequest]) -> Money {
+    requests
+        .iter()
+        .filter(|l| l.kind == "annual" && l.status == "approved")
+        .map(|l| {
+            let parts = leave_by_date(l);
+            let through = |last: NaiveDate| -> Money {
+                parts
+                    .iter()
+                    .filter(|p| p.date <= last)
+                    .map(|p| p.days)
+                    .sum::<Money>()
+                    .round_dp(2)
+            };
+            let before = year.from.pred_opt().map_or(Money::ZERO, through);
+            through(year.to) - before
+        })
+        .sum()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AnnualBalance {
+    pub year: AnnualLeaveYear,
+    pub taken: Money,
+}
+
+impl AnnualBalance {
+    pub fn entitlement(self) -> Money {
+        Money::from(self.year.days)
+    }
+
+    pub fn remaining(self) -> Money {
+        self.entitlement() - self.taken
+    }
+
+    pub fn json(self) -> Value {
+        json!({
+            "entitlement": self.entitlement().to_string(),
+            "taken": self.taken.to_string(),
+            "remaining": self.remaining().to_string(),
+            "from_on": self.year.from,
+            "to_on": self.year.to,
+        })
+    }
+}
+
+/// The annual leave balance for each `(employee, date)` asked, in order, from
+/// one read of the approved leave those years reach.
+pub(crate) async fn annual_balances(
+    ctx: &OpCtx,
+    rs: &Ruleset,
+    asks: &[(&Employee, NaiveDate)],
+) -> Result<Vec<AnnualBalance>, OpError> {
+    let years = asks
+        .iter()
+        .map(|(e, on)| annual_leave_year(rs, e.hired_on, e.left_on, *on))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(span) = years
+        .iter()
+        .map(|y| (y.from, y.to))
+        .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+    else {
+        return Ok(Vec::new());
+    };
+    let requests = ctx
+        .store
+        .leave_requests_matching(true, None, Some(span))
+        .await?;
+    Ok(asks
+        .iter()
+        .zip(years)
+        .map(|((e, _), year)| {
+            let own: Vec<&LeaveRequest> =
+                requests.iter().filter(|l| l.employee_id == e.id).collect();
+            AnnualBalance {
+                year,
+                taken: annual_leave_taken(&year, &own),
+            }
+        })
+        .collect())
+}
+
+/// [`annual_balances`] for one person on one date.
+pub(crate) async fn annual_balance(
+    ctx: &OpCtx,
+    rs: &Ruleset,
+    e: &Employee,
+    on: NaiveDate,
+) -> Result<AnnualBalance, OpError> {
+    let year = annual_leave_year(rs, e.hired_on, e.left_on, on)?;
+    let requests = ctx
+        .store
+        .leave_requests_matching(true, Some(e.id), Some((year.from, year.to)))
+        .await?;
+    let own: Vec<&LeaveRequest> = requests.iter().collect();
+    Ok(AnnualBalance {
+        year,
+        taken: annual_leave_taken(&year, &own),
+    })
 }
 
 fn leave_json(request: &LeaveRequest, balance: Option<AnnualBalance>) -> Value {
@@ -925,11 +1100,7 @@ fn leave_json(request: &LeaveRequest, balance: Option<AnnualBalance>) -> Value {
         "cancelled": request.cancelled,
         "created_at": request.created_at,
         "created_by": request.created_by,
-        "annual_leave": balance.map(|b| json!({
-            "entitlement": b.entitlement.to_string(),
-            "taken": b.taken.to_string(),
-            "remaining": b.remaining().to_string(),
-        })),
+        "annual_leave": balance.map(AnnualBalance::json),
     })
 }
 
@@ -1208,7 +1379,7 @@ impl Operation for ListLeaveRequests {
     }
 
     fn summary(&self) -> &'static str {
-        "讀休假單與逐人特休餘額。額度依查詢當日適用的特休規則與年資現算，系統只留已核准的實休天數。"
+        "讀休假單與逐人特休餘額。特休年度自到職日起算，額度依查詢當日適用的特休規則現算；每張特休單附上它開始那天所在年度的餘額。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1251,27 +1422,40 @@ impl Operation for ListLeaveRequests {
         let other_pending = (ctx.store.pending_leave_count().await? - listed_pending).max(0);
         let staff = ctx.store.employees(true, None).await?;
         let rs = laysi_regulation::resolve("annual_leave", ctx.today)?;
-        let taken = ctx.store.annual_leave_taken(ctx.today.year()).await?;
-        let taken_by_employee: BTreeMap<i32, Money> = taken.into_iter().collect();
-        let mut balances = BTreeMap::new();
-
-        for employee in &staff {
-            let earned_through = employee
-                .left_on
-                .map_or(ctx.today, |left| left.min(ctx.today));
-            let entitlement = annual_entitlement(rs, employee.hired_on, earned_through)?;
-            let used = taken_by_employee
-                .get(&employee.id)
-                .copied()
-                .unwrap_or(Money::ZERO);
-            balances.insert(
-                employee.id,
-                AnnualBalance {
-                    entitlement,
-                    taken: used,
-                },
-            );
-        }
+        let current: Vec<&Employee> = staff
+            .iter()
+            .filter(|employee| employee.status != "left")
+            .collect();
+        // An annual leave request is weighed against the year it starts in,
+        // which after an anniversary is not the year it was sent in.
+        let annual: Vec<(&LeaveRequest, &Employee)> = requests
+            .iter()
+            .filter(|r| r.kind == "annual")
+            .filter_map(|r| Some((r, staff.iter().find(|e| e.id == r.employee_id)?)))
+            .collect();
+        let asks: Vec<(&Employee, NaiveDate)> = current
+            .iter()
+            .map(|employee| (*employee, ctx.today))
+            .chain(annual.iter().map(|(r, employee)| (*employee, r.from_on)))
+            .collect();
+        let balances = annual_balances(ctx, rs, &asks).await?;
+        let (now, at_request) = balances.split_at(current.len());
+        let annual_balances: Vec<Value> = current
+            .iter()
+            .zip(now)
+            .map(|(employee, balance)| {
+                let mut row = balance.json();
+                row["emp_no"] = json!(employee.emp_no);
+                row["name"] = json!(employee.name);
+                row["dept_label"] = json!(employee.dept_label);
+                row
+            })
+            .collect();
+        let by_request: BTreeMap<&str, AnnualBalance> = annual
+            .iter()
+            .map(|(r, _)| r.leave_no.as_str())
+            .zip(at_request.iter().copied())
+            .collect();
 
         // Whether this identity can decide each request, answered here so the
         // screen can draw the button dead with the reason beside it. Same
@@ -1281,7 +1465,8 @@ impl Operation for ListLeaveRequests {
         let rows = requests
             .iter()
             .map(|request| {
-                let mut row = leave_json(request, balances.get(&request.employee_id).copied());
+                let mut row =
+                    leave_json(request, by_request.get(request.leave_no.as_str()).copied());
                 let own = deciding_as.is_some() && deciding_as == Some(request.employee_id);
                 row["can_decide"] = json!(request.status == "pending" && !own);
                 row["decide_blocked_reason"] = json!(own.then(|| {
@@ -1301,21 +1486,6 @@ impl Operation for ListLeaveRequests {
                 row
             })
             .collect::<Vec<_>>();
-        let annual_balances = staff
-            .iter()
-            .filter(|employee| employee.status != "left")
-            .filter_map(|employee| {
-                let balance = balances.get(&employee.id)?;
-                Some(json!({
-                    "emp_no": employee.emp_no,
-                    "name": employee.name,
-                    "dept_label": employee.dept_label,
-                    "entitlement": balance.entitlement.to_string(),
-                    "taken": balance.taken.to_string(),
-                    "remaining": balance.remaining().to_string(),
-                }))
-            })
-            .collect::<Vec<_>>();
         let pending = requests
             .iter()
             .filter(|request| request.status == "pending")
@@ -1332,10 +1502,9 @@ impl Operation for ListLeaveRequests {
                 "pending_count": pending,
                 "other_pending": other_pending,
                 "annual_leave_balances": annual_balances,
-                "annual_leave_year": ctx.today.year(),
                 "annual_leave_ruleset": ruleset_json(rs),
                 "annual_leave_quota_stored": false,
-                "annual_leave_note": "已休只計已核准的天數；離職員工的年資停在離職日。",
+                "annual_leave_note": "已休只計特休年度內已核准的天數；離職員工的年資停在離職日。",
             }),
             summary,
         ))
@@ -2647,12 +2816,236 @@ mod tests {
             .find(|days| *days != original_days)
             .expect("需要另一個不同的 tiers.days 才能驗證 payload 可替換");
 
-        let before = annual_entitlement_for_service(rs, months).unwrap();
+        let hired = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        let on = service_reached(hired, months);
+        let before = annual_leave_year(rs, hired, None, on).unwrap();
         let mut changed = rs.clone();
         changed.payload["tiers"][0]["days"] = Value::String(replacement.to_string());
-        let after = annual_entitlement_for_service(&changed, months).unwrap();
+        let after = annual_leave_year(&changed, hired, None, on).unwrap();
 
-        assert_ne!(before, after);
+        assert_ne!(before.days, after.days);
+    }
+
+    fn annual_rules() -> &'static Ruleset {
+        laysi_regulation::all()
+            .iter()
+            .find(|ruleset| ruleset.domain == "annual_leave")
+            .expect("規則庫缺少 annual_leave")
+    }
+
+    /// Annual leave recorded on a 09:00 to 17:00 working day.
+    fn annual(no: &str, status: &str, from: &str, to: &str, days: i64) -> LeaveRequest {
+        let l = leave(no, "annual", status, from, to);
+        LeaveRequest {
+            days: Money::from(days),
+            hours: Money::from(days * 8),
+            day_seconds: schedule(Some("09:00"), Some("17:00"), 0)
+                .leave_seconds_by_date(l.from_at, l.to_at)
+                .unwrap(),
+            ..l
+        }
+    }
+
+    fn day(v: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(v, "%Y-%m-%d").unwrap()
+    }
+
+    fn balance_on(hired: &str, on: &str, requests: &[LeaveRequest]) -> AnnualBalance {
+        let year = annual_leave_year(annual_rules(), day(hired), None, day(on)).unwrap();
+        let requests: Vec<&LeaveRequest> = requests.iter().collect();
+        AnnualBalance {
+            year,
+            taken: annual_leave_taken(&year, &requests),
+        }
+    }
+
+    /// The case that found this: leave from the year before the second
+    /// anniversary was taken off the year after it.
+    #[test]
+    fn leave_from_the_year_before_an_anniversary_is_not_taken_off_the_next() {
+        let requests = [
+            annual(
+                "LV2607-001",
+                "approved",
+                "2026-07-27T09:00",
+                "2026-07-29T17:00",
+                3,
+            ),
+            annual(
+                "LV2609-001",
+                "approved",
+                "2026-09-29T09:00",
+                "2026-10-02T17:00",
+                4,
+            ),
+        ];
+        let b = balance_on("2024-09-02", "2026-10-06", &requests);
+        assert_eq!(
+            (b.year.from, b.year.to),
+            (day("2026-09-02"), day("2027-09-01"))
+        );
+        assert_eq!(b.entitlement(), Money::from(10));
+        assert_eq!(b.taken, Money::from(4));
+        assert_eq!(b.remaining(), Money::from(6));
+
+        let before = balance_on("2024-09-02", "2026-08-31", &requests);
+        assert_eq!(
+            (before.year.from, before.year.to),
+            (day("2025-09-02"), day("2026-09-01"))
+        );
+        assert_eq!(before.entitlement(), Money::from(7));
+        assert_eq!(before.taken, Money::from(3));
+    }
+
+    #[test]
+    fn the_first_year_has_no_leave_and_the_half_year_after_it_has_its_own() {
+        let requests = [annual(
+            "LV2608-001",
+            "approved",
+            "2026-08-03T09:00",
+            "2026-08-03T17:00",
+            1,
+        )];
+        let first = balance_on("2026-03-02", "2026-08-03", &requests);
+        assert_eq!(
+            (first.year.from, first.year.to),
+            (day("2026-03-02"), day("2026-09-01"))
+        );
+        assert_eq!(first.entitlement(), Money::ZERO);
+        assert_eq!(first.taken, Money::ONE);
+
+        let half = balance_on("2026-03-02", "2026-10-01", &requests);
+        assert_eq!(
+            (half.year.from, half.year.to),
+            (day("2026-09-02"), day("2027-03-01"))
+        );
+        assert_eq!(half.entitlement(), Money::from(3));
+        assert_eq!(half.taken, Money::ZERO, "上一個區間的特休不扣這個區間");
+
+        let year = balance_on("2026-03-02", "2027-03-02", &requests);
+        assert_eq!(
+            (year.year.from, year.year.to),
+            (day("2027-03-02"), day("2028-03-01"))
+        );
+        assert_eq!(year.entitlement(), Money::from(7));
+    }
+
+    #[test]
+    fn a_request_across_an_anniversary_counts_its_days_in_each_year() {
+        let requests = [annual(
+            "LV2608-002",
+            "approved",
+            "2026-08-31T09:00",
+            "2026-09-04T17:00",
+            5,
+        )];
+        let before = balance_on("2024-09-02", "2026-09-01", &requests);
+        let after = balance_on("2024-09-02", "2026-09-02", &requests);
+        assert_eq!(before.taken, Money::from(2), "8/31 與 9/1");
+        assert_eq!(after.taken, Money::from(3), "9/2 到 9/4");
+
+        // Three dates sharing one stored day: thirds that still add up.
+        let thirds = [LeaveRequest {
+            days: Money::ONE,
+            ..annual(
+                "LV2608-003",
+                "approved",
+                "2026-08-31T09:00",
+                "2026-09-02T17:00",
+                3,
+            )
+        }];
+        let before = balance_on("2024-09-02", "2026-09-01", &thirds);
+        let after = balance_on("2024-09-02", "2026-09-02", &thirds);
+        assert_eq!(before.taken, Money::new(67, 2));
+        assert_eq!(after.taken, Money::new(33, 2));
+    }
+
+    #[test]
+    fn only_approved_annual_leave_is_taken() {
+        let requests = [
+            annual(
+                "LV2609-002",
+                "pending",
+                "2026-09-07T09:00",
+                "2026-09-07T17:00",
+                1,
+            ),
+            annual(
+                "LV2609-003",
+                "rejected",
+                "2026-09-08T09:00",
+                "2026-09-08T17:00",
+                1,
+            ),
+            annual(
+                "LV2609-004",
+                "withdrawn",
+                "2026-09-09T09:00",
+                "2026-09-09T17:00",
+                1,
+            ),
+            annual(
+                "LV2609-005",
+                "revoked",
+                "2026-09-10T09:00",
+                "2026-09-10T17:00",
+                1,
+            ),
+            LeaveRequest {
+                days: Money::ONE,
+                ..leave(
+                    "LV2609-006",
+                    "sick",
+                    "approved",
+                    "2026-09-11T09:00",
+                    "2026-09-11T17:00",
+                )
+            },
+        ];
+        let b = balance_on("2024-09-02", "2026-10-06", &requests);
+        assert_eq!(b.taken, Money::ZERO);
+    }
+
+    /// A departed employee stays in the year they left in, whatever date is
+    /// asked about.
+    #[test]
+    fn service_stops_at_the_termination_date() {
+        let year = annual_leave_year(
+            annual_rules(),
+            day("2024-09-02"),
+            Some(day("2026-08-15")),
+            day("2026-10-06"),
+        )
+        .unwrap();
+        assert_eq!((year.from, year.to), (day("2025-09-02"), day("2026-09-01")));
+        assert_eq!(year.days, 7);
+    }
+
+    /// Year boundaries agree with the service length the roster prints, month
+    /// ends included.
+    #[test]
+    fn a_year_starts_on_the_day_its_months_of_service_are_complete() {
+        for hired in [
+            "2024-01-31",
+            "2024-02-29",
+            "2024-08-30",
+            "2024-09-02",
+            "2024-12-31",
+        ] {
+            let hired = day(hired);
+            for months in [0, 1, 6, 12, 13, 24, 120] {
+                let first = service_reached(hired, months);
+                assert_eq!(
+                    service_months(hired, first),
+                    months,
+                    "{hired} 起 {months} 個月"
+                );
+                if months > 0 {
+                    assert!(service_months(hired, first.pred_opt().unwrap()) < months);
+                }
+            }
+        }
     }
 
     fn leave(no: &str, kind: &str, status: &str, from: &str, to: &str) -> LeaveRequest {
@@ -2671,6 +3064,7 @@ mod tests {
             to_on: to_at.date(),
             hours: Money::ZERO,
             days: Money::ZERO,
+            day_seconds: Vec::new(),
             reason: String::new(),
             status: status.into(),
             decided_by: String::new(),

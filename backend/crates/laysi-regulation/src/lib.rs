@@ -572,8 +572,9 @@ pub fn minimum_wage_shortfall(
     Ok((wage < floor).then_some(floor))
 }
 
-/// Annual leave days. `service_months` is completed months since hire.
-pub fn annual_leave_days(rs: &Ruleset, service_months: u32) -> Result<u32, RegulationError> {
+/// The `annual_leave` tiers as `(months, days)`. Rows missing either number
+/// are skipped.
+fn annual_leave_tiers(rs: &Ruleset) -> Result<Vec<(u32, u32)>, RegulationError> {
     rs.expect_domain("annual_leave")?;
     let tiers = rs
         .payload
@@ -587,13 +588,42 @@ pub fn annual_leave_days(rs: &Ruleset, service_months: u32) -> Result<u32, Regul
 
     let read =
         |t: &serde_json::Value, key: &str| -> Option<u32> { t.get(key)?.as_str()?.parse().ok() };
+    Ok(tiers
+        .iter()
+        .filter_map(|t| Some((read(t, "months")?, read(t, "days")?)))
+        .collect())
+}
+
+/// The annual leave year that `service_months` falls in, as `[start, end)` in
+/// completed months of service.
+///
+/// A year begins at every tier threshold and at every completed year of
+/// service, so the stretch before the first tier and the part of a tier that
+/// ends at the first anniversary are years of their own. The entitlement is
+/// constant inside one: `annual_leave_days(start)` is the year's.
+pub fn annual_leave_year(rs: &Ruleset, service_months: u32) -> Result<(u32, u32), RegulationError> {
+    let tiers = annual_leave_tiers(rs)?;
+    let year = service_months / 12;
+    let start = tiers
+        .iter()
+        .map(|(months, _)| *months)
+        .filter(|months| *months <= service_months)
+        .fold(year * 12, u32::max);
+    let end = tiers
+        .iter()
+        .map(|(months, _)| *months)
+        .filter(|months| *months > service_months)
+        .fold((year + 1) * 12, u32::min);
+    Ok((start, end))
+}
+
+/// Annual leave days. `service_months` is completed months since hire.
+pub fn annual_leave_days(rs: &Ruleset, service_months: u32) -> Result<u32, RegulationError> {
+    let tiers = annual_leave_tiers(rs)?;
 
     let mut days = 0;
     let mut matched_months = 0;
-    for t in tiers {
-        let (Some(months), Some(d)) = (read(t, "months"), read(t, "days")) else {
-            continue;
-        };
+    for (months, d) in tiers {
         if service_months >= months && months >= matched_months {
             days = d;
             matched_months = months;
@@ -1108,6 +1138,33 @@ mod tests {
         assert_eq!(annual_leave_days(rs, 120).unwrap(), 16);
         assert_eq!(annual_leave_days(rs, 132).unwrap(), 17, "滿十一年加一日");
         assert_eq!(annual_leave_days(rs, 600).unwrap(), 30, "上限 30 日");
+    }
+
+    #[test]
+    fn an_annual_leave_year_runs_from_one_threshold_to_the_next() {
+        let rs = resolve("annual_leave", d(2026, 7, 25)).unwrap();
+        assert_eq!(annual_leave_year(rs, 0).unwrap(), (0, 6), "未滿六個月");
+        assert_eq!(annual_leave_year(rs, 5).unwrap(), (0, 6));
+        assert_eq!(annual_leave_year(rs, 6).unwrap(), (6, 12), "六個月到一年");
+        assert_eq!(annual_leave_year(rs, 11).unwrap(), (6, 12));
+        assert_eq!(annual_leave_year(rs, 12).unwrap(), (12, 24));
+        assert_eq!(annual_leave_year(rs, 25).unwrap(), (24, 36));
+        assert_eq!(
+            annual_leave_year(rs, 40).unwrap(),
+            (36, 48),
+            "三到五年每年一個年度"
+        );
+        assert_eq!(annual_leave_year(rs, 59).unwrap(), (48, 60));
+        assert_eq!(annual_leave_year(rs, 133).unwrap(), (132, 144));
+        for months in 0..240 {
+            let (start, end) = annual_leave_year(rs, months).unwrap();
+            assert_eq!(
+                annual_leave_days(rs, months).unwrap(),
+                annual_leave_days(rs, start).unwrap(),
+                "年資 {months} 個月的額度要等於所在年度的額度"
+            );
+            assert!(start <= months && months < end);
+        }
     }
 
     #[test]

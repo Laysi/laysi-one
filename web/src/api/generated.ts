@@ -228,7 +228,7 @@ export const OPS: readonly OpMeta[] = [
   { name: 'get_employee_document', risk: 'read_only', riskLabel: '唯讀', summary: "取回一份員工附件並重算雜湊與登記值比對。預設只回驗證結果與後設資料；要求回傳內容時才以 base64 附上內容。雜湊不符會回報錯誤，不回傳內容。附件不屬於這位員工時一律查無此附件。" },
   { name: 'list_attendance_punches', risk: 'read_only', riskLabel: '唯讀', summary: "讀某個月全公司的打卡紀錄：逐人統計（實際打滿的天數、時數、遲到天數、加班時數）。指定員工編號時另附該員的逐日明細。上下班時間取自公司設定，未設定時不判定遲到。" },
   { name: 'correct_punch', risk: 'needs_confirm', riskLabel: '需人確認', summary: "補登或更正某人某天的上班或下班時間，來源記為補登並留下操作者。時間接受 HH:MM:SS，只給到分鐘時秒數記為零。同一時段已有紀錄時覆蓋原值，原時刻留在補登紀錄。" },
-  { name: 'list_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀休假單與逐人特休餘額。額度依查詢當日適用的特休規則與年資現算，系統只留已核准的實休天數。" },
+  { name: 'list_leave_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀休假單與逐人特休餘額。特休年度自到職日起算，額度依查詢當日適用的特休規則現算；每張特休單附上它開始那天所在年度的餘額。" },
   { name: 'decide_leave_request', risk: 'needs_confirm', riskLabel: '需人確認', summary: "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕；單據所在月份到當年年底之間有已計算薪資的期別時不能准假，駁回不受影響；申請人不得核准本人送出的單據，公司設定允許時負責人例外。" },
   { name: 'revoke_leave_request', risk: 'needs_confirm', riskLabel: '需人確認', summary: "撤銷一張已核准的休假單，理由必填，留下撤銷者與身分；撤銷後該段時間可以重新申請。單據所在月份到當年年底之間有已計算薪資的期別時拒絕；申請人不得撤銷本人的單，公司設定允許時負責人例外。" },
   { name: 'list_overtime_requests', risk: 'read_only', riskLabel: '唯讀', summary: "讀一個月的加班申請與逐人已核准時數。加班費依加班日適用的加班規則現算，不存欄位；月上限同樣來自規則庫。" },

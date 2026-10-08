@@ -47,7 +47,7 @@
 //! `dispatch` stops the caller. The filter is not written into the query.
 
 use crate::ops::attendance::{
-    default_day_kind, judges_absence, leave_kind_label, mark_days, month_days,
+    default_day_kind, judges_absence, leave_by_date, leave_kind_label, mark_days, month_days,
     ordinary_hourly_wage, punch_days, DayKind, PunchDay, WorkSchedule,
 };
 #[cfg(test)]
@@ -56,7 +56,7 @@ use crate::ops::employees::{pay_basis_label, service_months, BASIS_HOURLY, BASIS
 use crate::ops::insurance::{covered_dependants, percent, premiums_on, ruleset_json, Coverage};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use laysi_domain::business_time;
 use laysi_domain::Money;
 use laysi_regulation::{LeaveDay, Ruleset};
@@ -288,14 +288,12 @@ struct LeaveTotal {
 /// Approved leave inside the period, by kind, priced by `leave_pay`.
 ///
 /// `requests` must reach back to 1 January: sickness leave's yearly allowance
-/// is counted from then. Each request is split over its dates in proportion
-/// to the working time on each, but its stored hours and days are what gets
-/// split -- they were settled when it was sent, and a later change to the
-/// working window must not restate an approved request.
+/// is counted from then. Each request is split over its dates by
+/// [`leave_by_date`], the same split annual leave balances use, recorded when
+/// the request was sent.
 fn leave_in_period(
     e: &Employee,
     requests: &[&LeaveRequest],
-    schedule: &WorkSchedule,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<BTreeMap<String, LeaveTotal>, OpError> {
@@ -305,41 +303,18 @@ fn leave_in_period(
     let year_start = NaiveDate::from_ymd_opt(from.year(), 1, 1).unwrap_or(from);
     let mut days: Vec<(LeaveDay, Money)> = Vec::new();
     for l in requests.iter().filter(|l| l.status == "approved") {
-        let dates: Vec<NaiveDate> = l
-            .from_on
-            .iter_days()
-            .take_while(|d| *d <= l.to_on)
-            .collect();
-        let seconds: Vec<i64> = dates
-            .iter()
-            .map(|date| {
-                let open = date.and_time(NaiveTime::MIN);
-                let close = open + chrono::Duration::days(1);
-                schedule
-                    .leave_seconds(l.from_at.max(open), l.to_at.min(close))
-                    .unwrap_or(0)
-            })
-            .collect();
-        let total: i64 = seconds.iter().sum();
-        for (i, date) in dates.iter().enumerate() {
-            // Without a working window to split by, the whole request sits
-            // on its first date: the stored total is still right.
-            let share = match total > 0 {
-                true => Decimal::from(seconds[i]) / Decimal::from(total),
-                false if i == 0 => Decimal::ONE,
-                false => Decimal::ZERO,
-            };
-            if share.is_zero() || *date > to || *date < year_start {
+        for part in leave_by_date(l) {
+            if part.date > to || part.date < year_start {
                 continue;
             }
             days.push((
                 LeaveDay {
-                    date: *date,
+                    date: part.date,
                     kind: l.kind.clone(),
-                    days: l.days * share,
-                    service_months: service_months(e.hired_on, *date),
+                    days: part.days,
+                    service_months: service_months(e.hired_on, part.date),
                 },
-                l.hours * share,
+                part.hours,
             ));
         }
     }
@@ -1104,7 +1079,7 @@ impl Operation for RunPayroll {
                 &requests,
                 &fixes,
             ));
-            let leave = leave_in_period(e, &requests, &schedule, from, to)?;
+            let leave = leave_in_period(e, &requests, from, to)?;
 
             // An hourly worker with nothing clocked and no paid leave has no
             // pay to compute. A payslip of zero would read as an amount
@@ -1323,6 +1298,7 @@ impl Operation for VoidPayrollRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveTime;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -1689,6 +1665,9 @@ mod tests {
             to_on: at(to).date(),
             hours: n(hours),
             days: n(hours) / n("7"),
+            day_seconds: office()
+                .leave_seconds_by_date(at(from), at(to))
+                .unwrap_or_default(),
             reason: String::new(),
             status: status.into(),
             decided_by: String::new(),
@@ -1737,7 +1716,7 @@ mod tests {
         ];
         let requests: Vec<&LeaveRequest> = requests.iter().collect();
         let (from, to) = (d(2026, 5, 1), d(2026, 5, 31));
-        let leave = leave_in_period(&e, &requests, &office(), from, to).unwrap();
+        let leave = leave_in_period(&e, &requests, from, to).unwrap();
         assert_eq!(
             leave["personal"].days,
             n("1"),
@@ -1898,7 +1877,7 @@ mod tests {
             "35",
         )];
         let requests: Vec<&LeaveRequest> = requests.iter().collect();
-        let leave = leave_in_period(&e, &requests, &office(), d(2026, 1, 1), d(2026, 1, 31))
+        let leave = leave_in_period(&e, &requests, d(2026, 1, 1), d(2026, 1, 31))
             .expect("去年的日子不該讓整期計薪失敗");
         assert_eq!(leave["annual"].days, n("2"), "五天裡落在一月的兩天");
         assert_eq!(leave["annual"].paid_days, n("2"));
@@ -1920,7 +1899,7 @@ mod tests {
         )];
         let requests: Vec<&LeaveRequest> = requests.iter().collect();
         let (from, to) = (d(2026, 5, 1), d(2026, 5, 31));
-        let leave = leave_in_period(&e, &requests, &office(), from, to).unwrap();
+        let leave = leave_in_period(&e, &requests, from, to).unwrap();
         let c = compute_one(
             &e,
             from,

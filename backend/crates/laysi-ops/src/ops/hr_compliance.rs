@@ -30,10 +30,10 @@
 //! module's per-person annual totals are listed separately for reconciliation
 //! and never used to fill the gap.
 
-use crate::ops::attendance::{punch_days, summarise, OvertimeLimits, WorkSchedule};
-use crate::ops::employees::{
-    pay_basis_label, service_months, BASIS_HOURLY, INSURED_EMPLOYEE, INSURED_OWNER,
+use crate::ops::attendance::{
+    annual_balances, punch_days, summarise, OvertimeLimits, WorkSchedule,
 };
+use crate::ops::employees::{pay_basis_label, BASIS_HOURLY, INSURED_EMPLOYEE, INSURED_OWNER};
 use crate::ops::insurance::{missing_brackets, premiums_on, ruleset_json, Coverage};
 use crate::ops::payroll::SALARY_INCOME_CODE;
 use crate::ops::tax::{code_rule, withhold};
@@ -264,28 +264,22 @@ impl Operation for GetHrCompliance {
             .filter(|e| e.insured_as == INSURED_OWNER)
             .count();
 
-        let taken = ctx.store.annual_leave_taken(as_of.year()).await?;
-        let taken_by_employee: BTreeMap<i32, Money> = taken.into_iter().collect();
         let mut annual_failures = Vec::new();
         // Part-time leave is granted in proportion to agreed working hours,
         // and the roster does not record those hours. Comparing them against
         // the full-time entitlement would pass everybody regardless.
-        let part_time: Vec<&laysi_store::Employee> = staff
+        let part_time: Vec<&Employee> = staff
             .iter()
             .filter(|e| e.employment_type == "part_time" || e.pay_basis == BASIS_HOURLY)
             .collect();
-        for employee in staff
+        let full_time: Vec<(&Employee, NaiveDate)> = staff
             .iter()
             .filter(|e| e.employment_type != "part_time" && e.pay_basis != BASIS_HOURLY)
-        {
-            let entitlement = Money::from(laysi_regulation::annual_leave_days(
-                annual_rs,
-                service_months(employee.hired_on, as_of),
-            )?);
-            let used = taken_by_employee
-                .get(&employee.id)
-                .copied()
-                .unwrap_or(Money::ZERO);
+            .map(|e| (e, as_of))
+            .collect();
+        let balances = annual_balances(ctx, annual_rs, &full_time).await?;
+        for ((employee, _), balance) in full_time.iter().zip(&balances) {
+            let (entitlement, used) = (balance.entitlement(), balance.taken);
             if used > entitlement {
                 annual_failures.push(json!({
                     "emp_no": employee.emp_no,
@@ -293,8 +287,12 @@ impl Operation for GetHrCompliance {
                     "entitlement": entitlement.to_string(),
                     "taken": used.to_string(),
                     "difference": (used - entitlement).to_string(),
+                    "from_on": balance.year.from,
+                    "to_on": balance.year.to,
                     "message": format!(
-                        "已核准特休 {} 日，比規則額度多 {} 日，請確認是否為公司加給或資料有誤",
+                        "{}～{} 已核准特休 {} 日，比規則額度多 {} 日，請確認是否為公司加給或資料有誤",
+                        balance.year.from,
+                        balance.year.to,
                         used.normalize(),
                         (used - entitlement).normalize()
                     ),

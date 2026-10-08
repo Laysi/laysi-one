@@ -6222,7 +6222,11 @@ impl Store {
                     l.cancelled_by,
                     COALESCE(rc.name, l.cancelled_role) AS cancelled_role,
                     l.cancelled_at, l.cancel_reason,
-                    l.created_at, l.created_by
+                    l.created_at, l.created_by,
+                    ARRAY(SELECT x.on_date FROM leave_request_day x
+                           WHERE x.leave_request_id = l.id ORDER BY x.on_date) AS day_dates,
+                    ARRAY(SELECT x.seconds FROM leave_request_day x
+                           WHERE x.leave_request_id = l.id ORDER BY x.on_date) AS day_seconds
                FROM leave_request l
                JOIN employee e            ON e.id = l.employee_id
                LEFT JOIN dimension_value d ON d.id = e.dept_id
@@ -6244,27 +6248,6 @@ impl Store {
         .await?
         .iter()
         .map(row_to_leave)
-        .collect())
-    }
-
-    /// Annual leave days already taken by each employee in a year.
-    ///
-    /// The entitlement is not in the database: it is derived from service
-    /// length and the `annual_leave` rules, changes every year, and storing it
-    /// would leave a copy that drifts from the law. Days taken are the fact.
-    pub async fn annual_leave_taken(&self, year: i32) -> Result<Vec<(i32, Money)>> {
-        Ok(sqlx::query(
-            "SELECT employee_id, COALESCE(SUM(days), 0)::numeric AS taken
-               FROM leave_request
-              WHERE kind = 'annual' AND status = 'approved'
-                AND EXTRACT(YEAR FROM from_on) = $1
-              GROUP BY employee_id",
-        )
-        .bind(year)
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| (r.get("employee_id"), r.get("taken")))
         .collect())
     }
 
@@ -6305,11 +6288,12 @@ impl Store {
         let seq = next_doc_no(&mut tx, "LV", &period).await?;
         let leave_no = format!("LV{period}-{seq:03}");
 
-        sqlx::query(
+        let id: i32 = sqlx::query_scalar(
             "INSERT INTO leave_request
                (leave_no, employee_id, kind, from_at, to_at, hours, days, reason,
                 status, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9)
+             RETURNING id",
         )
         .bind(&leave_no)
         .bind(req.employee_id)
@@ -6320,6 +6304,16 @@ impl Store {
         .bind(req.days)
         .bind(req.reason)
         .bind(req.actor)
+        .fetch_one(&mut *tx)
+        .await?;
+        let (dates, seconds): (Vec<NaiveDate>, Vec<i64>) = req.day_seconds.iter().copied().unzip();
+        sqlx::query(
+            "INSERT INTO leave_request_day (leave_request_id, on_date, seconds)
+             SELECT $1, d, s FROM unnest($2::date[], $3::bigint[]) AS t(d, s)",
+        )
+        .bind(id)
+        .bind(&dates)
+        .bind(&seconds)
         .execute(&mut *tx)
         .await?;
 
@@ -9267,6 +9261,12 @@ pub struct LeaveRequest {
     /// restate what was approved.
     pub hours: Money,
     pub days: Money,
+    /// Working seconds on each date, recorded with `hours` and `days`, in
+    /// date order. They split the stored totals over the dates, so a later
+    /// change to the working window or the calendar moves nothing between
+    /// payroll periods or annual leave years. Empty when the dates had no
+    /// working time at the time.
+    pub day_seconds: Vec<(NaiveDate, i64)>,
     pub reason: String,
     pub status: String,
     pub decided_by: String,
@@ -9340,6 +9340,9 @@ pub struct NewLeaveRequest<'a> {
     pub to_at: NaiveDateTime,
     pub hours: Money,
     pub days: Money,
+    /// Working seconds on each date, from the same working window and
+    /// calendar as `hours` and `days`. Dates with none are left out.
+    pub day_seconds: &'a [(NaiveDate, i64)],
     pub reason: &'a str,
     pub actor: &'a str,
 }
@@ -10424,6 +10427,12 @@ fn row_to_leave(r: &PgRow) -> LeaveRequest {
         to_on: r.get("to_on"),
         hours: r.get("hours"),
         days: r.get("days"),
+        day_seconds: r
+            .get::<Vec<NaiveDate>, _>("day_dates")
+            .into_iter()
+            .zip(r.get::<Vec<i32>, _>("day_seconds"))
+            .map(|(date, seconds)| (date, i64::from(seconds)))
+            .collect(),
         reason: r.get("reason"),
         status: r.get("status"),
         decided_by: r.get("decided_by"),
@@ -11856,6 +11865,7 @@ mod tests {
             to_at,
             hours: "8".parse().unwrap(),
             days: "1".parse().unwrap(),
+            day_seconds: &[],
             reason: "測試",
             actor: "測試",
         };

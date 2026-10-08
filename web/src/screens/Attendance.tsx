@@ -886,7 +886,8 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       {r.kind_label}
                       {r.kind === 'annual' && r.annual_leave && (
                         <span className="cell-hint cell-hint--block num">
-                          特休餘額 {trimDecimal(r.annual_leave.remaining)} 日
+                          特休餘額 {trimDecimal(r.annual_leave.remaining)} 日 ·{' '}
+                          {r.annual_leave.from_on} 起
                         </span>
                       )}
                     </td>
@@ -994,15 +995,14 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
             />
           )}
 
-          <h3 className="section-title section-title--spaced">
-            {leave.annual_leave_year} 年特休餘額
-          </h3>
+          <h3 className="section-title section-title--spaced">特休餘額</h3>
           <div className="table-scroll">
             <table className="table">
               <thead>
                 <tr>
                   <th>員工</th>
                   <th>部門</th>
+                  <th>特休年度</th>
                   <th className="align-right">額度</th>
                   <th className="align-right">已休</th>
                   <th className="align-right">剩餘</th>
@@ -1016,6 +1016,9 @@ export function Attendance({ onToast, reloadKey, onChanged }: Props) {
                       <span className="cell-hint num">{b.emp_no}</span>
                     </td>
                     <td className="cell-accounts">{b.dept_label ?? '未指定'}</td>
+                    <td className="num cell-nowrap">
+                      {b.from_on}～{b.to_on}
+                    </td>
                     <td className="num align-right">{trimDecimal(b.entitlement)}</td>
                     <td className="num align-right">{trimDecimal(b.taken)}</td>
                     <td className="num align-right">

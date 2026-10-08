@@ -89,9 +89,12 @@ export function MyLeave({ onGo, onToast, onChanged, reloadKey }: Props) {
 
       <div className="stat-grid">
         <div className="card stat-card">
-          <div className="stat-card__kicker">{al.year} 年特休額度</div>
+          <div className="stat-card__kicker">特休額度</div>
           <div className="stat-card__value num">{trimDecimal(al.entitlement)}</div>
-          <div className="stat-card__note num">日 · 依年資即時計算</div>
+          <div className="stat-card__note num">日</div>
+          <div className="stat-card__note num">
+            {al.from_on}～{al.to_on}
+          </div>
         </div>
         <div className="card stat-card">
           <div className="stat-card__kicker">已休</div>

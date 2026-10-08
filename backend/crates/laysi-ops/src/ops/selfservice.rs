@@ -27,17 +27,18 @@
 //! name. `attach_my_expense_receipt` sends the bytes instead, which points at
 //! nothing that already exists.
 //!
-//! Leave entitlement still has one source: this module passes completed
-//! service months to `annual_leave_days`, and the database only sums approved
-//! days actually taken. A request states when the leave starts and ends; the
+//! Leave entitlement still has one source: the balance comes from
+//! `annual_balance`, the same answer the roster and the leave list give, and
+//! the database only holds approved days actually taken. A request states when the leave starts and ends; the
 //! hours and days it is worth are derived from the working window, so the
 //! two numbers on the request cannot disagree with the range above them.
 
 use crate::ops::attendance::{
-    business_instant, correction_auto_approves, holds_hours, judges_absence, leave_kind_label,
-    leave_status_label, mark_days, month_days, month_span, overtime_json, punch_correction_json,
-    punch_correction_status_label, punch_days, punch_kind_label, summarise, valid_leave_kind,
-    OvertimeLimits, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
+    annual_balance, business_instant, correction_auto_approves, holds_hours, judges_absence,
+    leave_kind_label, leave_status_label, mark_days, month_days, month_span, overtime_json,
+    punch_correction_json, punch_correction_status_label, punch_days, punch_kind_label, summarise,
+    valid_leave_kind, AnnualBalance, OvertimeLimits, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS,
+    PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
@@ -47,7 +48,7 @@ use crate::ops::notices::{history_outcome, missing_notice, notice_json};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::Engine;
-use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
 use laysi_store::storage::{self, MAX_OBJECT_BYTES};
@@ -114,56 +115,20 @@ fn service_through(employee: &Employee, today: NaiveDate) -> NaiveDate {
     employee.left_on.map_or(today, |left| left.min(today))
 }
 
-#[derive(Clone, Copy)]
-struct AnnualLeaveBalance {
-    entitlement: Money,
-    taken: Money,
-}
-
-impl AnnualLeaveBalance {
-    fn remaining(self) -> Money {
-        self.entitlement - self.taken
-    }
-}
-
-fn annual_leave_balance(
-    rs: &Ruleset,
-    service_months: u32,
-    taken: Money,
-) -> Result<AnnualLeaveBalance, laysi_regulation::RegulationError> {
-    Ok(AnnualLeaveBalance {
-        entitlement: Money::from(laysi_regulation::annual_leave_days(rs, service_months)?),
-        taken,
-    })
-}
-
 async fn my_annual_leave(
     ctx: &OpCtx,
     employee: &Employee,
-) -> Result<(&'static Ruleset, AnnualLeaveBalance), OpError> {
+) -> Result<(&'static Ruleset, AnnualBalance), OpError> {
     let rs = laysi_regulation::resolve("annual_leave", ctx.today)?;
-    let taken = ctx
-        .store
-        .annual_leave_taken(ctx.today.year())
-        .await?
-        .into_iter()
-        .find(|(employee_id, _)| *employee_id == employee.id)
-        .map(|(_, days)| days)
-        .unwrap_or(Money::ZERO);
-    let months = service_months(employee.hired_on, service_through(employee, ctx.today));
-    Ok((rs, annual_leave_balance(rs, months, taken)?))
+    Ok((rs, annual_balance(ctx, rs, employee, ctx.today).await?))
 }
 
-fn annual_leave_json(year: i32, rs: &Ruleset, balance: AnnualLeaveBalance) -> Value {
-    json!({
-        "year": year,
-        "entitlement": balance.entitlement.to_string(),
-        "taken": balance.taken.to_string(),
-        "remaining": balance.remaining().to_string(),
-        "ruleset": ruleset_json(rs),
-        "quota_stored": false,
-        "note": "額度依年資與特休規則現算；已休只加總本年度已核准的特休。",
-    })
+fn annual_leave_json(rs: &Ruleset, balance: AnnualBalance) -> Value {
+    let mut out = balance.json();
+    out["ruleset"] = ruleset_json(rs);
+    out["quota_stored"] = json!(false);
+    out["note"] = json!("額度依年資與特休規則現算；已休只加總本特休年度內已核准的特休。");
+    out
 }
 
 /// An account number as the owner's own screen shows it: the last digits and
@@ -333,11 +298,7 @@ impl Operation for GetMyHome {
         Ok(OpOutcome::new(
             json!({
                 "profile": profile_json(&employee, months),
-                "annual_leave": annual_leave_json(
-                    ctx.today.year(),
-                    annual_rs,
-                    annual_balance,
-                ),
+                "annual_leave": annual_leave_json(annual_rs, annual_balance),
                 "submissions": {
                     "leave_requests": leaves
                         .iter()
@@ -470,11 +431,7 @@ impl Operation for ListMyLeaveRequests {
                 "schedule": schedule.json(),
                 "next_workday": next_workday(&schedule, ctx.today),
                 "pending_count": pending,
-                "annual_leave": annual_leave_json(
-                    ctx.today.year(),
-                    annual_rs,
-                    annual_balance,
-                ),
+                "annual_leave": annual_leave_json(annual_rs, annual_balance),
                 "scope_note": "僅查詢已驗證 session 的 ctx.employee_id；輸入不含可指定他人的欄位。",
             }),
             summary,
@@ -487,6 +444,8 @@ impl Operation for ListMyLeaveRequests {
 struct LeaveWorth {
     hours: Money,
     days: Money,
+    /// The working seconds behind `hours`, date by date.
+    day_seconds: Vec<(NaiveDate, i64)>,
     /// Dates the range covers that are not working days.
     off_days: usize,
 }
@@ -512,8 +471,8 @@ fn leave_worth(
             "一張休假單最長 {MAX_LEAVE_SPAN_DAYS} 天，請分成幾張送出"
         )));
     }
-    let (Some(seconds), Some(daily), Some(start), Some(end)) = (
-        schedule.leave_seconds(from, to),
+    let (Some(day_seconds), Some(daily), Some(start), Some(end)) = (
+        schedule.leave_seconds_by_date(from, to),
         schedule.daily_seconds(),
         schedule.starts_at,
         schedule.ends_at,
@@ -522,6 +481,7 @@ fn leave_worth(
             "休假時數依上下班時間計算，請系統管理員在基礎設定填寫上班時間與下班時間".into(),
         ));
     };
+    let seconds: i64 = day_seconds.iter().map(|(_, seconds)| seconds).sum();
     // A range ending at midnight does not reach into the next date.
     let last = (to - chrono::Duration::seconds(1)).date();
     let dates = from.date().iter_days().take_while(|d| *d <= last);
@@ -541,6 +501,7 @@ fn leave_worth(
     Ok(LeaveWorth {
         hours: (Money::from(seconds) / Money::from(3600)).round_dp(2),
         days: (Money::from(seconds) / Money::from(daily)).round_dp(2),
+        day_seconds,
         off_days,
     })
 }
@@ -650,7 +611,12 @@ impl Operation for RequestLeave {
             )));
         }
         let schedule = WorkSchedule::load(ctx).await?;
-        let LeaveWorth { hours, days, .. } = leave_worth(&schedule, i.from_at, i.to_at)?;
+        let LeaveWorth {
+            hours,
+            days,
+            day_seconds,
+            ..
+        } = leave_worth(&schedule, i.from_at, i.to_at)?;
 
         let employee = actor_employee(ctx).await?;
         let request = ctx
@@ -662,6 +628,7 @@ impl Operation for RequestLeave {
                 to_at: i.to_at,
                 hours,
                 days,
+                day_seconds: &day_seconds,
                 reason: i.reason.as_deref().unwrap_or(""),
                 actor: &ctx.actor,
             })
@@ -2312,46 +2279,6 @@ mod tests {
             committed_overtime_hours(&rows),
             "5".parse::<Money>().unwrap()
         );
-    }
-
-    /// Leave entitlement is read only from the ruleset payload. Replace the
-    /// payload for the applicable band and the same service length must give
-    /// a different answer; this module has no entitlement constant to fall
-    /// back on.
-    #[test]
-    fn annual_leave_quota_changes_with_the_ruleset_payload() {
-        let rs = laysi_regulation::all()
-            .iter()
-            .find(|ruleset| ruleset.domain == "annual_leave")
-            .expect("規則庫缺少 annual_leave");
-        let tiers = rs
-            .payload
-            .get("tiers")
-            .and_then(Value::as_array)
-            .expect("annual_leave payload 缺少 tiers");
-        let first = tiers.first().expect("annual_leave tiers 是空的");
-        let months = first
-            .get("months")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<u32>().ok())
-            .expect("第一個 tiers.months 不是整數字串");
-        let original_days = first
-            .get("days")
-            .and_then(Value::as_str)
-            .expect("第一個 tiers.days 不是字串");
-        let replacement = tiers
-            .iter()
-            .skip(1)
-            .filter_map(|tier| tier.get("days").and_then(Value::as_str))
-            .find(|days| *days != original_days)
-            .expect("需要另一個不同的 tiers.days 才能驗證 payload 可替換");
-
-        let before = annual_leave_balance(rs, months, Money::ZERO).unwrap();
-        let mut changed = rs.clone();
-        changed.payload["tiers"][0]["days"] = Value::String(replacement.to_string());
-        let after = annual_leave_balance(&changed, months, Money::ZERO).unwrap();
-
-        assert_ne!(before.entitlement, after.entitlement);
     }
 
     /// The structural guarantee behind self-service authorisation: every read
