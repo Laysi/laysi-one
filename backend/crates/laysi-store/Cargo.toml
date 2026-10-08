@@ -20,6 +20,10 @@ argon2.workspace = true
 aws-sdk-s3.workspace = true
 aws-smithy-http-client.workspace = true
 aws-smithy-types.workspace = true
+# The bucket durability admin API sits outside S3, so the SDK cannot send it;
+# see ObjectStore::pin_strict_durability.
+aws-sigv4.workspace = true
+reqwest.workspace = true
 # API tokens store only a hash and the first eight characters; the plaintext is
 # never persisted (see migrations/0001). The same hash function also proves an
 # uploaded file was not swapped.

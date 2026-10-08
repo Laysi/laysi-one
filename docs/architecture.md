@@ -472,6 +472,22 @@ SQL 會讓三張表對「什麼算已過帳」與日期怎麼比各有一套定�
 `document_version` 的物件鍵與雜湊由 trigger 擋住不可修改，封存的 `document`
 不可刪除。改內容只能上傳新版本，與「已過帳傳票只能開反向分錄」同一條規矩。
 
+**文件 bucket 固定為 RustFS 的 `strict` 存檔模式**。`relaxed` 回 200 時只保證物件
+內容落盤，指向內容的 `xl.meta` 與目錄項還在 page cache，斷電遺失的部分靠其他節點的
+erasure 副本補回；本產品是單機單碟，沒有其他節點，最近確認的版本會永久消失。文件刪
+不掉、取回時比對 BLAKE3，所以遺失的物件會成為帳上登記卻取不出來的文件。RustFS
+1.0.0-rc.2 起新建 bucket 預設寫入 `relaxed`，1.0.1 改成跟隨全域預設，但保留既有
+bucket 的值，所以升級修不好。`ObjectStore::ensure_bucket` 在每個行程第一次呼叫時
+（啟動時就會呼叫）讀 `GET /rustfs/admin/v3/bucket-durability/{bucket}`，不是 `strict`
+就寫入 `strict`。寫在 bucket 上，不清掉 bucket 的值去跟隨全域預設，因為那個預設改過
+兩次。請求以 SigV4 簽章，帳密就是 S3 那一組。失敗不擋啟動也不擋上傳（與物件儲存連不上
+同一條理由），寫一筆 warn；之後的上傳也會呼叫 `ensure_bucket`，距上次失敗滿一分鐘就再試
+一次，直到成功，所以啟動那一刻的暫時失敗不會讓 bucket 停在 `relaxed` 到下次重啟。不設
+間隔的話，一個卡住的 admin API 會讓每一次上傳都多等一個逾時；嘗試在送出之前就先記下，
+所以同時進來的上傳只有一個去試，其餘照常上傳。`/healthz` 的管理員詳情以
+`rustfs.durability` 即時回報。compose 不設 `RUSTFS_NEW_BUCKET_DURABILITY_MODE`：
+伺服器已經固定，再加一個等於同一件事有兩個機制。
+
 上傳原本只有一條路：`upload_document` 的 `content_base64`，因為「所有操作都支援
 MCP」不能有例外。那條路留著（25 MB，`MAX_OBJECT_BYTES`），但它有兩個後果：base64
 膨脹三分之一，而 AI 要把整份 base64 當輸出寫出來——1 MB 的 PDF 約 140 萬字元，超過
@@ -2608,7 +2624,7 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 | 方法 | 路徑 | 說明 |
 |---|---|---|
 | GET | `/healthz` | 未登入：`{ status, db: {ok}, rustfs: {ok} }` |
-| — | — | 帶系統管理員 session cookie 時另加 `db.migration`、完整的 `rustfs`（含 endpoint、bucket）與 `operations` |
+| — | — | 帶系統管理員 session cookie 時另加 `db.migration`、完整的 `rustfs`（含 endpoint、bucket，以及即時讀取的存檔模式 `durability: {mode, pinned, error?}`）與 `operations` |
 | — | — | 前端也讀這一條（Caddy 與 vite 都要 proxy）：RustFS 狀態只有伺服器行程知道，`get_system_health` 從資料庫查不到 |
 | POST | `/v1/auth/login` | 帳密登入並設定 session cookie；失敗訊息不區分帳號或密碼 |
 | POST | `/v1/auth/logout` | 撤銷目前 session 並清除 cookie |

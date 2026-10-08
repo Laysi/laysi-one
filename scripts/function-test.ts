@@ -1391,6 +1391,32 @@ async function main() {
       return "核發 2 · 下載 1 · 擋下 1";
     });
 
+    await check("D7", "文件 bucket 的存檔模式固定為 strict，/healthz 照實回報", async () => {
+      // Asked of RustFS itself as well as of the server's own report. The
+      // admin API sits outside S3, so the S3 client cannot sign for it; curl can.
+      const curl = Bun.spawn(
+        ["curl", "-sS", "--fail-with-body", "--aws-sigv4", "aws:amz:us-east-1:s3",
+          "--user", `${RUSTFS.accessKeyId}:${RUSTFS.secretAccessKey}`,
+          `${RUSTFS.endpoint}/rustfs/admin/v3/bucket-durability/${RUSTFS.bucket}`],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const [reply, error] = await Promise.all([
+        new Response(curl.stdout).text(),
+        new Response(curl.stderr).text(),
+      ]);
+      expectEq(await curl.exited, 0, `讀取存檔模式（${(reply + error).trim()}）`);
+      expectEq(JSON.parse(reply).mode, "strict", "RustFS 回報的存檔模式");
+      await login("admin", ADMIN_PASSWORD);
+      try {
+        const health = await (await fetch(`${BASE}/healthz`, { headers: { cookie } })).json();
+        expectEq(health.rustfs?.durability?.mode, "strict", "/healthz 回報的存檔模式");
+        expectEq(health.rustfs?.durability?.pinned, true, "/healthz 的 pinned");
+      } finally {
+        await login("boss@test.local", BOSS_PASSWORD);
+      }
+      return `${RUSTFS.bucket} · strict`;
+    });
+
     console.log("\nZ 收尾");
     await check("Z1", "所有寫入之後試算表仍然平衡", async () => {
       const tb = await must("get_trial_balance", { as_of: TODAY });

@@ -39,8 +39,14 @@ use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, MetadataDirective};
 use aws_sdk_s3::Client;
+use aws_sigv4::http_request::{
+    sign, PayloadChecksumKind, PercentEncodingMode, SignableBody, SignableRequest, SigningParams,
+    SigningSettings, UriPathNormalizationMode,
+};
+use aws_sigv4::sign::v4;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Bucket name used when the environment variable is unset.
@@ -74,6 +80,41 @@ pub const DETECT_BYTES: usize = 8 * 1024;
 
 /// How much of an object is read at a time while it is hashed.
 const READ_BYTES: usize = 64 * 1024;
+
+/// RustFS admin API that reads and sets one bucket's durability mode.
+const DURABILITY_PATH: &str = "/rustfs/admin/v3/bucket-durability";
+
+/// The durability mode every document bucket is pinned to.
+pub const STRICT_DURABILITY: &str = "strict";
+
+/// How long after a failed pin, or one still under way, the next upload waits
+/// before trying again. Without a wait, an admin API that hangs would add its
+/// timeout to every upload.
+const PIN_RETRY: Duration = Duration::from_secs(60);
+
+/// Whether this process has seen our bucket pinned, and when it last set out
+/// to pin it or last failed to.
+#[derive(Debug, Default)]
+struct PinState {
+    pinned: bool,
+    tried_at: Option<Instant>,
+}
+
+impl PinState {
+    /// Whether to try now. A yes records the attempt before it starts, so
+    /// callers arriving while it is under way skip it rather than each
+    /// sending their own.
+    fn claim(&mut self, now: Instant) -> bool {
+        let due = !self.pinned
+            && self
+                .tried_at
+                .is_none_or(|tried| now.duration_since(tried) >= PIN_RETRY);
+        if due {
+            self.tried_at = Some(now);
+        }
+        due
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -179,6 +220,11 @@ pub struct ObjectStore {
     client: Client,
     bucket: String,
     endpoint: String,
+    /// Kept for the admin API call the SDK cannot make.
+    credentials: Credentials,
+    region: String,
+    /// Shared by every clone, so one success covers the whole process.
+    pin: Arc<Mutex<PinState>>,
 }
 
 impl ObjectStore {
@@ -220,6 +266,7 @@ impl ObjectStore {
             ))
             .build_https();
 
+        let credentials = Credentials::new(access_key, secret_key, None, None, "laysi-env");
         let conf = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::latest())
             .region(Region::new(region.to_string()))
@@ -227,13 +274,7 @@ impl ObjectStore {
             // RustFS has no virtual-hosted bucket URLs, so path style is
             // required.
             .force_path_style(true)
-            .credentials_provider(Credentials::new(
-                access_key,
-                secret_key,
-                None,
-                None,
-                "laysi-env",
-            ))
+            .credentials_provider(credentials.clone())
             .http_client(http)
             .timeout_config(
                 aws_sdk_s3::config::timeout::TimeoutConfig::builder()
@@ -247,6 +288,9 @@ impl ObjectStore {
             client: Client::from_conf(conf),
             bucket: bucket.to_string(),
             endpoint: endpoint.to_string(),
+            credentials,
+            region: region.to_string(),
+            pin: Arc::default(),
         }
     }
 
@@ -261,10 +305,12 @@ impl ObjectStore {
     /// Create the bucket if it does not exist. Run once at startup and
     /// confirmed again before every upload.
     ///
-    /// Returns `true` when this call actually created a new bucket.
+    /// Returns `true` when this call actually created a new bucket. Until the
+    /// bucket has been pinned to strict durability in this process, each call
+    /// also tries that; see [`ObjectStore::keep_pinned`].
     pub async fn ensure_bucket(&self) -> Result<bool> {
-        match self.client.head_bucket().bucket(&self.bucket).send().await {
-            Ok(_) => Ok(false),
+        let created = match self.client.head_bucket().bucket(&self.bucket).send().await {
+            Ok(_) => false,
             Err(_) => {
                 match self
                     .client
@@ -273,7 +319,7 @@ impl ObjectStore {
                     .send()
                     .await
                 {
-                    Ok(_) => Ok(true),
+                    Ok(_) => true,
                     // Two processes starting together will race; treat "someone
                     // else already created it" as success.
                     Err(e) => {
@@ -281,17 +327,175 @@ impl ObjectStore {
                         if msg.contains("BucketAlreadyOwnedByYou")
                             || msg.contains("BucketAlreadyExists")
                         {
-                            Ok(false)
+                            false
                         } else {
-                            Err(StorageError::S3 {
+                            return Err(StorageError::S3 {
                                 op: "create_bucket",
                                 message: msg,
-                            })
+                            });
                         }
                     }
                 }
             }
+        };
+        self.keep_pinned().await;
+        Ok(created)
+    }
+
+    /// Pin the bucket to strict durability once per process, at startup and,
+    /// if that fails, on a later upload.
+    ///
+    /// Not only when the bucket is new: a bucket created under RustFS
+    /// 1.0.0-rc.2 to 1.0.0 carries a relaxed mode that no RustFS upgrade
+    /// removes. A failure is logged and never fails the caller, so documents
+    /// keep working, but a startup that fails it no longer leaves the bucket
+    /// relaxed until the next restart. After the first success this costs one
+    /// lock.
+    async fn keep_pinned(&self) {
+        if !self.pin_state().claim(Instant::now()) {
+            return;
         }
+        let result = self.pin_strict_durability().await;
+        let mut state = self.pin_state();
+        match result {
+            Ok(found) => {
+                state.pinned = true;
+                if found.as_deref() != Some(STRICT_DURABILITY) {
+                    tracing::info!(
+                        bucket = %self.bucket,
+                        previous = found.as_deref().unwrap_or("server default"),
+                        "bucket pinned to strict durability"
+                    );
+                }
+            }
+            Err(e) => {
+                // The wait counts from the failure, not from when it started.
+                state.tried_at = Some(Instant::now());
+                tracing::warn!(
+                    bucket = %self.bucket,
+                    error = %e,
+                    "the bucket could not be pinned to strict durability, so a power cut can lose acknowledged writes"
+                );
+            }
+        }
+    }
+
+    fn pin_state(&self) -> MutexGuard<'_, PinState> {
+        self.pin.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The durability mode RustFS records on our bucket: `strict`, `relaxed`
+    /// or `none`, and `None` when the bucket carries no mode of its own and
+    /// follows the server-wide default.
+    pub async fn durability(&self) -> Result<Option<String>> {
+        self.durability_call(reqwest::Method::GET, Vec::new()).await
+    }
+
+    /// Pin our bucket to strict durability unless it already is, and return
+    /// the mode it had before.
+    ///
+    /// Under `relaxed`, RustFS acknowledges a write once the object's data is
+    /// on disk but before `xl.meta` and the directory entry that point at it
+    /// are, and relies on erasure shards on other nodes to heal what a power
+    /// cut loses. A single-node install has no other node, so the last
+    /// acknowledged version of a document can be lost for good. RustFS
+    /// 1.0.0-rc.2 started writing `relaxed` onto every new bucket, and 1.0.1
+    /// stopped but left the mode on buckets that already had it. The mode is
+    /// written onto the bucket rather than cleared to follow the server-wide
+    /// default, because that default has changed twice.
+    async fn pin_strict_durability(&self) -> Result<Option<String>> {
+        let found = self.durability().await?;
+        if found.as_deref() == Some(STRICT_DURABILITY) {
+            return Ok(found);
+        }
+        let body = serde_json::json!({ "mode": STRICT_DURABILITY }).to_string();
+        let now = self
+            .durability_call(reqwest::Method::PUT, body.into_bytes())
+            .await?;
+        if now.as_deref() != Some(STRICT_DURABILITY) {
+            return Err(StorageError::S3 {
+                op: "bucket_durability",
+                message: format!(
+                    "設為 {STRICT_DURABILITY} 之後回報的模式是 {}",
+                    now.as_deref().unwrap_or("未設定")
+                ),
+            });
+        }
+        Ok(found)
+    }
+
+    /// One SigV4-signed call to the durability admin API, which answers
+    /// `{"bucket": ..., "mode": ...}` to both reads and writes.
+    async fn durability_call(
+        &self,
+        method: reqwest::Method,
+        body: Vec<u8>,
+    ) -> Result<Option<String>> {
+        let fail = |message: String| StorageError::S3 {
+            op: "bucket_durability",
+            message,
+        };
+        let url = format!(
+            "{}{DURABILITY_PATH}/{}",
+            self.endpoint.trim_end_matches('/'),
+            self.bucket
+        );
+
+        // Signed the way the SDK signs S3 requests, which is what RustFS
+        // checks the admin API against as well.
+        let mut settings = SigningSettings::default();
+        settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
+        settings.percent_encoding_mode = PercentEncodingMode::Single;
+        settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
+        let identity = self.credentials.clone().into();
+        let params: SigningParams = v4::SigningParams::builder()
+            .identity(&identity)
+            .region(&self.region)
+            .name("s3")
+            .time(SystemTime::now())
+            .settings(settings)
+            .build()
+            .map_err(|e| fail(e.to_string()))?
+            .into();
+        let signable = SignableRequest::new(
+            method.as_str(),
+            url.as_str(),
+            std::iter::empty(),
+            SignableBody::Bytes(&body),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let (instructions, _) = sign(signable, &params)
+            .map_err(|e| fail(e.to_string()))?
+            .into_parts();
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| fail(e.to_string()))?;
+        let mut request = client.request(method, &url);
+        for (name, value) in instructions.headers() {
+            request = request.header(name, value);
+        }
+        if !body.is_empty() {
+            request = request
+                .header("content-type", "application/json")
+                .body(body);
+        }
+        let response = request.send().await.map_err(|e| fail(e.to_string()))?;
+        let status = response.status();
+        let text = response.text().await.map_err(|e| fail(e.to_string()))?;
+        if !status.is_success() {
+            return Err(fail(format!("HTTP {}：{text}", status.as_u16())));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Reply {
+            mode: Option<String>,
+        }
+        serde_json::from_str::<Reply>(&text)
+            .map(|reply| reply.mode)
+            .map_err(|e| fail(format!("無法解讀回應 {text}：{e}")))
     }
 
     /// Health check: actually call S3 to list buckets rather than confirming
@@ -1121,6 +1325,18 @@ pub fn checksum(body: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_caller_tries_to_pin_at_a_time_and_none_once_pinned() {
+        let start = Instant::now();
+        let mut state = PinState::default();
+        assert!(state.claim(start), "never tried");
+        assert!(!state.claim(start), "a second caller during the attempt");
+        assert!(!state.claim(start + PIN_RETRY - Duration::from_secs(1)));
+        assert!(state.claim(start + PIN_RETRY));
+        state.pinned = true;
+        assert!(!state.claim(start + PIN_RETRY * 10));
+    }
 
     #[test]
     fn object_keys_never_collide_between_versions() {
