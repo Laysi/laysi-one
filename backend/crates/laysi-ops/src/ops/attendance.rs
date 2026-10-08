@@ -19,7 +19,7 @@
 
 use crate::ops::employees::{service_months, BASIS_HOURLY, INSURED_OWNER};
 use crate::ops::insurance::ruleset_json;
-use crate::ops::settings::{deciding_as, own_request_refusal};
+use crate::ops::settings::{deciding_as, own_request_refusal, own_revoke_refusal};
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{
@@ -28,7 +28,10 @@ use chrono::{
 };
 use laysi_domain::{business_time, Money};
 use laysi_regulation::Ruleset;
-use laysi_store::{AttendancePunch, LeaveRequest, OvertimeRequest, PunchCorrection};
+use laysi_store::{
+    leave_payroll_span, overtime_payroll_span, overtime_status_label, payroll_blocker,
+    AttendancePunch, LeaveRequest, OvertimeRequest, PayrollPeriodState, PunchCorrection,
+};
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -49,8 +52,10 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(CorrectPunch),
         Box::new(ListLeaveRequests),
         Box::new(DecideLeaveRequest),
+        Box::new(RevokeLeaveRequest),
         Box::new(ListOvertimeRequests),
         Box::new(DecideOvertimeRequest),
+        Box::new(RevokeOvertimeRequest),
         Box::new(ListPunchCorrections),
         Box::new(DecidePunchCorrection),
     ]
@@ -554,7 +559,8 @@ pub(crate) fn judges_absence(
 
 /// Attach leave to each day and mark the days nobody accounted for.
 ///
-/// `leaves` are one person's requests; rejected ones are ignored. A day is
+/// `leaves` are one person's requests; only those still holding their hours
+/// are attached (see [`holds_hours`]). A day is
 /// absent when the calendar calls it a working day, it ended before `today`,
 /// and it has neither a punch, a leave request, nor a punch correction under
 /// review (`awaiting_fix`). A request still waiting for a decision counts:
@@ -575,7 +581,7 @@ pub(crate) fn mark_days(
         );
         day.leaves = leaves
             .iter()
-            .filter(|l| l.status != "rejected" && l.from_at < close && l.to_at > open)
+            .filter(|l| holds_hours(&l.status) && l.from_at < close && l.to_at > open)
             .map(|l| DayLeave {
                 leave_no: l.leave_no.clone(),
                 kind: l.kind.clone(),
@@ -857,12 +863,13 @@ pub(crate) fn leave_kind_label(kind: &str) -> &'static str {
     }
 }
 
-pub(crate) fn leave_status_label(status: &str) -> &'static str {
-    match status {
-        "approved" => "已准假",
-        "rejected" => "已駁回",
-        _ => "等簽核",
-    }
+pub(crate) use laysi_store::leave_status_label;
+
+/// Whether a leave or overtime request still claims its hours: waiting for a
+/// decision, or approved. Rejected, withdrawn and revoked requests have given
+/// them back, the same line the overlap constraints draw.
+pub(crate) fn holds_hours(status: &str) -> bool {
+    matches!(status, "pending" | "approved")
 }
 
 #[derive(Clone, Copy)]
@@ -915,6 +922,7 @@ fn leave_json(request: &LeaveRequest, balance: Option<AnnualBalance>) -> Value {
         "decided_role": request.decided_role,
         "decided_at": request.decided_at,
         "decision_note": request.decision_note,
+        "cancelled": request.cancelled,
         "created_at": request.created_at,
         "created_by": request.created_by,
         "annual_leave": balance.map(|b| json!({
@@ -1174,7 +1182,8 @@ struct ListLeaveRequests;
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct ListLeaveRequestsInput {
-    /// Include approved and rejected requests; by default only pending ones.
+    /// Include requests already decided or taken back; by default only
+    /// pending ones.
     #[serde(default)]
     pub include_done: bool,
     /// Maximum rows. Omit for no additional limit.
@@ -1268,6 +1277,7 @@ impl Operation for ListLeaveRequests {
         // screen can draw the button dead with the reason beside it. Same
         // separation of duties as the expense flow.
         let deciding_as = deciding_as(ctx).await?;
+        let paid = ctx.store.payroll_period_states().await?;
         let rows = requests
             .iter()
             .map(|request| {
@@ -1277,6 +1287,17 @@ impl Operation for ListLeaveRequests {
                 row["decide_blocked_reason"] = json!(own.then(|| {
                     own_request_refusal(&ctx.actor_role, &format!("{} ", request.leave_no))
                 }));
+                let span = leave_payroll_span(request.from_on, request.to_on);
+                payroll_answers(
+                    ctx,
+                    &mut row,
+                    &request.status,
+                    own,
+                    &request.leave_no,
+                    request.employee_id,
+                    span,
+                    &paid,
+                );
                 row
             })
             .collect::<Vec<_>>();
@@ -1345,7 +1366,7 @@ impl Operation for DecideLeaveRequest {
     }
 
     fn summary(&self) -> &'static str {
-        "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕；申請人不得核准本人送出的單據，公司設定允許時負責人例外。"
+        "准假或駁回一張仍在等簽核的休假單，留下決定者、身分與說明。狀態不是待簽核時一律拒絕；單據所在月份到當年年底之間有已計算薪資的期別時不能准假，駁回不受影響；申請人不得核准本人送出的單據，公司設定允許時負責人例外。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1380,6 +1401,67 @@ impl Operation for DecideLeaveRequest {
         );
         Ok(OpOutcome::new(
             json!({ "request": leave_json(&request, None), "action": request.status }),
+            summary,
+        ))
+    }
+}
+
+struct RevokeLeaveRequest;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RevokeLeaveRequestInput {
+    /// Leave request number. Only an approved one can be revoked.
+    pub leave_no: String,
+    /// Why the approval is undone. Required; the requester reads it.
+    pub reason: String,
+}
+
+#[async_trait]
+impl Operation for RevokeLeaveRequest {
+    fn name(&self) -> &'static str {
+        "revoke_leave_request"
+    }
+
+    fn risk(&self) -> Risk {
+        // The inverse of approving, and the same tier.
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "撤銷一張已核准的休假單，理由必填，留下撤銷者與身分；撤銷後該段時間可以重新申請。單據所在月份到當年年底之間有已計算薪資的期別時拒絕；申請人不得撤銷本人的單，公司設定允許時負責人例外。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<RevokeLeaveRequestInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: RevokeLeaveRequestInput = parse(input)?;
+        let reason = revoke_reason(&i.reason)?;
+        let request = ctx
+            .store
+            .revoke_leave_request(
+                &i.leave_no,
+                &ctx.actor,
+                &ctx.actor_role,
+                deciding_as(ctx).await?,
+                reason,
+            )
+            .await
+            .map_err(|e| own_request_error(ctx, e))?;
+
+        let summary = format!(
+            "{} · {} {} {} {} 日 · 由 {}（{}）撤銷 · 理由：{reason}",
+            request.leave_no,
+            request.emp_no,
+            request.name,
+            leave_kind_label(&request.kind),
+            request.days.normalize(),
+            ctx.actor,
+            crate::role_name(ctx).await
+        );
+        Ok(OpOutcome::new(
+            json!({ "request": leave_json(&request, None) }),
             summary,
         ))
     }
@@ -1448,7 +1530,56 @@ fn own_request_error(ctx: &OpCtx, e: laysi_store::StoreError) -> OpError {
         StoreError::PunchCorrectionDecidedByRequester => {
             OpError::BadInput(own_request_refusal(&ctx.actor_role, PUNCH_SUBJECT))
         }
+        StoreError::RevokedByRequester { no } => {
+            OpError::BadInput(own_revoke_refusal(&ctx.actor_role, &format!("{no} ")))
+        }
         e => e.into(),
+    }
+}
+
+/// Whether this caller can approve or revoke a request, answered on its list
+/// row so the screen draws the button or the reason instead of it. Approving
+/// is asked of a pending request the caller may decide, revoking of an
+/// approved one. Each reason is the sentence the operation itself would
+/// refuse with, built from the same store function.
+///
+/// Rejecting is not asked: it changes nothing payroll reads, so a computed
+/// period leaves it open while it closes approval.
+#[allow(clippy::too_many_arguments)]
+fn payroll_answers(
+    ctx: &OpCtx,
+    row: &mut Value,
+    status: &str,
+    own: bool,
+    no: &str,
+    employee_id: i32,
+    (first, last): (String, String),
+    paid: &[PayrollPeriodState],
+) {
+    let span = (first.as_str(), last.as_str());
+    let refusal = |action| payroll_blocker(paid, employee_id, span, action).map(|e| e.to_string());
+    let approve_blocked = match status {
+        "pending" if !own => refusal("核准"),
+        _ => None,
+    };
+    row["can_approve"] = json!(status == "pending" && !own && approve_blocked.is_none());
+    row["approve_blocked_reason"] = json!(approve_blocked);
+
+    let revoke_blocked = match status {
+        "approved" if own => Some(own_revoke_refusal(&ctx.actor_role, &format!("{no} "))),
+        "approved" => refusal("撤銷"),
+        _ => None,
+    };
+    row["can_revoke"] = json!(status == "approved" && revoke_blocked.is_none());
+    row["revoke_blocked_reason"] = json!(revoke_blocked);
+}
+
+/// The reason a revocation must carry: the requester reads it, and it is the
+/// only account of why an approval stopped counting.
+fn revoke_reason(reason: &str) -> Result<&str, OpError> {
+    match reason.trim() {
+        "" => Err(OpError::BadInput("請填寫撤銷理由".into())),
+        reason => Ok(reason),
     }
 }
 
@@ -1533,11 +1664,12 @@ pub(crate) fn overtime_json(o: &OvertimeRequest) -> Result<Value, OpError> {
         "pay_blocked_reason": pay.is_none().then_some("尚未設定底薪，設定後才算得出加班費"),
         "reason": o.reason,
         "status": o.status,
-        "status_label": leave_status_label(&o.status),
+        "status_label": overtime_status_label(&o.status),
         "decided_by": o.decided_by,
         "decided_role": o.decided_role,
         "decided_at": o.decided_at,
         "decision_note": o.decision_note,
+        "cancelled": o.cancelled,
         "created_at": o.created_at,
         "created_by": o.created_by,
     }))
@@ -1628,6 +1760,7 @@ impl Operation for ListOvertimeRequests {
         let ceiling = laysi_regulation::overtime_monthly_max_hours(rs)?;
         let include_done = i.include_done.unwrap_or(false);
         let deciding_as = deciding_as(ctx).await?;
+        let paid = ctx.store.payroll_period_states().await?;
 
         let rows = all
             .iter()
@@ -1639,6 +1772,17 @@ impl Operation for ListOvertimeRequests {
                 row["decide_blocked_reason"] = json!(own.then(|| {
                     own_request_refusal(&ctx.actor_role, &format!("{} ", o.request_no))
                 }));
+                let span = overtime_payroll_span(o.worked_on);
+                payroll_answers(
+                    ctx,
+                    &mut row,
+                    &o.status,
+                    own,
+                    &o.request_no,
+                    o.employee_id,
+                    span,
+                    &paid,
+                );
                 Ok(row)
             })
             .collect::<Result<Vec<_>, OpError>>()?;
@@ -1703,7 +1847,7 @@ impl Operation for DecideOvertimeRequest {
     }
 
     fn summary(&self) -> &'static str {
-        "核准或駁回一張仍在等簽核的加班申請，留下決定者、身分與說明。核准後該時數會列入當期薪資的加班費。狀態不是等簽核時一律拒絕；申請人不得核准本人送出的申請，公司設定允許時負責人例外。"
+        "核准或駁回一張仍在等簽核的加班申請，留下決定者、身分與說明。核准後該時數會列入當期薪資的加班費。狀態不是等簽核時一律拒絕；加班日所在期別已計算薪資時不能核准，駁回不受影響；申請人不得核准本人送出的申請，公司設定允許時負責人例外。"
     }
 
     fn input_schema(&self) -> Value {
@@ -1740,6 +1884,65 @@ impl Operation for DecideOvertimeRequest {
                 "request": overtime_json(&request)?,
                 "action": action,
             }),
+            summary,
+        ))
+    }
+}
+
+struct RevokeOvertimeRequest;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RevokeOvertimeRequestInput {
+    /// Overtime request number. Only an approved one can be revoked.
+    pub request_no: String,
+    /// Why the approval is undone. Required; the requester reads it.
+    pub reason: String,
+}
+
+#[async_trait]
+impl Operation for RevokeOvertimeRequest {
+    fn name(&self) -> &'static str {
+        "revoke_overtime_request"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "撤銷一張已核准的加班申請，理由必填，留下撤銷者與身分；撤銷後不再列入薪資的加班費，該段時間可以重新申請。加班日所在期別已計算薪資時拒絕；申請人不得撤銷本人的單，公司設定允許時負責人例外。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<RevokeOvertimeRequestInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: RevokeOvertimeRequestInput = parse(input)?;
+        let reason = revoke_reason(&i.reason)?;
+        let request = ctx
+            .store
+            .revoke_overtime_request(
+                &i.request_no,
+                &ctx.actor,
+                &ctx.actor_role,
+                deciding_as(ctx).await?,
+                reason,
+            )
+            .await
+            .map_err(|e| own_request_error(ctx, e))?;
+
+        let summary = format!(
+            "{} · {} {} 加班 {} 小時 · 由 {}（{}）撤銷 · 理由：{reason}",
+            request.request_no,
+            request.emp_no,
+            request.name,
+            request.hours.normalize(),
+            ctx.actor,
+            crate::role_name(ctx).await
+        );
+        Ok(OpOutcome::new(
+            json!({ "request": overtime_json(&request)? }),
             summary,
         ))
     }
@@ -2474,6 +2677,7 @@ mod tests {
             decided_role: String::new(),
             decided_at: None,
             decision_note: String::new(),
+            cancelled: None,
             created_at: Utc::now(),
             created_by: String::new(),
         }
@@ -2520,6 +2724,20 @@ mod tests {
                 "2026-06-16T17:00",
             ),
             leave(
+                "LV6",
+                "personal",
+                "withdrawn",
+                "2026-06-16T09:00",
+                "2026-06-16T12:00",
+            ),
+            leave(
+                "LV7",
+                "annual",
+                "revoked",
+                "2026-06-16T13:00",
+                "2026-06-16T17:00",
+            ),
+            leave(
                 "LV4",
                 "annual",
                 "approved",
@@ -2544,7 +2762,8 @@ mod tests {
         };
         mark_days(&mut days, &requests, &[], &sched, true, on("2026-06-24"));
 
-        // 06-16 has only a rejected request and 06-22 nothing at all; the
+        // 06-16 has only requests that gave their hours back (rejected,
+        // withdrawn, revoked) and 06-22 nothing at all; the
         // holiday, the weekend and today are not missed days.
         assert_eq!(absent(&days), ["2026-06-16", "2026-06-22"]);
 
@@ -2571,7 +2790,10 @@ mod tests {
         assert_eq!(hours_on("2026-06-18"), [("LV2".into(), Some(7 * 3600))]);
         assert_eq!(hours_on("2026-06-23"), [("LV4".into(), Some(4 * 3600))]);
         assert_eq!(hours_on("2026-06-24"), [("LV4".into(), Some(3 * 3600))]);
-        assert!(hours_on("2026-06-16").is_empty(), "駁回的單不算請假");
+        assert!(
+            hours_on("2026-06-16").is_empty(),
+            "駁回、撤回與撤銷的單不算請假"
+        );
         for off in ["2026-06-19", "2026-06-20", "2026-06-21"] {
             assert!(hours_on(off).is_empty(), "{off} 不是工作日，休假單不佔那天");
         }

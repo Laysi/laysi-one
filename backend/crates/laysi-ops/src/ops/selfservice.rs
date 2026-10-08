@@ -34,7 +34,7 @@
 //! two numbers on the request cannot disagree with the range above them.
 
 use crate::ops::attendance::{
-    business_instant, correction_auto_approves, judges_absence, leave_kind_label,
+    business_instant, correction_auto_approves, holds_hours, judges_absence, leave_kind_label,
     leave_status_label, mark_days, month_days, month_span, overtime_json, punch_correction_json,
     punch_correction_status_label, punch_days, punch_kind_label, summarise, valid_leave_kind,
     OvertimeLimits, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS, PUNCH_TIME,
@@ -70,8 +70,10 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
         Box::new(ListMyLeaveRequests),
         Box::new(PreviewLeave),
         Box::new(RequestLeave),
+        Box::new(WithdrawMyLeaveRequest),
         Box::new(ListMyOvertimeRequests),
         Box::new(SubmitMyOvertimeRequest),
+        Box::new(WithdrawMyOvertimeRequest),
         Box::new(ListMyExpenseClaims),
         Box::new(SubmitMyExpenseClaim),
         Box::new(AttachMyExpenseReceipt),
@@ -234,6 +236,7 @@ fn leave_request_json(request: &LeaveRequest) -> Value {
         "decided_role": request.decided_role,
         "decided_at": request.decided_at,
         "decision_note": request.decision_note,
+        "cancelled": request.cancelled,
         "created_at": request.created_at,
         "created_by": request.created_by,
     })
@@ -688,6 +691,76 @@ impl Operation for RequestLeave {
     }
 }
 
+struct WithdrawMyLeaveRequest;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct WithdrawMyLeaveRequestInput {
+    /// Number of one's own leave request still waiting for a decision.
+    pub leave_no: String,
+    /// Why it is taken back.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[async_trait]
+impl Operation for WithdrawMyLeaveRequest {
+    fn name(&self) -> &'static str {
+        "withdraw_my_leave_request"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "撤回本人一張仍在等簽核的休假單，撤回後該段時間可以重新申請。已核准的單要由人資撤銷；別人的單號一律查無此單。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<WithdrawMyLeaveRequestInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: WithdrawMyLeaveRequestInput = parse(input)?;
+        let reason = i.reason.as_deref().map(str::trim).unwrap_or("");
+        let employee = actor_employee(ctx).await?;
+        let request = ctx
+            .store
+            .withdraw_leave_request(
+                &i.leave_no,
+                employee.id,
+                &ctx.actor,
+                &ctx.actor_role,
+                reason,
+            )
+            .await?;
+
+        let summary = format!(
+            "{} · {} 撤回{} {} 日{}",
+            request.leave_no,
+            employee.name,
+            leave_kind_label(&request.kind),
+            request.days.normalize(),
+            reason_suffix(reason)
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "request": leave_request_json(&request),
+                "scope_note": "所屬員工由 ctx.employee_id 決定並直接寫進 WHERE 條件。",
+            }),
+            summary,
+        ))
+    }
+}
+
+/// How an optional reason ends an audit summary.
+fn reason_suffix(reason: &str) -> String {
+    match reason {
+        "" => String::new(),
+        reason => format!(" · 理由：{reason}"),
+    }
+}
+
 // My overtime
 
 /// Hours an overtime request covers: the length of the range less the break
@@ -703,13 +776,13 @@ fn requested_overtime_hours(
 }
 
 /// What the monthly ceiling in the overtime ruleset is measured against:
-/// everything not rejected. A pending request is already spoken for, so
-/// counting only the approved ones would offer hours the next submission
-/// refuses.
+/// every request still holding its hours. A pending request is already
+/// spoken for, so counting only the approved ones would offer hours the next
+/// submission refuses.
 fn committed_overtime_hours(requests: &[OvertimeRequest]) -> Money {
     requests
         .iter()
-        .filter(|o| o.status != "rejected")
+        .filter(|o| holds_hours(&o.status))
         .map(|o| o.hours)
         .sum()
 }
@@ -933,6 +1006,67 @@ impl Operation for SubmitMyOvertimeRequest {
                 "monthly_max_hours": ceiling.normalize().to_string(),
                 "ruleset": ruleset_json(rs),
                 "scope_note": "employee_id 由已驗證 session 的 ctx.employee_id 決定，created_by 來自同一個登入身分。",
+            }),
+            summary,
+        ))
+    }
+}
+
+struct WithdrawMyOvertimeRequest;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct WithdrawMyOvertimeRequestInput {
+    /// Number of one's own overtime request still waiting for a decision.
+    pub request_no: String,
+    /// Why it is taken back.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[async_trait]
+impl Operation for WithdrawMyOvertimeRequest {
+    fn name(&self) -> &'static str {
+        "withdraw_my_overtime_request"
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::NeedsConfirm
+    }
+
+    fn summary(&self) -> &'static str {
+        "撤回本人一張仍在等簽核的加班申請，撤回後該段時間可以重新申請，時數也不再計入當月上限。已核准的單要由人資撤銷；別人的單號一律查無此單。"
+    }
+
+    fn input_schema(&self) -> Value {
+        schema_of::<WithdrawMyOvertimeRequestInput>()
+    }
+
+    async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
+        let i: WithdrawMyOvertimeRequestInput = parse(input)?;
+        let reason = i.reason.as_deref().map(str::trim).unwrap_or("");
+        let employee = actor_employee(ctx).await?;
+        let request = ctx
+            .store
+            .withdraw_overtime_request(
+                &i.request_no,
+                employee.id,
+                &ctx.actor,
+                &ctx.actor_role,
+                reason,
+            )
+            .await?;
+
+        let summary = format!(
+            "{} · {} 撤回加班 {} 小時{}",
+            request.request_no,
+            employee.name,
+            request.hours.normalize(),
+            reason_suffix(reason)
+        );
+        Ok(OpOutcome::new(
+            json!({
+                "request": overtime_json(&request)?,
+                "scope_note": "所屬員工由 ctx.employee_id 決定並直接寫進 WHERE 條件。",
             }),
             summary,
         ))
@@ -2137,7 +2271,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_overtime_hours_counts_pending_and_drops_rejected() {
+    fn committed_overtime_hours_counts_pending_and_drops_what_was_given_back() {
         let one = |status: &str, hours: &str| OvertimeRequest {
             request_no: "OT2608-001".into(),
             employee_id: 1,
@@ -2163,6 +2297,7 @@ mod tests {
             decided_role: String::new(),
             decided_at: None,
             decision_note: String::new(),
+            cancelled: None,
             created_at: Utc::now(),
             created_by: "e001@example.com".into(),
         };
@@ -2170,6 +2305,8 @@ mod tests {
             one("approved", "3"),
             one("pending", "2"),
             one("rejected", "8"),
+            one("withdrawn", "4"),
+            one("revoked", "1"),
         ];
         assert_eq!(
             committed_overtime_hours(&rows),
@@ -2232,6 +2369,12 @@ mod tests {
                 "request_leave",
                 BTreeSet::from(["kind", "from_at", "to_at", "reason"]),
             ),
+            // The number names a request, and requests belong to people, so
+            // the employee is part of the SQL WHERE clause, as with a token.
+            (
+                "withdraw_my_leave_request",
+                BTreeSet::from(["leave_no", "reason"]),
+            ),
             ("list_my_overtime_requests", BTreeSet::new()),
             // The hours are the length of the range and the day type comes
             // from the work calendar, so there is no field to inflate the pay
@@ -2239,6 +2382,10 @@ mod tests {
             (
                 "submit_my_overtime_request",
                 BTreeSet::from(["from_at", "to_at", "reason"]),
+            ),
+            (
+                "withdraw_my_overtime_request",
+                BTreeSet::from(["request_no", "reason"]),
             ),
             ("list_my_expense_claims", BTreeSet::new()),
             (

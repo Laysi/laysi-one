@@ -57,6 +57,7 @@ if (!ACTIVATION_KEY) {
   process.exit(1);
 }
 const BOSS_PASSWORD = "Function-Boss-2026";
+const NAMESAKE_PASSWORD = "Function-Namesake-2026";
 
 async function psql(db: string, sql: string): Promise<string> {
   const proc = Bun.spawn(
@@ -126,6 +127,32 @@ function previousMonth(month: string): string {
 
 // Money arrives as decimal strings and must never become a float on the way
 // to a comparison.
+// A date `months` after this month, stated as a company workday so that a
+// government holiday falling on it cannot change what a check exercises.
+async function workday(months: number, day: number): Promise<string> {
+  const [y, m] = [Number(TODAY.slice(0, 4)), Number(TODAY.slice(5, 7))];
+  const on = new Date(Date.UTC(y, m - 1 + months, day)).toISOString().slice(0, 10);
+  await must("set_work_calendar_day", { on_date: on, kind: "workday", name: "測試工作日" });
+  return on;
+}
+
+// Signing in once and swapping cookies after that: switching by signing in
+// again runs into the login rate limit within a few checks.
+let namesakeCookie = "";
+async function asNamesake<T>(fn: () => Promise<T>): Promise<T> {
+  const owner = cookie;
+  if (namesakeCookie) cookie = namesakeCookie;
+  else {
+    await login("namesake@test.local", NAMESAKE_PASSWORD);
+    namesakeCookie = cookie;
+  }
+  try {
+    return await fn();
+  } finally {
+    cookie = owner;
+  }
+}
+
 function money(value: unknown): number {
   if (typeof value !== "string") throw new Error(`金額應為字串，收到 ${typeof value}：${JSON.stringify(value)}`);
   return Math.round(Number(value) * 100);
@@ -865,7 +892,7 @@ async function main() {
       const changed = await fetch(`${BASE}/v1/auth/change-password`, {
         method: "POST",
         headers: { "content-type": "application/json", cookie },
-        body: JSON.stringify({ new_password: "Function-Namesake-2026" }),
+        body: JSON.stringify({ new_password: NAMESAKE_PASSWORD }),
       });
       expect(changed.status === 200, `變更密碼 HTTP ${changed.status}`);
       const set = (changed.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");
@@ -1175,6 +1202,96 @@ async function main() {
       rows = await listed();
       expectEq(rows.length, 0, "空清單清空名單");
       return "整份取代 · 不帶不動 · 空清單清空 · 兄弟姊妹、沒有加保日與錯字號擋下";
+    });
+
+    console.log("\nL 撤回與撤銷");
+
+    await check("L1", "撤回待簽核的休假單之後，同一段時間送得出去；別人的單號查無此單", async () => {
+      const day = await workday(2, 14);
+      const span = { kind: "personal", from_at: `${day}T09:00:00`, to_at: `${day}T12:00:00` };
+      const first = (await must("request_leave", span)).request.leave_no;
+      const blocked = await op("request_leave", span);
+      expect(!blocked.ok, "重疊的休假單竟然送得出去");
+      const theirs = await asNamesake(() => op("withdraw_my_leave_request", { leave_no: first }));
+      expect(!theirs.ok, "撤回得了別人的休假單");
+      expectEq(theirs.error!.message, `查無休假單 ${first}`, "別人的單號");
+      const gone = await must("withdraw_my_leave_request", { leave_no: first, reason: "改期" });
+      expectEq(gone.request.status, "withdrawn", "撤回後的狀態");
+      expectEq(gone.request.cancelled.reason, "改期", "撤回理由");
+      const again = (await must("request_leave", span)).request.leave_no;
+      return `${first} 撤回 → ${again} 送出同一段時間`;
+    });
+
+    await check("L2", "已核准的加班申請由人資撤銷，理由必填，撤銷後同一段時間送得出去", async () => {
+      const day = await workday(2, 15);
+      const span = { from_at: `${day}T18:00:00`, to_at: `${day}T20:00:00` };
+      const no = await asNamesake(async () => {
+        const first = (await must("submit_my_overtime_request", span)).request.request_no;
+        await must("withdraw_my_overtime_request", { request_no: first });
+        return (await must("submit_my_overtime_request", span)).request.request_no;
+      });
+      await must("decide_overtime_request", { request_no: no, approve: true });
+      const own = await asNamesake(() => op("withdraw_my_overtime_request", { request_no: no }));
+      expect(!own.ok, "已核准的單竟然撤回得了");
+      const bare = await op("revoke_overtime_request", { request_no: no, reason: " " });
+      expect(!bare.ok, "沒有理由竟然撤銷得了");
+      expectEq(bare.error!.message, "請填寫撤銷理由", "沒有理由");
+      const listed = await must("list_overtime_requests", { month: day.slice(0, 7), include_done: true });
+      expectEq(listed.requests.find((r: any) => r.request_no === no).can_revoke, true, "尚未計薪的期別");
+      const revoked = await must("revoke_overtime_request", { request_no: no, reason: "預先核准但沒有加班" });
+      expectEq(revoked.request.status, "revoked", "撤銷後的狀態");
+      expectEq(revoked.request.decided_by, revoked.request.cancelled.by, "核准與撤銷的人");
+      await asNamesake(() => must("submit_my_overtime_request", span));
+      return `${no} 撤回重送、核准、撤銷，同一段時間再送一次`;
+    });
+
+    await check("L3", "本期已有薪資單的人，核准被擋下並指向薪資作業，駁回照常；計薪之後才建檔的人照常核准與撤銷", async () => {
+      const day = await workday(0, 2);
+      const month = day.slice(0, 7);
+      const morning = { kind: "personal", from_at: `${day}T09:00:00`, to_at: `${day}T12:00:00` };
+      const findRow = async (leaveNo: string) =>
+        (await must("list_leave_requests", { month })).requests.find((r: any) => r.leave_no === leaveNo);
+
+      // The namesake was put on the roster after this month was computed.
+      const unpaid = await asNamesake(async () => (await must("request_leave", morning)).request.leave_no);
+      const open = await findRow(unpaid);
+      expectEq(open.can_approve, true, "計薪之後才建檔的人可以核准");
+      expectEq(open.approve_blocked_reason, null, "計薪之後才建檔的人的原因");
+      await must("decide_leave_request", { leave_no: unpaid, approve: true });
+      await must("revoke_leave_request", { leave_no: unpaid, reason: "測試撤銷" });
+
+      // The owner (E001) holds a payslip of this month since H5. Deciding
+      // their own request takes owner_self_decide; the two sessions are
+      // swapped rather than signed in again, which the login rate limit
+      // refuses this late in the run.
+      const owner = cookie;
+      await login("admin", ADMIN_PASSWORD);
+      const admin = cookie;
+      cookie = owner;
+      const selfDecide = async (value: string) => {
+        cookie = admin;
+        try {
+          await must("update_company_setting", { code: "owner_self_decide", value });
+        } finally {
+          cookie = owner;
+        }
+      };
+      await selfDecide("可自行核決");
+      try {
+        const leaveNo = (await must("request_leave", morning)).request.leave_no;
+        const refused = await op("decide_leave_request", { leave_no: leaveNo, approve: true });
+        expect(!refused.ok, "已計薪的期別竟然核准得了");
+        expect(refused.error!.message.startsWith(month), refused.error!.message);
+        const row = await findRow(leaveNo);
+        expectEq(row.can_decide, true, "可以簽核");
+        expectEq(row.can_approve, false, "可以核准");
+        expectEq(row.approve_blocked_reason, refused.error!.message, "清單上的原因與拒絕訊息");
+        const rejected = await must("decide_leave_request", { leave_no: leaveNo, approve: false, note: "已計薪" });
+        expectEq(rejected.request.status, "rejected", "駁回後的狀態");
+        return `${unpaid} 核准並撤銷 · ${refused.error!.message}`;
+      } finally {
+        await selfDecide("由他人簽核");
+      }
     });
 
     console.log("\nD 文件下載連結");

@@ -397,9 +397,6 @@ pub enum StoreError {
         to: String,
     },
 
-    #[error("加班申請 {no} 已為「{status}」，不能重複簽核")]
-    OvertimeAlreadyDecided { no: String, status: String },
-
     #[error("{date} 已有{kind}卡紀錄（{at}），一天只記一次；如需更正請由人資補登")]
     PunchAlreadyRecorded {
         date: String,
@@ -413,8 +410,56 @@ pub enum StoreError {
     #[error("下班時間 {out} 不能早於上班時間 {in_at}")]
     PunchOutBeforeIn { out: String, in_at: String },
 
-    #[error("休假單 {no} 已為「{status}」，不能重複簽核")]
-    LeaveAlreadyDecided { no: String, status: String },
+    #[error("{what} {no} 已為「{status}」，只有等簽核的單可以簽核")]
+    NotDecidable {
+        what: &'static str,
+        no: String,
+        status: &'static str,
+    },
+
+    /// An approved request has reached payroll's input, so taking it back is
+    /// HR's revocation rather than the requester's withdrawal.
+    #[error("{what} {no} 已核准，要取消請洽人資撤銷")]
+    WithdrawApproved { what: &'static str, no: String },
+
+    #[error("{what} {no} 已為「{status}」，只有等簽核的單可以撤回")]
+    NotWithdrawable {
+        what: &'static str,
+        no: String,
+        status: &'static str,
+    },
+
+    #[error("{what} {no} 為「{status}」，只有已核准的單可以撤銷")]
+    NotRevocable {
+        what: &'static str,
+        no: String,
+        status: &'static str,
+    },
+
+    #[error("{no} 由本人送出，要由另一個帳號撤銷")]
+    RevokedByRequester { no: String },
+
+    /// A payroll that read the request has been computed, so approving or
+    /// revoking it would change what that payroll should have paid. The
+    /// period can be voided while its vouchers are unposted; `periods` is
+    /// every one in the way, joined for reading.
+    #[error("{periods} 已計算薪資，{action}前請先到「薪資作業」作廢")]
+    PeriodComputed {
+        periods: String,
+        action: &'static str,
+    },
+
+    #[error("{periods} 的薪資已過帳，無法{action}；差額請在下一期補發或補扣")]
+    PeriodPosted {
+        periods: String,
+        action: &'static str,
+    },
+
+    /// A request was approved or revoked between payroll reading the
+    /// requests and writing the run. Computing again reads them as they
+    /// stand now.
+    #[error("{nos} 在計算期間被核准或撤銷，請重新計算本期薪資")]
+    PricedRequestChanged { nos: String },
 
     #[error("查無補登申請")]
     PunchCorrectionNotFound,
@@ -6174,11 +6219,15 @@ impl Store {
                     l.status, l.decided_by,
                     COALESCE(r.name, l.decided_role) AS decided_role,
                     l.decided_at, l.decision_note,
+                    l.cancelled_by,
+                    COALESCE(rc.name, l.cancelled_role) AS cancelled_role,
+                    l.cancelled_at, l.cancel_reason,
                     l.created_at, l.created_by
                FROM leave_request l
                JOIN employee e            ON e.id = l.employee_id
                LEFT JOIN dimension_value d ON d.id = e.dept_id
                LEFT JOIN role r            ON r.code = l.decided_role
+               LEFT JOIN role rc           ON rc.code = l.cancelled_role
               WHERE ($1 OR l.status = 'pending')
                 AND ($3::int IS NULL OR l.employee_id = $3)
                 AND ($4::date IS NULL OR l.to_on >= $4)
@@ -6234,7 +6283,7 @@ impl Store {
             "SELECT leave_no, from_at, to_at
                FROM leave_request
               WHERE employee_id = $1
-                AND status <> 'rejected'
+                AND status IN ('pending', 'approved')
                 AND tsrange(from_at, to_at, '[)') && tsrange($2, $3, '[)')
               ORDER BY from_at
               LIMIT 1",
@@ -6298,11 +6347,16 @@ impl Store {
                     o.day_type, o.from_at, o.to_at, o.worked_on, o.hours, e.base_salary, e.pay_basis,
                     o.reason, o.status, o.decided_by,
                     COALESCE(r.name, o.decided_role) AS decided_role,
-                    o.decided_at, o.decision_note, o.created_at, o.created_by
+                    o.decided_at, o.decision_note,
+                    o.cancelled_by,
+                    COALESCE(rc.name, o.cancelled_role) AS cancelled_role,
+                    o.cancelled_at, o.cancel_reason,
+                    o.created_at, o.created_by
                FROM overtime_request o
                JOIN employee e             ON e.id = o.employee_id
                LEFT JOIN dimension_value d ON d.id = e.dept_id
                LEFT JOIN role r            ON r.code = o.decided_role
+               LEFT JOIN role rc           ON rc.code = o.cancelled_role
               WHERE ($1 OR o.status = 'pending')
                 AND ($2::int IS NULL OR o.employee_id = $2)
                 AND ($3::text IS NULL OR to_char(o.worked_on, 'YYYY-MM') = $3)
@@ -6329,11 +6383,16 @@ impl Store {
                     o.day_type, o.from_at, o.to_at, o.worked_on, o.hours, e.base_salary, e.pay_basis,
                     o.reason, o.status, o.decided_by,
                     COALESCE(r.name, o.decided_role) AS decided_role,
-                    o.decided_at, o.decision_note, o.created_at, o.created_by
+                    o.decided_at, o.decision_note,
+                    o.cancelled_by,
+                    COALESCE(rc.name, o.cancelled_role) AS cancelled_role,
+                    o.cancelled_at, o.cancel_reason,
+                    o.created_at, o.created_by
                FROM overtime_request o
                JOIN employee e             ON e.id = o.employee_id
                LEFT JOIN dimension_value d ON d.id = e.dept_id
                LEFT JOIN role r            ON r.code = o.decided_role
+               LEFT JOIN role rc           ON rc.code = o.cancelled_role
               WHERE o.status = 'approved' AND o.worked_on BETWEEN $1 AND $2
               ORDER BY o.worked_on, o.id",
         )
@@ -6359,7 +6418,7 @@ impl Store {
             "SELECT request_no, from_at, to_at
                FROM overtime_request
               WHERE employee_id = $1
-                AND status <> 'rejected'
+                AND status IN ('pending', 'approved')
                 AND tsrange(from_at, to_at, '[)') && tsrange($2, $3, '[)')
               ORDER BY from_at
               LIMIT 1",
@@ -6408,9 +6467,9 @@ impl Store {
 
     /// Approve or reject one overtime request.
     ///
-    /// The same two rules as leave: the requester may not decide their own,
-    /// and the status is re-checked inside the UPDATE so two managers acting
-    /// at once cannot both win.
+    /// The same rules as leave: the row is locked so two managers acting at
+    /// once cannot both win, the requester may not decide their own, and an
+    /// approval is refused once a computed payroll has read the month worked.
     pub async fn decide_overtime_request(
         &self,
         request_no: &str,
@@ -6420,48 +6479,52 @@ impl Store {
         actor_employee_id: Option<i32>,
         note: &str,
     ) -> Result<OvertimeRequest> {
-        let row =
-            sqlx::query("SELECT status, employee_id FROM overtime_request WHERE request_no = $1")
-                .bind(request_no)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| StoreError::OvertimeNotFound {
-                    no: request_no.to_string(),
-                })?;
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT status, employee_id, worked_on
+               FROM overtime_request WHERE request_no = $1 FOR UPDATE",
+        )
+        .bind(request_no)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::OvertimeNotFound {
+            no: request_no.to_string(),
+        })?;
         let status: String = row.get("status");
         if status != "pending" {
-            return Err(StoreError::OvertimeAlreadyDecided {
+            return Err(StoreError::NotDecidable {
+                what: OVERTIME_SUBJECT,
                 no: request_no.to_string(),
-                status,
+                status: overtime_status_label(&status),
             });
         }
-        if actor_employee_id.is_some() && actor_employee_id == Some(row.get("employee_id")) {
+        let employee_id: i32 = row.get("employee_id");
+        if actor_employee_id == Some(employee_id) {
             return Err(StoreError::LeaveDecidedByRequester {
                 no: request_no.to_string(),
             });
         }
+        if approve {
+            let (first, last) = overtime_payroll_span(row.get("worked_on"));
+            check_payroll_unread(&mut tx, employee_id, (&first, &last), "核准").await?;
+        }
 
-        let updated = sqlx::query(
+        sqlx::query(
             "UPDATE overtime_request
                 SET status = CASE WHEN $2 THEN 'approved' ELSE 'rejected' END,
                     decided_by = $3, decided_role = $4, decided_at = now(), decision_note = $5
-              WHERE request_no = $1 AND status = 'pending'",
+              WHERE request_no = $1",
         )
         .bind(request_no)
         .bind(approve)
         .bind(actor)
         .bind(actor_role)
         .bind(note)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        if updated.rows_affected() == 0 {
-            return Err(StoreError::OvertimeAlreadyDecided {
-                no: request_no.to_string(),
-                status: "已處理".into(),
-            });
-        }
+        tx.commit().await?;
 
-        self.overtime_requests(true, None, None)
+        self.overtime_requests(true, Some(employee_id), None)
             .await?
             .into_iter()
             .find(|o| o.request_no == request_no)
@@ -6531,6 +6594,12 @@ impl Store {
             })
     }
 
+    /// Approve or reject one leave request.
+    ///
+    /// The row is locked for the decision, so two managers acting at the
+    /// same moment cannot both win: the second waits, then finds it decided.
+    /// An approval changes what payroll reads and a refusal does not, so only
+    /// an approval is refused once a computed payroll has read the request.
     pub async fn decide_leave_request(
         &self,
         leave_no: &str,
@@ -6540,58 +6609,275 @@ impl Store {
         actor_employee_id: Option<i32>,
         note: &str,
     ) -> Result<LeaveRequest> {
-        let row = sqlx::query("SELECT status, employee_id FROM leave_request WHERE leave_no = $1")
-            .bind(leave_no)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| StoreError::LeaveNotFound {
-                no: leave_no.to_string(),
-            })?;
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT status, employee_id, from_on, to_on
+               FROM leave_request WHERE leave_no = $1 FOR UPDATE",
+        )
+        .bind(leave_no)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::LeaveNotFound {
+            no: leave_no.to_string(),
+        })?;
         let status: String = row.get("status");
         if status != "pending" {
-            return Err(StoreError::LeaveAlreadyDecided {
+            return Err(StoreError::NotDecidable {
+                what: LEAVE_SUBJECT,
                 no: leave_no.to_string(),
-                status,
+                status: leave_status_label(&status),
             });
         }
         // Same separation of duties the expense flow enforces. The key is the
         // employee id, not the name: two people can share a name.
-        if actor_employee_id.is_some() && actor_employee_id == Some(row.get("employee_id")) {
+        let employee_id: i32 = row.get("employee_id");
+        if actor_employee_id == Some(employee_id) {
             return Err(StoreError::LeaveDecidedByRequester {
                 no: leave_no.to_string(),
             });
         }
+        if approve {
+            let (first, last) = leave_payroll_span(row.get("from_on"), row.get("to_on"));
+            check_payroll_unread(&mut tx, employee_id, (&first, &last), "核准").await?;
+        }
 
-        // The status is re-checked in the UPDATE itself, so two managers
-        // acting at the same moment cannot both win: the second changes no
-        // row and is told the request was already decided.
-        let updated = sqlx::query(
+        sqlx::query(
             "UPDATE leave_request
                 SET status = CASE WHEN $2 THEN 'approved' ELSE 'rejected' END,
                     decided_by = $3, decided_role = $4, decided_at = now(), decision_note = $5
-              WHERE leave_no = $1 AND status = 'pending'",
+              WHERE leave_no = $1",
         )
         .bind(leave_no)
         .bind(approve)
         .bind(actor)
         .bind(actor_role)
         .bind(note)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        if updated.rows_affected() == 0 {
-            return Err(StoreError::LeaveAlreadyDecided {
-                no: leave_no.to_string(),
-                status: "已處理".into(),
-            });
-        }
+        tx.commit().await?;
 
-        self.leave_requests(true, 1000)
+        self.leave_requests_by_employee(employee_id)
             .await?
             .into_iter()
             .find(|l| l.leave_no == leave_no)
             .ok_or_else(|| StoreError::LeaveNotFound {
                 no: leave_no.to_string(),
             })
+    }
+
+    /// Take back one's own leave request before anybody has decided it.
+    ///
+    /// The employee is part of the WHERE clause, so another person's number
+    /// is a missing row rather than a refusal that confirms it exists.
+    pub async fn withdraw_leave_request(
+        &self,
+        leave_no: &str,
+        employee_id: i32,
+        actor: &str,
+        actor_role: &str,
+        reason: &str,
+    ) -> Result<LeaveRequest> {
+        let updated = sqlx::query(
+            "UPDATE leave_request
+                SET status = 'withdrawn', cancelled_by = $3, cancelled_role = $4,
+                    cancelled_at = now(), cancel_reason = $5
+              WHERE leave_no = $1 AND employee_id = $2 AND status = 'pending'",
+        )
+        .bind(leave_no)
+        .bind(employee_id)
+        .bind(actor)
+        .bind(actor_role)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() == 0 {
+            let status: Option<String> = sqlx::query_scalar(
+                "SELECT status FROM leave_request WHERE leave_no = $1 AND employee_id = $2",
+            )
+            .bind(leave_no)
+            .bind(employee_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            return Err(not_withdrawn(LEAVE_SUBJECT, leave_no, status.as_deref()));
+        }
+
+        self.leave_requests_by_employee(employee_id)
+            .await?
+            .into_iter()
+            .find(|l| l.leave_no == leave_no)
+            .ok_or_else(|| StoreError::LeaveNotFound {
+                no: leave_no.to_string(),
+            })
+    }
+
+    /// Undo an approval that no computed payroll has read.
+    ///
+    /// The row is locked before the payroll periods are read, so two people
+    /// revoking at once cannot both pass; the requester may not revoke their
+    /// own, for the same reason they may not approve it.
+    pub async fn revoke_leave_request(
+        &self,
+        leave_no: &str,
+        actor: &str,
+        actor_role: &str,
+        actor_employee_id: Option<i32>,
+        reason: &str,
+    ) -> Result<LeaveRequest> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT status, employee_id, from_on, to_on
+               FROM leave_request WHERE leave_no = $1 FOR UPDATE",
+        )
+        .bind(leave_no)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::LeaveNotFound {
+            no: leave_no.to_string(),
+        })?;
+        let employee_id: i32 = row.get("employee_id");
+        let (first, last) = leave_payroll_span(row.get("from_on"), row.get("to_on"));
+        check_revocable(
+            &mut tx,
+            LEAVE_SUBJECT,
+            leave_no,
+            &row.get::<String, _>("status"),
+            actor_employee_id == Some(employee_id),
+            employee_id,
+            (&first, &last),
+        )
+        .await?;
+
+        sqlx::query(
+            "UPDATE leave_request
+                SET status = 'revoked', cancelled_by = $2, cancelled_role = $3,
+                    cancelled_at = now(), cancel_reason = $4
+              WHERE leave_no = $1",
+        )
+        .bind(leave_no)
+        .bind(actor)
+        .bind(actor_role)
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        self.leave_requests_by_employee(employee_id)
+            .await?
+            .into_iter()
+            .find(|l| l.leave_no == leave_no)
+            .ok_or_else(|| StoreError::LeaveNotFound {
+                no: leave_no.to_string(),
+            })
+    }
+
+    /// Take back one's own overtime request before anybody has decided it.
+    /// Same shape as [`Store::withdraw_leave_request`].
+    pub async fn withdraw_overtime_request(
+        &self,
+        request_no: &str,
+        employee_id: i32,
+        actor: &str,
+        actor_role: &str,
+        reason: &str,
+    ) -> Result<OvertimeRequest> {
+        let updated = sqlx::query(
+            "UPDATE overtime_request
+                SET status = 'withdrawn', cancelled_by = $3, cancelled_role = $4,
+                    cancelled_at = now(), cancel_reason = $5
+              WHERE request_no = $1 AND employee_id = $2 AND status = 'pending'",
+        )
+        .bind(request_no)
+        .bind(employee_id)
+        .bind(actor)
+        .bind(actor_role)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() == 0 {
+            let status: Option<String> = sqlx::query_scalar(
+                "SELECT status FROM overtime_request WHERE request_no = $1 AND employee_id = $2",
+            )
+            .bind(request_no)
+            .bind(employee_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            return Err(not_withdrawn(
+                OVERTIME_SUBJECT,
+                request_no,
+                status.as_deref(),
+            ));
+        }
+
+        self.overtime_requests(true, Some(employee_id), None)
+            .await?
+            .into_iter()
+            .find(|o| o.request_no == request_no)
+            .ok_or_else(|| StoreError::OvertimeNotFound {
+                no: request_no.to_string(),
+            })
+    }
+
+    /// Undo an overtime approval that no computed payroll has read. Same
+    /// shape as [`Store::revoke_leave_request`].
+    pub async fn revoke_overtime_request(
+        &self,
+        request_no: &str,
+        actor: &str,
+        actor_role: &str,
+        actor_employee_id: Option<i32>,
+        reason: &str,
+    ) -> Result<OvertimeRequest> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT status, employee_id, worked_on
+               FROM overtime_request WHERE request_no = $1 FOR UPDATE",
+        )
+        .bind(request_no)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::OvertimeNotFound {
+            no: request_no.to_string(),
+        })?;
+        let employee_id: i32 = row.get("employee_id");
+        let (first, last) = overtime_payroll_span(row.get("worked_on"));
+        check_revocable(
+            &mut tx,
+            OVERTIME_SUBJECT,
+            request_no,
+            &row.get::<String, _>("status"),
+            actor_employee_id == Some(employee_id),
+            employee_id,
+            (&first, &last),
+        )
+        .await?;
+
+        sqlx::query(
+            "UPDATE overtime_request
+                SET status = 'revoked', cancelled_by = $2, cancelled_role = $3,
+                    cancelled_at = now(), cancel_reason = $4
+              WHERE request_no = $1",
+        )
+        .bind(request_no)
+        .bind(actor)
+        .bind(actor_role)
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        self.overtime_requests(true, Some(employee_id), None)
+            .await?
+            .into_iter()
+            .find(|o| o.request_no == request_no)
+            .ok_or_else(|| StoreError::OvertimeNotFound {
+                no: request_no.to_string(),
+            })
+    }
+
+    /// Every period with a payroll run, and whether any of its vouchers has
+    /// left `pending`. A list rather than a lookup: there are twelve a year.
+    pub async fn payroll_period_states(&self) -> Result<Vec<PayrollPeriodState>> {
+        payroll_period_states(&self.pool).await
     }
 
     /// Punch correction requests, newest working day first.
@@ -6954,6 +7240,7 @@ impl Store {
         }
 
         let mut tx = self.pool.begin().await?;
+        confirm_priced_requests(&mut tx, &req).await?;
 
         let gross: Money = req.slips.iter().map(|s| s.gross).sum();
         let deduction: Money = req.slips.iter().map(|s| s.deduction).sum();
@@ -8986,8 +9273,20 @@ pub struct LeaveRequest {
     pub decided_role: String,
     pub decided_at: Option<DateTime<Utc>>,
     pub decision_note: String,
+    pub cancelled: Option<Cancellation>,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
+}
+
+/// Who took a leave or overtime request back, when and why. Present exactly
+/// when the status is `withdrawn` or `revoked`; a CHECK holds the two together.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Cancellation {
+    pub by: String,
+    /// The role's display name, as `decided_role` is read.
+    pub role: String,
+    pub at: DateTime<Utc>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -9013,6 +9312,7 @@ pub struct OvertimeRequest {
     pub decided_role: String,
     pub decided_at: Option<DateTime<Utc>>,
     pub decision_note: String,
+    pub cancelled: Option<Cancellation>,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
 }
@@ -9174,6 +9474,14 @@ pub struct RecordPayroll<'a> {
     pub partial_month_version: &'a str,
     pub note: &'a str,
     pub actor: &'a str,
+    /// What this run read as approved: leave touching `leave_span` and
+    /// overtime worked within `overtime_span`. The write compares them with
+    /// what is approved now, under the lock every approval and revocation
+    /// takes, so a decision that landed after the read stops the run.
+    pub leave_span: (NaiveDate, NaiveDate),
+    pub leave_nos: &'a [String],
+    pub overtime_span: (NaiveDate, NaiveDate),
+    pub overtime_nos: &'a [String],
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -9328,6 +9636,251 @@ async fn resolve_department_id(tx: &mut Tx<'_>, dept_code: Option<&str>) -> Resu
     .ok_or_else(|| StoreError::DepartmentNotFound {
         code: dept_code.to_string(),
     })
+}
+
+/// How refusals name the two kinds of request that can be taken back.
+const LEAVE_SUBJECT: &str = "休假單";
+const OVERTIME_SUBJECT: &str = "加班申請";
+
+/// A leave status named the way the screens name it. `status` is a column
+/// value and never reaches the reader.
+pub fn leave_status_label(status: &str) -> &'static str {
+    request_status_label(status, "已准假")
+}
+
+/// An overtime status named the way the screens name it. Leave is granted,
+/// overtime is approved, so the two differ in that one word.
+pub fn overtime_status_label(status: &str) -> &'static str {
+    request_status_label(status, "已核准")
+}
+
+fn request_status_label(status: &str, approved: &'static str) -> &'static str {
+    match status {
+        "approved" => approved,
+        "rejected" => "已駁回",
+        "withdrawn" => "已撤回",
+        "revoked" => "已撤銷",
+        _ => "等簽核",
+    }
+}
+
+fn status_label_of(what: &str, status: &str) -> &'static str {
+    match what {
+        LEAVE_SUBJECT => leave_status_label(status),
+        _ => overtime_status_label(status),
+    }
+}
+
+/// Why a withdrawal changed no row. `status` was read with the requester in
+/// the WHERE clause, so `None` means no such request of theirs.
+fn not_withdrawn(what: &'static str, no: &str, status: Option<&str>) -> StoreError {
+    let no = no.to_string();
+    match status {
+        None if what == LEAVE_SUBJECT => StoreError::LeaveNotFound { no },
+        None => StoreError::OvertimeNotFound { no },
+        Some("approved") => StoreError::WithdrawApproved { what, no },
+        Some(status) => StoreError::NotWithdrawable {
+            what,
+            no,
+            status: status_label_of(what, status),
+        },
+    }
+}
+
+/// The payroll periods that read a leave request, first and last as
+/// `YYYY-MM`: every month it touches, and the rest of its last year. Sickness
+/// and menstrual leave count towards a yearly allowance from 1 January, so a
+/// later period of the same year read this request to price its own days.
+pub fn leave_payroll_span(from_on: NaiveDate, to_on: NaiveDate) -> (String, String) {
+    (
+        from_on.format("%Y-%m").to_string(),
+        format!("{}-12", to_on.format("%Y")),
+    )
+}
+
+/// The payroll period that pays an overtime request: the month worked.
+pub fn overtime_payroll_span(worked_on: NaiveDate) -> (String, String) {
+    let month = worked_on.format("%Y-%m").to_string();
+    (month.clone(), month)
+}
+
+/// One period with a computed payroll. `posted` is whether any of its
+/// vouchers has left `pending`, which is when voiding it is refused. `paid`
+/// is the employees holding a payslip of the period, from any of its runs.
+#[derive(Debug, Clone)]
+pub struct PayrollPeriodState {
+    pub period: String,
+    pub posted: bool,
+    pub paid: Vec<i32>,
+}
+
+/// The refusal for approving or revoking (`action`) a request of
+/// `employee_id` that payroll reads in `first..=last`, or `None` when no
+/// period in that span has paid that employee yet.
+///
+/// A period computed before the employee was on the roster, or that skipped
+/// them, did not price their requests; its next run is the one that pays
+/// them, so it reads what is approved by then.
+///
+/// Posted periods are named on their own: voiding is refused there, and
+/// pointing the reader at it would only lead to a second refusal. Voiding
+/// takes every run of the period, so that is asked of the period as a whole.
+pub fn payroll_blocker(
+    states: &[PayrollPeriodState],
+    employee_id: i32,
+    (first, last): (&str, &str),
+    action: &'static str,
+) -> Option<StoreError> {
+    let hit: Vec<&PayrollPeriodState> = states
+        .iter()
+        .filter(|s| s.period.as_str() >= first && s.period.as_str() <= last)
+        .filter(|s| s.paid.contains(&employee_id))
+        .collect();
+    let posted: Vec<&str> = hit
+        .iter()
+        .filter(|s| s.posted)
+        .map(|s| s.period.as_str())
+        .collect();
+    match (hit.is_empty(), posted.is_empty()) {
+        (true, _) => None,
+        (false, true) => Some(StoreError::PeriodComputed {
+            periods: hit
+                .iter()
+                .map(|s| s.period.as_str())
+                .collect::<Vec<_>>()
+                .join("、"),
+            action,
+        }),
+        (false, false) => Some(StoreError::PeriodPosted {
+            periods: posted.join("、"),
+            action,
+        }),
+    }
+}
+
+async fn payroll_period_states<'e, E>(db: E) -> Result<Vec<PayrollPeriodState>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    Ok(sqlx::query(
+        "SELECT p.period,
+                COALESCE(bool_or(p.voucher_no IS NOT NULL AND v.status <> 'pending'), false)
+                  AS posted,
+                COALESCE(array_agg(DISTINCT s.employee_id)
+                           FILTER (WHERE s.employee_id IS NOT NULL), '{}')
+                  AS paid
+           FROM payroll_run p
+           LEFT JOIN voucher v ON v.no = p.voucher_no
+           LEFT JOIN payslip s ON s.run_id = p.id
+          GROUP BY p.period
+          ORDER BY p.period",
+    )
+    .fetch_all(db)
+    .await?
+    .iter()
+    .map(|r| PayrollPeriodState {
+        period: r.get("period"),
+        posted: r.get("posted"),
+        paid: r.get("paid"),
+    })
+    .collect())
+}
+
+/// Taken by every write that changes what payroll reads (approving or
+/// revoking a leave or overtime request) and by the write of a payroll run,
+/// each before it looks at the other's tables. Whichever commits first, the
+/// other sees it.
+pub const PAYROLL_INPUT_LOCK_KEY: i64 = 4803;
+
+async fn lock_payroll_input(tx: &mut Tx<'_>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(PAYROLL_INPUT_LOCK_KEY)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Confirm that what a payroll run priced is still exactly what is approved.
+///
+/// `run_payroll` reads the requests outside this transaction. Under the lock
+/// no approval or revocation can commit until the run does, so a difference
+/// found here is one that landed between the read and the write.
+async fn confirm_priced_requests(tx: &mut Tx<'_>, req: &RecordPayroll<'_>) -> Result<()> {
+    lock_payroll_input(tx).await?;
+    let leave: Vec<String> = sqlx::query_scalar(
+        "SELECT leave_no FROM leave_request
+          WHERE status = 'approved' AND to_on >= $1 AND from_on <= $2",
+    )
+    .bind(req.leave_span.0)
+    .bind(req.leave_span.1)
+    .fetch_all(&mut **tx)
+    .await?;
+    let overtime: Vec<String> = sqlx::query_scalar(
+        "SELECT request_no FROM overtime_request
+          WHERE status = 'approved' AND worked_on BETWEEN $1 AND $2",
+    )
+    .bind(req.overtime_span.0)
+    .bind(req.overtime_span.1)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let now: std::collections::BTreeSet<&str> =
+        leave.iter().chain(&overtime).map(String::as_str).collect();
+    let priced: std::collections::BTreeSet<&str> = req
+        .leave_nos
+        .iter()
+        .chain(req.overtime_nos)
+        .map(String::as_str)
+        .collect();
+    let moved: Vec<&str> = now.symmetric_difference(&priced).copied().collect();
+    match moved.is_empty() {
+        true => Ok(()),
+        false => Err(StoreError::PricedRequestChanged {
+            nos: moved.join("、"),
+        }),
+    }
+}
+
+/// Refuse a change to what payroll reads in `span` for `employee_id` when a
+/// computed payroll already paid that employee there. Takes the payroll lock
+/// first, so the answer holds until the caller commits.
+async fn check_payroll_unread(
+    tx: &mut Tx<'_>,
+    employee_id: i32,
+    span: (&str, &str),
+    action: &'static str,
+) -> Result<()> {
+    lock_payroll_input(tx).await?;
+    let states = payroll_period_states(&mut **tx).await?;
+    match payroll_blocker(&states, employee_id, span, action) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// What a revocation must pass before it writes, read inside the transaction
+/// that holds the request's row. `own` is whether the caller is the requester
+/// and nothing lifts that rule for them.
+async fn check_revocable(
+    tx: &mut Tx<'_>,
+    what: &'static str,
+    no: &str,
+    status: &str,
+    own: bool,
+    employee_id: i32,
+    span: (&str, &str),
+) -> Result<()> {
+    if status != "approved" {
+        return Err(StoreError::NotRevocable {
+            what,
+            no: no.to_string(),
+            status: status_label_of(what, status),
+        });
+    }
+    if own {
+        return Err(StoreError::RevokedByRequester { no: no.to_string() });
+    }
+    check_payroll_unread(tx, employee_id, span, "撤銷").await
 }
 
 /// A voucher status named the way the screens name it. `status` is a column
@@ -9847,6 +10400,16 @@ fn local_span(at: chrono::NaiveDateTime) -> String {
     at.format("%Y-%m-%d %H:%M").to_string()
 }
 
+fn cancellation(r: &PgRow) -> Option<Cancellation> {
+    r.get::<Option<DateTime<Utc>>, _>("cancelled_at")
+        .map(|at| Cancellation {
+            by: r.get("cancelled_by"),
+            role: r.get("cancelled_role"),
+            at,
+            reason: r.get("cancel_reason"),
+        })
+}
+
 fn row_to_leave(r: &PgRow) -> LeaveRequest {
     LeaveRequest {
         leave_no: r.get("leave_no"),
@@ -9867,6 +10430,7 @@ fn row_to_leave(r: &PgRow) -> LeaveRequest {
         decided_role: r.get("decided_role"),
         decided_at: r.get("decided_at"),
         decision_note: r.get("decision_note"),
+        cancelled: cancellation(r),
         created_at: r.get("created_at"),
         created_by: r.get("created_by"),
     }
@@ -9892,6 +10456,7 @@ fn row_to_overtime(r: &PgRow) -> OvertimeRequest {
         decided_role: r.get("decided_role"),
         decided_at: r.get("decided_at"),
         decision_note: r.get("decision_note"),
+        cancelled: cancellation(r),
         created_at: r.get("created_at"),
         created_by: r.get("created_by"),
     }
@@ -10434,6 +10999,123 @@ mod tests {
     fn leave_number_period_matches_every_other_document_number() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 26).unwrap();
         assert_eq!(date.format("%y%m").to_string(), "2607");
+    }
+
+    /// A leave request is read by the payroll of every month it touches and,
+    /// through the yearly sickness allowance, by every later month of its
+    /// last year. Overtime is paid in the month worked and nowhere else.
+    #[test]
+    fn revoking_is_refused_by_any_computed_payroll_that_read_the_request() {
+        let on = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let state = |period: &str, posted| PayrollPeriodState {
+            period: period.into(),
+            posted,
+            paid: vec![REQUESTER],
+        };
+
+        let leave = leave_payroll_span(on(2026, 9, 29), on(2026, 10, 2));
+        assert_eq!(leave, ("2026-09".to_string(), "2026-12".to_string()));
+        let across_new_year = leave_payroll_span(on(2026, 12, 30), on(2027, 1, 2));
+        assert_eq!(across_new_year.1, "2027-12");
+        let overtime = overtime_payroll_span(on(2026, 9, 17));
+        assert_eq!(overtime, ("2026-09".to_string(), "2026-09".to_string()));
+        let span = |s: &(String, String)| (s.0.clone(), s.1.clone());
+        let blocked = |states: &[PayrollPeriodState], s: &(String, String)| {
+            let (first, last) = span(s);
+            payroll_blocker(states, REQUESTER, (&first, &last), "撤銷").map(|e| e.to_string())
+        };
+
+        assert_eq!(blocked(&[state("2026-08", true)], &leave), None);
+        assert_eq!(
+            blocked(&[state("2026-08", true), state("2026-11", false)], &leave),
+            Some("2026-11 已計算薪資，撤銷前請先到「薪資作業」作廢".into()),
+            "後面的期別也讀過這張單"
+        );
+        assert_eq!(blocked(&[state("2026-10", false)], &overtime), None);
+        assert_eq!(
+            blocked(&[state("2026-09", false), state("2026-10", false)], &leave),
+            Some("2026-09、2026-10 已計算薪資，撤銷前請先到「薪資作業」作廢".into())
+        );
+        assert_eq!(
+            blocked(&[state("2026-09", true), state("2026-10", false)], &leave),
+            Some("2026-09 的薪資已過帳，無法撤銷；差額請在下一期補發或補扣".into()),
+            "有一期已過帳就作廢不了，不指向作廢"
+        );
+        assert_eq!(
+            payroll_blocker(
+                &[state("2026-09", false)],
+                REQUESTER,
+                ("2026-09", "2026-09"),
+                "核准"
+            )
+            .map(|e| e.to_string()),
+            Some("2026-09 已計算薪資，核准前請先到「薪資作業」作廢".into()),
+            "核准與撤銷同一條規則"
+        );
+    }
+
+    const REQUESTER: i32 = 7;
+
+    /// A period computed before the requester was on the roster, or that
+    /// skipped them, priced none of their requests: its next run pays them.
+    /// Once a run has, the period's state decides, posted or not.
+    #[test]
+    fn only_a_period_that_paid_the_requester_refuses() {
+        let state = |posted, paid: &[i32]| PayrollPeriodState {
+            period: "2026-10".into(),
+            posted,
+            paid: paid.to_vec(),
+        };
+        let blocked = |states: &[PayrollPeriodState]| {
+            payroll_blocker(states, REQUESTER, ("2026-10", "2026-10"), "核准")
+                .map(|e| e.to_string())
+        };
+
+        assert_eq!(blocked(&[state(false, &[3, 4])]), None);
+        assert_eq!(blocked(&[state(true, &[3, 4])]), None, "已過帳也一樣");
+        assert_eq!(
+            blocked(&[state(false, &[3, REQUESTER])]),
+            Some("2026-10 已計算薪資，核准前請先到「薪資作業」作廢".into())
+        );
+        assert_eq!(
+            blocked(&[state(true, &[3, REQUESTER])]),
+            Some("2026-10 的薪資已過帳，無法核准；差額請在下一期補發或補扣".into()),
+            "有一次已過帳就作廢不了，不指向作廢"
+        );
+    }
+
+    #[test]
+    fn statuses_read_as_words_and_overtime_is_approved_not_granted() {
+        assert_eq!(leave_status_label("approved"), "已准假");
+        assert_eq!(overtime_status_label("approved"), "已核准");
+        assert_eq!(overtime_status_label("withdrawn"), "已撤回");
+        let refusal = StoreError::NotDecidable {
+            what: OVERTIME_SUBJECT,
+            no: "OT2609-009".into(),
+            status: status_label_of(OVERTIME_SUBJECT, "revoked"),
+        };
+        assert_eq!(
+            refusal.to_string(),
+            "加班申請 OT2609-009 已為「已撤銷」，只有等簽核的單可以簽核"
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_that_changed_nothing_says_why() {
+        let refusal = |status| not_withdrawn(LEAVE_SUBJECT, "LV2610-001", status).to_string();
+        assert_eq!(refusal(None), "查無休假單 LV2610-001");
+        assert_eq!(
+            refusal(Some("approved")),
+            "休假單 LV2610-001 已核准，要取消請洽人資撤銷"
+        );
+        assert_eq!(
+            refusal(Some("withdrawn")),
+            "休假單 LV2610-001 已為「已撤回」，只有等簽核的單可以撤回"
+        );
+        assert_eq!(
+            not_withdrawn(OVERTIME_SUBJECT, "OT2609-008", None).to_string(),
+            "查無加班申請 OT2609-008"
+        );
     }
 
     #[test]
@@ -11116,7 +11798,9 @@ mod tests {
     /// message says.
     ///
     /// Adjacent periods are not overlapping ones: the ranges are half-open, so
-    /// leave ending at 18:00 and leave starting at 18:00 both stand.
+    /// leave ending at 18:00 and leave starting at 18:00 both stand. A
+    /// withdrawn request is outside the constraint, so its hours can be filed
+    /// again.
     ///
     /// Run with:
     /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
@@ -11176,7 +11860,7 @@ mod tests {
             actor: "測試",
         };
 
-        store
+        let first = store
             .create_leave_request(leave(at(10, 9), at(10, 18)))
             .await
             .expect("第一張應收下");
@@ -11192,6 +11876,15 @@ mod tests {
             .create_leave_request(leave(at(10, 18), at(11, 18)))
             .await
             .expect("接在後面的時段不算重疊");
+        // A withdrawn request gives its hours back.
+        store
+            .withdraw_leave_request(&first.leave_no, employee.id, "測試", "staff", "")
+            .await
+            .expect("等簽核的單應撤回得了");
+        store
+            .create_leave_request(leave(at(10, 9), at(10, 18)))
+            .await
+            .expect("撤回之後同一段時間應送得出去");
 
         let overtime = |from_at, to_at| NewOvertimeRequest {
             employee_id: employee.id,
@@ -11202,7 +11895,7 @@ mod tests {
             reason: "測試",
             actor: "測試",
         };
-        store
+        let first = store
             .create_overtime_request(overtime(at(12, 19), at(12, 21)))
             .await
             .expect("第一張應收下");
@@ -11214,6 +11907,14 @@ mod tests {
             matches!(clash, StoreError::OvertimeOverlaps { .. }),
             "重疊要說出擋住它的那一張單：{clash}"
         );
+        store
+            .withdraw_overtime_request(&first.request_no, employee.id, "測試", "staff", "")
+            .await
+            .expect("等簽核的申請應撤回得了");
+        store
+            .create_overtime_request(overtime(at(12, 20), at(12, 22)))
+            .await
+            .expect("撤回之後同一段時間應送得出去");
     }
 
     /// Run with:

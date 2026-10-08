@@ -980,6 +980,7 @@ mod tests {
         include_str!("../../../migrations/0014_preview_leave.sql"),
         include_str!("../../../migrations/0017_upload_staging.sql"),
         include_str!("../../../migrations/0018_download_link.sql"),
+        include_str!("../../../migrations/0023_withdraw_and_revoke_requests.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the

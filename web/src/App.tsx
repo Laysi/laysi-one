@@ -649,8 +649,17 @@ function Workspace() {
                 <MyExpenses onGo={go} onToast={showToast} reloadKey={reloadKey} />
               )}
               {screen === 'mepay' && <MyPayslips reloadKey={reloadKey} />}
-              {screen === 'meleave' && <MyLeave onGo={go} reloadKey={reloadKey} />}
-              {screen === 'meot' && <MyOvertime onGo={go} reloadKey={reloadKey} />}
+              {screen === 'meleave' && (
+                <MyLeave onGo={go} onToast={showToast} onChanged={reload} reloadKey={reloadKey} />
+              )}
+              {screen === 'meot' && (
+                <MyOvertime
+                  onGo={go}
+                  onToast={showToast}
+                  onChanged={reload}
+                  reloadKey={reloadKey}
+                />
+              )}
               {screen === 'memcp' && <MyMcp onToast={showToast} reloadKey={reloadKey} />}
               {screen === 'menotice' && (
                 <MyNotices reloadKey={reloadKey} onRead={() => setUnreadCount(0)} />
