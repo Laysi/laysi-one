@@ -1294,6 +1294,7 @@ impl Operation for ListLeaveRequests {
                     &request.status,
                     own,
                     &request.leave_no,
+                    request.employee_id,
                     span,
                     &paid,
                 );
@@ -1544,17 +1545,19 @@ fn own_request_error(ctx: &OpCtx, e: laysi_store::StoreError) -> OpError {
 ///
 /// Rejecting is not asked: it changes nothing payroll reads, so a computed
 /// period leaves it open while it closes approval.
+#[allow(clippy::too_many_arguments)]
 fn payroll_answers(
     ctx: &OpCtx,
     row: &mut Value,
     status: &str,
     own: bool,
     no: &str,
+    employee_id: i32,
     (first, last): (String, String),
     paid: &[PayrollPeriodState],
 ) {
     let span = (first.as_str(), last.as_str());
-    let refusal = |action| payroll_blocker(paid, span, action).map(|e| e.to_string());
+    let refusal = |action| payroll_blocker(paid, employee_id, span, action).map(|e| e.to_string());
     let approve_blocked = match status {
         "pending" if !own => refusal("核准"),
         _ => None,
@@ -1770,7 +1773,16 @@ impl Operation for ListOvertimeRequests {
                     own_request_refusal(&ctx.actor_role, &format!("{} ", o.request_no))
                 }));
                 let span = overtime_payroll_span(o.worked_on);
-                payroll_answers(ctx, &mut row, &o.status, own, &o.request_no, span, &paid);
+                payroll_answers(
+                    ctx,
+                    &mut row,
+                    &o.status,
+                    own,
+                    &o.request_no,
+                    o.employee_id,
+                    span,
+                    &paid,
+                );
                 Ok(row)
             })
             .collect::<Result<Vec<_>, OpError>>()?;

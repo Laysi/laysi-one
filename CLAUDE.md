@@ -944,7 +944,9 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 申請人不得撤銷本人的單，例外同 `owner_decides_own`）。**兩個狀態不合併**：撤回時
 `decided_at` 仍是 NULL，撤銷保留原本的核准，撤銷者另寫在 `cancelled_*`。**讀過那張單的
 薪資作業還在，核准與撤銷都拒絕**（駁回照常）：加班看加班日那一期，休假看碰到的月份一直到
-當年 12 月——病假與生理假按曆年累計，後面的期別也讀過它。拒絕訊息由 store 的
+當年 12 月——病假與生理假按曆年累計，後面的期別也讀過它。「讀過」看的是**申請人本人在那一期
+有沒有薪資單**（`PayrollPeriodState.paid`），不看那一期有沒有算過：計薪之後才建檔或第一次被
+跳過的人，單照常核准，由同一期的下一次計算補發；過帳仍看整期。拒絕訊息由 store 的
 `payroll_blocker` 產生，清單的 `approve_blocked_reason`／`revoke_blocked_reason` 是同一句；
 已過帳的期別另說「差額請在下一期補發或補扣」，不指向作廢。計薪在交易外讀單據，所以核准、
 撤銷與 `record_payroll_run` 共用 advisory lock `PAYROLL_INPUT_LOCK_KEY`，計薪寫入前在鎖內

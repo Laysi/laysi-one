@@ -6506,7 +6506,7 @@ impl Store {
         }
         if approve {
             let (first, last) = overtime_payroll_span(row.get("worked_on"));
-            check_payroll_unread(&mut tx, (&first, &last), "核准").await?;
+            check_payroll_unread(&mut tx, employee_id, (&first, &last), "核准").await?;
         }
 
         sqlx::query(
@@ -6638,7 +6638,7 @@ impl Store {
         }
         if approve {
             let (first, last) = leave_payroll_span(row.get("from_on"), row.get("to_on"));
-            check_payroll_unread(&mut tx, (&first, &last), "核准").await?;
+            check_payroll_unread(&mut tx, employee_id, (&first, &last), "核准").await?;
         }
 
         sqlx::query(
@@ -6742,6 +6742,7 @@ impl Store {
             leave_no,
             &row.get::<String, _>("status"),
             actor_employee_id == Some(employee_id),
+            employee_id,
             (&first, &last),
         )
         .await?;
@@ -6845,6 +6846,7 @@ impl Store {
             request_no,
             &row.get::<String, _>("status"),
             actor_employee_id == Some(employee_id),
+            employee_id,
             (&first, &last),
         )
         .await?;
@@ -9703,27 +9705,36 @@ pub fn overtime_payroll_span(worked_on: NaiveDate) -> (String, String) {
 }
 
 /// One period with a computed payroll. `posted` is whether any of its
-/// vouchers has left `pending`, which is when voiding it is refused.
+/// vouchers has left `pending`, which is when voiding it is refused. `paid`
+/// is the employees holding a payslip of the period, from any of its runs.
 #[derive(Debug, Clone)]
 pub struct PayrollPeriodState {
     pub period: String,
     pub posted: bool,
+    pub paid: Vec<i32>,
 }
 
-/// The refusal for approving or revoking (`action`) a request that payroll
-/// reads in `first..=last`, or `None` when no computed payroll falls in that
-/// span.
+/// The refusal for approving or revoking (`action`) a request of
+/// `employee_id` that payroll reads in `first..=last`, or `None` when no
+/// period in that span has paid that employee yet.
+///
+/// A period computed before the employee was on the roster, or that skipped
+/// them, did not price their requests; its next run is the one that pays
+/// them, so it reads what is approved by then.
 ///
 /// Posted periods are named on their own: voiding is refused there, and
-/// pointing the reader at it would only lead to a second refusal.
+/// pointing the reader at it would only lead to a second refusal. Voiding
+/// takes every run of the period, so that is asked of the period as a whole.
 pub fn payroll_blocker(
     states: &[PayrollPeriodState],
+    employee_id: i32,
     (first, last): (&str, &str),
     action: &'static str,
 ) -> Option<StoreError> {
     let hit: Vec<&PayrollPeriodState> = states
         .iter()
         .filter(|s| s.period.as_str() >= first && s.period.as_str() <= last)
+        .filter(|s| s.paid.contains(&employee_id))
         .collect();
     let posted: Vec<&str> = hit
         .iter()
@@ -9754,9 +9765,13 @@ where
     Ok(sqlx::query(
         "SELECT p.period,
                 COALESCE(bool_or(p.voucher_no IS NOT NULL AND v.status <> 'pending'), false)
-                  AS posted
+                  AS posted,
+                COALESCE(array_agg(DISTINCT s.employee_id)
+                           FILTER (WHERE s.employee_id IS NOT NULL), '{}')
+                  AS paid
            FROM payroll_run p
            LEFT JOIN voucher v ON v.no = p.voucher_no
+           LEFT JOIN payslip s ON s.run_id = p.id
           GROUP BY p.period
           ORDER BY p.period",
     )
@@ -9766,6 +9781,7 @@ where
     .map(|r| PayrollPeriodState {
         period: r.get("period"),
         posted: r.get("posted"),
+        paid: r.get("paid"),
     })
     .collect())
 }
@@ -9825,16 +9841,18 @@ async fn confirm_priced_requests(tx: &mut Tx<'_>, req: &RecordPayroll<'_>) -> Re
     }
 }
 
-/// Refuse a change to what payroll reads in `span` when a computed payroll
-/// already read it. Takes the payroll lock first, so the answer holds until
-/// the caller commits.
+/// Refuse a change to what payroll reads in `span` for `employee_id` when a
+/// computed payroll already paid that employee there. Takes the payroll lock
+/// first, so the answer holds until the caller commits.
 async fn check_payroll_unread(
     tx: &mut Tx<'_>,
+    employee_id: i32,
     span: (&str, &str),
     action: &'static str,
 ) -> Result<()> {
     lock_payroll_input(tx).await?;
-    match payroll_blocker(&payroll_period_states(&mut **tx).await?, span, action) {
+    let states = payroll_period_states(&mut **tx).await?;
+    match payroll_blocker(&states, employee_id, span, action) {
         Some(refusal) => Err(refusal),
         None => Ok(()),
     }
@@ -9849,6 +9867,7 @@ async fn check_revocable(
     no: &str,
     status: &str,
     own: bool,
+    employee_id: i32,
     span: (&str, &str),
 ) -> Result<()> {
     if status != "approved" {
@@ -9861,7 +9880,7 @@ async fn check_revocable(
     if own {
         return Err(StoreError::RevokedByRequester { no: no.to_string() });
     }
-    check_payroll_unread(tx, span, "撤銷").await
+    check_payroll_unread(tx, employee_id, span, "撤銷").await
 }
 
 /// A voucher status named the way the screens name it. `status` is a column
@@ -10991,6 +11010,7 @@ mod tests {
         let state = |period: &str, posted| PayrollPeriodState {
             period: period.into(),
             posted,
+            paid: vec![REQUESTER],
         };
 
         let leave = leave_payroll_span(on(2026, 9, 29), on(2026, 10, 2));
@@ -11002,7 +11022,7 @@ mod tests {
         let span = |s: &(String, String)| (s.0.clone(), s.1.clone());
         let blocked = |states: &[PayrollPeriodState], s: &(String, String)| {
             let (first, last) = span(s);
-            payroll_blocker(states, (&first, &last), "撤銷").map(|e| e.to_string())
+            payroll_blocker(states, REQUESTER, (&first, &last), "撤銷").map(|e| e.to_string())
         };
 
         assert_eq!(blocked(&[state("2026-08", true)], &leave), None);
@@ -11022,10 +11042,45 @@ mod tests {
             "有一期已過帳就作廢不了，不指向作廢"
         );
         assert_eq!(
-            payroll_blocker(&[state("2026-09", false)], ("2026-09", "2026-09"), "核准")
-                .map(|e| e.to_string()),
+            payroll_blocker(
+                &[state("2026-09", false)],
+                REQUESTER,
+                ("2026-09", "2026-09"),
+                "核准"
+            )
+            .map(|e| e.to_string()),
             Some("2026-09 已計算薪資，核准前請先到「薪資作業」作廢".into()),
             "核准與撤銷同一條規則"
+        );
+    }
+
+    const REQUESTER: i32 = 7;
+
+    /// A period computed before the requester was on the roster, or that
+    /// skipped them, priced none of their requests: its next run pays them.
+    /// Once a run has, the period's state decides, posted or not.
+    #[test]
+    fn only_a_period_that_paid_the_requester_refuses() {
+        let state = |posted, paid: &[i32]| PayrollPeriodState {
+            period: "2026-10".into(),
+            posted,
+            paid: paid.to_vec(),
+        };
+        let blocked = |states: &[PayrollPeriodState]| {
+            payroll_blocker(states, REQUESTER, ("2026-10", "2026-10"), "核准")
+                .map(|e| e.to_string())
+        };
+
+        assert_eq!(blocked(&[state(false, &[3, 4])]), None);
+        assert_eq!(blocked(&[state(true, &[3, 4])]), None, "已過帳也一樣");
+        assert_eq!(
+            blocked(&[state(false, &[3, REQUESTER])]),
+            Some("2026-10 已計算薪資，核准前請先到「薪資作業」作廢".into())
+        );
+        assert_eq!(
+            blocked(&[state(true, &[3, REQUESTER])]),
+            Some("2026-10 的薪資已過帳，無法核准；差額請在下一期補發或補扣".into()),
+            "有一次已過帳就作廢不了，不指向作廢"
         );
     }
 

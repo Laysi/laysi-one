@@ -89,6 +89,13 @@ fn no_of(data: &Value, key: &str) -> anyhow::Result<String> {
         .with_context(|| format!("回應沒有 request.{key}"))
 }
 
+fn listed_row<'a>(listed: &'a Value, key: &str, no: &str) -> anyhow::Result<&'a Value> {
+    listed["requests"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r[key] == no))
+        .with_context(|| format!("清單裡沒有 {no}"))
+}
+
 async fn payslip(store: &Store, period: &str, emp_no: &str) -> anyhow::Result<(Money, Money)> {
     let row: (Money, Money) = sqlx::query_as(
         "SELECT s.overtime, s.gross
@@ -450,6 +457,164 @@ async fn take_back(database_url: &str) -> anyhow::Result<()> {
 
     // A revoked request gives its hours back as well.
     run.ok(&me, "request_leave", day("2026-10-14")).await?;
+
+    // On the roster only after September and October were computed: neither
+    // period paid this person, so their requests in both are approved and
+    // the next run of each pays them, posted September included. Once a
+    // payslip of theirs exists, the rule holds for them as well.
+    let joined = run
+        .ok(
+            &boss,
+            "create_employee",
+            json!({
+                "name": "後到職",
+                "hired_on": "2026-09-21",
+                "base_salary": "40000",
+                "labor_insured_salary": "40100",
+                "health_insured_salary": "40100",
+                "pension_wage": "40100",
+            }),
+        )
+        .await?;
+    let late_no = joined["employee"]["emp_no"]
+        .as_str()
+        .context("回應沒有員工編號")?
+        .to_string();
+    let late_id = store.employee(&late_no).await?.id;
+    let newcomer = ctx(&store, "後到職", ROLE_STAFF, Some(late_id));
+    let evening = |date: &str| {
+        json!({
+            "from_at": format!("{date}T19:00:00"),
+            "to_at": format!("{date}T21:00:00"),
+        })
+    };
+    let in_september = no_of(
+        &run.ok(
+            &newcomer,
+            "submit_my_overtime_request",
+            evening("2026-09-24"),
+        )
+        .await?,
+        "request_no",
+    )?;
+    let in_october = no_of(
+        &run.ok(
+            &newcomer,
+            "submit_my_overtime_request",
+            evening("2026-10-14"),
+        )
+        .await?,
+        "request_no",
+    )?;
+    let leave_in_october = no_of(
+        &run.ok(&newcomer, "request_leave", day("2026-10-15"))
+            .await?,
+        "leave_no",
+    )?;
+
+    let listed = run
+        .ok(
+            &boss,
+            "list_overtime_requests",
+            json!({ "month": "2026-10", "include_done": true }),
+        )
+        .await?;
+    let row = listed_row(&listed, "request_no", &in_october)?;
+    ensure!(
+        row["can_approve"] == true && row["approve_blocked_reason"].is_null(),
+        "{row}"
+    );
+    let listed = run
+        .ok(
+            &boss,
+            "list_leave_requests",
+            json!({ "month": "2026-10", "include_done": true }),
+        )
+        .await?;
+    let row = listed_row(&listed, "leave_no", &leave_in_october)?;
+    ensure!(
+        row["can_approve"] == true && row["approve_blocked_reason"].is_null(),
+        "{row}"
+    );
+    for no in [&in_september, &in_october] {
+        run.ok(
+            &boss,
+            "decide_overtime_request",
+            json!({ "request_no": no, "approve": true }),
+        )
+        .await?;
+    }
+    run.ok(
+        &boss,
+        "decide_leave_request",
+        json!({ "leave_no": leave_in_october, "approve": true }),
+    )
+    .await?;
+
+    run.ok(
+        &boss,
+        "run_payroll",
+        json!({ "period": "2026-09", "pay_on": "2026-10-05" }),
+    )
+    .await?;
+    let (overtime, _) = payslip(&store, "2026-09", &late_no).await?;
+    ensure!(overtime > Money::ZERO, "已過帳的期別補算時應計入核准的加班");
+    run.ok(
+        &boss,
+        "run_payroll",
+        json!({ "period": "2026-10", "pay_on": "2026-10-20" }),
+    )
+    .await?;
+    let (overtime, _) = payslip(&store, "2026-10", &late_no).await?;
+    ensure!(overtime > Money::ZERO, "補算時應計入核准的加班");
+    let note: String = sqlx::query_scalar(
+        "SELECT s.note
+           FROM payslip s
+           JOIN payroll_run p ON p.id = s.run_id
+          WHERE p.period = '2026-10' AND s.employee_id = $1",
+    )
+    .bind(late_id)
+    .fetch_one(store.pool())
+    .await?;
+    ensure!(
+        note.contains("事假 1 日扣"),
+        "補算時應扣核准的事假，備註：{note}"
+    );
+
+    let refused = run
+        .refused(
+            &boss,
+            "revoke_overtime_request",
+            json!({ "request_no": in_october, "reason": "沒有加班" }),
+        )
+        .await?;
+    ensure!(
+        refused == "2026-10 已計算薪資，撤銷前請先到「薪資作業」作廢",
+        "{refused}"
+    );
+    let listed = run
+        .ok(
+            &boss,
+            "list_overtime_requests",
+            json!({ "month": "2026-10", "include_done": true }),
+        )
+        .await?;
+    let row = listed_row(&listed, "request_no", &in_october)?;
+    ensure!(
+        row["can_revoke"] == false && row["revoke_blocked_reason"] == refused.as_str(),
+        "{row}"
+    );
+    let refused = run
+        .refused(
+            &boss,
+            "revoke_overtime_request",
+            json!({ "request_no": in_september, "reason": "沒有加班" }),
+        )
+        .await?;
+    ensure!(
+        refused == "2026-09 的薪資已過帳，無法撤銷；差額請在下一期補發或補扣",
+        "{refused}"
+    );
 
     // A revocation, and an approval, that commit while payroll is between
     // reading and writing stop the run rather than being paid around. Each is
