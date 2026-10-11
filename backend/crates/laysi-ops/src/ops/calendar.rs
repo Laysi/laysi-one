@@ -21,13 +21,19 @@
 //! holiday, because the Labor Standards Act grants it none of the same
 //! things.
 
-use super::attendance::{default_day_kind, DayKind, WorkSchedule, DAY_KINDS};
-use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
+use super::attendance::{
+    default_day_kind, holds_hours, leave_by_date, leave_kind_label, leave_status_label, DayKind,
+    WorkSchedule, DAY_KINDS,
+};
+use crate::{parse, schema_of, Channel, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, NaiveDate, NaiveTime};
+use laysi_domain::Money;
+use laysi_store::LeaveRequest;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
@@ -158,14 +164,23 @@ impl Operation for SetWorkCalendarDay {
     async fn call(&self, ctx: &OpCtx, input: Value) -> Result<OpOutcome, OpError> {
         let i: SetWorkCalendarDayInput = parse(input)?;
         let date = i.on_date;
+        // Requests are weighed against the calendar this call is about to
+        // write, before writing it, so a failure there changes nothing.
+        let mut after = WorkSchedule::load(ctx).await?;
         if i.kind.trim().is_empty() {
-            let cleared = ctx.store.clear_work_calendar_day(date).await?;
             let kind = default_day_kind(date);
-            let summary = format!("工作日曆 {date} 回到{}", kind.label());
+            after.calendar.remove(&date);
+            let overlaps = leave_overlaps(ctx, &after, &[date]).await?;
+            let cleared = ctx.store.clear_work_calendar_day(date).await?;
+            let summary = format!(
+                "工作日曆 {date} 回到{}{}",
+                kind.label(),
+                overlap_note(&overlaps)
+            );
             return Ok(OpOutcome::new(
                 json!({
                     "on_date": date, "kind": kind.code(), "kind_label": kind.label(),
-                    "default": true, "changed": cleared,
+                    "default": true, "changed": cleared, "leave_overlaps": overlaps,
                 }),
                 summary,
             ));
@@ -180,18 +195,126 @@ impl Operation for SetWorkCalendarDay {
             OpError::BadInput(format!("日別要填{names}其中一項"))
         })?;
         let name = i.name.unwrap_or_default().trim().to_string();
+        after.calendar.insert(date, (kind, name.clone()));
+        let overlaps = leave_overlaps(ctx, &after, &[date]).await?;
         ctx.store
             .set_work_calendar_day(date, kind.code(), &name, "company", &ctx.actor)
             .await?;
 
-        let summary = format!("工作日曆 {date} 設為{}", kind.label());
+        let summary = format!(
+            "工作日曆 {date} 設為{}{}",
+            kind.label(),
+            overlap_note(&overlaps)
+        );
         Ok(OpOutcome::new(
             json!({
                 "on_date": date, "kind": kind.code(), "kind_label": kind.label(),
                 "name": name, "source": "company", "default": false, "changed": true,
+                "leave_overlaps": overlaps,
             }),
             summary,
         ))
+    }
+}
+
+/// Leave requests that disagree with `schedule`'s calendar on one of `dates`,
+/// for whoever is changing it.
+///
+/// A request keeps the dates and hours it was sent with: a date declared a
+/// day off afterwards still counts as leave, and a date made a working day
+/// afterwards is not covered by it. Whether the day is given back is for the
+/// company and the employee to settle, and the way to do it is to revoke the
+/// request and send it again; this list is how HR learns whom to ask. A
+/// request is listed for a date when one side counts working time there and
+/// the other does not.
+///
+/// `None` when the caller could not read leave requests itself: the kinds of
+/// leave people took are not part of maintaining a calendar.
+async fn leave_overlaps(
+    ctx: &OpCtx,
+    schedule: &WorkSchedule,
+    dates: &[NaiveDate],
+) -> Result<Option<Vec<Value>>, OpError> {
+    const READ_LEAVE: &str = "list_leave_requests";
+    if !ctx
+        .store
+        .permitted_ops(&ctx.actor_role)
+        .await?
+        .contains(READ_LEAVE)
+        || (ctx.channel == Channel::Mcp && ctx.store.tool_enabled(READ_LEAVE).await? != Some(true))
+    {
+        return Ok(None);
+    }
+    let (Some(first), Some(last)) = (dates.iter().min(), dates.iter().max()) else {
+        return Ok(Some(Vec::new()));
+    };
+    let requests = ctx
+        .store
+        .leave_requests_matching(true, None, Some((*first, *last)))
+        .await?;
+
+    let mut out = Vec::new();
+    for &date in dates {
+        for l in requests.iter().filter(|l| holds_hours(&l.status)) {
+            let Some((counted, calendar)) = disagreement(schedule, l, date) else {
+                continue;
+            };
+            out.push(json!({
+                "on_date": date,
+                "leave_no": l.leave_no,
+                "emp_no": l.emp_no,
+                "name": l.name,
+                "kind_label": leave_kind_label(&l.kind),
+                "status": l.status,
+                "status_label": leave_status_label(&l.status),
+                "from_at": l.from_at,
+                "to_at": l.to_at,
+                "hours": counted.round_dp(1).normalize().to_string(),
+                "calendar_hours": (Money::from(calendar) / Money::from(3600))
+                    .round_dp(1)
+                    .normalize()
+                    .to_string(),
+            }));
+        }
+    }
+    Ok(Some(out))
+}
+
+/// The hours `l` counts on `date` and the working seconds the calendar now
+/// gives that part of it, when exactly one of the two is nothing.
+fn disagreement(
+    schedule: &WorkSchedule,
+    l: &LeaveRequest,
+    date: NaiveDate,
+) -> Option<(Money, i64)> {
+    let open = date.and_time(NaiveTime::MIN);
+    let close = open + chrono::Duration::days(1);
+    if l.from_at >= close || l.to_at <= open {
+        return None;
+    }
+    let counted = leave_by_date(l)
+        .into_iter()
+        .find(|p| p.date == date)
+        .map_or(Money::ZERO, |p| p.hours);
+    let calendar = match schedule.day_kind(date).works() {
+        true => schedule
+            .leave_seconds(l.from_at.max(open), l.to_at.min(close))
+            .unwrap_or(0),
+        false => 0,
+    };
+    (counted.is_zero() != (calendar == 0)).then_some((counted, calendar))
+}
+
+/// The tail the audit summary gets when a change touches leave requests.
+fn overlap_note(overlaps: &Option<Vec<Value>>) -> String {
+    let requests: std::collections::BTreeSet<&str> = overlaps
+        .iter()
+        .flatten()
+        .filter_map(|o| o["leave_no"].as_str())
+        .collect();
+    match requests.len() {
+        0 => String::new(),
+        n => format!(" · 與 {n} 張休假單不一致"),
     }
 }
 
@@ -345,14 +468,32 @@ impl Operation for RefreshWorkCalendar {
         let i: RefreshInput = parse(input)?;
         let year = i.year.unwrap_or_else(|| ctx.today.year());
         let fetched = fetch(year).await?;
+
+        // The calendar the import is about to write, worked out first so a
+        // failure weighing requests against it changes nothing: every
+        // published day replaces what is there unless the company set that
+        // date by hand, as `import_work_calendar` does.
+        let mut after = WorkSchedule::load(ctx).await?;
+        let by_hand: BTreeSet<NaiveDate> = ctx
+            .store
+            .work_calendar()
+            .await?
+            .into_iter()
+            .filter(|d| d.source == "company")
+            .map(|d| d.on_date)
+            .collect();
+        let changed = import_into(&mut after.calendar, &by_hand, &fetched.days);
+        let overlaps = leave_overlaps(ctx, &after, &changed).await?;
+
         let (written, kept) = ctx
             .store
             .import_work_calendar(&fetched.days, &ctx.actor)
             .await?;
 
         let summary = format!(
-            "更新工作日曆 {year} · 讀取 {} 天 · 寫入 {written} 天 · 保留自訂 {kept} 天",
-            fetched.read
+            "更新工作日曆 {year} · 讀取 {} 天 · 寫入 {written} 天 · 保留自訂 {kept} 天{}",
+            fetched.read,
+            overlap_note(&overlaps)
         );
         Ok(OpOutcome::new(
             json!({
@@ -361,10 +502,37 @@ impl Operation for RefreshWorkCalendar {
                 "read": fetched.read,
                 "written": written,
                 "kept": kept,
+                "leave_overlaps": overlaps,
             }),
             summary,
         ))
     }
+}
+
+/// Apply published days to `calendar` the way `import_work_calendar` writes
+/// them -- each replaces what is there unless the company set that date by
+/// hand -- and return the dates whose kind of day changed.
+fn import_into(
+    calendar: &mut BTreeMap<NaiveDate, (DayKind, String)>,
+    by_hand: &BTreeSet<NaiveDate>,
+    days: &[(NaiveDate, String, String)],
+) -> Vec<NaiveDate> {
+    let kind_in = |calendar: &BTreeMap<NaiveDate, (DayKind, String)>, date: NaiveDate| {
+        calendar
+            .get(&date)
+            .map_or_else(|| default_day_kind(date), |(k, _)| *k)
+    };
+    let mut changed = Vec::new();
+    for (date, code, name) in days {
+        let Some(kind) = DayKind::from_code(code).filter(|_| !by_hand.contains(date)) else {
+            continue;
+        };
+        if kind_in(calendar, *date) != kind {
+            changed.push(*date);
+        }
+        calendar.insert(*date, (kind, name.clone()));
+    }
+    changed
 }
 
 /// One year, as the platform served it.
@@ -543,5 +711,121 @@ mod tests {
         assert!(parse_gov_calendar("a,b,c\n1,2,3\n").is_err());
         assert!(parse_gov_calendar("").is_err());
         assert!(parse_gov_calendar("西元日期,是否放假\n").is_err());
+    }
+
+    /// The calendar an import is weighed against before it is written: a
+    /// published day lands unless the company set that date by hand, and only
+    /// the dates whose kind of day moves are reported.
+    #[test]
+    fn an_import_is_applied_in_memory_as_the_store_writes_it() {
+        let mut calendar = BTreeMap::new();
+        calendar.insert(d(2026, 9, 28), (DayKind::NaturalDisaster, "颱風".into()));
+        calendar.insert(d(2026, 10, 10), (DayKind::Holiday, "國慶日".into()));
+        let by_hand = BTreeSet::from([d(2026, 9, 28)]);
+        let published = [
+            (d(2026, 9, 28), "holiday".to_string(), "教師節".to_string()),
+            (d(2026, 10, 10), "holiday".to_string(), "國慶日".to_string()),
+            (
+                d(2026, 10, 9),
+                "holiday".to_string(),
+                "調整放假".to_string(),
+            ),
+            (
+                d(2026, 10, 17),
+                "workday".to_string(),
+                "補行上班".to_string(),
+            ),
+        ];
+        let changed = import_into(&mut calendar, &by_hand, &published);
+        assert_eq!(changed, [d(2026, 10, 9), d(2026, 10, 17)]);
+        assert_eq!(
+            calendar[&d(2026, 9, 28)].0,
+            DayKind::NaturalDisaster,
+            "自訂的日子保留"
+        );
+        assert_eq!(calendar[&d(2026, 10, 17)].0, DayKind::Workday);
+    }
+
+    fn office() -> WorkSchedule {
+        let t = |h: u32| NaiveTime::from_hms_opt(h, 0, 0);
+        WorkSchedule {
+            starts_at: t(9),
+            ends_at: t(17),
+            grace_minutes: 0,
+            grace_stated: true,
+            flex_minutes: 0,
+            break_start: t(12),
+            break_end: t(13),
+            calendar: Default::default(),
+        }
+    }
+
+    /// A request as it is stored when sent under `schedule`.
+    fn sent(schedule: &WorkSchedule, from: &str, to: &str) -> LeaveRequest {
+        let at = |v: &str| chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M").unwrap();
+        let (from_at, to_at) = (at(from), at(to));
+        let day_seconds = schedule.leave_seconds_by_date(from_at, to_at).unwrap();
+        let seconds: i64 = day_seconds.iter().map(|(_, s)| s).sum();
+        LeaveRequest {
+            leave_no: "LV2607-003".into(),
+            employee_id: 2,
+            emp_no: "E002".into(),
+            name: "測試員工".into(),
+            dept_label: None,
+            kind: "annual".into(),
+            from_at,
+            to_at,
+            from_on: from_at.date(),
+            to_on: to_at.date(),
+            hours: Money::from(seconds) / Money::from(3600),
+            days: Money::from(seconds) / Money::from(7 * 3600),
+            day_seconds,
+            reason: String::new(),
+            status: "approved".into(),
+            decided_by: String::new(),
+            decided_role: String::new(),
+            decided_at: None,
+            decision_note: String::new(),
+            cancelled: None,
+            created_at: chrono::Utc::now(),
+            created_by: String::new(),
+        }
+    }
+
+    /// A day declared off after a request was sent is a day the request still
+    /// counts and the calendar no longer does; a Saturday made a working day
+    /// is the other way round. Either is listed, and nothing else is.
+    #[test]
+    fn a_request_is_listed_where_it_and_the_calendar_part_ways() {
+        let mut schedule = office();
+        let three_days = sent(&schedule, "2026-07-27T09:00", "2026-07-29T17:00");
+        let weekend = sent(&schedule, "2026-07-31T13:00", "2026-08-03T12:00");
+
+        schedule
+            .calendar
+            .insert(d(2026, 7, 28), (DayKind::NaturalDisaster, "颱風".into()));
+        schedule
+            .calendar
+            .insert(d(2026, 8, 1), (DayKind::Workday, "補行上班".into()));
+        schedule
+            .calendar
+            .insert(d(2026, 8, 2), (DayKind::Holiday, String::new()));
+
+        let hours = |found: Option<(Money, i64)>| found.map(|(h, s)| (h.round_dp(2), s / 3600));
+        assert_eq!(
+            hours(disagreement(&schedule, &three_days, d(2026, 7, 28))),
+            Some((Money::from(7), 0))
+        );
+        assert_eq!(disagreement(&schedule, &three_days, d(2026, 7, 27)), None);
+        assert_eq!(disagreement(&schedule, &three_days, d(2026, 7, 30)), None);
+        assert_eq!(
+            hours(disagreement(&schedule, &weekend, d(2026, 8, 1))),
+            Some((Money::ZERO, 7))
+        );
+        assert_eq!(
+            disagreement(&schedule, &weekend, d(2026, 8, 2)),
+            None,
+            "週日改成國定假日，兩邊都不計"
+        );
     }
 }

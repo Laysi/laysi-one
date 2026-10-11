@@ -4,13 +4,18 @@ import {
   businessToday,
   callOp,
   OpFailed,
+  trimDecimal,
   workCalendarRefresh,
+  workCalendarSet,
   workCalendarYear,
+  type LeaveOverlap,
   type WorkCalendarDay,
   type WorkCalendarYear,
 } from '../api/client';
+import type { ScreenId } from '../nav';
 
 interface Props {
+  onGo: (screen: ScreenId) => void;
   onToast: (msg: string) => void;
   reloadKey: number;
 }
@@ -26,10 +31,11 @@ function offsetOf(day: WorkCalendarDay) {
   return WEEK_HEAD.indexOf(day.weekday);
 }
 
-export function WorkCalendar({ onToast, reloadKey }: Props) {
+export function WorkCalendar({ onGo, onToast, reloadKey }: Props) {
   const me = useCurrentUser();
   const canEdit = me.permissions.includes('set_work_calendar_day');
   const canRefresh = me.permissions.includes('refresh_work_calendar');
+  const canRevoke = me.permissions.includes('revoke_leave_request');
 
   const thisYear = Number(businessToday().slice(0, 4));
   const [year, setYear] = useState(thisYear);
@@ -37,6 +43,7 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
   const [picked, setPicked] = useState<WorkCalendarDay | null>(null);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [overlaps, setOverlaps] = useState<LeaveOverlap[]>([]);
 
   const running = useRef<(() => void) | null>(null);
 
@@ -63,11 +70,13 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
     if (!picked) return;
     setBusy(true);
     try {
-      await callOp('set_work_calendar_day', {
-        on_date: picked.on_date,
-        kind,
-        name: kind ? name : null,
-      });
+      const r = await callOp(
+        'set_work_calendar_day',
+        { on_date: picked.on_date, kind, name: kind ? name : null },
+        undefined,
+        workCalendarSet,
+      );
+      setOverlaps(r.leave_overlaps ?? []);
       onToast(`${picked.on_date} 已更新`);
       setPicked(null);
       load();
@@ -82,6 +91,7 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
     setBusy(true);
     try {
       const r = await callOp('refresh_work_calendar', { year }, undefined, workCalendarRefresh);
+      setOverlaps(r.leave_overlaps ?? []);
       onToast(`${r.source}：寫入 ${r.written} 天，保留自訂 ${r.kept} 天`);
       load();
     } catch (e) {
@@ -129,6 +139,55 @@ export function WorkCalendar({ onToast, reloadKey }: Props) {
           </button>
         )}
       </div>
+
+      {overlaps.length > 0 && (
+        <section className="cal-overlaps">
+          <div className="toolbar">
+            <span className="section-title">與日曆不一致的休假單</span>
+            <span className="spacer" />
+            {canRevoke && (
+              <button className="btn btn--ghost btn--compact" onClick={() => onGo('att')}>
+                前往出勤與休假
+              </button>
+            )}
+            <button className="btn btn--close" onClick={() => setOverlaps([])} aria-label="關閉">
+              ×
+            </button>
+          </div>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>員工</th>
+                  <th>休假單</th>
+                  <th>狀態</th>
+                  <th className="align-right">本單計入</th>
+                  <th className="align-right">依日曆</th>
+                </tr>
+              </thead>
+              <tbody>
+                {overlaps.map((o) => (
+                  <tr key={`${o.on_date}${o.leave_no}`}>
+                    <td className="num">{o.on_date}</td>
+                    <td>
+                      {o.name}
+                      <span className="cell-hint cell-hint--block num">{o.emp_no}</span>
+                    </td>
+                    <td className="cell-nowrap">
+                      <span className="tag tag--static tag--pale">{o.kind_label}</span>
+                      <span className="cell-hint num">{o.leave_no}</span>
+                    </td>
+                    <td>{o.status_label}</td>
+                    <td className="num align-right">{trimDecimal(o.hours)} 小時</td>
+                    <td className="num align-right">{trimDecimal(o.calendar_hours)} 小時</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       {!data && <p className="state-note">讀取中…</p>}
 
