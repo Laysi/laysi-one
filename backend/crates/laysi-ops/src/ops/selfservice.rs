@@ -36,9 +36,9 @@
 use crate::ops::attendance::{
     annual_balance, business_instant, correction_auto_approves, holds_hours, judges_absence,
     leave_kind_label, leave_status_label, mark_days, month_days, month_span, overtime_json,
-    punch_correction_json, punch_correction_status_label, punch_days, punch_kind_label, summarise,
-    valid_leave_kind, AnnualBalance, OvertimeLimits, WorkSchedule, LEAVE_KINDS, PUNCH_KINDS,
-    PUNCH_TIME,
+    punch_correction_json, punch_correction_status_label, punch_day, punch_days, punch_kind_label,
+    summarise, valid_leave_kind, AnnualBalance, OvertimeLimits, WorkSchedule, LEAVE_KINDS,
+    PUNCH_KINDS, PUNCH_TIME,
 };
 use crate::ops::documents::{human_size, short_checksum};
 use crate::ops::employees::{service_label, service_months};
@@ -1442,15 +1442,8 @@ impl Operation for PunchClock {
 
         let schedule = WorkSchedule::load(ctx).await?;
         let limits = OvertimeLimits::resolve(ctx.today)?;
-        let month = local.date().format("%Y-%m").to_string();
-        let days = punch_days(
-            &ctx.store.punches(&month, Some(employee.id)).await?,
-            ctx.offset,
-        );
-        let today = days.iter().find(|d| d.date == local.date());
-        let late = today
-            .and_then(|d| d.arrived)
-            .and_then(|arrived| schedule.late(arrived));
+        let today = punch_day(ctx, employee.id, local.date(), &schedule).await?;
+        let late = today.as_ref().and_then(|d| d.late(&schedule));
 
         let summary = format!(
             "{} {} 打{}卡 {}{}",
