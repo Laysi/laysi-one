@@ -370,9 +370,9 @@ skill，本節只定政策；兩者衝突時以本節為準（內文格式用下
   尚未經人工審核）；**Todo 只放使用者核准過、真正可啟動的工作**。把卡移出 Triage 是
   使用者的決定，agent 不得自行升級；使用者明示指派的工作才可直接進 Todo 或 In Progress。
 - **建 issue 時 type 與 label 必齊**：type 三選一（Feature 新能力／Bug 行為錯誤與資安
-  漏洞／Task 其餘），label 只用 repo 現有的八個——分類五個（`bug`／`enhancement`／
+  漏洞／Task 其餘），issue 的 label 只用八個——分類五個（`bug`／`enhancement`／
   `documentation`／`ui`／`ci/cd`）與分級三個（`priority:P0`／`priority:P1`／
-  `priority:P2`）。**新增 label 分類要先問過**——同一個 repo 長出兩套命名之後，讀的人會
+  `priority:P2`）；PR 另掛一個 `review:*`（見下）。**新增 label 分類要先問過**——同一個 repo 長出兩套命名之後，讀的人會
   以為是兩件事。分級設兩處且要一致：看板的 Priority 欄位與 `priority:*` label（P0 生產
   事故或阻斷／P1 當前重點／P2 backlog）——前者只在看板上看得到，後者才出現在 issue
   頁面。**org 的 issue 欄位 Priority 不用**：它的選項是 Urgent／High／Medium／Low，
@@ -388,6 +388,27 @@ skill，本節只定政策；兩者衝突時以本節為準（內文格式用下
   欄位、選項與項目 id，`gh project item-add` 掛板、`gh project item-edit` 設 Status 與
   Priority。缺 scope 時請使用者跑 `! gh auth refresh -h github.com -s read:project,project`。
   id 一律當場讀，不寫進任何文件——換一個看板就全錯。
+- **每個 PR 恰好掛一個 `review:*` label**，開 PR 當下就掛，範圍變了就換：`review:human`
+  由使用者審查並合併，agent 不合；`review:ai` 由 agent 通過合併檢查後自己合。下列任一條
+  成立就是 `review:human`，拿不準也是：
+  1. 看得到的改動：`web/` 底下的任何改動，以及後端改了畫面讀得到的文字（`OpError`、
+     `summary()`、種子資料的 `role.name` 這類，判準同「慣例」的 UI 文案）；
+  2. 不是一看就能合：驗收條件沒勾完、PR 留著「已知未處理」或與 issue 不同的取捨、需要
+     產品決定，或推翻文件裡記過的決定；
+  3. 難以復原或碰到安全邊界：新增 migration、`permission`／`mcp_tool_grant` 種子與風險
+     底線、登入與 session／OIDC／OAuth、授權（含 `license-server/`）、法規 feed；
+  4. 改做事的方法：本檔「規範」「慣例」「Commit 前的 Codex 審查」「專案管理」四節。隨程式
+     改動同步更新的設計記錄（本檔其餘段落與 `docs/architecture.md`）不算；
+  5. 來自 fork。
+- **合併 `review:ai` 之前，外掛 skill 的合併檢查每一條都由合併的 agent 自己驗**，作者的
+  報告只是宣稱。本 repo 的做法：CI 的 `backend`／`frontend`／`license-server` 三個 job
+  全綠；在乾淨的 worktree 重跑的指令以 `.github/workflows/ci.yml` 為準，動到操作或回應形狀
+  再加 `function-test.ts` 與 `schema-live-test.ts`；Codex 閘門通過不留痕跡，**查不到做那個
+  commit 的對話記錄就改掛 `review:human`**；PR 內文要有 `Closes Laysi/laysi-one#N`，不關
+  issue 的 PR 不由 agent 合；base 不是 `main` 的 PR（疊在另一個 PR 上）等 base 改指 `main`
+  之後再驗一次。
+- **合併一律用 merge commit，不用 squash**：保留每個 commit 的 GPG 簽章，疊在上面的 PR 也
+  不會在底下那個合併之後把同一份改動再帶一次。
 
 ## 目前進度
 
