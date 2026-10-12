@@ -52,6 +52,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # A version is built once. Rebuilding pushes images with new digests
+      # under the same tags, and installations that took the first manifest
+      # count themselves up to date on a build nobody else runs. Re-running
+      # only the failed jobs does not come back here; a change ships as a new
+      # tag.
+      - name: This version has no signed manifest yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sh .github/published-manifest.sh "$GITHUB_REF_NAME" published.txt
+          if [ -e published.txt ]; then
+              echo "$GITHUB_REF_NAME already has a signed release manifest; tag the change as a new version"
+              exit 1
+          fi
+
       # Pinned to a commit, like the notes action below: this job is handed
       # the signing key, and a tag moves.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
@@ -284,10 +300,25 @@ jobs:
       # `gh` is preinstalled on the runner. Editing rather than failing when
       # the release already exists, which is the case for a tag cut in the
       # web UI or a workflow re-run.
+      #
+      # A published manifest is only ever replaced by one with the same body.
+      # The same digests sign to the same bytes, so re-running the later jobs
+      # replaces the file with itself; other digests under a version that
+      # installations already took stop here, whatever path led to them.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -eu
+          sh .github/published-manifest.sh "$GITHUB_REF_NAME" published.txt
+          if [ -e published.txt ]; then
+              head -n 5 published.txt > published.body
+              head -n 5 release-manifest.txt > signed.body
+              cmp -s published.body signed.body || {
+                  echo "$GITHUB_REF_NAME already published a manifest with other digests; tag the change as a new version"
+                  exit 1
+              }
+          fi
           gh release create "$GITHUB_REF_NAME" docker-compose.prod.yml release-manifest.txt \
               --notes-file notes.md \
             || { gh release edit "$GITHUB_REF_NAME" --notes-file notes.md &&

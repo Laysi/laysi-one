@@ -9,7 +9,7 @@
 // cargo; the first run compiles the example.
 
 import { createHash, createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -135,6 +135,51 @@ ok("任何輸出都不含私鑰", !everything.some(leaks));
 const regenerated = join(dir, "fixture.txt");
 signTo(regenerated, "07".repeat(32));
 ok("testdata/release-manifest.txt 與腳本輸出一致", readFileSync(regenerated, "utf8") === readFileSync(fixture, "utf8"));
+
+// .github/published-manifest.sh decides whether a version already went out,
+// so an error from GitHub has to fail it rather than read as "not yet". A
+// stub `gh` on PATH plays each answer.
+const stubDir = join(dir, "bin");
+mkdirSync(stubDir);
+writeFileSync(
+  join(stubDir, "gh"),
+  `#!/bin/sh
+case "$1 $2" in
+  "api --paginate")
+    [ "$STUB" = api-error ] && { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
+    echo v0.1.12
+    [ "$STUB" = no-release ] || echo v0.1.13 ;;
+  "release view")
+    [ "$STUB" = view-error ] && exit 1
+    echo docker-compose.prod.yml
+    [ "$STUB" = no-asset ] || echo release-manifest.txt ;;
+  "release download")
+    [ "$STUB" = download-error ] && exit 1
+    while [ $# -gt 0 ]; do [ "$1" = --dir ] && out="$2"; shift; done
+    cp "${fixture}" "$out/" ;;
+  *) exit 1 ;;
+esac
+`,
+  { mode: 0o755 },
+);
+const published = (stub: string): { code: number; found: string | null } => {
+  const out = join(dir, `published-${stub}.txt`);
+  const r = sh(["sh", join(root, ".github", "published-manifest.sh"), "v0.1.13", out], {
+    STUB: stub,
+    GITHUB_REPOSITORY: "Laysi/laysi-one",
+    PATH: `${stubDir}:${process.env.PATH}`,
+  });
+  return { code: r.code, found: existsSync(out) ? readFileSync(out, "utf8") : null };
+};
+const none = published("no-release");
+ok("沒有 release 時回報沒有清單", none.code === 0 && none.found === null);
+const noAsset = published("no-asset");
+ok("release 沒有清單時回報沒有清單", noAsset.code === 0 && noAsset.found === null);
+const found = published("found");
+ok("已附清單時取回原檔", found.code === 0 && found.found === readFileSync(fixture, "utf8"));
+for (const stub of ["api-error", "view-error", "download-error"]) {
+  ok(`GitHub 回錯誤時失敗（${stub}）`, published(stub).code !== 0);
+}
 
 rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
