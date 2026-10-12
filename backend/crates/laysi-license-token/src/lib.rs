@@ -6,10 +6,17 @@
 //! other could not parse — at a customer's site, with nothing on screen to
 //! say why. One definition makes that a compile error instead.
 //!
-//! Only the shape lives here. Signing stays on the licence server, which is
-//! the side that holds the private key, and verifying stays in the product;
-//! each is a dozen lines over `ed25519-dalek` and neither needs the other's
-//! error handling.
+//! Only the shape of the licence payload lives here. Signing stays on the
+//! licence server, which is the side that holds the private key, and verifying
+//! stays in the product; each is a dozen lines over `ed25519-dalek` and neither
+//! needs the other's error handling.
+//!
+//! [`release`] is the other document that crosses between them: the signed
+//! list of images a release is made of. Its verification does live here,
+//! because the product, the licence server and the host-side updater all have
+//! to reach the same answer, and none of them can sign one.
+
+pub mod release;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
