@@ -940,6 +940,11 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 不是換個名字的國定假日。**每一種休息日仍以休息日費率計價**：第 39、40 條是按日加倍而
 不是時數級距，payload 沒有那個形狀。
 
+**日曆事後改動不改寫已送出的休假單**：停班日之前請好的假照原單計（銷不銷假由勞資協商，
+婚假遇颱風計入婚假有函釋），逐日明細（`mark_days`）、計薪與特休已休都讀 `leave_by_date()`，
+三處同一個天數（沒有拆法記錄的舊單，明細依現行日曆拆，見 `shown_by_date`）。公司同意銷假就撤銷再重送。`set_work_calendar_day`／`refresh_work_calendar`
+回 `leave_overlaps` 列出與新日曆不一致的單，呼叫者讀不到休假單時是 `null`。
+
 **加班要先申請再核准，加班費由規則庫算**：`submit_my_overtime_request` 收起訖
 時刻，時數等於區間長度扣掉休息時間；`decide_overtime_request` 核准後，`run_payroll` 依 `overtime.toml`
 的倍數與「月薪 ÷ `monthly_hours`」算出金額，**倍數與時數上限都不在 Rust 裡**。加班費
