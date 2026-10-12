@@ -12,6 +12,14 @@
 # to that tag, so downloading it and running
 # `docker compose -f docker-compose.prod.yml up -d` deploys exactly this build.
 #
+# release-manifest.txt is attached beside it: the index digest of each of the
+# three images, signed with RELEASE_MANIFEST_SIGNING_KEY. A tag on ghcr.io can
+# be moved; a digest cannot, and the host-side updater installs only images a
+# manifest it verified names. That key is not the licence key and never leaves
+# this workflow: the licence server carries manifests and cannot produce one.
+# Every `v*` tag is signed; whether a machine is offered it is decided per
+# machine on the licence server.
+#
 # CI (ci.yml) still guards the code; this workflow only packages a tag that
 # already passed it.
 #
@@ -31,7 +39,46 @@ permissions:
   packages: write
 
 jobs:
+  # Before any image is built: a key the product does not trust would leave
+  # images on ghcr.io with no manifest any installation accepts. The product
+  # carries the trusted keys as a constant and asks nobody at run time, so this
+  # comparison is the only place a wrong secret shows up before a customer's
+  # updater does. Same check license-deploy.yml makes for the licence key.
+  signing-key:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to a commit, like the notes action below: this job is handed
+      # the signing key, and a tag moves.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+
+      - name: The signing key is one the product trusts
+        env:
+          RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
+        run: |
+          set -eu
+          # Every quoted key from the declaration to its closing `];`, which
+          # rustfmt puts on one line or several depending on how many keys
+          # there are. A renamed constant finds nothing and fails here.
+          trusted=$(awk '/^pub const TRUSTED_KEYS: &\[&str\] =/ { on = 1 } on { print } on && /\];$/ { exit }' \
+            backend/crates/laysi-license-token/src/release.rs | grep -o '"[0-9a-f]\{64\}"' | tr -d '"' || true)
+          test -n "$trusted" || { echo "TRUSTED_KEYS not found; did the constant change shape?"; exit 1; }
+          derived=$(bun scripts/release-manifest.ts public-key)
+          echo "product trusts:"
+          printf '  %s\n' $trusted
+          echo "secret signs as:"
+          printf '  %s\n' $derived
+          for key in $derived; do
+              printf '%s\n' "$trusted" | grep -qx "$key" \
+                  || { echo "$key is not in TRUSTED_KEYS"; exit 1; }
+          done
+
   images:
+    needs: signing-key
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -78,7 +125,8 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest
 
-      - uses: docker/build-push-action@v7
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
@@ -94,8 +142,61 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
-  release:
+      # The index digest of what this run pushed, for the manifest job. Matrix
+      # jobs overwrite each other's outputs, so each image leaves its own
+      # artifact; overwrite covers a re-run of all jobs, which pushes and
+      # records again.
+      - name: Record the index digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ matrix.name }}
+        run: printf '%s\n' "$DIGEST" > "digest-$IMAGE"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.name }}
+          path: digest-${{ matrix.name }}
+          overwrite: true
+
+  # Its own job, so the signing key is on a runner that runs nothing else:
+  # the release job below hands AI_API_KEY to a third-party action.
+  manifest:
     needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+
+      - name: Sign the release manifest
+        env:
+          RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
+        run: |
+          set -eu
+          bun scripts/release-manifest.ts sign --version "$GITHUB_REF_NAME" \
+            --api "$(cat digests/digest-api)" \
+            --web "$(cat digests/digest-web)" \
+            --backup "$(cat digests/digest-backup)" \
+            --out release-manifest.txt
+          cat release-manifest.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-manifest
+          path: release-manifest.txt
+          overwrite: true
+
+  release:
+    needs: [images, manifest]
     runs-on: ubuntu-latest
 
     steps:
@@ -104,6 +205,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-manifest
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+
+      # With the verifier the updater and the product use, against the keys
+      # this tag compiles in, before anything is published: a manifest that
+      # does not pass here would pass nowhere.
+      - name: The manifest verifies as an installation would
+        working-directory: backend
+        run: |
+          cargo run -q -p laysi-license-token --example verify-release-manifest -- \
+            ../release-manifest.txt --version "$GITHUB_REF_NAME"
 
       # The attached copy pins LAYSI_VERSION to this tag. The copy in the
       # repository keeps `latest`, which is what a git clone should follow.
@@ -172,16 +288,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" docker-compose.prod.yml --notes-file notes.md \
+          gh release create "$GITHUB_REF_NAME" docker-compose.prod.yml release-manifest.txt \
+              --notes-file notes.md \
             || { gh release edit "$GITHUB_REF_NAME" --notes-file notes.md &&
-                 gh release upload "$GITHUB_REF_NAME" docker-compose.prod.yml --clobber; }
+                 gh release upload "$GITHUB_REF_NAME" docker-compose.prod.yml release-manifest.txt --clobber; }
 
   # The demo tracks the newest release; one.laysi.io does not. A customer's
   # install is upgraded when its owner decides, and the demo has no owner and
   # nothing to lose -- it is rebuilt from nothing every night anyway, so a
   # release that reaches it late is a release nobody is evaluating.
+  #
+  # After the release rather than after the images: a tag whose manifest did
+  # not sign or verify is not one any installation can take, so the demo does
+  # not run it either.
   demo:
-    needs: images
+    needs: release
     uses: ./.github/workflows/deploy.yml
     with:
       version: ${{ github.ref_name }}
