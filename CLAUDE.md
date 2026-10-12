@@ -347,7 +347,9 @@ workspace**：它多租戶、經銷商與代理商在那裡開立啟動金鑰，
 hook**。**每個 clone 跑一次** `/codex-review:init`，它寫入 `.githooks/pre-commit` 並設定
 `core.hooksPath`；外掛在啟動時發現沒裝會提示。hook 把暫存區的 diff 交給 `codex`，第一行
 不是 `ALLOW:` 就擋下，理由印在 stderr；`codex` 沒裝、沒登入或出錯一樣擋下。merge、
-cherry-pick 與 revert 不審。
+cherry-pick 與 revert 只審 git 自動結果之上多出來的部分（解衝突與另外加的修改），與自動
+結果相同的直接放行；算不出自動結果時（git 2.40 以前、octopus merge）整份暫存區都審。
+本機的 hook 若是舊版，SessionStart 會提示，再跑一次 `/codex-review:init` 更新。
 
 它掛在 git 而不是 Claude Code 的 `PreToolUse` 上：審的是實際的暫存區，不是去猜指令字串，
 所以同一個 clone 裡終端機與其他 agent 的 commit 都會經過它；**沒跑過 init 的 clone 與 CI
