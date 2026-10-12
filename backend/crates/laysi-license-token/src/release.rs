@@ -53,7 +53,7 @@ use sha2::{Digest, Sha256};
 /// this constant to the `];` that closes it, so a rename fails the release
 /// rather than skipping the check.
 pub const TRUSTED_KEYS: &[&str] =
-    &["7fba84ede97cd4283c89e41f98848ed122fbc352b858fdfa0cfc99fb2edbc11b"];
+    &["000aef2b6ed55b8cfb5481af7bce7b0e65584aaec863073348c68e132d1021a5"];
 
 /// The largest manifest anything should read. A manifest with eight
 /// signatures is under 1.6 KB; enforce this before reading a file or a
