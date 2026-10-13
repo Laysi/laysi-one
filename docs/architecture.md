@@ -507,6 +507,8 @@ MCP」不能有例外。那條路留著（25 MB，`MAX_OBJECT_BYTES`），但它
    CopyObject 搬到文件的物件鍵，類型與雜湊用收件當下記下的那兩個。
 4. 一天內沒人取用的暫存檔由 api 每小時的清除工作刪掉，連同桶子裡沒有資料列指著的
    `staging/` 物件與中斷的 multipart。
+5. 存成文件時暫存物件已經不在（資料庫還原到歸檔或清除之前，見「主機端更新程式」），
+   比照過期處理：刪掉那一列，回「暫存檔已不存在，請重新上傳。」
 
 **先進暫存區，不直接成為文件**：文件封存後不可刪，傳錯的檔案要丟得掉；AI 也要先讀過
 檔案才知道要掛哪一張單。**連結不綁定目標操作**是同一個理由。
@@ -3360,9 +3362,9 @@ BLAKE3，認得出是不是同一台機器，認不出那是誰。
 
 每一個 `v*` 標籤由 `release.yml` 簽一份 `release-manifest.txt`，與
 `docker-compose.prod.yml` 一起附在 GitHub release 上：版本號，加上 api、web、backup
-三份映像的 index digest。`mcp` 與 `api` 跑同一份映像。主機端的更新程式（#61）只裝它驗過
-的清單上列出的 digest，用的 compose 檔也取自那份驗過 digest 的 api 映像（放進映像是 #61 的
-範圍），所以釘住 api 的 digest 就同時釘住它。release 上另外附的 `docker-compose.prod.yml`
+三份映像的 index digest。`mcp` 與 `api` 跑同一份映像。主機端的更新程式（見下一節）只裝它
+驗過的清單上列出的 digest，用的 compose 檔也取自那份驗過 digest 的 api 映像，所以釘住 api
+的 digest 就同時釘住它。release 上另外附的 `docker-compose.prod.yml`
 不在簽章範圍內，那一份給手動安裝的人用，更新程式不讀它。ghcr.io 上的 tag 改得動，digest
 改不動，版本字串也說不出哪三份映像屬於同一版。
 
@@ -3440,6 +3442,180 @@ release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯�
 識別碼；secret 已經存在就拒絕，因為 GitHub 讀不回 secret，覆寫等於丟掉每一台安裝信任的那
 把金鑰。`scripts/release-manifest-test.ts` 以隨機金鑰跑一次腳本再交給 Rust 驗證，並確認
 `testdata/release-manifest.txt` 與腳本的輸出逐位元組相同（Ed25519 簽章是確定性的）。
+
+## 主機端更新程式
+
+出貨的機器沒有人進得了主機：客戶、經銷商與雷希都沒有。系統管理員在產品畫面上按更新，
+結果只有兩種：以新版本回來，或者自己回到前一版、連同完整的資料庫。執行的是
+`backend/crates/laysi-updater`，一支靜態 musl 的 Rust 執行檔（`rust-lld` 連結，不需要 C
+工具鏈），以擁有這套 stack 的 rootless 使用者、從 `systemd --user` 執行。**放在主機上而不是
+容器裡**：容器換不掉自己，而把 podman socket 交給一個容器等於交出整套系統。
+
+它只依賴 `laysi-license-token`（驗章與共用型別）、`serde`、`serde_json` 與 `libc`，不依賴
+`laysi-ops`／`laysi-store`——後兩者帶進 `ring`、`blake3` 與 `cc`。`ci.yml` 對兩個 musl target
+檢查依賴樹，並編出兩份 static 執行檔。
+
+**下一版的更新程式與 compose 檔都放在 api 映像裡**（`/usr/local/share/laysi-one/`，
+`backend/Dockerfile`），由目前這一版取出來用，所以更新程式不另外列進版本清單：digest 釘住
+映像，也就釘住這三個檔案。安全與復原的邏輯留在更新程式裡，不寫在映像內的腳本：一個有問題
+的版本不該帶走用來從它復原的那段程式。
+
+### 主機配置
+
+`<root>` 是 `~/.local/share/laysi-one`（`LAYSI_UPDATER_ROOT` 可改），整棵由 stack 使用者
+擁有：
+
+| 路徑 | 權限 | 內容 |
+|---|---|---|
+| `<root>/` | 0700 | |
+| `bin/laysi-updater`、`bin/laysi-updater.previous` | 0755 | 現行與前一版的更新程式 |
+| `stack/` | 0700 | 兩份 compose 檔與 `.env`（0600），旁邊各一份 `.previous` |
+| `state/installed` | 0600 | 已安裝的版本與三個 digest：取自驗過的清單，不從容器讀 |
+| `state/journal`、`state/lock`、`state/updater.log`、`state/updater.env` | 0600 | 日誌、鎖、紀錄、工具路徑 |
+| `backup/` | 0700 | 切換前的 `pg_dump -Fc`（0600），成功或回退完成即刪 |
+| `incoming/` | 0700 | 從新版 api 映像取出的檔案 |
+| `requests/` | 0755 | 掛進 api（`:U,z`），api 寫旗標 |
+| `results/` | 0755 | 掛進 api（`:ro,z`，不加 `U`），更新程式寫結果 |
+
+只有最後兩個目錄掛進容器，而且只掛進 `api`，不掛進 `mcp`——所以從 MCP 寫不了旗標。日誌、
+資料庫備份、`.env` 與 compose 檔都不在任何掛進容器的目錄裡。`:U` 把 `requests/` chown 給
+api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉裡面的東西，清空走
+`podman unshare`；不採「目錄設 1777」那條路，主機上不多一個人人可寫的目錄。
+
+### 旗標與結果（api 容器內看到的樣子）
+
+契約定義在 `laysi-license-token` 的 `update` 模組，產品與更新程式共用：
+
+- `CONTAINER_REQUEST_DIR` = `/var/lib/laysi-update/requests`（可寫）。api 把
+  `UpdateRequest::encode()` 寫到暫存名稱、fsync、chmod 0644，再 rename 成
+  `request`（`REQUEST_FILE`）。內容是 `laysi-update-request 1`、`request <請求編號>`，
+  後面逐位元組接上授權伺服器給的簽章版本清單。請求編號不在簽章範圍內，只用來對上結果；
+  8–64 個英數與 `-`，同時是結果的檔名。
+- `CONTAINER_RESULT_DIR` = `/var/lib/laysi-update/results`（唯讀）。檔名就是請求編號，
+  `UpdateResult::decode()` 讀，上限 `MAX_RESULT_BYTES`。每一步都整份換掉，
+  `UpdateStatus::is_final()` 之後不再變；保留最新的 `KEEP_RESULTS` 份。
+- 狀態：進行中 `accepted`→`preparing`→`switching`→（`rolling-back`）；結束
+  `succeeded`、`succeeded-updater-kept`（新版已在執行，但新版更新程式自我檢查不通過，
+  `reason` 說原因）、`failed-unchanged`（停機前就失敗，什麼都沒變）、`rolled-back`、
+  `rollback-failed`，以及拒絕 `refused-signature`／`-downgrade`／`-same-version`／
+  `-installed-unknown`／`-disk-space`／`-busy`／`-blocked`。每份都帶 `received`、
+  `updated`，視情況帶 `offered`、`running`、`downtime-from`／`-to`、`reason`、
+  `rollback-reason`。停機時間從 `downtime-from`（第 4 步）量到 `downtime-to`。
+- 旗標是不可信輸入：以目錄 fd 加 `O_NOFOLLOW | O_NONBLOCK` 開啟、`fstat` 確認是一般檔案、
+  有大小上限，驗不過章就丟棄。symlink、FIFO、目錄都不會讓更新程式讀到目錄外的檔案或卡住。
+
+### 一次更新
+
+1. 寫下 `accepted`；驗章、拒絕降版，與已安裝版本相同就不做任何事。
+2. 事前檢查磁碟：新映像加一份資料庫備份，上一版映像要留著。新映像在拉下來之前量不到
+   （更新程式不經 podman 就問不了 registry），所以先假設新版至多是現行版映像的兩倍；
+   不足就停在這裡。
+3. 依 digest 拉映像，從新 api 映像取出 compose 檔與下一版更新程式。新 compose 檔要有
+   postgres、rustfs、api、mcp、web、backup，自家三份映像各在自己的服務裡（api 與 mcp 用
+   api 映像），每個映像都以 digest 指定，自家映像要等於清單上的 digest。拉完以實際大小
+   再檢查一次磁碟。到這一步系統照常運作；失敗就刪掉拉下來的映像，回 `failed-unchanged`
+   （空間不足是 `refused-disk-space`）。
+4. 停止 postgres 以外的每個服務，web、mcp 先停並確認停了。停機從這裡開始。
+5. `pg_dump -Fc`，0600，`pg_restore --list` 確認完整。
+6. 前一版的 compose 檔與 `.env` 另存同目錄，再換上新版的。
+7. 跑完 `secrets`（冪等，新版多一個密鑰就在這裡產生），先起 postgres，再
+   `--force-recreate` 其餘常駐服務，web 與 mcp 除外。一律帶 `--no-deps`：podman-compose
+   把 `depends_on` 譯成 `--requires`，有它就刪不掉、換不掉被依賴的容器。
+8. 等候成功：每個服務的最新容器在執行、是切換之後建立的、建立時的 digest 等於 compose
+   檔指定的那個也正在執行它（多平台映像以 index digest 拉取時 podman 回報的就是 index
+   digest）、自家映像等於清單、有 healthcheck 的是 healthy；反覆重啟的容器立刻算失敗。
+   逾時 20 分鐘，涵蓋 migration。通過之後才起 web 與 mcp，以同樣條件確認（逾時 3 分鐘）。
+9. 失敗：先放回前一版的檔案，確認 postgres 以外都停了，以**舊版的 postgres 映像**重建
+   容器，`DROP DATABASE … WITH (FORCE)` 後 `pg_restore --create`（保留 ICU zh-TW 定序），
+   成功才刪備份、起舊版並以第 8 步的條件確認。回退也不通過就停在舊版、不再重試。
+10. 成功：新版更新程式先在本機跑 `self-check`（讀得了這次的日誌、寫得出 unit），通過才
+    換上，前一版留在 `.previous`；接著刪掉現行與前一版以外的映像與資料庫備份。
+
+**換回舊映像不構成回退**：sqlx 遇到資料庫裡有執行檔不認得的 migration 會回
+`VersionMissing` 拒絕啟動，所以回退一定連同資料庫。**入口開放之後的寫入會隨回退消失**：
+第 8 步通過核心之後 web 與 mcp 才啟動，在那之前沒有人寫得進新版；之後若 web 或 mcp 自己
+沒通過，回退仍要還原資料庫，那段時間（上限是入口的逾時）收到的寫入一起還原，結果的
+`reason` 寫出那段時間有多長。
+
+### 日誌與開機
+
+每一步開始前把狀態寫進 `state/journal`（暫存檔、fsync、rename、fsync 目錄），所以任何
+時間點斷電，開機都知道下一步。最終結果寫進結果目錄之後才刪日誌，寫不進去就留著日誌讓
+下一次收尾再寫；收到旗標卻在寫日誌之前就中斷的請求，清空請求目錄時回
+`failed-unchanged`。分界在切換：
+
+| 日誌狀態 | 中斷後 |
+|---|---|
+| `preparing`、`prepared` | 什麼都沒變：刪掉拉下來的映像，回 `failed-unchanged` |
+| `stopping`、`backed-up` | 起舊版，刪備份，回 `rolled-back` |
+| `files-saved`、`files-swapped` | 先放回前一版檔案，其餘同上 |
+| `switching`、`core-up` | 停掉仍在執行的服務，重做切換再判斷；不通過就回退 |
+| `committed`、`finishing` | 做完：記下新版、換更新程式、清理 |
+| `rolling-back` | 重做回退 |
+| `restoring` | 重新還原資料庫 |
+| `restored` | 起舊版並判斷 |
+| `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres |
+
+**開機時 stack 只由更新程式啟動**：compose 用 `unless-stopped`，而 rootless 的
+`podman-restart.service` 只啟動 `restart: always` 的容器；任何服務都不得設 `always`，
+否則它會在收尾之前被啟動。順序是先收尾日誌、再啟動 stack；日誌讀不懂或收尾失敗時什麼都
+不啟動、結束碼非零，交給前一版。
+
+systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一起換：
+
+- `laysi-updater.path` 監看 `requests/request`，觸發 `laysi-updater.service`（oneshot）。
+  `ExecStopPost=` 在每一次結束時清空請求目錄，失敗也一樣——檔案還在，path unit 會在
+  service 結束時再觸發、一秒五次之後轉為 `failed` 而不再監看。執行期間寫入的旗標因此被丟棄
+  並回 `refused-busy`，不排隊也不合併；`StartLimitIntervalSec=0`。
+- `laysi-updater-boot.service`：開機收尾並啟動 stack，`ExecStop=` 在關機時依序停下 web／
+  mcp、其餘、postgres。`OnFailure=` 啟動 `laysi-updater-fallback.service`，以
+  `bin/laysi-updater.previous` 再做一次。
+- `laysi-updater.service` 失敗時（例如程序被殺），`OnFailure=` 的
+  `laysi-updater-recover.service` 立刻收尾，不必等下一次開機；它失敗同樣交給前一版。
+- 每一次執行（旗標、開機、收尾）都先取 `state/lock` 的 `flock`。旗標那次拿不到就回
+  `refused-busy`；開機那次等鎖。
+
+podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，oneshot 一結束就連同容器
+被殺掉，所以更新程式呼叫 podman 時移除 `INVOCATION_ID`。
+
+### 出貨與 compose
+
+`install` 是唯一的出貨步驟：以 stack 使用者執行，收一份簽章版本清單，先驗章並檢查主機，
+才建好目錄、放上更新程式、從那一版的 api 映像取 compose 檔並檢查、寫 `.env` 與 unit、確認
+lingering（沒有就 `loginctl enable-linger`，失敗請 root 執行一次），最後寫第一份
+`state/installed` 並啟動開機 unit——它先跑完 `secrets` 才啟動其餘服務。寫下
+`state/installed` 之前失敗可以直接重跑；寫下之後就算安裝完成，由開機 unit 負責啟動。
+主機要用 netavark（服務以名稱互找，Ubuntu 的 CNI 沒有 DNS
+外掛），`install` 檢查這一點。podman 4.9.3（Ubuntu 24.04）與以 uv 安裝的 podman-compose
+1.6.0 是驗證過的組合，`updater-e2e.yml` 釘住這兩個版本。
+
+`docker-compose.ship.yml` 是出貨機器的 overlay：自家映像以
+`${LAYSI_REGISTRY:?}/laysi-one-*@${LAYSI_*_DIGEST:?}` 引用（`.env` 缺值就拒絕啟動）、拿掉
+postgres 對 `secrets` 的依賴、釘住容器名稱、掛兩個共用目錄、`in_pod: false`。第三方映像在
+`docker-compose.prod.yml` 裡就以 digest 釘住，one.laysi.io 與示範站沿用同一份。postgres
+釘的是 `postgres:18` 的 trixie 版（ICU 76）：換 Debian 基底就換 ICU，在舊 ICU 建立的資料
+目錄每次連線都警告 `collation version mismatch`，zh-TW 定序的文字索引要重建。
+
+**換 rustfs 或 postgres 的 digest 要先過 `scripts/third-party-image-check.ts`**（`ci.yml`
+的 `third-party-images`）：RustFS 的物件不在回退範圍內，所以新舊兩版要讀得了同一份資料，
+舊→新→舊；postgres 另外比對兩版的 ICU，不同時那次變更要帶一份執行 `REINDEX` 與
+`ALTER DATABASE … REFRESH COLLATION VERSION` 的 migration，否則不通過。
+
+### 資料庫還原之後的 RustFS
+
+回退只還原資料庫，RustFS 的物件維持回退當下的樣子：
+
+- **文件版本不會指向不存在的物件**：物件先寫進桶子、成功才寫資料列，而文件從不刪除；
+  還原後的資料庫只會少列，桶子裡多出沒有列指著的物件。
+- **暫存上傳可能指向已刪除的暫存物件**：歸檔成功後會刪暫存物件（`documents.rs`
+  `file_staged`），清除工作也會刪過期的暫存物件（`uploads.rs`）。還原後那一列又變回等待
+  歸檔，物件卻不在了。歸檔它時比照過期處理：刪掉那一列，請使用者重新上傳。
+
+### 不包含
+
+逾期自動更新（EPIC #59 決定：只有管理員按下更新才執行）、RustFS 物件的備份與還原、
+PostgreSQL 大版本升級。實機才看得到的部分（`$XDG_RUNTIME_DIR`、bind mount 的 SELinux
+標籤、開機順序）由 #64 的演練涵蓋。
 
 ## 異地備份
 
