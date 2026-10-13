@@ -3592,6 +3592,10 @@ systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一
   `ExecStopPost=` 在每一次結束時清空請求目錄，失敗也一樣——檔案還在，path unit 會在
   service 結束時再觸發、一秒五次之後轉為 `failed` 而不再監看。執行期間寫入的旗標因此被丟棄
   並回 `refused-busy`，不排隊也不合併；`StartLimitIntervalSec=0`。
+  它排在開機 unit 之後才開始監看，並設 `DefaultDependencies=no`：path unit 預設排在
+  `paths.target` 之前，而開機 unit 是 service、排在 `basic.target`（也就在 `paths.target`）
+  之後，兩者相加是循環，systemd 每次開機都刪掉 path unit 的啟動工作，重開過的機器就再也
+  收不到更新請求。端對端測試只重啟開機 unit、不經過 user manager 開機，看不到這件事。
 - `laysi-updater-boot.service`：開機收尾並啟動 stack，`ExecStop=` 在關機時依序停下 web／
   mcp、其餘、postgres。`OnFailure=` 啟動 `laysi-updater-fallback.service`，以
   `bin/laysi-updater.previous` 再做一次。

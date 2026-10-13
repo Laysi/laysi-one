@@ -5,7 +5,9 @@
 //!   `laysi-updater.service`, which runs one update. Its `ExecStopPost=`
 //!   empties the requests directory however the run ended: a request left in
 //!   place would start the service again the moment it stops, five times in a
-//!   second, after which the path unit gives up watching for good.
+//!   second, after which the path unit gives up watching for good. It starts
+//!   after the boot unit, without the default ordering before `paths.target`
+//!   that would make that a cycle.
 //! - `laysi-updater-boot.service` is how the stack starts at boot: it finishes
 //!   an interrupted update first. Nothing else starts the stack, since the
 //!   compose services use `unless-stopped`, which `podman-restart.service`
@@ -84,7 +86,15 @@ pub fn render(layout: &Layout) -> Result<Vec<(&'static str, String)>, String> {
             format!(
                 "[Unit]\n\
                  Description=Laysi One update requests\n\
+                 # Watch only once the boot unit has finished. A path unit is\n\
+                 # ordered before paths.target by default, and the boot unit\n\
+                 # comes after basic.target and so after paths.target: with\n\
+                 # the defaults this is a cycle, and systemd drops this unit's\n\
+                 # start job at every boot.\n\
+                 DefaultDependencies=no\n\
                  After={BOOT_UNIT}\n\
+                 Conflicts=shutdown.target\n\
+                 Before=shutdown.target\n\
                  \n\
                  [Path]\n\
                  PathExists={request}\n\
@@ -191,6 +201,21 @@ mod tests {
         for (_, text) in &units {
             assert!(!text.contains("restart"), "nothing restarts on its own");
         }
+    }
+
+    /// Ordering the path unit after the boot unit with the defaults on is a
+    /// cycle through paths.target and basic.target. systemd breaks it at boot
+    /// by dropping the path unit's start job, so a machine that has rebooted
+    /// never picks up an update request. Restarting the boot unit, as the
+    /// end-to-end test does, never shows it; only a user manager starting up
+    /// does.
+    #[test]
+    fn the_path_unit_waits_for_boot_without_an_ordering_cycle() {
+        let units = render(&Layout::new("/home/stack/.local/share/laysi-one")).unwrap();
+        let path = &units.iter().find(|(n, _)| *n == PATH_UNIT).unwrap().1;
+        assert!(path.contains(&format!("After={BOOT_UNIT}\n")));
+        assert!(path.contains("DefaultDependencies=no\n"));
+        assert!(path.contains("Conflicts=shutdown.target\nBefore=shutdown.target\n"));
     }
 
     #[test]
