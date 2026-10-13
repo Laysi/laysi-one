@@ -327,9 +327,18 @@ export function Security({ onToast, reloadKey }: Props) {
     }
   }
 
-  function refreshLicence() {
+  function refreshAfterUpdate() {
     callOp('get_license', {}, undefined, licenseState)
       .then(setLicence)
+      .catch(() => undefined);
+    callOp('get_system_health', {}, undefined, systemHealth)
+      .then(setHealth)
+      .catch(() => undefined);
+    getHealthz()
+      .then(setHz)
+      .catch(() => undefined);
+    getMeta()
+      .then(setInfo)
       .catch(() => undefined);
   }
 
@@ -493,7 +502,7 @@ export function Security({ onToast, reloadKey }: Props) {
         <UpdateCard
           licence={licence}
           canUpdate={me.permissions.includes('get_update_ticket')}
-          onFinished={refreshLicence}
+          onFinished={refreshAfterUpdate}
         />
       )}
 

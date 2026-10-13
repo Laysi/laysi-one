@@ -3,7 +3,7 @@
 //
 // advance() decides what the card says on every poll. The container behind the
 // screen disappears mid-update, so the cases that matter are the ones where
-// the answer is missing: it must end in one of five states and never sit in
+// the answer is missing: it must end in one of six states and never sit in
 // "in progress", and an old result must never be read as this request's.
 //
 //   bun scripts/update-test.ts
@@ -15,6 +15,7 @@ import {
   STORAGE_KEY,
   STORED_RUN_TTL_MS,
   UNCONFIRMED_MESSAGE,
+  UNREACHABLE_MESSAGE,
   advance,
   clearRun,
   loadRun,
@@ -66,6 +67,7 @@ const up = (r: UpdateResultView | null, version: string | null = "v0.1.12"): Pro
   reachable: r !== null,
 });
 const down: Probe = { version: null, result: null, reachable: false };
+const resultUnreadable: Probe = { version: "v0.1.12", result: null, reachable: false };
 
 function phase(p: Probe, at: number, from = run()): Phase {
   return advance(from, p, T0 + at).phase;
@@ -104,6 +106,15 @@ for (const status of ["refused-signature", "refused-downgrade", "refused-same-ve
   ok(`${status} is not run, with its own sentence`, p.kind === "not-run" && p.why === "refused" && p.message.startsWith("更新沒有執行。") && p.message !== refusedMessage(null));
 }
 ok("a refusal the screen has no sentence for still says it did not run", refusedMessage("refused-something-new").startsWith("更新沒有執行。"));
+{
+  const reason = "映像所在的磁碟剩 1.1 GB，更新需要 4.2 GB（新映像約 3.9 GB、資料庫備份約 120 MB）";
+  const p = phase(up(result("refused-disk-space", "refused", { reason })), 3000);
+  ok("a disk-space refusal carries the updater's numbers", p.kind === "not-run" && p.message === `更新沒有執行。${reason}。清出空間後可以再試。`);
+  ok("a reason that already ends a sentence does not get a second full stop", refusedMessage("refused-disk-space", `${reason}。`) === refusedMessage("refused-disk-space", reason));
+  ok("a disk-space refusal with no reason keeps its own sentence", refusedMessage("refused-disk-space", " ") === refusedMessage("refused-disk-space"));
+  const blocked = phase(up(result("refused-blocked", "refused", { reason: "上一次回退沒有完成，資料庫備份 a.dump 保留在主機上，處理之前不再更新" })), 3000);
+  ok("other refusals keep their own sentence whatever the reason says", blocked.kind === "not-run" && blocked.message === refusedMessage("refused-blocked"));
+}
 
 // A result that is not this request's never reaches advance: the operation
 // answers found=false for an id with no file, so the old run's answer cannot
@@ -142,9 +153,19 @@ ok("a result still switching outranks a version that has already moved", phase(u
 
 // Never stall. Once the update was accepted, or the api went away, it may
 // have run: running out of time is "could not confirm", never "did not run".
-for (const [label, probe] of [["api gone", down], ["switching", up(result("switching", "in_progress"))]] as const) {
+for (const [label, probe] of [["switching", up(result("switching", "in_progress"))], ["only the version answers", resultUnreadable]] as const) {
   const p = phase(probe, GIVE_UP_MS);
   ok(`after the give-up time (${label}) the card says it could not confirm`, p.kind === "unconfirmed" && p.message === UNCONFIRMED_MESSAGE);
+}
+{
+  const p = phase(down, GIVE_UP_MS);
+  ok("after the give-up time with nothing answering, the card says the system is not responding", p.kind === "unreachable" && p.message === UNREACHABLE_MESSAGE);
+  const gone = advance(run(), down, T0 + 3000).run;
+  const back = advance(gone, up(none), T0 + GIVE_UP_MS).phase;
+  ok("an api that went away and is answering again at the give-up time is could-not-confirm", back.kind === "unconfirmed");
+  const seen = advance(run(), up(result("switching", "in_progress")), T0 + 3000).run;
+  const lost = advance(seen, down, T0 + GIVE_UP_MS).phase;
+  ok("a switching result followed by silence ends as not responding", lost.kind === "unreachable");
 }
 {
   const accepted = advance(run(), up(result("accepted", "in_progress")), T0 + 3000).run;
@@ -156,6 +177,7 @@ for (const [label, probe] of [["api gone", down], ["switching", up(result("switc
   ok("an accepted that never appeared stays not run, however long it has been", p.kind === "not-run" && p.why === "never-started");
 }
 ok("the could-not-confirm sentence asks for a reload and does not claim it did not run", UNCONFIRMED_MESSAGE.includes("重新整理") && !UNCONFIRMED_MESSAGE.includes("沒有執行"));
+ok("the not-responding sentence sends to the dealer, not to a reload", UNREACHABLE_MESSAGE.includes("經銷商") && !UNREACHABLE_MESSAGE.includes("重新整理") && !UNREACHABLE_MESSAGE.includes("沒有執行"));
 
 // Reload during an update: the id is kept in the browser.
 function fakeStore(): KeyValueStore & { data: Map<string, string> } {

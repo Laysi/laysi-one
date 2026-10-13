@@ -3570,7 +3570,8 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 帶它，更新程式再驗一次。資料列只是一份副本：讀版本與寫請求每次都重新驗章，手改資料庫
 換不到任何版本。`get_license` 因此多回三個欄位：`running_version`、`released_version`（驗過
 章且 `decide()` 為 `Install` 才有，否則 `null`）與 `updater_present`（請求目錄存在才為真，
-沒有更新程式的安裝不畫按鈕）。畫面只知道有沒有放行給這台機器，沒有放行版本時不說「最新」。
+沒有更新程式的安裝不畫按鈕，也不畫「更新期間」與「更新失敗時」兩列——那兩句講的是更新程式
+的行為，由維運人員更新的安裝兩句都不成立）。畫面只知道有沒有放行給這台機器，沒有放行版本時不說「最新」。
 
 **兩個操作，同屬 `manage_license`**（migration `0025_release_manifest.sql` 整列改寫那條
 permission，並種兩列 `mcp_tool_grant`，檔案接在 `laysi-ops` 測試的 `SCHEMA` 後面）：
@@ -3606,12 +3607,23 @@ permission，並種兩列 `mcp_tool_grant`，檔案接在 `laysi-ops` 測試的 
 | 失敗並已回復 | `failed-unchanged`／`rolled-back`，說出回到的版本 |
 | 失敗且未回復 | `rollback-failed` |
 | 沒有執行 | 任一種 `refused-*`，每一種各有一句；或「已接收」在 60 秒內從未出現 |
-| 無法確認 | 「已接收」出現過或 api 曾經消失，卻在 45 分鐘內沒有最終結果 |
+| 無法確認 | 「已接收」出現過或 api 曾經消失，卻在 45 分鐘內沒有最終結果，而最後一次輪詢有回應 |
+| 沒有回應 | 同上，但最後一次輪詢 `/v1/meta` 與 `get_update_result` 都沒有回應 |
 
 **「沒有執行」只留給拒絕，以及「已接收」從未出現**。已接收之後逾時，更新可能已經執行，說
 沒有執行會讓人重按；那一格說無法確認結果、請重新整理本頁查看目前版本。輪詢同時問
 `/v1/meta` 與 `get_update_result`（帶請求編號），每次 5 秒逾時，api 在換版途中消失時
 回應失敗只會記為「曾經消失」，不會讓畫面壞掉。
+
+**沒有回應另成一格**：回退失敗而保留了資料庫備份時，更新程式只啟動 postgres（`machine.rs`
+的 `start_what_is_safe`），api 不會回來。這時請人重新整理，換來的是一個讀不到任何東西的頁面，
+卡片上的結果也跟著消失；所以那一格不畫「重新載入」，只請使用者盡快洽經銷商。兩個端點都沒有
+回應才算，`get_update_result` 失敗而 `/v1/meta` 有回應仍是無法確認。
+
+`refused-disk-space` 的那一句帶出結果檔的 `reason`（更新程式算出的剩餘與需要的容量），
+沒有 `reason` 才用固定句；其餘拒絕的 `reason` 寫給維運人員看，畫面不印。結束時卡片重讀授權、
+`/v1/meta`、`get_system_health` 與 `/healthz`，讀不到就保留原值：同一頁「系統健康」的版本
+與 migration 才不會停在更新前，而 api 不在時卡片也不會因為授權讀不到而整張消失。
 
 **重新整理後接續**：請求編號與已看到的狀態（`seenResult`、`wentDown`、起始版本與時間）存在
 `localStorage` 的 `laysi.update.run`。選 `localStorage` 而不是 `sessionStorage`，是因為更新

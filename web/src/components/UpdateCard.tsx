@@ -119,6 +119,8 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
 
   const running = phase?.kind === 'progress';
   const released = licence.released_version;
+  const ended =
+    phase?.kind === 'succeeded' || phase?.kind === 'unconfirmed' || phase?.kind === 'unreachable';
 
   return (
     <section className="licence-card">
@@ -134,16 +136,18 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
               <span className="fact__key">可安裝版本</span>
               <span className="fact__value num">{released}</span>
             </div>
-            <div className="fact">
-              <span className="fact__key">更新期間</span>
-              <span className="fact__value">系統暫時無法使用，{DOWNTIME_PHRASE}</span>
-            </div>
-            <div className="fact">
-              <span className="fact__key">更新失敗時</span>
-              <span className="fact__value">
-                自動回到目前版本，系統可以繼續使用
-              </span>
-            </div>
+            {licence.updater_present && (
+              <>
+                <div className="fact">
+                  <span className="fact__key">更新期間</span>
+                  <span className="fact__value">系統暫時無法使用，{DOWNTIME_PHRASE}</span>
+                </div>
+                <div className="fact">
+                  <span className="fact__key">更新失敗時</span>
+                  <span className="fact__value">自動回到目前版本，系統可以繼續使用</span>
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
@@ -154,9 +158,9 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
         <p
           role="status"
           className={
-            phase.kind === 'failed' || phase.kind === 'not-run' || phase.kind === 'unconfirmed'
-              ? 'state-note state-note--error'
-              : 'state-note'
+            phase.kind === 'progress' || phase.kind === 'succeeded'
+              ? 'state-note'
+              : 'state-note state-note--error'
           }
         >
           {phase.kind === 'progress' && '更新進行中，請稍候。'}
@@ -174,7 +178,10 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
           {phase.kind === 'failed' && !phase.restored && (
             <>更新沒有完成，也沒有回到原來的版本。請盡快洽經銷商。</>
           )}
-          {(phase.kind === 'not-run' || phase.kind === 'unconfirmed') && phase.message}
+          {(phase.kind === 'not-run' ||
+            phase.kind === 'unconfirmed' ||
+            phase.kind === 'unreachable') &&
+            phase.message}
         </p>
       )}
 
@@ -186,7 +193,7 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
         </div>
       )}
 
-      {released && !running && phase?.kind !== 'succeeded' && phase?.kind !== 'unconfirmed' && (
+      {released && !running && !ended && (
         <div className="row-actions">
           {!licence.updater_present ? (
             <span className="cell-muted">本安裝的更新由維運人員處理，請洽經銷商。</span>

@@ -27,12 +27,15 @@ export type NotRunWhy = 'refused' | 'never-started' | 'error';
 export const UNCONFIRMED_MESSAGE =
   '無法確認更新結果，請重新整理本頁查看目前版本。仍無法確認時請洽經銷商。';
 
+export const UNREACHABLE_MESSAGE = '系統更新後一直沒有回應。請盡快洽經銷商。';
+
 export type Phase =
   | { kind: 'progress' }
   | { kind: 'succeeded'; version: string }
   | { kind: 'failed'; restored: boolean; version: string }
   | { kind: 'not-run'; why: NotRunWhy; message: string }
-  | { kind: 'unconfirmed'; message: string };
+  | { kind: 'unconfirmed'; message: string }
+  | { kind: 'unreachable'; message: string };
 
 export function startRun(requestId: string, from: string, offered: string, now: number): UpdateRun {
   return { requestId, from, offered, startedAt: now, seenResult: false, wentDown: false };
@@ -48,13 +51,24 @@ const REFUSED: Record<string, string> = {
   'refused-blocked': '上一次更新回復時留下了資料庫備份，需要先檢查。請洽經銷商。',
 };
 
-export function refusedMessage(status: string | null): string {
-  const reason = (status && REFUSED[status]) || '請洽經銷商。';
-  return `更新沒有執行。${reason}`;
+export function refusedMessage(status: string | null, reason: string | null = null): string {
+  const shortfall = reason?.trim().replace(/[。.]+$/, '');
+  if (status === 'refused-disk-space' && shortfall) {
+    return `更新沒有執行。${shortfall}。清出空間後可以再試。`;
+  }
+  const sentence = (status && REFUSED[status]) || '請洽經銷商。';
+  return `更新沒有執行。${sentence}`;
 }
 
-function gaveUp(run: UpdateRun, now: number): { run: UpdateRun; phase: Phase } | null {
+function gaveUp(
+  run: UpdateRun,
+  probe: Probe,
+  now: number,
+): { run: UpdateRun; phase: Phase } | null {
   if (now - run.startedAt < GIVE_UP_MS) return null;
+  if (!probe.reachable && probe.version === null) {
+    return { run, phase: { kind: 'unreachable', message: UNREACHABLE_MESSAGE } };
+  }
   return { run, phase: { kind: 'unconfirmed', message: UNCONFIRMED_MESSAGE } };
 }
 
@@ -87,10 +101,14 @@ export function advance(
       case 'refused':
         return {
           run,
-          phase: { kind: 'not-run', why: 'refused', message: refusedMessage(result.status) },
+          phase: {
+            kind: 'not-run',
+            why: 'refused',
+            message: refusedMessage(result.status, result.reason),
+          },
         };
       case 'in_progress':
-        return gaveUp({ ...run, seenResult: true }, now) ?? {
+        return gaveUp({ ...run, seenResult: true }, probe, now) ?? {
           run: { ...run, seenResult: true },
           phase: { kind: 'progress' },
         };
@@ -114,7 +132,7 @@ export function advance(
       },
     };
   }
-  const over = gaveUp(next, now);
+  const over = gaveUp(next, probe, now);
   if (over) return over;
   return { run: next, phase: { kind: 'progress' } };
 }
