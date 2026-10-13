@@ -20,3 +20,8 @@ libc = "0.2"
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+
+[features]
+# Also trust the keys in LAYSI_UPDATER_TEST_KEYS at compile time. For
+# scripts/updater-e2e.ts only; the api image never enables it.
+test-keys = []

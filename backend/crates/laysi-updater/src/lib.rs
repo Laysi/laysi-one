@@ -11,12 +11,36 @@
 pub mod envfile;
 pub mod fsx;
 pub mod host;
+pub mod install;
 pub mod journal;
 pub mod layout;
 pub mod machine;
 pub mod podman;
+pub mod units;
 
 #[cfg(test)]
 mod fake;
 #[cfg(test)]
 mod machine_tests;
+
+use laysi_license_token::release::{self, VerifyingKey};
+
+/// Whether this build also trusts the test keys (the `test-keys` feature).
+/// The api image never builds with it.
+pub const TEST_KEYS: bool = cfg!(feature = "test-keys");
+
+/// The keys a release manifest has to be signed with: the ones compiled into
+/// `laysi-license-token`, and in a `test-keys` build also the public keys in
+/// `LAYSI_UPDATER_TEST_KEYS` at compile time, which scripts/updater-e2e.ts
+/// signs its releases with.
+pub fn trusted_keys() -> Vec<VerifyingKey> {
+    #[allow(unused_mut)]
+    let mut keys = release::trusted_keys();
+    #[cfg(feature = "test-keys")]
+    keys.extend(
+        env!("LAYSI_UPDATER_TEST_KEYS")
+            .split_whitespace()
+            .filter_map(release::parse_public_key),
+    );
+    keys
+}
