@@ -58,14 +58,16 @@ jobs:
       # The host-side updater depends on laysi-license-token and is linked for
       # musl with rust-lld alone, so nothing that crate pulls in for those
       # targets may compile C.
-      - name: laysi-license-token needs no C compiler
+      - name: laysi-license-token and laysi-updater need no C compiler
         run: |
-          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-              tree=$(cargo tree -p laysi-license-token -e normal,build --target "$target" --prefix none)
-              if printf '%s\n' "$tree" | grep -E '^(cc|cmake|ring|blake3) '; then
-                  echo "laysi-license-token pulls in a C build dependency for $target"
-                  exit 1
-              fi
+          for crate in laysi-license-token laysi-updater; do
+              for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+                  tree=$(cargo tree -p "$crate" -e normal,build --target "$target" --prefix none)
+                  if printf '%s\n' "$tree" | grep -E '^(cc|cmake|ring|blake3) '; then
+                      echo "$crate pulls in a C build dependency for $target"
+                      exit 1
+                  fi
+              done
           done
 
       # The script release.yml signs with, against the Rust verifier, with
@@ -92,6 +94,57 @@ jobs:
         run: |
           cargo run -q -p laysi-server --bin laysi-schema -- /tmp/generated.ts
           diff -u ../web/src/api/generated.ts /tmp/generated.ts
+
+  # The updater runs on the host, whatever its libc, so it ships as a static
+  # musl binary for both architectures the api image is built for, linked by
+  # rust-lld alone. backend/Dockerfile builds it the same way.
+  updater-musl:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Static for both targets
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: |
+          set -eu
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+              cargo build --release --locked -p laysi-updater --bin laysi-updater --target "$target"
+              described=$(file "target/$target/release/laysi-updater")
+              echo "$described"
+              printf '%s\n' "$described" | grep -q 'static' || { echo "not static"; exit 1; }
+          done
+          ./target/x86_64-unknown-linux-musl/release/laysi-updater version
+
+  # A rollback restores the database into the previous postgres image and
+  # leaves RustFS's objects as they are, so a change to either digest must
+  # read the same data both ways; a postgres with another ICU must bring the
+  # reindex with it. A no-op when neither digest moves.
+  third-party-images:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun scripts/third-party-image-check.ts --base "origin/$GITHUB_BASE_REF"
 
   frontend:
     runs-on: ubuntu-latest
