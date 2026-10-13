@@ -3475,10 +3475,11 @@ release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯�
 | `backup/` | 0700 | 切換前的 `pg_dump -Fc`（0600），成功或回退完成即刪 |
 | `incoming/` | 0700 | 從新版 api 映像取出的檔案 |
 | `requests/` | 0755 | 掛進 api（`:U,z`），api 寫旗標 |
-| `results/` | 0755 | 掛進 api（`:ro,z`，不加 `U`），更新程式寫結果 |
+| `results/` | 0755 | 掛進 api 與 mcp（`:ro,z`，不加 `U`），更新程式寫結果與切換標記 |
 
-只有最後兩個目錄掛進容器，而且只掛進 `api`，不掛進 `mcp`——所以從 MCP 寫不了旗標。日誌、
-資料庫備份、`.env` 與 compose 檔都不在任何掛進容器的目錄裡。`:U` 把 `requests/` chown 給
+只有最後兩個目錄掛進容器。請求目錄只掛進 `api`，所以從 MCP 寫不了旗標；結果目錄以唯讀
+掛進 `api` 與 `mcp`，兩者都要讀得到切換標記。日誌、資料庫備份、`.env` 與 compose 檔都不在
+任何掛進容器的目錄裡。`:U` 把 `requests/` chown 給
 api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉裡面的東西，清空走
 `podman unshare`；不採「目錄設 1777」那條路，主機上不多一個人人可寫的目錄。
 
@@ -3491,16 +3492,29 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   `request`（`REQUEST_FILE`）。內容是 `laysi-update-request 1`、`request <請求編號>`，
   後面逐位元組接上授權伺服器給的簽章版本清單。請求編號不在簽章範圍內，只用來對上結果；
   8–64 個英數與 `-`，同時是結果的檔名。
-- `CONTAINER_RESULT_DIR` = `/var/lib/laysi-update/results`（唯讀）。檔名就是請求編號，
-  `UpdateResult::decode()` 讀，上限 `MAX_RESULT_BYTES`。每一步都整份換掉，
+- `CONTAINER_RESULT_DIR` = `/var/lib/laysi-update/results`（api 與 mcp 皆唯讀）。檔名就是
+  請求編號，`UpdateResult::decode()` 讀，上限 `MAX_RESULT_BYTES`。每一步都整份換掉，
   `UpdateStatus::is_final()` 之後不再變；保留最新的 `KEEP_RESULTS` 份。
+- 切換標記 `SWITCHING_FILE`（`switching.marker`）：更新程式在第 4 步停下第一個服務之前
+  寫入（暫存檔、fsync、rename），最終結果寫出之後才刪除。**api 與 mcp 在 `update::switching()`
+  為真時拒絕所有寫入，讀取照常**：回退把資料庫還原成第 5 步的樣子，這段期間的寫入會被
+  還原掉。判斷只看標記在不在，不需要請求編號，所以更新程式自己起的 api 與沒有送出請求的
+  mcp 看到的是同一個答案。結果目錄不存在（沒有主機端更新程式的安裝，例如開發環境）時為假；
+  `lstat` 遇到 `NotFound` 以外的錯誤時為真，被擋下的寫入可以重做，被還原的寫入不會有人
+  知道。第 4 步之前的寫入由第 5 步的備份保留，所以 `accepted`／`preparing` 不擋。
+  標記寫不進去就不停任何服務，回 `failed-unchanged`。斷電或程序中斷留下的標記，由下一次
+  取得鎖的執行（開機與收尾 unit 都是）在發現沒有進行中的更新時刪掉；在那之前它留著，
+  寧可多擋一段。名稱含 `.`，不可能是請求編號，清理舊結果時不會碰到它。
+  拒絕寫入接在 `dispatch` 第 0 步（`op.writes()`），由 #63 實作。
 - 狀態：進行中 `accepted`→`preparing`→`switching`→（`rolling-back`）；結束
   `succeeded`、`succeeded-updater-kept`（新版已在執行，但新版更新程式自我檢查不通過，
   `reason` 說原因）、`failed-unchanged`（停機前就失敗，什麼都沒變）、`rolled-back`、
   `rollback-failed`，以及拒絕 `refused-signature`／`-downgrade`／`-same-version`／
   `-installed-unknown`／`-disk-space`／`-busy`／`-blocked`。每份都帶 `received`、
   `updated`，視情況帶 `offered`、`running`、`downtime-from`／`-to`、`reason`、
-  `rollback-reason`。停機時間從 `downtime-from`（第 4 步）量到 `downtime-to`。
+  `rollback-reason`、`tools`。停機時間從 `downtime-from`（第 4 步）量到 `downtime-to`。
+  `rolled-back` 帶 `rollback-reason` 表示第一次還原失敗、重試成功，內容是第一次的原因。
+  `tools` 是這次執行實際用的版本（`podman=4.9.3 podman-compose=1.6.0`），只記錄、不判斷。
 - 旗標是不可信輸入：以目錄 fd 加 `O_NOFOLLOW | O_NONBLOCK` 開啟、`fstat` 確認是一般檔案、
   有大小上限，驗不過章就丟棄。symlink、FIFO、目錄都不會讓更新程式讀到目錄外的檔案或卡住。
 
@@ -3514,8 +3528,10 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
    postgres、rustfs、api、mcp、web、backup，自家三份映像各在自己的服務裡（api 與 mcp 用
    api 映像），每個映像都以 digest 指定，自家映像要等於清單上的 digest。拉完以實際大小
    再檢查一次磁碟。到這一步系統照常運作；失敗就刪掉拉下來的映像，回 `failed-unchanged`
-   （空間不足是 `refused-disk-space`）。
-4. 停止 postgres 以外的每個服務，web、mcp 先停並確認停了。停機從這裡開始。
+   （空間不足是 `refused-disk-space`）。映像庫拒絕匿名拉取或找不到映像時，`reason` 只寫
+   「無法取得 … 映像：映像庫拒絕提供或沒有這個映像」，podman 的原文寫進日誌。
+4. 寫入切換標記，再停止 postgres 以外的每個服務，web、mcp 先停並確認停了。停機從這裡
+   開始。
 5. `pg_dump -Fc`，0600，`pg_restore --list` 確認完整。
 6. 前一版的 compose 檔與 `.env` 另存同目錄，再換上新版的。
 7. 跑完 `secrets`（冪等，新版多一個密鑰就在這裡產生），先起 postgres，再
@@ -3527,15 +3543,21 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
    逾時 20 分鐘，涵蓋 migration。通過之後才起 web 與 mcp，以同樣條件確認（逾時 3 分鐘）。
 9. 失敗：先放回前一版的檔案，確認 postgres 以外都停了，以**舊版的 postgres 映像**重建
    容器，`DROP DATABASE … WITH (FORCE)` 後 `pg_restore --create`（保留 ICU zh-TW 定序），
-   成功才刪備份、起舊版並以第 8 步的條件確認。回退也不通過就停在舊版、不再重試。
+   成功才刪備份、起舊版並以第 8 步的條件確認。**還原失敗（含之前的 DROP）在同一次執行裡
+   立刻重試一次**：先把第一次的原因寫進日誌（`restore-retry`），刪掉 postgres 以外已停止
+   的容器與新版的映像釋出空間，重建舊版 postgres，再從同一份備份還原。備份從頭到尾不改寫，
+   還原成功才刪。重試成功就照常起舊版並判斷，結果是 `rolled-back`，`rollback-reason`
+   寫第一次失敗的原因；重試也失敗就是 `rollback-failed`，備份留著。回退不通過就停在舊版、
+   不再重試。
 10. 成功：新版更新程式先在本機跑 `self-check`（讀得了這次的日誌、寫得出 unit），通過才
     換上，前一版留在 `.previous`；接著刪掉現行與前一版以外的映像與資料庫備份。
 
 **換回舊映像不構成回退**：sqlx 遇到資料庫裡有執行檔不認得的 migration 會回
-`VersionMissing` 拒絕啟動，所以回退一定連同資料庫。**入口開放之後的寫入會隨回退消失**：
-第 8 步通過核心之後 web 與 mcp 才啟動，在那之前沒有人寫得進新版；之後若 web 或 mcp 自己
-沒通過，回退仍要還原資料庫，那段時間（上限是入口的逾時）收到的寫入一起還原，結果的
-`reason` 寫出那段時間有多長。
+`VersionMissing` 拒絕啟動，所以回退一定連同資料庫。**入口開放之後才判定失敗時，回退照樣
+還原資料庫**：第 8 步通過核心之後 web 與 mcp 才啟動，之後若 web 或 mcp 自己沒通過（上限
+是入口的逾時），資料庫仍要回到第 5 步。這段期間 api 與 mcp 要依切換標記拒絕寫入，寫入才
+不會隨回退消失；拒絕寫入由 #63 接上，在那之前這段期間的寫入仍會被還原。結果的 `reason`
+寫出入口開放了多久。
 
 ### 日誌與開機
 
@@ -3552,9 +3574,12 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 | `switching`、`core-up` | 停掉仍在執行的服務，重做切換再判斷；不通過就回退 |
 | `committed`、`finishing` | 做完：記下新版、換更新程式、清理 |
 | `rolling-back` | 重做回退 |
-| `restoring` | 重新還原資料庫 |
+| `restoring` | 重新還原資料庫；`restore-retry` 已寫下時是續做那一次重試，不會再開始第二次 |
 | `restored` | 起舊版並判斷 |
 | `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres |
+
+日誌存在、階段在 `stopping` 之後且結果還不是最終時，切換標記一定在；收尾一個這樣的日誌時
+更新程式先補寫標記。最終結果寫出、日誌刪掉之後才刪標記，所以中斷在兩者之間也只會多擋一段。
 
 **開機時 stack 只由更新程式啟動**：compose 用 `unless-stopped`，而 rootless 的
 `podman-restart.service` 只啟動 `restart: always` 的容器；任何服務都不得設 `always`，
@@ -3585,13 +3610,26 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
 lingering（沒有就 `loginctl enable-linger`，失敗請 root 執行一次），最後寫第一份
 `state/installed` 並啟動開機 unit——它先跑完 `secrets` 才啟動其餘服務。寫下
 `state/installed` 之前失敗可以直接重跑；寫下之後就算安裝完成，由開機 unit 負責啟動。
-主機要用 netavark（服務以名稱互找，Ubuntu 的 CNI 沒有 DNS
-外掛），`install` 檢查這一點。podman 4.9.3（Ubuntu 24.04）與以 uv 安裝的 podman-compose
-1.6.0 是驗證過的組合，`updater-e2e.yml` 釘住這兩個版本。
+
+**工具版本在 `install` 嚴格檢查，之後只記錄**。podman 4.9.3（Ubuntu 24.04）與以 uv 安裝的
+podman-compose 1.6.0 是驗證過的組合，`updater-e2e.yml` 釘住這兩個版本。`install` 要求三件事，
+缺一項就以繁體中文說明並拒絕：podman-compose 恰好是 `install.rs` 的
+`PODMAN_COMPOSE_VERSION`、podman 用 netavark 網路後端、podman 找得到 aardvark-dns（服務
+以名稱互找，Ubuntu 的 CNI 沒有 DNS 外掛）。`updater-e2e.yml` 的 `PODMAN_COMPOSE_VERSION`
+與那個常數不同時，`laysi-updater` 的單元測試不通過。之後的每一次執行都不因版本拒絕，只把
+實際版本寫進結果的 `tools`：主機事後升級工具時，能放寬檢查的只有更新的更新程式，而它正是
+被拒絕的那一次要裝上的。
+
+**自家映像必須公開**。出貨機器不帶任何 registry 憑證，更新程式也從不登入 registry，三份
+映像以 digest 匿名拉取；完整性由簽章版本清單裡的 digest 保證，能不能用由授權決定。
+`ghcr.io/laysi/laysi-one-api`、`-web`、`-backup` 三個套件的可見度要由人在 GitHub 上改成
+公開，**在第一台出貨機器之前完成**；沒有公開時，更新停在第 3 步並回 `failed-unchanged`，
+`install` 也在拉 api 映像時停下。
 
 `docker-compose.ship.yml` 是出貨機器的 overlay：自家映像以
 `${LAYSI_REGISTRY:?}/laysi-one-*@${LAYSI_*_DIGEST:?}` 引用（`.env` 缺值就拒絕啟動）、拿掉
-postgres 對 `secrets` 的依賴、釘住容器名稱、掛兩個共用目錄、`in_pod: false`。第三方映像在
+postgres 對 `secrets` 的依賴、釘住容器名稱、api 掛兩個共用目錄而 mcp 只掛結果目錄、
+`in_pod: false`。第三方映像在
 `docker-compose.prod.yml` 裡就以 digest 釘住，one.laysi.io 與示範站沿用同一份。postgres
 釘的是 `postgres:18` 的 trixie 版（ICU 76）：換 Debian 基底就換 ICU，在舊 ICU 建立的資料
 目錄每次連線都警告 `collation version mismatch`，zh-TW 定序的文字索引要重建。
