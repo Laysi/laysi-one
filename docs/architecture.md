@@ -3289,7 +3289,7 @@ crate。
 
 預設由 `risk()` 推導，所以只有少數「帶身分底線的讀取」需要覆寫 `writes()`：
 `list_payslips`、`list_withholding_statements`、`get_backup_setting`、`get_oidc_setting`、
-`list_user_accounts`、`get_license`。`reads_are_not_writes_whatever_floor_they_carry` 依
+`list_user_accounts`、`get_license`、`get_update_ticket`、`get_update_result`。`reads_are_not_writes_whatever_floor_they_carry` 依
 命名動詞把關，新增一個 `get_*` 而忘了覆寫就會紅。
 
 `activate_license` 是唯一豁免的寫入，它是離開唯讀的那條路。被擋下的呼叫照樣寫稽核。
@@ -3505,7 +3505,7 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   標記寫不進去就不停任何服務，回 `failed-unchanged`。斷電或程序中斷留下的標記，由下一次
   取得鎖的執行（開機與收尾 unit 都是）在發現沒有進行中的更新時刪掉；在那之前它留著，
   寧可多擋一段。名稱含 `.`，不可能是請求編號，清理舊結果時不會碰到它。
-  拒絕寫入接在 `dispatch` 第 0 步（`op.writes()`），由 #63 實作。
+  拒絕寫入接在 `dispatch` 第 0a 步（`op.writes()`），見〈產品畫面的更新卡〉。
 - 狀態：進行中 `accepted`→`preparing`→`switching`→（`rolling-back`）；結束
   `succeeded`、`succeeded-updater-kept`（新版已在執行，但新版更新程式自我檢查不通過，
   `reason` 說原因）、`failed-unchanged`（停機前就失敗，什麼都沒變）、`rolled-back`、
@@ -3556,8 +3556,75 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 `VersionMissing` 拒絕啟動，所以回退一定連同資料庫。**入口開放之後才判定失敗時，回退照樣
 還原資料庫**：第 8 步通過核心之後 web 與 mcp 才啟動，之後若 web 或 mcp 自己沒通過（上限
 是入口的逾時），資料庫仍要回到第 5 步。這段期間 api 與 mcp 要依切換標記拒絕寫入，寫入才
-不會隨回退消失；拒絕寫入由 #63 接上，在那之前這段期間的寫入仍會被還原。結果的 `reason`
+不會隨回退消失；`dispatch` 的第 0a 步已經接上這道檢查。結果的 `reason`
 寫出入口開放了多久。
+
+### 產品畫面的更新卡
+
+「安全與營運」的「系統更新」卡（`components/UpdateCard.tsx`，狀態機在 `web/src/update.ts`）
+是上面那份契約的畫面端。
+
+**放行的版本存在 `license_state.release_manifest`**：授權檢查的回應帶一份簽章版本清單，
+`ops/license.rs` 的 `released_manifest()` 用 `release::verify_with` 驗過才存，驗不過存空字串；
+每次成功的檢查整份換掉，所以撤回放行也一併生效。存的是簽章全文、逐位元組不動，因為請求原樣
+帶它，更新程式再驗一次。資料列只是一份副本：讀版本與寫請求每次都重新驗章，手改資料庫
+換不到任何版本。`get_license` 因此多回三個欄位：`running_version`、`released_version`（驗過
+章且 `decide()` 為 `Install` 才有，否則 `null`）與 `updater_present`（請求目錄存在才為真，
+沒有更新程式的安裝不畫按鈕）。畫面只知道有沒有放行給這台機器，沒有放行版本時不說「最新」。
+
+**兩個操作，同屬 `manage_license`**（migration `0025_release_manifest.sql` 整列改寫那條
+permission，並種兩列 `mcp_tool_grant`，檔案接在 `laysi-ops` 測試的 `SCHEMA` 後面）：
+
+| 操作 | `risk()` | `writes()` | `ui_only` | MCP 開關 |
+|---|---|---|---|---|
+| `get_update_ticket` | `AdminOnly` | false | 是 | 關閉，且開不起來 |
+| `get_update_result` | `AdminOnly` | false | 否 | 關閉 |
+
+`get_update_ticket` 把請求寫進旗標目錄（暫存檔、fsync、0644、rename、fsync 目錄）並回傳
+請求編號。`writes()` 為 false，授權到期而唯讀的安裝照樣更新得了自己；名稱用 `get_` 開頭，
+由 `reads_are_not_writes_whatever_floor_they_carry` 把關。`get_update_result { request_id }`
+讀 `results/<編號>`，並核對檔案內的編號等於要求的編號；找不到時回 `found = false`，目錄
+不存在也一樣，所以結果目錄裡上一次的結果不會被當成這一次的。
+
+**`ui_only`** 是 `Operation` trait 的新掛鉤（預設 `None`），回傳該去的畫面名稱。MCP 呼叫
+在讀 `mcp_tool_grant` 之前就被擋下，錯誤訊息請使用者到「安全與營運」執行；
+`set_mcp_tool_grant` 也拒絕把這類操作打開。理由：旗標目錄只掛進 api 容器，AI 不該決定系統
+何時停機。`schema-live-test` 的 `NEVER_CALLED` 列出 `get_update_ticket`，因為呼叫它會
+真的寫旗標。
+
+**更新期間唯讀**：`dispatch` 第 0a 步在授權檢查之前問 `op.writes()` 與
+`UpdateDirs::switching()`，兩個 channel 都擋，回 `OpError::Updating`（`updating`，HTTP
+403），被擋下的呼叫照樣寫稽核。授權底線的 `Unlicensed` 原本沒有對應的狀態碼，一併對到 403。
+測試以 `Registry::in_update_dirs` 指向自己的目錄。
+
+**卡片的狀態**：沒有放行版本、可更新（按鈕依 `permissions` 與 `updater_present` 決定畫不畫，
+沒有權限時印誰維護）、進行中，以及六種結束：
+
+| 狀態 | 條件 |
+|---|---|
+| 成功 | 結果為 `succeeded`／`succeeded-updater-kept`，或結果讀不到而 `/v1/meta` 的版本已變 |
+| 失敗並已回復 | `failed-unchanged`／`rolled-back`，說出回到的版本 |
+| 失敗且未回復 | `rollback-failed` |
+| 沒有執行 | 任一種 `refused-*`，每一種各有一句；或「已接收」在 60 秒內從未出現 |
+| 無法確認 | 「已接收」出現過或 api 曾經消失，卻在 45 分鐘內沒有最終結果 |
+
+**「沒有執行」只留給拒絕，以及「已接收」從未出現**。已接收之後逾時，更新可能已經執行，說
+沒有執行會讓人重按；那一格說無法確認結果、請重新整理本頁查看目前版本。輪詢同時問
+`/v1/meta` 與 `get_update_result`（帶請求編號），每次 5 秒逾時，api 在換版途中消失時
+回應失敗只會記為「曾經消失」，不會讓畫面壞掉。
+
+**重新整理後接續**：請求編號與已看到的狀態（`seenResult`、`wentDown`、起始版本與時間）存在
+`localStorage` 的 `laysi.update.run`。選 `localStorage` 而不是 `sessionStorage`，是因為更新
+是以分鐘計的，管理員可能關掉分頁再回來；兩個分頁同時開著只是各自輪詢同一個編號，結果
+相同。卡片掛載時讀回，繼續輪詢同一個編號；出現最終狀態、顯示出來的同時清除。讀回的編號
+只用來輪詢，新的更新永遠向 `get_update_ticket` 要新的編號，所以不會把舊編號當成新的更新：
+結果已是最終的編號只會顯示那個結果一次，然後清除。超過一天、格式不符或無法讀取的紀錄
+一律丟掉。這些規則都在 `update.ts` 的純函式裡，由 `scripts/update-test.ts` 驗證。
+
+**停機時間**：畫面寫「約一分鐘」，只存在 `update.ts` 的 `DOWNTIME_PHRASE`。數字來自 #61 的
+CI 端對端測試，從第 4 步停止服務量到最終結果，成功路徑 18–20 秒、最長 30 秒，用的是假
+映像，真實映像的 migration 與拉取不在其中；取整到一分鐘留出餘裕。#64 的實機演練量到
+實測值之後換掉這個字串。
 
 ### 日誌與開機
 
