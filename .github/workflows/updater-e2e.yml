@@ -3,9 +3,12 @@
 # scripts/updater-e2e.ts says what it checks; it breaks releases on purpose
 # and expects every one of them to end on a single release with its data.
 #
-# A shipped machine runs Ubuntu 24.04's podman 4.9.3 with netavark, and
-# podman-compose 1.6.0 installed with uv. Both are pinned here and the job
-# fails rather than test anything else.
+# A shipped machine runs Ubuntu 24.04's podman 4.9.3 with netavark and
+# aardvark-dns, and podman-compose 1.6.0 installed with uv. Both are pinned
+# here and the job fails rather than test anything else. `install` refuses
+# any other podman-compose; PODMAN_COMPOSE_VERSION has to equal
+# PODMAN_COMPOSE_VERSION in backend/crates/laysi-updater/src/install.rs,
+# which a unit test of that crate checks in ci.yml.
 
 name: Updater end-to-end
 

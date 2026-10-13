@@ -44,6 +44,10 @@ const ROOT = join(HOME, ".local/share/laysi-one");
 const RESULTS = join(ROOT, "results");
 const REQUESTS = join(ROOT, "requests");
 const BACKUPS = join(ROOT, "backup");
+// laysi_license_token::update::SWITCHING_FILE: api and mcp refuse writes
+// while it exists.
+const MARKER = join(RESULTS, "switching.marker");
+const CONTAINER_MARKER = "/var/lib/laysi-update/results/switching.marker";
 const UNITS = ["laysi-updater.path", "laysi-updater.service", "laysi-updater-boot.service", "laysi-updater-recover.service", "laysi-updater-fallback.service"];
 const FINAL = new Set([
   "succeeded",
@@ -285,6 +289,10 @@ function journalPhase(): string | undefined {
   return readFileSync(path, "utf8").match(/^phase (\S+)$/m)?.[1];
 }
 
+function switching(): boolean {
+  return existsSync(MARKER);
+}
+
 function installed(): string {
   return readFileSync(join(ROOT, "state/installed"), "utf8").match(/^version (\S+)$/m)?.[1] ?? "";
 }
@@ -302,10 +310,16 @@ interface Ctr {
 }
 
 function containers(): Ctr[] {
-  const ids = podman("ps", "-a", "-q", "--filter", `label=io.podman.compose.project=${PROJECT}`).split("\n").filter(Boolean);
-  if (ids.length === 0) return [];
-  const inspected = JSON.parse(podman("container", "inspect", ...ids));
-  return inspected.map((c: any) => ({
+  // While the updater recreates containers, one listed here can be gone by
+  // the time it is inspected: list again.
+  let inspected: any[] | undefined;
+  for (let attempt = 0; inspected === undefined; attempt++) {
+    const ids = podman("ps", "-a", "-q", "--filter", `label=io.podman.compose.project=${PROJECT}`).split("\n").filter(Boolean);
+    if (ids.length === 0) return [];
+    const run = sh(["podman", "container", "inspect", ...ids], { ok: attempt < 4 ? false : undefined });
+    if (run.code === 0) inspected = JSON.parse(run.out);
+  }
+  return (inspected ?? []).map((c: any) => ({
     name: c.Name,
     service: c.Config?.Labels?.["com.docker.compose.service"] ?? "",
     running: c.State?.Running === true,
@@ -368,14 +382,17 @@ async function settledRun(): Promise<void> {
   });
 }
 
-async function update(id: string, manifest: string, seconds = 1800): Promise<Result> {
+async function update(id: string, manifest: string, seconds = 1800, during?: () => Promise<void>): Promise<Result> {
   writeRequest(id, manifest);
+  if (during) await during();
   const result = await waitFor(`a final result for ${id}`, seconds, () => {
     const r = readResult(id);
     return r && FINAL.has(r.status) ? r : undefined;
   });
   await settledRun();
   log(`${id}: ${result.status}${result.reason ? ` (${result.reason})` : ""}${result["rollback-reason"] ? ` / ${result["rollback-reason"]}` : ""}`);
+  if (result.tools) log(`${id}: ${result.tools}`);
+  check(!switching(), `no switching marker is left after ${result.status}`);
   return result;
 }
 
@@ -398,6 +415,7 @@ function assertSettledOn(version: string) {
   check(migrations().at(-1) === release.migration || migrations().includes(release.migration), `the database carries ${version}'s migration`);
   check(requestsLeft().length === 0, "the requests directory is empty");
   check(journalPhase() === undefined, "no journal is left");
+  check(!switching(), "no switching marker is left");
   check(unitState("laysi-updater.path") === "active", "the path unit is still watching");
 }
 
@@ -565,9 +583,13 @@ async function main() {
   psql("create table if not exists e2e_rows (note text)");
   psql("insert into e2e_rows values ('written before any update')");
 
-  // --- the api's side of the directories -----------------------------------
+  // --- the api's and mcp's side of the directories ---------------------------
   const api = `${PROJECT}-api`;
+  const mcp = `${PROJECT}-mcp`;
   check(sh(["podman", "exec", api, "touch", "/var/lib/laysi-update/results/x"], { ok: false }).code !== 0, "the api cannot write into the results directory");
+  check(sh(["podman", "exec", mcp, "test", "-d", "/var/lib/laysi-update/results"], { ok: false }).code === 0, "mcp mounts the results directory");
+  check(sh(["podman", "exec", mcp, "touch", "/var/lib/laysi-update/results/x"], { ok: false }).code !== 0, "mcp cannot write into the results directory");
+  check(sh(["podman", "exec", mcp, "test", "-e", "/var/lib/laysi-update/requests"], { ok: false }).code !== 0, "mcp has no requests directory, so it cannot ask for an update");
   sh(["podman", "exec", api, "ln", "-s", "/etc/passwd", "/var/lib/laysi-update/requests/request"]);
   await settledRun();
   check(requestsLeft().length === 0, "a symlinked request is cleared without being followed");
@@ -582,6 +604,8 @@ async function main() {
   // --- refusals --------------------------------------------------------------
   let r = await update("e2e-same-version", v1.manifest);
   check(r.status === "refused-same-version" && r.running === "v1.0.0", "the same version is refused and answered");
+  check(/^podman=\S+ podman-compose=\S+$/.test(r.tools ?? ""), `the result records the tools the run used (${r.tools})`);
+  check(sh(["podman", "exec", mcp, "test", "-f", "/var/lib/laysi-update/results/e2e-same-version"], { ok: false }).code === 0, "mcp reads the same results the api does");
   const tampered = v1.manifest.replace(/signature (\S+) (\S)/, (_m, id, c) => `signature ${id} ${c === "0" ? "1" : "0"}`);
   r = await update("e2e-bad-signature", tampered);
   check(r.status === "refused-signature", "a manifest whose signature does not verify is refused");
@@ -610,13 +634,60 @@ async function main() {
 
   const v3 = buildRelease({ version: "v1.2.0", api: "never-healthy" }, known);
   since = new Date().toISOString();
-  r = await update("e2e-never-healthy", v3.manifest);
+  r = await update("e2e-never-healthy", v3.manifest, 1800, async () => {
+    // The new api runs, never passing, for the whole health timeout: the
+    // marker is there, and the api sees it, while its writes could still be
+    // taken back.
+    await waitFor("the new api to run", 600, () => journalPhase() === "switching" && byService().get("api")?.running && byService().get("api")?.digest === v3.digests.api);
+    check(switching(), "the switching marker is there while the new release comes up");
+    check(readResult("e2e-never-healthy")?.status === "switching", "and the result says switching");
+    check(sh(["podman", "exec", api, "test", "-e", CONTAINER_MARKER], { ok: false }).code === 0, "the api running on the new release sees the marker");
+  });
   check(r.status === "rolled-back", "a release whose healthcheck never passes is rolled back");
   assertSettledOn("v1.0.0");
   assertEntriesNeverOn(since, "v1.2.0");
   check(!migrations().includes(v3.migration), "its migration went back out with the restore");
   check(psql("select count(*) from e2e_rows") === "1", "the data written before step 4 survived the restore");
   check(backups().length === 0, "the database backup is deleted after the rollback");
+
+  // --- the first restore of a rollback fails: retried once, at once ---------
+  // The updater's podman is swapped for one that fails the next restore,
+  // the way pg_restore fails on a full disk, and runs everything else.
+  const envBeforeRetry = readFileSync(toolEnv, "utf8");
+  const realPodman = envBeforeRetry.match(/^LAYSI_PODMAN=(\S+)$/m)?.[1];
+  check(!!realPodman, "updater.env names the podman the updater runs");
+  const failOnce = join(workDir, "fail-next-restore");
+  const failingPodman = join(workDir, "podman-failing-restore");
+  writeFileSync(
+    failingPodman,
+    `#!/bin/sh
+case "$*" in
+*"pg_restore --create"*)
+  if [ -e ${failOnce} ]; then
+    rm -f ${failOnce}
+    cat > /dev/null
+    echo 'pg_restore: error: could not write to file: No space left on device' >&2
+    exit 1
+  fi ;;
+esac
+exec ${realPodman} "$@"
+`,
+  );
+  chmodSync(failingPodman, 0o755);
+  writeFileSync(failOnce, "");
+  writeFileSync(toolEnv, `${envBeforeRetry}LAYSI_PODMAN=${failingPodman}\n`);
+  const vRetry = buildRelease({ version: "v1.2.1", api: "exit" }, known);
+  r = await update("e2e-restore-retry", vRetry.manifest);
+  writeFileSync(toolEnv, envBeforeRetry);
+  check(!existsSync(failOnce), "the first restore of the rollback failed");
+  check(r.status === "rolled-back" && r.running === "v1.0.0", "a rollback whose first restore fails restores again and is rolled back");
+  check(/No space left on device/.test(r["rollback-reason"] ?? "") && /重試後成功/.test(r["rollback-reason"] ?? ""), "rollback-reason says why the first restore failed and that the retry succeeded");
+  assertSettledOn("v1.0.0");
+  check(!migrations().includes(vRetry.migration), "the retried restore took the new migration back out");
+  check(psql("select count(*) from e2e_rows") === "1", "the data written before step 4 survived the retried restore");
+  check(backups().length === 0, "the dump is deleted once the retry restored it");
+  const retryImages = JSON.parse(podman("images", "--format", "json")).filter((i: any) => (i.RepoDigests ?? []).some((d: string) => Object.values(vRetry.digests).some((x) => d.endsWith(x))));
+  check(retryImages.length === 0, "the new release's images are gone");
 
   // --- a good release, with a new secret and a new updater ------------------
   const secretsBefore = podman("exec", api, "sh", "-c", "sha256sum /secrets/pg_password /secrets/setup_token /secrets/database_url");
@@ -721,6 +792,7 @@ async function main() {
   });
   await settledRun();
   check(["succeeded", "rolled-back"].includes(killed.status), `an update killed after the switch ends on one release (${killed.status})`);
+  check(!switching(), "the recovery removed the switching marker");
   assertSettledOn(installed());
 
   // Killed while restoring the database: the recovery restores it again.
@@ -732,6 +804,7 @@ async function main() {
   });
   await settledRun();
   check(restored.status === "rolled-back", "a rollback killed while restoring is finished");
+  check(!switching(), "the recovery removed the switching marker");
   check(!migrations().includes(v9.migration), "and the database is the one from before the update");
   const settledVersion = installed();
   assertSettledOn(settledVersion);
@@ -741,6 +814,7 @@ async function main() {
   const v10 = buildRelease({ version: "v1.9.0", rustfs: newRustfs }, known);
   await killAt(["stopping", "backed-up", "files-saved", "files-swapped"], "e2e-power-cut-1", v10.manifest);
   await sleep(2000);
+  check(switching(), "the switching marker outlives an update cut off mid-switch");
   systemctl("unmask", "--runtime", "laysi-updater-recover.service");
   check(powerCutAndBoot().code === 0, "the boot after a power cut mid-update succeeds");
   check(readResult("e2e-power-cut-1")?.status === "rolled-back", "an update cut before the switch is returned at boot");
@@ -764,10 +838,12 @@ async function main() {
   check(failed.status === "rollback-failed" && !!failed.reason && !!failed["rollback-reason"], "a rollback that fails is final and records both reasons");
   check(installed() === settledVersion, "the host stays on the previous release");
   check(journalPhase() === "rollback-failed", "the journal is left in its final state");
+  check(!switching(), "the switching marker is gone once the failure is final");
   psql("insert into e2e_rows values ('written after the failed rollback')");
   powerCutAndBoot();
   await settledRun();
   check(psql("select count(*) from e2e_rows") === "2", "the next boot did not restore the database again");
+  check(!switching(), "and left no switching marker");
   podman("start", "laysi-e2e-registry");
 
   // A good release brings the machine back.
