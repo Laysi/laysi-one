@@ -3,13 +3,14 @@
 //!
 //! The api container asks for an update by writing a request into a directory
 //! it shares with the host, and the updater answers by writing a result into
-//! another directory that the api mounts read-only. Both directories are
-//! mounted into `api` only, never into `mcp`.
+//! another directory. The requests directory is mounted into `api` only, so
+//! MCP cannot ask for an update; the results directory is mounted read-only
+//! into both `api` and `mcp`, which ask it [`switching`].
 //!
 //! ```text
-//! inside the api container                     on the host (stack user)
-//! /var/lib/laysi-update/requests  read-write   <root>/requests   (:U)
-//! /var/lib/laysi-update/results   read-only    <root>/results    (:ro)
+//! inside the api and mcp containers            on the host (stack user)
+//! /var/lib/laysi-update/requests  read-write   <root>/requests   (:U, api only)
+//! /var/lib/laysi-update/results   read-only    <root>/results    (:ro, api and mcp)
 //! ```
 //!
 //! Writing a request: write the encoded [`UpdateRequest`] to a temporary name
@@ -25,6 +26,14 @@
 //! [`UpdateStatus::is_final`] says so. The updater keeps the newest
 //! [`KEEP_RESULTS`] result files.
 //!
+//! Refusing writes while an update switches: [`SWITCHING_FILE`] exists in the
+//! results directory from before the services stop until the final result
+//! is written. Anything api or mcp writes in that span can be taken back by
+//! a rollback, which restores the database as it was when the services
+//! stopped, so both refuse writes while [`switching`] is true. It needs no
+//! request id: a service started by the updater itself, or one that never
+//! asked for the update, sees it the same way.
+//!
 //! Both files are line text like the release manifest rather than JSON: the
 //! manifest inside a request is carried byte for byte, and this crate stays
 //! free of dependencies the host-side updater would have to link.
@@ -36,6 +45,8 @@
 //! request that asked for it.
 
 use std::fmt;
+use std::io::ErrorKind;
+use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
@@ -44,8 +55,21 @@ use crate::release::{ReleaseVersion, MAX_MANIFEST_BYTES};
 /// The requests directory as the api container sees it.
 pub const CONTAINER_REQUEST_DIR: &str = "/var/lib/laysi-update/requests";
 
-/// The results directory as the api container sees it. Mounted read-only.
+/// The results directory as the api and mcp containers see it. Mounted
+/// read-only.
 pub const CONTAINER_RESULT_DIR: &str = "/var/lib/laysi-update/results";
+
+/// Present in the results directory while an update is switching: written,
+/// durably, before the updater stops the first service (step 4), and
+/// removed only once the final result is written. A run that finds no
+/// update in progress removes one left behind, so a power cut or a killed
+/// run cannot leave the product refusing writes; until that run, which the
+/// boot unit and the recovery unit both are, it stays.
+///
+/// It contains the request id, for whoever looks; readers only ask whether
+/// it exists. The dot keeps it from ever being a request id, so no result is
+/// named this and the pruning of old results never touches it.
+pub const SWITCHING_FILE: &str = "switching.marker";
 
 /// The name a finished request is renamed to. Only this name starts an update.
 pub const REQUEST_FILE: &str = "request";
@@ -67,8 +91,33 @@ pub const MAX_RESULT_BYTES: usize = 8 * 1024;
 /// [`MAX_RESULT_BYTES`].
 pub const MAX_REASON_CHARS: usize = 600;
 
+/// The longest tool version a result records; longer ones are cut.
+pub const MAX_TOOL_VERSION_CHARS: usize = 40;
+
 const MIN_REQUEST_ID_LEN: usize = 8;
 const MAX_REQUEST_ID_LEN: usize = 64;
+
+/// Whether an update is switching, judged from a results directory: true
+/// while [`SWITCHING_FILE`] is in `dir`. One `lstat`, cheap enough to ask on
+/// every write.
+///
+/// False when the file is not there, and when `dir` itself is missing or is
+/// not a directory: an install without the host-side updater, a development
+/// one for instance, never switches. Any other error, such as a directory
+/// that cannot be searched, counts as switching. A refused write can be made
+/// again; one the rollback takes back is lost without anybody being told.
+pub fn switching_in(dir: &Path) -> bool {
+    match std::fs::symlink_metadata(dir.join(SWITCHING_FILE)) {
+        Ok(_) => true,
+        Err(e) => !matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory),
+    }
+}
+
+/// [`switching_in`] the results directory as api and mcp see it,
+/// [`CONTAINER_RESULT_DIR`]. Writes are refused while this is true.
+pub fn switching() -> bool {
+    switching_in(Path::new(CONTAINER_RESULT_DIR))
+}
 
 /// Names one request and the result that answers it. Also the result's file
 /// name, so it is restricted to ASCII letters, digits and `-`: no dot, no
@@ -299,6 +348,7 @@ impl fmt::Display for UpdateStatus {
 /// downtime-to <RFC 3339>        optional: every service up again
 /// reason <one line>             optional
 /// rollback-reason <one line>    optional: why returning also failed
+/// tools podman=<v> podman-compose=<v>   optional: what the run used
 /// ```
 ///
 /// `running` is absent while the switch is under way. After
@@ -306,6 +356,9 @@ impl fmt::Display for UpdateStatus {
 /// which did not come up, and is absent when even that could not be done.
 /// `reason` says why the update failed or was refused; after
 /// `succeeded-updater-kept` it says why the new updater was not installed.
+/// After `rolled-back`, `rollback-reason` is present when the first restore
+/// of the database failed and the one retry succeeded, and says why the
+/// first one failed.
 ///
 /// A reader skips keys it does not know, so a later updater can add one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,6 +373,7 @@ pub struct UpdateResult {
     pub downtime_to: Option<DateTime<Utc>>,
     pub reason: Option<String>,
     pub rollback_reason: Option<String>,
+    pub tools: Option<ToolVersions>,
 }
 
 impl UpdateResult {
@@ -336,6 +390,7 @@ impl UpdateResult {
             downtime_to: None,
             reason: None,
             rollback_reason: None,
+            tools: None,
         }
     }
 
@@ -364,6 +419,7 @@ impl UpdateResult {
             "rollback-reason",
             self.rollback_reason.as_deref().map(one_line),
         );
+        line("tools", self.tools.as_ref().map(ToolVersions::encode));
         out
     }
 
@@ -424,7 +480,79 @@ impl UpdateResult {
             downtime_to: optional_time("downtime-to")?,
             reason: get("reason").map(str::to_string),
             rollback_reason: get("rollback-reason").map(str::to_string),
+            tools: get("tools")
+                .map(|v| ToolVersions::decode(v).ok_or(ResultError::Field("tools")))
+                .transpose()?,
         })
+    }
+}
+
+/// The podman and podman-compose a run used, as they report themselves.
+/// Recorded in every result and never checked after `install`: a host whose
+/// tools were upgraded later must still be able to update, and only a newer
+/// updater could accept a newer tool, which is the updater it could not
+/// install if this one refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolVersions {
+    pub podman: String,
+    pub podman_compose: String,
+}
+
+impl ToolVersions {
+    /// What was reported, kept to printable ASCII without spaces or `=` and
+    /// at most [`MAX_TOOL_VERSION_CHARS`]; nothing left is `unknown`.
+    pub fn new(podman: &str, podman_compose: &str) -> ToolVersions {
+        ToolVersions {
+            podman: tool_version(podman),
+            podman_compose: tool_version(podman_compose),
+        }
+    }
+
+    fn encode(&self) -> String {
+        format!(
+            "podman={} podman-compose={}",
+            tool_version(&self.podman),
+            tool_version(&self.podman_compose)
+        )
+    }
+
+    /// `key=value` pairs; a key it does not know is skipped, so a later
+    /// updater can record another tool.
+    fn decode(text: &str) -> Option<ToolVersions> {
+        let mut podman = None;
+        let mut podman_compose = None;
+        for pair in text.split(' ') {
+            let (key, value) = pair.split_once('=')?;
+            if value.is_empty() || value.contains('=') {
+                return None;
+            }
+            let slot = match key {
+                "podman" => &mut podman,
+                "podman-compose" => &mut podman_compose,
+                _ => continue,
+            };
+            if slot.replace(value.to_string()).is_some() {
+                return None;
+            }
+        }
+        Some(ToolVersions {
+            podman: podman?,
+            podman_compose: podman_compose?,
+        })
+    }
+}
+
+fn tool_version(text: &str) -> String {
+    let kept: String = text
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_graphic() && *c != '=')
+        .take(MAX_TOOL_VERSION_CHARS)
+        .collect();
+    if kept.is_empty() {
+        "unknown".to_string()
+    } else {
+        kept
     }
 }
 
@@ -570,9 +698,11 @@ mod tests {
         result.downtime_to = Some(at(8));
         result.reason = Some("api 在期限內沒有通過健康檢查".into());
         result.rollback_reason = Some("回退後 web 沒有啟動".into());
+        result.tools = Some(ToolVersions::new("4.9.3", "1.6.0"));
         let text = result.encode();
         assert_eq!(UpdateResult::decode(&text).unwrap(), result);
         assert!(text.contains("\nstatus rollback-failed\n"));
+        assert!(text.ends_with("\ntools podman=4.9.3 podman-compose=1.6.0\n"));
         assert!(text.contains("\ndowntime-from 2026-10-12T09:02:00Z\n"));
 
         let bare = UpdateResult::new(id(), UpdateStatus::Accepted, at(0));
@@ -649,5 +779,86 @@ mod tests {
                 UpdateStatus::RollingBack
             ]
         );
+    }
+
+    #[test]
+    fn tool_versions_round_trip_and_stay_one_token_each() {
+        let mut result = UpdateResult::new(id(), UpdateStatus::Succeeded, at(0));
+        result.tools = Some(ToolVersions::new(
+            " 5.4.0-dev (rc 1)\n",
+            &format!("1.6.0={}", "9".repeat(100)),
+        ));
+        let tools = result.tools.clone().unwrap();
+        assert_eq!(tools.podman, "5.4.0-dev(rc1)");
+        assert_eq!(tools.podman_compose.len(), MAX_TOOL_VERSION_CHARS);
+        assert!(tools.podman_compose.starts_with("1.6.0999"));
+        assert_eq!(ToolVersions::new("", "\t").podman, "unknown");
+        let back = UpdateResult::decode(&result.encode()).unwrap();
+        assert_eq!(back, result);
+
+        let text = UpdateResult::new(id(), UpdateStatus::Succeeded, at(0)).encode();
+        let decoded = |line: &str| UpdateResult::decode(&format!("{text}tools {line}\n"));
+        let later = decoded("podman=4.9.3 buildah=1.33 podman-compose=1.6.0").unwrap();
+        assert_eq!(later.tools.unwrap().podman_compose, "1.6.0");
+        for bad in [
+            "podman=4.9.3",
+            "podman=4.9.3 podman-compose=",
+            "podman=4.9.3 podman=5.0 podman-compose=1.6.0",
+            "podman 4.9.3 podman-compose 1.6.0",
+            "podman=4.9.3  podman-compose=1.6.0",
+        ] {
+            assert_eq!(decoded(bad), Err(ResultError::Field("tools")), "{bad}");
+        }
+        assert_eq!(UpdateResult::decode(&text).unwrap().tools, None);
+    }
+
+    #[test]
+    fn the_largest_result_fits() {
+        let mut result = UpdateResult::new(
+            RequestId::parse(&"a".repeat(MAX_REQUEST_ID_LEN)).unwrap(),
+            UpdateStatus::SucceededUpdaterKept,
+            at(0),
+        );
+        result.offered = Some(ReleaseVersion::parse("v999.999.999").unwrap());
+        result.running = Some(ReleaseVersion::parse("v999.999.998").unwrap());
+        result.downtime_from = Some(at(1));
+        result.downtime_to = Some(at(2));
+        // Four bytes each, the most a char takes.
+        result.reason = Some("\u{20000}".repeat(MAX_REASON_CHARS + 10));
+        result.rollback_reason = result.reason.clone();
+        let long = "x".repeat(MAX_TOOL_VERSION_CHARS + 10);
+        result.tools = Some(ToolVersions::new(&long, &long));
+        let text = result.encode();
+        assert!(text.len() <= MAX_RESULT_BYTES, "{} bytes", text.len());
+        assert!(UpdateResult::decode(&text).is_ok());
+    }
+
+    #[test]
+    fn switching_is_the_marker_in_the_results_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("laysi-update-switching-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // No results directory at all: an install without the updater.
+        assert!(!switching_in(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!switching_in(&dir));
+        let marker = dir.join(SWITCHING_FILE);
+        std::fs::write(&marker, "request abcdefgh\n").unwrap();
+        assert!(switching_in(&dir));
+        // Whatever the entry is, its presence is the answer.
+        std::fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink("/nonexistent", &marker).unwrap();
+        assert!(switching_in(&dir));
+        std::fs::remove_file(&marker).unwrap();
+        assert!(!switching_in(&dir));
+        // A file where the directory should be is no results directory.
+        let file = dir.join("plain");
+        std::fs::write(&file, "").unwrap();
+        assert!(!switching_in(&file));
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // Never a result's name, so never pruned or overwritten as one.
+        assert!(RequestId::parse(SWITCHING_FILE).is_err());
+        assert!(!switching());
     }
 }
