@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { CopyButton } from '../components/CopyButton';
+import { UpdateCard } from '../components/UpdateCard';
 import {
   apiTokenList,
   backupSetting,
@@ -326,6 +327,12 @@ export function Security({ onToast, reloadKey }: Props) {
     }
   }
 
+  function refreshLicence() {
+    callOp('get_license', {}, undefined, licenseState)
+      .then(setLicence)
+      .catch(() => undefined);
+  }
+
   async function checkLicence(input: Record<string, string>) {
     setCheckingLicence(true);
     try {
@@ -480,6 +487,14 @@ export function Security({ onToast, reloadKey }: Props) {
             </div>
           )}
         </section>
+      )}
+
+      {licence && (
+        <UpdateCard
+          licence={licence}
+          canUpdate={me.permissions.includes('get_update_ticket')}
+          onFinished={refreshLicence}
+        />
       )}
 
       {tokens && health && (
