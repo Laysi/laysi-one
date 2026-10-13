@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { UpdateResultView } from './api/client';
+import { OpFailed, type UpdateResultView } from './api/client';
 
 export const DOWNTIME_PHRASE = '約一分鐘';
 export const POLL_MS = 3000;
@@ -135,6 +135,10 @@ export function advance(
   const over = gaveUp(next, probe, now);
   if (over) return over;
   return { run: next, phase: { kind: 'progress' } };
+}
+
+export function serverUnreachable(e: unknown): boolean {
+  return !(e instanceof OpFailed) || e.error.code === 'network';
 }
 
 export function within<T>(work: Promise<T>, ms: number): Promise<T> {

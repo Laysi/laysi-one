@@ -27,6 +27,7 @@ import {
   type OidcSetting,
   type SystemHealth,
 } from '../api/client';
+import { serverUnreachable } from '../update';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -174,7 +175,7 @@ export function Security({ onToast, reloadKey }: Props) {
     if (canReadLicence) {
       callOp('get_license', {}, undefined, licenseState)
         .then((d) => live && setLicence(d))
-        .catch(() => live && setLicence(null));
+        .catch((e: unknown) => live && !serverUnreachable(e) && setLicence(null));
     }
     return () => running.current?.();
   }, [canReadOidc, canReadBackup, canReadLicence]);
@@ -331,8 +332,15 @@ export function Security({ onToast, reloadKey }: Props) {
     callOp('get_license', {}, undefined, licenseState)
       .then(setLicence)
       .catch(() => undefined);
-    callOp('get_system_health', {}, undefined, systemHealth)
-      .then(setHealth)
+    Promise.all([
+      callOp('list_api_tokens', {}, undefined, apiTokenList),
+      callOp('get_system_health', {}, undefined, systemHealth),
+    ])
+      .then(([t, h]) => {
+        setTokens(t);
+        setHealth(h);
+        setError(null);
+      })
       .catch(() => undefined);
     getHealthz()
       .then(setHz)

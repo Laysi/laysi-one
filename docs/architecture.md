@@ -3622,8 +3622,16 @@ permission，並種兩列 `mcp_tool_grant`，檔案接在 `laysi-ops` 測試的 
 
 `refused-disk-space` 的那一句帶出結果檔的 `reason`（更新程式算出的剩餘與需要的容量），
 沒有 `reason` 才用固定句；其餘拒絕的 `reason` 寫給維運人員看，畫面不印。結束時卡片重讀授權、
-`/v1/meta`、`get_system_health` 與 `/healthz`，讀不到就保留原值：同一頁「系統健康」的版本
-與 migration 才不會停在更新前，而 api 不在時卡片也不會因為授權讀不到而整張消失。
+`/v1/meta`、`list_api_tokens`、`get_system_health` 與 `/healthz`，讀不到就保留原值：同一頁
+「系統健康」的版本與 migration 才不會停在更新前，而 api 不在時卡片也不會因為授權讀不到而整張
+消失。讀得到時一併清掉頁首的錯誤，停機期間重讀失敗留下的「伺服器回應異常」不會在更新完成後
+還掛著。
+
+**整頁重讀時也保留授權**：分頁重新變成可見時 App 會 `reload()`，「安全與營運」整頁重讀。
+停機那一分鐘裡切一次分頁，`get_license` 必定失敗；原本這時把授權清成 `null`，更新卡連同它
+正在等的結果一起被拆掉，api 回來之後也不會自己出現。現在連不上伺服器（`update.ts` 的
+`serverUnreachable`：不是 `OpFailed`，或代碼為 `network`）就保留上一次的值，只有操作本身
+回拒絕才清掉。
 
 **重新整理後接續**：請求編號與已看到的狀態（`seenResult`、`wentDown`、起始版本與時間）存在
 `localStorage` 的 `laysi.update.run`。選 `localStorage` 而不是 `sessionStorage`，是因為更新

@@ -8,7 +8,7 @@
 //
 //   bun scripts/update-test.ts
 
-import { updateResult, type UpdateResultView } from "../web/src/api/client";
+import { OpFailed, updateResult, type UpdateResultView } from "../web/src/api/client";
 import {
   ACCEPT_WAIT_MS,
   GIVE_UP_MS,
@@ -21,6 +21,7 @@ import {
   loadRun,
   refusedMessage,
   saveRun,
+  serverUnreachable,
   startRun,
   within,
   type KeyValueStore,
@@ -242,6 +243,12 @@ function fakeStore(): KeyValueStore & { data: Map<string, string> } {
   const loaded = loadRun(store, T0 + 2000);
   ok("a new update replaces the stored id", loaded !== null && loaded.requestId === "22222222-bbbb");
 }
+
+// The security screen rereads everything whenever the tab is shown again. While
+// the api is away that read fails, and clearing the licence on it would take
+// the card, and whatever it was about to say, off the screen.
+ok("a server that does not answer keeps the licence on screen", serverUnreachable(new OpFailed({ code: "network", message: "伺服器回應異常（HTTP 502）" })) && serverUnreachable(new TypeError("Failed to fetch")));
+ok("a refusal from the operation itself clears it", !serverUnreachable(new OpFailed({ code: "forbidden", message: "限系統管理員執行" })));
 
 // A fetch that never returns must not stop the loop.
 {
