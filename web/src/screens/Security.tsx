@@ -533,7 +533,7 @@ export function Security({ onToast, reloadKey }: Props) {
                 <span className="fact__key">稽核紀錄</span>
                 <span className="fact__value">
                   <span className="num">
-                    {health.stats.audit_entries} 筆（{health.stats.audit_blocked} 筆被權限擋下、
+                    {health.stats.audit_entries} 筆（{health.stats.audit_blocked} 筆被擋下、
                     {health.stats.audit_errors} 筆被規則拒絕）
                   </span>
                 </span>
