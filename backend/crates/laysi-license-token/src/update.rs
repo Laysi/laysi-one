@@ -294,12 +294,18 @@ impl fmt::Display for UpdateStatus {
 /// received <RFC 3339, UTC>
 /// updated <RFC 3339, UTC>
 /// offered <version>             optional: the manifest's version
-/// running <version>             optional: what the machine runs afterwards
-/// downtime-from <RFC 3339>      optional: services stopped
+/// running <version>             optional: the release the machine is on
+/// downtime-from <RFC 3339>      optional: services stopped (step 4)
 /// downtime-to <RFC 3339>        optional: every service up again
 /// reason <one line>             optional
 /// rollback-reason <one line>    optional: why returning also failed
 /// ```
+///
+/// `running` is absent while the switch is under way. After
+/// `rollback-failed` it names the release the stack files were put back to,
+/// which did not come up, and is absent when even that could not be done.
+/// `reason` says why the update failed or was refused; after
+/// `succeeded-updater-kept` it says why the new updater was not installed.
 ///
 /// A reader skips keys it does not know, so a later updater can add one.
 #[derive(Debug, Clone, PartialEq, Eq)]
