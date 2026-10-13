@@ -14,6 +14,7 @@ pub mod host;
 pub mod journal;
 pub mod layout;
 pub mod machine;
+pub mod podman;
 
 #[cfg(test)]
 mod fake;
