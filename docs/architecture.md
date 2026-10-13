@@ -3607,6 +3607,18 @@ systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一
 podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，oneshot 一結束就連同容器
 被殺掉，所以更新程式呼叫 podman 時移除 `INVOCATION_ID`。
 
+對外埠的轉送程序 `rootlessport` 不看那個變數，一律留在啟動容器的那個 unit 底下。開機 unit
+有 `RemainAfterExit=yes`，cgroup 留著所以沒事；更新與收尾兩個 unit 跑完就結束，轉送程序
+跟著被收掉，容器全部健康而 8088、8089 連不上，要重開機才回來。所以 `compose up` 一律經
+`systemd-run --user --scope` 在自己的 scope 裡執行，scope 在最後一個程序結束時自己消失。
+`systemd-run` 走 user manager 的私有 socket，沒有 `dbus-user-session` 也能用。只看容器
+狀態看不出這件事，所以端對端測試在每一次收斂後都連一次兩個對外埠。
+
+`systemd-run --scope` 會替它執行的程式重新設一個 `INVOCATION_ID`，所以 scope 裡再以
+`env -u` 拿掉一次，conmon 才回到 podman 自己開的 `libpod-conmon-*.scope`。那個 scope 不帶
+預設相依（`DefaultDependencies=no`），這個 scope 也照做：帶著預設相依的 scope 會在關機時
+與開機 unit 同時停下，conmon 在 `ExecStop=` 依序停 stack、postgres 還沒停好之前就被殺掉。
+
 ### 出貨與 compose
 
 `install` 是唯一的出貨步驟：以 stack 使用者執行，收一份簽章版本清單，先驗章並檢查主機，

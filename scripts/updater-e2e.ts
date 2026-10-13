@@ -396,8 +396,20 @@ async function update(id: string, manifest: string, seconds = 1800, during?: () 
   return result;
 }
 
+// The ports docker-compose.prod.yml publishes by default. Rootless podman
+// forwards each with a process that stays in the cgroup of the unit that
+// started the container, and dies with it.
+const PUBLISHED: Record<string, number> = { web: 8088, mcp: 8089 };
+
+/// A TCP connection to the host port opens. The fakes serve nothing, but the
+/// forwarder listens on the host whatever is behind it, so this says whether
+/// the forwarder is alive.
+function accepts(port: number): boolean {
+  return sh(["timeout", "5", "bash", "-c", `exec 3<>/dev/tcp/127.0.0.1/${port}`], { ok: false }).code === 0;
+}
+
 /// Every service of the compose project running, all on the release the
-/// host records, nothing left over.
+/// host records, reachable on the ports it publishes, nothing left over.
 function assertSettledOn(version: string) {
   const release = releases.get(version);
   if (!release) fail(`unknown release ${version}`);
@@ -409,6 +421,9 @@ function assertSettledOn(version: string) {
     if (!c?.running) fail(`${service} is not running on ${version}`);
     if (own[service] && c.digest !== own[service]) fail(`${service} runs ${c.digest}, not ${version}'s ${own[service]}`);
     if (c.health && c.health !== "healthy") fail(`${service} is ${c.health}`);
+  }
+  for (const [service, port] of Object.entries(PUBLISHED)) {
+    check(accepts(port), `${service}'s published port ${port} accepts connections`);
   }
   const rustfs = release.spec.rustfs ?? RUSTFS;
   check(services.get("rustfs")?.digest === rustfs.split("@")[1], `rustfs runs the image ${version} names`);

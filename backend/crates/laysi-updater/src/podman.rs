@@ -1,9 +1,11 @@
-//! The real host: podman, podman-compose and systemctl as the stack user.
+//! The real host: podman, podman-compose, systemctl and systemd-run as the
+//! stack user.
 //!
 //! Tool paths come from `state/updater.env`, which `install` writes with the
 //! absolute paths it found, because a systemd user unit does not see the
 //! PATH of an interactive shell.
 
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -28,6 +30,7 @@ pub struct PodmanHost {
     pub podman: String,
     pub compose: String,
     pub systemctl: String,
+    pub systemd_run: String,
     pub root: PathBuf,
     /// For pulls, which wait on the network.
     pub pull_timeout: Duration,
@@ -45,6 +48,8 @@ impl PodmanHost {
             podman: var("LAYSI_PODMAN", "podman"),
             compose: var("LAYSI_PODMAN_COMPOSE", "podman-compose"),
             systemctl: var("LAYSI_SYSTEMCTL", "systemctl"),
+            // Installs from before it was in updater.env find it on PATH.
+            systemd_run: var("LAYSI_SYSTEMD_RUN", "systemd-run"),
             root: root.to_path_buf(),
             pull_timeout: Duration::from_secs(60 * 60),
         }
@@ -82,6 +87,39 @@ impl PodmanHost {
         }
         cmd
     }
+
+    /// `podman-compose up` in a transient scope of its own.
+    ///
+    /// Rootless podman forwards each published port with a `rootlessport`
+    /// process, and unlike conmon it stays in the cgroup of whoever started
+    /// the container whatever `INVOCATION_ID` says. Started from the run or
+    /// recovery unit, both oneshots without `RemainAfterExit=`, it is killed
+    /// with the unit's cgroup the moment the run ends: every container stays
+    /// up and healthy and nothing outside the machine reaches them. The scope
+    /// outlives the run and goes away when its last process does.
+    ///
+    /// systemd-run sets `INVOCATION_ID` for what it runs in a scope, so it is
+    /// removed again inside and conmon keeps the scope podman gives it. That
+    /// scope has no default dependencies and neither has this one: at
+    /// shutdown neither is stopped alongside the boot unit while its
+    /// `ExecStop=` is still stopping the stack, postgres last.
+    fn up_command(&self, files: &StackFiles, services: &[String], recreate: bool) -> Command {
+        let mut compose = self.compose(files);
+        compose.args(["up", "-d", "--no-deps"]);
+        if recreate {
+            compose.arg("--force-recreate");
+        }
+        compose.args(services);
+        let mut cmd = detached(Command::new(&self.systemd_run));
+        cmd.args(["--user", "--scope", "--collect", "--quiet"]);
+        cmd.arg("--property=DefaultDependencies=no");
+        cmd.args(["--", "env", "-u", "INVOCATION_ID"]);
+        cmd.arg(compose.get_program()).args(compose.get_args());
+        if let Some(dir) = compose.get_current_dir() {
+            cmd.current_dir(dir);
+        }
+        cmd
+    }
 }
 
 /// podman leaves conmon in the calling unit's cgroup when `INVOCATION_ID` says
@@ -95,7 +133,14 @@ fn detached(mut cmd: Command) -> Command {
 
 /// Run to completion, with stdin from nowhere unless given. `Ok(stdout)` on
 /// a zero exit, otherwise the tail of stderr.
-fn run(mut cmd: Command, timeout: Option<Duration>) -> HostResult<String> {
+fn run(cmd: Command, timeout: Option<Duration>) -> HostResult<String> {
+    let name = program_of(&cmd);
+    run_as(cmd, &name, timeout)
+}
+
+/// `run`, with errors naming `name`: a wrapper that execs the program the
+/// exit status belongs to would otherwise be named for it.
+fn run_as(mut cmd: Command, name: &str, timeout: Option<Duration>) -> HostResult<String> {
     let shown = describe(&cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -109,8 +154,7 @@ fn run(mut cmd: Command, timeout: Option<Duration>) -> HostResult<String> {
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
         Err(format!(
-            "{} exited with {status}: {}",
-            program_of(&cmd),
+            "{name} exited with {status}: {}",
             tail(&String::from_utf8_lossy(&stderr))
         ))
     }
@@ -227,9 +271,13 @@ fn describe(cmd: &Command) -> String {
 }
 
 fn program_of(cmd: &Command) -> String {
-    Path::new(cmd.get_program())
+    file_name(cmd.get_program())
+}
+
+fn file_name(program: &OsStr) -> String {
+    Path::new(program)
         .file_name()
-        .unwrap_or(cmd.get_program())
+        .unwrap_or(program)
         .to_string_lossy()
         .into_owned()
 }
@@ -483,13 +531,9 @@ impl Host for PodmanHost {
         if services.is_empty() {
             return Ok(());
         }
-        let mut cmd = self.compose(files);
-        cmd.args(["up", "-d", "--no-deps"]);
-        if recreate {
-            cmd.arg("--force-recreate");
-        }
-        cmd.args(services);
-        run(cmd, Some(Duration::from_secs(30 * 60))).map(drop)
+        let cmd = self.up_command(files, services, recreate);
+        let name = file_name(OsStr::new(&self.compose));
+        run_as(cmd, &name, Some(Duration::from_secs(30 * 60))).map(drop)
     }
 
     /// One container at a time when inspecting them together fails: one
@@ -658,6 +702,61 @@ impl Host for PodmanHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The run unit ends, and its cgroup with it, right after the last
+    /// `compose up`; a port forwarder started from there must not be in it.
+    #[test]
+    fn containers_are_started_in_a_scope_that_outlives_the_run() {
+        let host = PodmanHost {
+            podman: "/usr/bin/podman".into(),
+            compose: "/opt/bin/podman-compose".into(),
+            systemctl: "/usr/bin/systemctl".into(),
+            systemd_run: "/usr/bin/systemd-run".into(),
+            root: "/home/stack/.local/share/laysi-one".into(),
+            pull_timeout: Duration::from_secs(1),
+        };
+        let stack = Path::new("/home/stack/.local/share/laysi-one/stack");
+        let files = [
+            stack.join("docker-compose.prod.yml"),
+            stack.join("docker-compose.ship.yml"),
+            stack.join(".env"),
+        ];
+        let cmd = host.up_command(&files, &["web".into(), "mcp".into()], true);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+        assert_eq!(cmd.get_program(), "/usr/bin/systemd-run");
+        assert_eq!(
+            args[..10],
+            [
+                "--user",
+                "--scope",
+                "--collect",
+                "--quiet",
+                "--property=DefaultDependencies=no",
+                "--",
+                "env",
+                "-u",
+                "INVOCATION_ID",
+                "/opt/bin/podman-compose"
+            ]
+        );
+        assert_eq!(
+            args[args.len() - 6..],
+            ["up", "-d", "--no-deps", "--force-recreate", "web", "mcp"]
+        );
+        assert_eq!(cmd.get_current_dir(), Some(stack));
+        assert!(cmd
+            .get_envs()
+            .any(|(key, value)| key == "INVOCATION_ID" && value.is_none()));
+    }
+
+    #[test]
+    fn a_wrapped_command_fails_under_the_name_given() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo broken >&2; exit 3"]);
+        let error = run_as(cmd, "podman-compose", None).unwrap_err();
+        assert!(error.starts_with("podman-compose exited with"), "{error}");
+        assert!(error.ends_with("broken"), "{error}");
+    }
 
     #[test]
     fn a_deadline_ends_what_the_command_started_too() {
