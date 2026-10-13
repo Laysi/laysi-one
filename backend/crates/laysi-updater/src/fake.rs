@@ -24,6 +24,8 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 
+use laysi_license_token::update::ToolVersions;
+
 use crate::envfile::EnvFile;
 use crate::host::{Container, Host, HostResult, LocalImage, Service, StackFiles};
 use crate::machine::{DATABASE, ENTRIES, SECRETS};
@@ -107,7 +109,15 @@ pub struct World {
     pub db: Option<Db>,
     pub secrets: BTreeSet<String>,
     pub free: u64,
+    /// Every restore fails.
     pub fail_restore: bool,
+    /// The next this many restores fail.
+    pub fail_next_restores: usize,
+    /// What each restore found in local storage when it started.
+    pub local_at_restore: Vec<BTreeSet<String>>,
+    /// A repository the registry answers with 401, the way ghcr.io answers
+    /// an anonymous pull of a private package.
+    pub private_repo: Option<String>,
     /// An image whose containers ignore `podman stop`.
     pub unstoppable: Option<String>,
     pub restores: usize,
@@ -115,6 +125,11 @@ pub struct World {
     pub pulls: usize,
     /// Moments an entry point ran while the rest of the stack was not proven.
     pub violations: Vec<String>,
+    /// The switching marker, when the test watches it.
+    pub marker: Option<PathBuf>,
+    /// Every stop, and every start of web or mcp, with whether the marker
+    /// was there at that moment.
+    pub marked: Vec<(String, bool)>,
 }
 
 impl World {
@@ -134,11 +149,23 @@ impl World {
             secrets: ["pg_password".to_string(), "setup_token".to_string()].into(),
             free: 100 * 1024 * 1024 * 1024,
             fail_restore: false,
+            fail_next_restores: 0,
+            local_at_restore: Vec::new(),
+            private_repo: None,
             unstoppable: None,
             restores: 0,
             dumps: 0,
             pulls: 0,
             violations: Vec::new(),
+            marker: None,
+            marked: Vec::new(),
+        }
+    }
+
+    fn note_marker(&mut self, what: String) {
+        if let Some(marker) = &self.marker {
+            let present = marker.exists();
+            self.marked.push((what, present));
         }
     }
 
@@ -278,10 +305,22 @@ impl Host for FakeHost {
         self.tick(label);
     }
 
+    fn tool_versions(&mut self) -> ToolVersions {
+        ToolVersions::new("4.9.3", "1.6.0")
+    }
+
     fn pull(&mut self, reference: &str) -> HostResult<()> {
         self.tick("pull");
         let digest = FakeHost::digest_of(reference)?;
         let mut w = self.world.borrow_mut();
+        if w.private_repo
+            .as_ref()
+            .is_some_and(|repo| reference.starts_with(repo.as_str()))
+        {
+            return Err(format!(
+                "podman exited with exit status: 125: Error: initializing source docker://{reference}: reading manifest {digest} in {reference}: unauthorized: authentication required"
+            ));
+        }
         match w.registry.get(&digest) {
             Some(spec) if reference.starts_with(&spec.repo) => {
                 w.local.insert(digest);
@@ -342,6 +381,9 @@ impl Host for FakeHost {
             let digest = FakeHost::digest_of(&reference)?;
             {
                 let mut w = self.world.borrow_mut();
+                if ENTRIES.contains(&service.as_str()) {
+                    w.note_marker(format!("start {service}"));
+                }
                 let spec = w.registry.get(&digest).cloned().ok_or("image not found")?;
                 w.local.insert(digest.clone());
                 let now = w.clock;
@@ -431,6 +473,7 @@ impl Host for FakeHost {
             self.tick("stop");
             let service = name.trim_start_matches("laysi-one-");
             let mut w = self.world.borrow_mut();
+            w.note_marker(format!("stop {service}"));
             let stuck = w.unstoppable.clone();
             if let Some(c) = w.containers.get_mut(service) {
                 if stuck.as_ref() == Some(&c.digest) {
@@ -438,6 +481,19 @@ impl Host for FakeHost {
                 }
                 c.running = false;
             }
+        }
+        Ok(())
+    }
+
+    fn remove_containers(&mut self, names: &[String]) -> HostResult<()> {
+        for name in names {
+            self.tick("rm");
+            let service = name.trim_start_matches("laysi-one-");
+            let mut w = self.world.borrow_mut();
+            if w.containers.get(service).is_some_and(|c| c.running) {
+                return Err(format!("{name} is running"));
+            }
+            w.containers.remove(service);
         }
         Ok(())
     }
@@ -496,10 +552,21 @@ impl Host for FakeHost {
             }
             w.db = None;
             w.restores += 1;
+            let local = w.local.clone();
+            w.local_at_restore.push(local);
         }
         self.tick("pg_restore");
-        if self.world.borrow().fail_restore {
-            return Err("pg_restore: error: could not execute query".into());
+        {
+            let mut w = self.world.borrow_mut();
+            if w.fail_next_restores > 0 {
+                w.fail_next_restores -= 1;
+                return Err(
+                    "pg_restore: error: could not write to file: No space left on device".into(),
+                );
+            }
+            if w.fail_restore {
+                return Err("pg_restore: error: could not execute query".into());
+            }
         }
         let mut text = String::new();
         from.read_to_string(&mut text).map_err(|e| e.to_string())?;

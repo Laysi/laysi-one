@@ -14,15 +14,24 @@
 //! 7. Run `secrets` and recreate every long-running service but web and mcp
 //!    from the new files.
 //! 8. Wait for them; only then start web and mcp, and wait again. Until web
-//!    and mcp start nobody can write to the new version, so a rollback loses
-//!    nothing.
+//!    and mcp start nobody can reach the new version, and once they have,
+//!    the switching marker tells api and mcp to refuse writes until the
+//!    result is final.
 //! 9. On failure: put the files back, recreate postgres from the old image,
-//!    restore the dump, start the old version and judge it the same way.
+//!    restore the dump, start the old version and judge it the same way. A
+//!    restore that fails is tried once more in the same run, after the new
+//!    release's containers and images are removed and the old postgres is
+//!    recreated.
 //! 10. On success: replace this updater with the new one when it passes its
 //!     self-check, and delete images other than the current and the previous
 //!     release.
 //!
 //! Every way out writes a result for the request id.
+//!
+//! From before step 4 until the final result is written, the results
+//! directory also holds [`SWITCHING_FILE`], which tells api and mcp to refuse
+//! writes: a rollback restores the database as it was at step 5, and would
+//! take back anything written in between.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -33,8 +42,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use laysi_license_token::release::{self, Decision, Image, ImageDigest, Refusal, VerifyingKey};
 use laysi_license_token::update::{
-    RequestId, UpdateRequest, UpdateResult, UpdateStatus, KEEP_RESULTS, MAX_REQUEST_BYTES,
-    MAX_RESULT_BYTES, REQUEST_FILE,
+    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, KEEP_RESULTS,
+    MAX_REQUEST_BYTES, MAX_RESULT_BYTES, REQUEST_FILE, SWITCHING_FILE,
 };
 
 use crate::envfile::{self, EnvFile};
@@ -65,6 +74,9 @@ pub const ROLES: [(&str, Image); 4] = [
 pub const ENTRIES: [&str; 2] = ["web", "mcp"];
 
 const INTERRUPTED: &str = "更新途中主機重新啟動或更新程式中斷";
+/// Ends every rollback failure from the restore on: the dump is not
+/// deleted until a restore has succeeded.
+const BACKUP_KEPT: &str = "備份保留在主機上";
 const NOT_STARTED: &str = "更新程式在開始更新前中斷，系統沒有任何變更";
 /// How many times the size of the running release's images a new release
 /// is assumed to need before it has been pulled.
@@ -81,9 +93,9 @@ pub struct Config {
     pub health_timeout_secs: u64,
     /// How long web and mcp get once everything behind them has passed.
     /// They run images that have just passed (mcp is the api image) or that
-    /// serve files, so this is short: from the moment they start, writes
-    /// reach the new release, and a rollback takes them back out with the
-    /// database.
+    /// serve files, so this is short: from the moment they start, users
+    /// reach the new release, which is to refuse writes while the switching
+    /// marker is there, and a rollback restores the database regardless.
     pub entry_timeout_secs: u64,
     pub poll_secs: u64,
     /// Kept free on top of what the images and the dump need.
@@ -130,6 +142,8 @@ pub struct Machine<'h, H: Host> {
     pub layout: Layout,
     pub keys: Vec<VerifyingKey>,
     pub config: Config,
+    /// Asked once per run, the first time a result is written.
+    tools: Option<ToolVersions>,
 }
 
 enum Space {
@@ -159,6 +173,7 @@ impl<'h, H: Host> Machine<'h, H> {
             layout,
             keys,
             config,
+            tools: None,
         }
     }
 
@@ -197,8 +212,16 @@ impl<'h, H: Host> Machine<'h, H> {
     /// A result that cannot be written is logged. Only a final one is worth
     /// failing over: the journal stays until it is written, so the run that
     /// finishes the journal writes it again.
+    ///
+    /// Every result records the tools this run used.
     fn write_result(&mut self, result: &UpdateResult) -> Result<(), String> {
         let path = self.result_path(&result.request_id);
+        let tools = match &self.tools {
+            Some(tools) => tools.clone(),
+            None => self.tools.insert(self.host.tool_versions()).clone(),
+        };
+        let mut result = result.clone();
+        result.tools = Some(tools);
         let written = fsx::write_atomic(&path, result.encode().as_bytes(), 0o644).map_err(|e| {
             let e = format!("could not write the result for {}: {e}", result.request_id);
             self.log(&e);
@@ -265,6 +288,43 @@ impl<'h, H: Host> Machine<'h, H> {
         };
         result.rollback_reason = j.rollback_reason.clone();
         self.write_result(&result)
+    }
+
+    // The switching marker
+
+    fn switching_marker(&self) -> PathBuf {
+        self.layout.results_dir().join(SWITCHING_FILE)
+    }
+
+    /// Before step 4, and again by a run that resumes an update past it.
+    fn mark_switching(&mut self, j: &Journal) -> Result<(), String> {
+        fsx::write_atomic(
+            &self.switching_marker(),
+            format!("request {}\n", j.request).as_bytes(),
+            0o644,
+        )
+        .map_err(|e| format!("無法寫入切換標記：{e}"))
+    }
+
+    /// The marker goes once no update is left that could still take back a
+    /// write: no journal, or one ended in `RollbackFailed` whose final
+    /// result is written. Every run that holds the lock asks after its
+    /// recovery, so one that died between the final result and this, or
+    /// that lost power, leaves the marker only until the boot or recovery
+    /// unit runs.
+    fn settle_switching(&mut self) {
+        let done = match self.load_journal() {
+            Ok(None) => true,
+            Ok(Some(j)) if j.phase == Phase::RollbackFailed => self
+                .read_result(&j.request)
+                .is_some_and(|r| r.status.is_final()),
+            _ => false,
+        };
+        if done {
+            if let Err(e) = fsx::remove_durable(&self.switching_marker()) {
+                self.log(format!("could not remove the switching marker: {e}"));
+            }
+        }
     }
 
     fn refuse(&mut self, mut result: UpdateResult, status: UpdateStatus, reason: String) {
@@ -367,6 +427,7 @@ impl<'h, H: Host> Machine<'h, H> {
             Some(j) => self.answer_final(&j),
             None => {}
         }
+        self.settle_switching();
 
         let Some(request) = request else {
             return Ok(());
@@ -404,6 +465,7 @@ impl<'h, H: Host> Machine<'h, H> {
                 return Err(e);
             }
         }
+        self.settle_switching();
         let started = self.start_what_is_safe();
         if let Err(e) = &started {
             self.log(e);
@@ -624,6 +686,14 @@ impl<'h, H: Host> Machine<'h, H> {
             "request {}: recovering from {}",
             j.request, j.phase
         ));
+        // Past step 4 the marker is already there; written again for a
+        // journal left by an updater that did not write one. Without it
+        // the recovery still has to run.
+        if j.phase >= Phase::Stopping && j.phase != Phase::RollbackFailed {
+            if let Err(e) = self.mark_switching(&j) {
+                self.log(e);
+            }
+        }
         match j.phase {
             Phase::Preparing | Phase::Prepared => {
                 return self.abandon(j, UpdateStatus::FailedUnchanged, INTERRUPTED.into());
@@ -669,6 +739,11 @@ impl<'h, H: Host> Machine<'h, H> {
                 }
                 Phase::Prepared => {
                     // Step 4 starts here: the downtime and what was running.
+                    // The marker first, so api and mcp refuse writes before
+                    // anything stops; without it nothing stops.
+                    if let Err(reason) = self.mark_switching(&j) {
+                        return self.abandon(j, UpdateStatus::FailedUnchanged, reason);
+                    }
                     let containers = self.host.containers().unwrap_or_default();
                     j.keep = containers
                         .iter()
@@ -753,8 +828,9 @@ impl<'h, H: Host> Machine<'h, H> {
                     // The old release cannot run on a database the new one
                     // has migrated, so a rollback from here on restores the
                     // dump even though web and mcp were reachable for a
-                    // moment. What they took in is lost: entry_timeout_secs
-                    // bounds it, and roll_back says how long it was, counted
+                    // moment. The switching marker tells them to refuse
+                    // writes meanwhile; entry_timeout_secs bounds that
+                    // span, and roll_back says how long it was, counted
                     // from the first time they started.
                     if j.entries_opened.is_none() {
                         j.entries_opened = Some(self.host.now());
@@ -789,6 +865,7 @@ impl<'h, H: Host> Machine<'h, H> {
                     };
                     self.report(&j, status)?;
                     self.drop_journal()?;
+                    self.settle_switching();
                     self.log(format!(
                         "request {}: {status}, running {}",
                         j.request, j.to.version
@@ -841,17 +918,47 @@ impl<'h, H: Host> Machine<'h, H> {
                 }
                 Phase::Restoring => {
                     if let Err(reason) = self.ensure_stopped() {
-                        return self.fail_rollback(j, reason);
+                        return self.fail_rollback(j, format!("{reason}，{BACKUP_KEPT}"));
                     }
                     let from = j.from.clone();
-                    if let Err(reason) = self.database_up(false, &from, None) {
-                        return self.fail_rollback(j, format!("舊版資料庫服務沒有啟動：{reason}"));
+                    // The one retry, begun or resumed: room first, since a
+                    // full disk is the likely cause, then a fresh old
+                    // postgres. Everything removed here is recreated from
+                    // the old files when the old release starts.
+                    let retry = j.restore_retry.clone();
+                    if retry.is_some() {
+                        self.clear_for_retry(&j);
                     }
-                    if let Err(reason) = self.restore(&j) {
-                        return self.fail_rollback(j, reason);
+                    let since = retry.is_some().then(|| self.host.now());
+                    if let Err(reason) = self.database_up(retry.is_some(), &from, since) {
+                        return self.fail_rollback(
+                            j,
+                            format!("舊版資料庫服務沒有啟動：{reason}，{BACKUP_KEPT}"),
+                        );
                     }
-                    j.phase = Phase::Restored;
-                    self.save(&j)?;
+                    match (self.restore(&j), retry) {
+                        (Ok(()), retry) => {
+                            if let Some(first) = retry {
+                                j.rollback_reason = Some(format!("第一次{first}，重試後成功"));
+                            }
+                            j.phase = Phase::Restored;
+                            self.save(&j)?;
+                        }
+                        (Err(reason), None) => {
+                            self.log(format!(
+                                "request {}: {reason}; retrying the restore once",
+                                j.request
+                            ));
+                            j.restore_retry = Some(reason);
+                            self.save(&j)?;
+                        }
+                        (Err(reason), Some(first)) => {
+                            return self.fail_rollback(
+                                j,
+                                format!("重試後{reason}（第一次{first}），{BACKUP_KEPT}"),
+                            );
+                        }
+                    }
                 }
                 Phase::Restored => {
                     self.remove_backup(&j)?;
@@ -868,6 +975,7 @@ impl<'h, H: Host> Machine<'h, H> {
                     self.drop_offered(&j);
                     self.report(&j, UpdateStatus::RolledBack)?;
                     self.drop_journal()?;
+                    self.settle_switching();
                     self.log(format!(
                         "request {}: rolled back to {}",
                         j.request, j.from.version
@@ -907,11 +1015,16 @@ impl<'h, H: Host> Machine<'h, H> {
     /// stay as they are; the next boot only starts the stack.
     fn fail_rollback(&mut self, mut j: Journal, reason: String) -> Result<(), String> {
         self.log(format!("request {}: rollback failed: {reason}", j.request));
-        j.rollback_reason = Some(reason);
+        // A retried restore that succeeded said so here already.
+        j.rollback_reason = Some(match j.rollback_reason.take() {
+            Some(earlier) => format!("{reason}；{earlier}"),
+            None => reason,
+        });
         j.phase = Phase::RollbackFailed;
         self.save(&j)?;
         self.empty_incoming();
         self.progress(&j, UpdateStatus::RollbackFailed);
+        self.settle_switching();
         Ok(())
     }
 
@@ -926,7 +1039,9 @@ impl<'h, H: Host> Machine<'h, H> {
         j.reason = Some(reason);
         self.drop_offered(&j);
         self.report(&j, status)?;
-        self.drop_journal()
+        self.drop_journal()?;
+        self.settle_switching();
+        Ok(())
     }
 
     /// What was pulled for a release that is not staying goes again, or every
@@ -1026,9 +1141,10 @@ impl<'h, H: Host> Machine<'h, H> {
                 envfile::repository(&registry, image),
                 j.to.digest(image)
             );
-            self.host
-                .pull(&reference)
-                .map_err(|e| format!("無法下載 {image} 映像：{e}"))?;
+            if let Err(e) = self.host.pull(&reference) {
+                self.log(format!("pulling {reference}: {e}"));
+                return Err(pull_failure(&format!(" {image} 映像"), &e).into());
+            }
         }
 
         let api = format!(
@@ -1069,9 +1185,10 @@ impl<'h, H: Host> Machine<'h, H> {
             .compose_config(&files)
             .map_err(|e| format!("無法讀取新版 compose 檔：{e}"))?;
         check_release_files(&services, &j.to, &registry)?;
-        self.host
-            .compose_pull(&files)
-            .map_err(|e| format!("無法下載新版的映像：{e}"))?;
+        if let Err(e) = self.host.compose_pull(&files) {
+            self.log(format!("pulling the new release's images: {e}"));
+            return Err(pull_failure("新版的映像", &e).into());
+        }
         match self.check_space(true) {
             Ok(()) => Ok(()),
             Err(Space::Short(reason)) => Err(Abandoned {
@@ -1190,6 +1307,7 @@ impl<'h, H: Host> Machine<'h, H> {
         self.wait_ready(&files, &database, Some(release), since, timeout)
     }
 
+    /// The dump into the running postgres. Never writes to the dump.
     fn restore(&mut self, j: &Journal) -> Result<(), String> {
         let path = self.backup_path(j);
         let mut file = File::open(&path)
@@ -1198,15 +1316,39 @@ impl<'h, H: Host> Machine<'h, H> {
         let postgres = running_container(&containers, DATABASE).ok_or("資料庫服務沒有在執行")?;
         if let Err(e) = self.host.restore_database(&postgres, &mut file) {
             // A database half restored is worse than none: the old api would
-            // run its migrations over it. The dump stays for whoever repairs it.
+            // run its migrations over it. The dump stays for the retry and,
+            // after that, for whoever repairs it.
             if let Err(drop) = self.host.drop_database(&postgres) {
                 self.log(format!(
                     "dropping the partly restored database failed: {drop}"
                 ));
             }
-            return Err(format!("還原資料庫失敗，備份保留在主機上：{e}"));
+            return Err(format!("還原資料庫失敗：{e}"));
         }
         Ok(())
+    }
+
+    /// Room for the retried restore: the new release's containers, stopped
+    /// by now, and then its images, which those containers held. postgres
+    /// stays; it is recreated from the old files next. Whatever cannot be
+    /// removed is logged and the retry goes ahead.
+    fn clear_for_retry(&mut self, j: &Journal) {
+        match self.host.containers() {
+            Ok(containers) => {
+                let stopped: Vec<String> = containers
+                    .iter()
+                    .filter(|c| !c.running && c.service != DATABASE)
+                    .map(|c| c.name.clone())
+                    .collect();
+                if !stopped.is_empty() {
+                    if let Err(e) = self.host.remove_containers(&stopped) {
+                        self.log(format!("removing containers before the retry: {e}"));
+                    }
+                }
+            }
+            Err(e) => self.log(format!("listing containers before the retry: {e}")),
+        }
+        self.drop_offered(j);
     }
 
     // Steps 7 and 8, and starting at boot
@@ -1462,6 +1604,30 @@ impl<'h, H: Host> Machine<'h, H> {
                 self.log(format!("removing image {}: {e}", image.id));
             }
         }
+    }
+}
+
+/// Why a pull failed, short enough for the screen. A registry that refuses
+/// an anonymous pull or does not have the image gets one sentence: shipped
+/// machines carry no registry credentials, so either the image is not public
+/// or it is gone, and neither is anything the machine can fix. Anything
+/// else, such as no network, keeps podman's own words. The updater never
+/// logs in to a registry.
+pub fn pull_failure(what: &str, error: &str) -> String {
+    const REFUSED: [&str; 6] = [
+        "unauthorized",
+        "authentication required",
+        "denied",
+        "manifest unknown",
+        "name unknown",
+        "not found",
+    ];
+    // A local file podman cannot open is not the registry refusing.
+    let lower = error.to_ascii_lowercase().replace("permission denied", "");
+    if REFUSED.iter().any(|word| lower.contains(word)) {
+        format!("無法取得{what}：映像庫拒絕提供或沒有這個映像")
+    } else {
+        format!("無法下載{what}：{error}")
     }
 }
 

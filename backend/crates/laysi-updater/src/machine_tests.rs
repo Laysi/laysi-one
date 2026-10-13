@@ -9,11 +9,12 @@ use std::rc::Rc;
 use ed25519_dalek::{Signer, SigningKey};
 use laysi_license_token::release::{self, Image, ImageDigest, KeyId, ReleaseVersion};
 use laysi_license_token::update::{
-    RequestId, UpdateRequest, UpdateResult, UpdateStatus, REQUEST_FILE,
+    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, REQUEST_FILE,
+    SWITCHING_FILE,
 };
 
 use crate::envfile::EnvFile;
-use crate::fake::{Behaviour, FakeHost, ImageSpec, World};
+use crate::fake::{Behaviour, FakeContainer, FakeHost, ImageSpec, World};
 use crate::fsx;
 use crate::journal::{self, Phase, Release};
 use crate::layout::{Layout, COMPOSE_FILES, IMAGE_SHARE, IMAGE_UPDATER};
@@ -155,6 +156,7 @@ impl Rig {
             fsx::ensure_dir(&dir, mode).unwrap();
         }
         let mut world = World::new();
+        world.marker = Some(layout.results_dir().join(SWITCHING_FILE));
         installed.publish(&mut world);
         for spec in offered {
             spec.publish(&mut world);
@@ -198,6 +200,7 @@ impl Rig {
         rig.machine(|m| m.boot())
             .expect("the installed release boots");
         rig.world.borrow_mut().violations.clear();
+        rig.world.borrow_mut().marked.clear();
         rig
     }
 
@@ -261,6 +264,20 @@ impl Rig {
             .collect()
     }
 
+    /// Whether a container of `service` exists and runs.
+    fn running(&self, service: &str) -> bool {
+        self.world
+            .borrow()
+            .containers
+            .get(service)
+            .is_some_and(|c| c.running)
+    }
+
+    /// What api and mcp ask before every write.
+    fn switching(&self) -> bool {
+        laysi_license_token::update::switching_in(&self.layout.results_dir())
+    }
+
     fn requests_left(&self) -> usize {
         std::fs::read_dir(self.layout.requests_dir())
             .unwrap()
@@ -315,7 +332,27 @@ impl Rig {
         assert!(result.status.is_final(), "{:?}", result.status);
         let running = result.running.as_ref().map(|v| v.to_string());
         assert_eq!(running.as_deref(), Some(installed.as_str()), "{:?}", result);
+        assert_eq!(result.tools, Some(ToolVersions::new("4.9.3", "1.6.0")));
         assert_eq!(self.requests_left(), 0);
+        assert!(!self.switching(), "the switching marker is left");
+    }
+
+    /// Whether every stop and every start of web or mcp since the rig was
+    /// built happened with the marker in place, and there was at least one.
+    fn all_marked(&self) -> bool {
+        let w = self.world.borrow();
+        !w.marked.is_empty() && w.marked.iter().all(|(_, present)| *present)
+    }
+
+    /// How often this request's log says a retry was begun.
+    fn retries_begun(&self, id: &str) -> usize {
+        std::fs::read_to_string(self.layout.log())
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| {
+                l.contains(&format!("request {id}:")) && l.contains("retrying the restore once")
+            })
+            .count()
     }
 }
 
@@ -357,6 +394,9 @@ fn an_update_installs_the_new_release() {
     assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
     assert_eq!(rig.installed(), "v0.2.0");
     rig.assert_settled(&id);
+    // Every service stopped, and web and mcp started on the new release,
+    // while api and mcp would refuse writes.
+    assert!(rig.all_marked(), "{:?}", rig.world.borrow().marked);
     let (from, to) = (result.downtime_from.unwrap(), result.downtime_to.unwrap());
     assert!(from < to);
     assert_eq!(result.offered.unwrap().to_string(), "v0.2.0");
@@ -409,6 +449,7 @@ fn a_new_release_that_never_passes_is_rolled_back_with_the_database() {
     // row written before step 4 is still there.
     assert_eq!(rig.world.borrow().restores, 1);
     rig.assert_settled(&id);
+    assert!(rig.all_marked(), "{:?}", rig.world.borrow().marked);
     // Neither entry point ever ran on the new release.
     let w = rig.world.borrow();
     assert!(w.violations.is_empty());
@@ -437,8 +478,10 @@ fn entry_points_never_start_before_the_rest_has_passed() {
     rig.run().unwrap();
     assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
     // web and mcp were reachable on the new release for a while, and the
-    // result says that what they took in went back with the database.
+    // result says that what they took in went back with the database. They
+    // were refusing writes all along.
     assert!(rig.result(&id).reason.unwrap().contains("一併還原"));
+    assert!(rig.all_marked(), "{:?}", rig.world.borrow().marked);
     rig.assert_settled(&id);
 }
 
@@ -500,7 +543,7 @@ fn a_failed_restore_keeps_the_dump_and_blocks_further_updates() {
     assert_eq!(rig.backups(), vec!["req-restorefail.dump".to_string()]);
     assert!(rig.world.borrow().db.is_none(), "a half restore is dropped");
     // The services other than postgres stay stopped.
-    assert!(!rig.world.borrow().containers["web"].running);
+    assert!(!rig.running("web"));
 
     let next = rig.request("req-after-fail", &rig.manifest("v0.3.0"));
     rig.run().unwrap();
@@ -511,12 +554,15 @@ fn a_failed_restore_keeps_the_dump_and_blocks_further_updates() {
     for _ in 0..2 {
         rig.world.borrow_mut().reboot();
         assert!(rig.machine(|m| m.boot()).is_ok());
-        let w = rig.world.borrow();
-        assert!(w.containers["postgres"].running);
+        assert!(rig.running("postgres"));
         for service in ["api", "mcp", "web", "backup", "rustfs"] {
-            assert!(!w.containers[service].running, "{service} started");
+            assert!(!rig.running(service), "{service} started");
         }
-        assert_eq!(w.restores, 1);
+        assert_eq!(
+            rig.world.borrow().restores,
+            2,
+            "the first restore and its one retry"
+        );
     }
 }
 
@@ -760,10 +806,52 @@ enum Cut {
     Process,
 }
 
+/// Wherever a run stopped: while the result is not final and the journal is
+/// past step 4, api and mcp see the marker, and every stop so far happened
+/// with it in place.
+fn assert_marked_while_switching(rig: &Rig, id: &RequestId, k: usize) {
+    let journal = rig.machine(|m| m.load_journal()).unwrap();
+    let result = rig.machine(|m| m.read_result(id));
+    let unfinished = result.as_ref().is_none_or(|r| !r.status.is_final());
+    let past_step_4 = journal.is_some_and(|j| j.phase >= Phase::Stopping);
+    if unfinished && past_step_4 {
+        assert!(
+            rig.switching(),
+            "cut at call {k}: no marker while switching"
+        );
+    }
+    if result.is_some_and(|r| {
+        matches!(
+            r.status,
+            UpdateStatus::Switching | UpdateStatus::RollingBack
+        )
+    }) {
+        assert!(rig.switching(), "cut at call {k}: no marker beside {id}");
+    }
+    let w = rig.world.borrow();
+    assert!(
+        w.marked.iter().all(|(_, present)| *present),
+        "cut at call {k}: {:?}",
+        w.marked
+    );
+}
+
 fn sweep(installed: Spec, offered: Spec, expect_final: &[UpdateStatus], cut: Cut) {
+    sweep_with(installed, offered, expect_final, cut, |_| {});
+}
+
+/// [`sweep`], with `setup` applied to every fresh world first.
+fn sweep_with(
+    installed: Spec,
+    offered: Spec,
+    expect_final: &[UpdateStatus],
+    cut: Cut,
+    setup: impl Fn(&mut World),
+) {
     let double = cut == Cut::PowerTwice;
     let calls = {
         let rig = Rig::new(installed.clone(), std::slice::from_ref(&offered));
+        setup(&mut rig.world.borrow_mut());
         rig.request("req-sweep-0000", &rig.manifest(offered.version));
         let start = rig.world.borrow().calls;
         rig.machine(|m| m.run_request()).unwrap();
@@ -774,11 +862,13 @@ fn sweep(installed: Spec, offered: Spec, expect_final: &[UpdateStatus], cut: Cut
     let step = if double { 3 } else { 1 };
     for k in (1..=calls).step_by(step) {
         let rig = Rig::new(installed.clone(), std::slice::from_ref(&offered));
+        setup(&mut rig.world.borrow_mut());
         let id = rig.request("req-sweep-0001", &rig.manifest(offered.version));
         let at = rig.world.borrow().calls + k;
         rig.world.borrow_mut().crash_at = Some(at);
         let first = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
         assert!(first.is_err(), "the cut at call {k} of {calls} happened");
+        assert_marked_while_switching(&rig, &id, k);
         if cut == Cut::Process {
             rig.world.borrow_mut().restart_updater();
         } else {
@@ -808,6 +898,7 @@ fn sweep(installed: Spec, offered: Spec, expect_final: &[UpdateStatus], cut: Cut
             result.reason
         );
         rig.assert_settled(&id);
+        assert!(rig.retries_begun(id.as_str()) <= 1, "cut at call {k}");
     }
 }
 
@@ -1107,11 +1198,11 @@ fn a_restore_that_fails_while_recovering_starts_postgres_alone() {
     assert!(rig.machine(|m| m.boot()).is_ok());
     assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
     assert_eq!(rig.backups(), vec!["req-recoverfail.dump".to_string()]);
-    let w = rig.world.borrow();
-    assert!(w.containers["postgres"].running);
+    assert!(rig.running("postgres"));
     for service in ["api", "mcp", "web", "backup", "rustfs"] {
-        assert!(!w.containers[service].running, "{service} started");
+        assert!(!rig.running(service), "{service} started");
     }
+    assert!(!rig.switching());
 }
 
 #[test]
@@ -1266,13 +1357,23 @@ fn a_kept_dump_starts_no_database_under_a_service_that_will_not_stop() {
     let id = rig.request("req-stuckdump1", &rig.manifest("v0.2.0"));
     rig.run().unwrap();
     assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
-    // The old rustfs, still running from the failed rollback, now ignores
-    // podman stop; postgres is stopped.
+    // A rustfs container started by hand on the old image ignores podman
+    // stop; postgres is stopped.
     {
         let mut w = rig.world.borrow_mut();
-        w.containers.get_mut("rustfs").unwrap().running = true;
+        let rustfs = digest(v1().rustfs);
+        let clock = w.clock;
+        w.containers.insert(
+            "rustfs".into(),
+            FakeContainer {
+                reference: format!("docker.io/rustfs/rustfs@{rustfs}"),
+                digest: rustfs.clone(),
+                running: true,
+                exit_code: None,
+                created: clock,
+            },
+        );
         w.containers.get_mut("postgres").unwrap().running = false;
-        let rustfs = w.containers["rustfs"].digest.clone();
         w.unstoppable = Some(rustfs);
     }
     assert!(rig.machine(|m| m.boot()).is_ok());
@@ -1310,29 +1411,19 @@ fn a_rollback_failure_cut_before_its_result_is_answered_at_boot() {
 
 #[test]
 fn a_final_result_that_cannot_be_written_keeps_the_journal_until_it_is() {
-    use std::os::unix::fs::PermissionsExt;
     let rig = Rig::new(v1(), &[v2()]);
-    let results = rig.layout.results_dir();
     let id = rig.request("req-noresult-01", &rig.manifest("v0.2.0"));
-    // The results directory turns read-only once the update is under way.
+    // A directory in the result's place: every write of this result fails,
+    // and the marker beside it can still be written.
+    let blocker = rig.layout.results_dir().join(id.as_str());
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("x"), "").unwrap();
     let journal = rig.layout.journal();
-    let outcome = {
-        let mut host = FakeHost {
-            world: rig.world.clone(),
-        };
-        let mut m = Machine::new(
-            &mut host,
-            rig.layout.clone(),
-            vec![rig.key.verifying_key()],
-            rig.config.clone(),
-        );
-        std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let outcome = m.run_request();
-        std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o755)).unwrap();
-        outcome
-    };
+    let outcome = rig.machine(|m| m.run_request());
+    std::fs::remove_dir_all(&blocker).unwrap();
     assert!(outcome.is_err(), "the final result could not be written");
     assert!(journal.exists(), "the journal waits for the result");
+    assert!(rig.switching(), "and so does the marker");
     // ExecStopPost does not take it for a request that never started.
     rig.machine(|m| m.discard_requests()).unwrap();
     assert!(rig.machine(|m| m.read_result(&id)).is_none());
@@ -1340,6 +1431,7 @@ fn a_final_result_that_cannot_be_written_keeps_the_journal_until_it_is() {
     rig.machine(|m| m.boot()).unwrap();
     assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
     assert!(!journal.exists());
+    assert!(!rig.switching());
 }
 
 #[test]
@@ -1432,4 +1524,264 @@ fn a_swap_cut_before_it_began_does_not_bring_back_an_older_updater() {
     );
     let id = RequestId::parse("req-swapcut-001").unwrap();
     assert_eq!(rig.result(&id).status, UpdateStatus::SucceededUpdaterKept);
+}
+
+fn never_healthy() -> Spec {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    broken
+}
+
+#[test]
+fn a_failed_restore_is_retried_once_after_making_room() {
+    let broken = never_healthy();
+    let rig = Rig::new(v1(), std::slice::from_ref(&broken));
+    rig.world.borrow_mut().fail_next_restores = 1;
+    let id = rig.request("req-retryok-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    let note = result.rollback_reason.clone().unwrap();
+    assert!(
+        note.contains("第一次還原資料庫失敗") && note.contains("No space left"),
+        "{note}"
+    );
+    assert!(note.contains("重試後成功"), "{note}");
+    assert!(result.reason.unwrap().contains("api"));
+    let w = rig.world.borrow();
+    assert_eq!(w.restores, 2);
+    // The retry found the new release's images gone, and the old ones there.
+    let before_retry = &w.local_at_restore[1];
+    for image in Image::ALL {
+        assert!(
+            !before_retry.contains(&broken.own(image)),
+            "{image} of v0.2.0 kept"
+        );
+        assert!(
+            before_retry.contains(&v1().own(image)),
+            "{image} of v0.1.0 removed"
+        );
+    }
+    assert!(w.local_at_restore[0].contains(&broken.own(Image::Api)));
+    drop(w);
+    assert_eq!(rig.retries_begun(id.as_str()), 1);
+    assert!(rig.all_marked(), "{:?}", rig.world.borrow().marked);
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_retry_that_fails_too_ends_the_rollback_and_keeps_the_dump_as_it_was() {
+    let broken = never_healthy();
+    let rig = Rig::new(v1(), std::slice::from_ref(&broken));
+    rig.world.borrow_mut().fail_restore = true;
+    let id = rig.request("req-retryfail1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed, "{result:?}");
+    let why = result.rollback_reason.unwrap();
+    assert!(
+        why.contains("重試後") && why.contains("第一次") && why.contains("備份保留"),
+        "{why}"
+    );
+    assert_eq!(rig.world.borrow().restores, 2);
+    assert_eq!(rig.retries_begun(id.as_str()), 1);
+    // The dump is the database as it was at step 5.
+    let dump =
+        std::fs::read_to_string(rig.layout.backup_dir().join("req-retryfail1.dump")).unwrap();
+    assert_eq!(dump, "fake-dump\nm1\nwritten-before-the-update\n");
+    // The new release's images went to make room; the old release's stay
+    // for whoever restores by hand.
+    for image in Image::ALL {
+        assert!(!rig.world.borrow().local.contains(&broken.own(image)));
+        assert!(rig.world.borrow().local.contains(&v1().own(image)));
+    }
+    assert!(!rig.switching(), "the result is final");
+
+    // No boot tries again.
+    for _ in 0..3 {
+        rig.world.borrow_mut().reboot();
+        assert!(rig.machine(|m| m.boot()).is_ok());
+        assert_eq!(rig.world.borrow().restores, 2);
+        assert!(rig.running("postgres"));
+        assert!(!rig.running("api"));
+        assert!(!rig.switching());
+    }
+    assert_eq!(rig.retries_begun(id.as_str()), 1);
+}
+
+#[test]
+fn a_power_cut_at_any_point_of_a_retried_restore_ends_on_the_old_release() {
+    for cut in [Cut::Power, Cut::Process] {
+        sweep_with(
+            v1(),
+            never_healthy(),
+            &[UpdateStatus::RolledBack, UpdateStatus::FailedUnchanged],
+            cut,
+            |w| w.fail_next_restores = 1,
+        );
+    }
+}
+
+/// Every restore fails: wherever the power goes, the rollback ends failed
+/// after one retry at most, and the dump stays as it was.
+#[test]
+fn a_power_cut_during_a_failing_retry_never_begins_a_second_one() {
+    let calls = {
+        let rig = Rig::new(v1(), &[never_healthy()]);
+        rig.world.borrow_mut().fail_restore = true;
+        rig.request("req-retrycut-00", &rig.manifest("v0.2.0"));
+        let start = rig.world.borrow().calls;
+        rig.machine(|m| m.run_request()).unwrap();
+        let end = rig.world.borrow().calls;
+        end - start
+    };
+    let mut retried = 0;
+    for k in 1..=calls {
+        let rig = Rig::new(v1(), &[never_healthy()]);
+        rig.world.borrow_mut().fail_restore = true;
+        let id = rig.request("req-retrycut-01", &rig.manifest("v0.2.0"));
+        let at = rig.world.borrow().calls + k;
+        rig.world.borrow_mut().crash_at = Some(at);
+        let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+        assert!(cut.is_err(), "the cut at call {k} of {calls} happened");
+        assert_marked_while_switching(&rig, &id, k);
+        let begun_before_boot = rig.retries_begun(id.as_str());
+        rig.world.borrow_mut().reboot();
+        let _ = rig.machine(|m| m.boot());
+        let _ = rig.run();
+
+        let result = rig.result(&id);
+        let begun = rig.retries_begun(id.as_str());
+        assert!(begun <= 1, "cut at call {k}: {begun} retries");
+        assert!(!rig.switching(), "cut at call {k}: marker left");
+        match result.status {
+            UpdateStatus::RollbackFailed => {
+                assert_eq!(begun, 1, "cut at call {k}");
+                let dump = rig.layout.backup_dir().join("req-retrycut-01.dump");
+                assert_eq!(
+                    std::fs::read_to_string(dump).unwrap(),
+                    "fake-dump\nm1\nwritten-before-the-update\n",
+                    "cut at call {k}"
+                );
+                // A cut during the retry resumes it: one more restore at most.
+                assert!(rig.world.borrow().restores <= 3, "cut at call {k}");
+                if begun_before_boot == 1 {
+                    retried += 1;
+                }
+            }
+            // Cut before anything stopped, or before the switch.
+            UpdateStatus::FailedUnchanged | UpdateStatus::RolledBack => {
+                assert_eq!(begun, 0, "cut at call {k}");
+                rig.assert_settled(&id);
+            }
+            other => panic!("cut at call {k}: {other:?}"),
+        }
+        let restores = rig.world.borrow().restores;
+        rig.world.borrow_mut().reboot();
+        let _ = rig.machine(|m| m.boot());
+        assert_eq!(rig.world.borrow().restores, restores, "cut at call {k}");
+    }
+    assert!(retried > 3, "only {retried} cuts fell inside the retry");
+}
+
+#[test]
+fn an_image_the_registry_will_not_hand_out_is_reported_as_such() {
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    rig.world.borrow_mut().private_repo = Some(format!("{REGISTRY}/laysi-one-api"));
+    let id = rig.request("req-private-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert_eq!(
+        result.reason.as_deref(),
+        Some("無法取得 api 映像：映像庫拒絕提供或沒有這個映像")
+    );
+    assert!(result.downtime_from.is_none());
+    rig.assert_settled(&id);
+    assert!(rig.world.borrow().marked.is_empty(), "nothing stopped");
+
+    // A release whose images were never published.
+    rig.world.borrow_mut().private_repo = None;
+    let ghost = Spec::good("v0.3.0", "m3");
+    let id = rig.request("req-missing-001", &signed_manifest(&rig.key, &ghost));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert!(result.reason.unwrap().starts_with("無法取得 api 映像"));
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_pull_that_fails_otherwise_keeps_podmans_words() {
+    use crate::machine::pull_failure;
+    for e in [
+        "podman exited with exit status: 125: Error: dial tcp: lookup ghcr.io: no such host",
+        "Error: copying system image from manifest list: open /home/stack/.local/share/containers/storage/overlay/l: permission denied",
+    ] {
+        assert_eq!(
+            pull_failure(" api 映像", e),
+            format!("無法下載 api 映像：{e}")
+        );
+    }
+    for refused in [
+        "reading manifest sha256:11 in ghcr.io/laysi/laysi-one-api: denied",
+        "Error: unauthorized: authentication required",
+        "manifest unknown",
+        "name unknown: repository name not known to registry",
+    ] {
+        assert!(
+            pull_failure("新版的映像", refused).starts_with("無法取得新版的映像："),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn a_stale_marker_is_removed_by_the_next_run_that_finds_no_update() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let marker = rig.layout.results_dir().join(SWITCHING_FILE);
+    // Left by a run that died between dropping its journal and the marker.
+    std::fs::write(&marker, "request req-gone-000001\n").unwrap();
+    assert!(rig.switching());
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(!rig.switching());
+
+    std::fs::write(&marker, "request req-gone-000001\n").unwrap();
+    let id = rig.request("req-same-00009", &rig.manifest("v0.1.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RefusedSameVersion);
+    assert!(!rig.switching());
+}
+
+#[test]
+fn a_journal_past_step_4_without_a_marker_gets_one_until_it_is_finished() {
+    // An update the marker did not exist for yet, cut while restoring.
+    let rig = Rig::new(v1(), &[never_healthy()]);
+    rig.world.borrow_mut().crash_on = Some("restoring");
+    let id = rig.request("req-nomarker-01", &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err());
+    std::fs::remove_file(rig.layout.results_dir().join(SWITCHING_FILE)).unwrap();
+    rig.world.borrow_mut().reboot();
+    rig.world.borrow_mut().marked.clear();
+    rig.machine(|m| m.boot()).unwrap();
+    // web and mcp came back on the restored database with the marker in
+    // place; the boot then starts the stack once more after it is gone.
+    let marked = rig.world.borrow().marked.clone();
+    assert_eq!(
+        marked[..2],
+        [
+            ("start mcp".to_string(), true),
+            ("start web".to_string(), true)
+        ]
+    );
+    assert!(
+        marked[2..].iter().all(|(_, present)| !present),
+        "{marked:?}"
+    );
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    rig.run().unwrap();
+    rig.assert_settled(&id);
 }

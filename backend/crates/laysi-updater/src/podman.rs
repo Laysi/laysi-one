@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+use laysi_license_token::update::ToolVersions;
+
 use crate::fsx;
 use crate::host::{Container, Host, HostResult, LocalImage, Service, StackFiles};
 use crate::layout::PROJECT;
@@ -50,6 +52,22 @@ impl PodmanHost {
 
     fn podman(&self) -> Command {
         detached(Command::new(&self.podman))
+    }
+
+    /// `podman-compose --version`, which also runs podman.
+    pub fn compose_version(&self) -> HostResult<String> {
+        let mut cmd = detached(Command::new(&self.compose));
+        cmd.arg("--podman-path").arg(&self.podman).arg("--version");
+        let out = run(cmd, Some(Duration::from_secs(60)))?;
+        parse_compose_version(&out)
+            .map(str::to_string)
+            .ok_or_else(|| format!("podman-compose --version printed {:?}", out.trim()))
+    }
+
+    pub fn podman_version(&self) -> HostResult<String> {
+        let mut cmd = self.podman();
+        cmd.args(["version", "--format", "{{.Client.Version}}"]);
+        Ok(run(cmd, Some(Duration::from_secs(60)))?.trim().to_string())
     }
 
     fn compose(&self, files: &StackFiles) -> Command {
@@ -220,6 +238,15 @@ fn tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(3);
     lines[start..].join(" / ")
+}
+
+/// The version in `podman-compose --version`, which prints podman's own line
+/// too: `podman version 4.9.3` and `podman-compose version 1.6.0`.
+pub fn parse_compose_version(out: &str) -> Option<&str> {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix("podman-compose version"))
+        .map(|v| v.trim_start_matches(':').trim())
+        .find(|v| !v.is_empty())
 }
 
 /// The application database, named by the container's own environment.
@@ -402,6 +429,12 @@ impl Host for PodmanHost {
 
     fn checkpoint(&mut self, _label: &str) {}
 
+    fn tool_versions(&mut self) -> ToolVersions {
+        let podman = self.podman_version().unwrap_or_default();
+        let compose = self.compose_version().unwrap_or_default();
+        ToolVersions::new(&podman, &compose)
+    }
+
     fn pull(&mut self, reference: &str) -> HostResult<()> {
         let mut cmd = self.podman();
         cmd.args(["pull", "--quiet", reference]);
@@ -508,6 +541,12 @@ impl Host for PodmanHost {
         let mut cmd = self.podman();
         cmd.args(["stop", "--time", "30"]).args(names);
         run(cmd, None).map(drop)
+    }
+
+    fn remove_containers(&mut self, names: &[String]) -> HostResult<()> {
+        let mut cmd = self.podman();
+        cmd.args(["rm", "--ignore"]).args(names);
+        run(cmd, Some(Duration::from_secs(120))).map(drop)
     }
 
     fn wait_exit(&mut self, name: &str) -> HostResult<i64> {
@@ -663,6 +702,17 @@ mod tests {
         );
         assert!(parse_config("services:\n  api:\n    restart: always\n").is_err());
         assert!(parse_config("volumes: {}\n").is_err());
+    }
+
+    #[test]
+    fn the_compose_version_is_read_from_its_own_line() {
+        let out = "podman version 4.9.3\npodman-compose version 1.6.0\n";
+        assert_eq!(parse_compose_version(out), Some("1.6.0"));
+        assert_eq!(
+            parse_compose_version("podman-compose version: 1.0.6\n['podman', '--version', '']\nusing podman version: 4.9.3\n"),
+            Some("1.0.6")
+        );
+        assert_eq!(parse_compose_version("podman version 4.9.3\n"), None);
     }
 
     #[test]

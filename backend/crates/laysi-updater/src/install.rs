@@ -5,11 +5,18 @@
 //! user lingers so they run without a login, and starts the stack through
 //! the boot unit, which runs `secrets` before anything else.
 //!
-//! Everything that can refuse, the manifest above all, is checked before
-//! anything is written, and a run that fails before `state/installed` is
-//! written can simply be run again. Once it is written the machine is
-//! installed: this command refuses to run again, and the boot unit starts
-//! the stack at every boot.
+//! Everything that can refuse is checked before anything is written: the
+//! manifest, and the tools, which are podman-compose
+//! [`PODMAN_COMPOSE_VERSION`] and podman with the netavark network backend
+//! and aardvark-dns. The tools are checked only here. An update never
+//! refuses because a tool changed since, and records the versions it ran
+//! with in its result instead: the refusal would come from the updater on
+//! the machine, and only a newer updater could accept a newer tool, which
+//! is the one an update installs.
+//!
+//! A run that fails before `state/installed` is written can simply be run
+//! again. Once it is written the machine is installed: this command refuses
+//! to run again, and the boot unit starts the stack at every boot.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -22,9 +29,13 @@ use crate::fsx;
 use crate::host::Host;
 use crate::journal::{self, Release};
 use crate::layout::{Layout, COMPOSE_FILES, IMAGE_SHARE};
-use crate::machine::check_release_files;
+use crate::machine::{check_release_files, pull_failure};
 use crate::podman::PodmanHost;
 use crate::units;
+
+/// The podman-compose a machine is installed with: the version
+/// `.github/workflows/updater-e2e.yml` tests, which a test here holds it to.
+pub const PODMAN_COMPOSE_VERSION: &str = "1.6.0";
 
 const MAX_COMPOSE_BYTES: usize = 256 * 1024;
 const MAX_UPDATER_BYTES: usize = 64 * 1024 * 1024;
@@ -77,7 +88,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
         }
     }
     let mut host = PodmanHost::from_env(&layout.root);
-    network_backend(&host.podman)?;
+    check_tools(&host)?;
     println!("installing {}", release.version);
 
     for (dir, mode) in layout.directories() {
@@ -99,7 +110,15 @@ pub fn install(args: &[String]) -> Result<(), String> {
         envfile::repository(&registry, Image::Api),
         release.digest(Image::Api)
     );
-    host.pull(&api)?;
+    host.pull(&api).map_err(|e| {
+        // Whoever installs reads podman's words as well.
+        let short = pull_failure(" api 映像", &e);
+        if short.contains(&e) {
+            short
+        } else {
+            format!("{short}（{e}）")
+        }
+    })?;
     let incoming = layout.incoming_files();
     let sources: Vec<String> = COMPOSE_FILES
         .iter()
@@ -205,22 +224,47 @@ fn tool_env() -> Result<String, String> {
     Ok(out)
 }
 
+/// The tools a machine is shipped with.
+///
 /// The services find each other by name. netavark answers those names with
 /// aardvark-dns; CNI needs a plugin that podman 4.9 on Ubuntu does not bring,
-/// and without it the api never reaches postgres.
-fn network_backend(podman: &str) -> Result<(), String> {
-    let out = Command::new(podman)
-        .args(["info", "--format", "{{.Host.NetworkBackend}}"])
-        .output()
-        .map_err(|e| format!("{podman}: {e}"))?;
-    let backend = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if backend == "netavark" {
-        Ok(())
-    } else {
-        Err(format!(
-            "podman uses the {backend:?} network backend; install netavark and aardvark-dns and run `podman system reset` first"
-        ))
+/// and without it the api never reaches postgres. podman reports the DNS
+/// server it found, and an empty one when aardvark-dns is missing.
+fn check_tools(host: &PodmanHost) -> Result<(), String> {
+    let info = |format: &str| -> Result<String, String> {
+        let out = Command::new(&host.podman)
+            .args(["info", "--format", format])
+            .output()
+            .map_err(|e| format!("{}: {e}", host.podman))?;
+        if !out.status.success() {
+            return Err(format!(
+                "podman info 執行失敗：{}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let backend = info("{{.Host.NetworkBackend}}")?;
+    if backend != "netavark" {
+        return Err(format!(
+            "podman 使用 {backend:?} 網路後端，服務之間無法以名稱互相連線。請安裝 netavark 與 aardvark-dns，執行 `podman system reset` 後再安裝"
+        ));
     }
+    if info("{{.Host.NetworkBackendInfo.DNS.Path}}")?.is_empty() {
+        return Err(
+            "podman 找不到 aardvark-dns，服務之間無法以名稱互相連線。請安裝 aardvark-dns 後再安裝"
+                .into(),
+        );
+    }
+    let compose = host
+        .compose_version()
+        .unwrap_or_else(|e| format!("無法判斷（{e}）"));
+    if compose != PODMAN_COMPOSE_VERSION {
+        return Err(format!(
+            "podman-compose 版本為 {compose}，安裝需要 {PODMAN_COMPOSE_VERSION}。請執行 `uv tool install podman-compose=={PODMAN_COMPOSE_VERSION}` 後再安裝"
+        ));
+    }
+    Ok(())
 }
 
 /// An ssh session without a login has no runtime directory set, and both
@@ -277,5 +321,25 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("systemctl --user {} failed", args.join(" ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The end-to-end test runs the version a machine is installed with.
+    #[test]
+    fn the_e2e_workflow_pins_the_podman_compose_this_installs() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../.github/workflows/updater-e2e.yml");
+        let workflow =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let pinned: Vec<&str> = workflow
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("PODMAN_COMPOSE_VERSION:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(pinned, [PODMAN_COMPOSE_VERSION], "{}", path.display());
     }
 }

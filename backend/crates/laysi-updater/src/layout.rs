@@ -15,7 +15,7 @@
 //!   backup/                       database dumps taken before a switch, 0600
 //!   incoming/                     files taken from the release being installed
 //!   requests/                     mounted into api read-write (`:U`)
-//!   results/                      mounted into api read-only
+//!   results/                      mounted into api and mcp read-only
 //! ```
 //!
 //! Only the last two are mounted into a container. The journal, the backups,

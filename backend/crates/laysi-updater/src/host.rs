@@ -9,6 +9,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use laysi_license_token::update::ToolVersions;
 
 pub type HostResult<T> = Result<T, String>;
 
@@ -67,6 +68,10 @@ pub trait Host {
     /// A point at which the fake host may cut the power. The real host does
     /// nothing here.
     fn checkpoint(&mut self, label: &str);
+    /// The podman and podman-compose this run calls, as they report
+    /// themselves; `unknown` for one that does not answer. Recorded in the
+    /// results, never checked.
+    fn tool_versions(&mut self) -> ToolVersions;
 
     fn pull(&mut self, reference: &str) -> HostResult<()>;
     /// Copy files out of an image without running it: `(path in the image,
@@ -87,6 +92,8 @@ pub trait Host {
     /// Every container of the project, running or not.
     fn containers(&mut self) -> HostResult<Vec<Container>>;
     fn stop(&mut self, names: &[String]) -> HostResult<()>;
+    /// Remove stopped containers. Their volumes stay.
+    fn remove_containers(&mut self, names: &[String]) -> HostResult<()>;
     /// Wait for a container to exit and return its exit code.
     fn wait_exit(&mut self, name: &str) -> HostResult<i64>;
 

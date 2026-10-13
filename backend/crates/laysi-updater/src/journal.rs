@@ -92,7 +92,7 @@ pub fn decode_installed(text: &str) -> Result<Release, String> {
 /// | `Committed` | every service passed; new release installed | replace the updater, clean up |
 /// | `Finishing` | updater replaced or kept | clean up and report |
 /// | `RollingBack` | stopping, restoring files, old postgres | start the rollback over |
-/// | `Restoring` | `pg_restore` into the old postgres | restore again from the dump |
+/// | `Restoring` | `pg_restore` into the old postgres; after one failure, the retry | restore again from the dump; a retry begun is resumed, never a second one begun |
 /// | `Restored` | database back as it was | start the old version and judge it |
 /// | `RollbackFailed` | final | only start the stack |
 ///
@@ -202,6 +202,10 @@ pub struct Journal {
     pub updater_swapped: bool,
     pub reason: Option<String>,
     pub rollback_reason: Option<String>,
+    /// Why the first restore of the rollback failed. Written before the one
+    /// retry starts, so a run that finds it set resumes that retry, and a
+    /// retry that fails ends the rollback.
+    pub restore_retry: Option<String>,
     /// Why the new updater was not installed, when it was not.
     pub updater_note: Option<String>,
 }
@@ -230,6 +234,7 @@ impl Journal {
             updater_swapped: false,
             reason: None,
             rollback_reason: None,
+            restore_retry: None,
             updater_note: None,
         }
     }
@@ -260,6 +265,10 @@ impl Journal {
         line(
             "rollback-reason",
             self.rollback_reason.as_deref().map(single_line),
+        );
+        line(
+            "restore-retry",
+            self.restore_retry.as_deref().map(single_line),
         );
         line(
             "updater-note",
@@ -315,6 +324,9 @@ impl Journal {
             },
             reason: fields.optional("reason")?.map(str::to_string),
             rollback_reason: fields.optional("rollback-reason")?.map(str::to_string),
+            // An updater from before the retry skips this line and restores
+            // again as if the retry had not begun.
+            restore_retry: fields.optional("restore-retry")?.map(str::to_string),
             updater_note: fields.optional("updater-note")?.map(str::to_string),
         })
     }
@@ -439,6 +451,9 @@ mod tests {
             j.restore_db = phase >= Phase::Switching;
             j.updater_swapped = phase >= Phase::Committed;
             j.reason = Some("api 沒有通過\n健康檢查".into());
+            if phase == Phase::Restoring {
+                j.restore_retry = Some("還原資料庫失敗：磁碟已滿".into());
+            }
             assert_eq!(Phase::from_name(phase.name()), Some(phase));
             let back = Journal::decode(&j.encode()).unwrap();
             assert_eq!(back.reason.as_deref(), Some("api 沒有通過 健康檢查"));
