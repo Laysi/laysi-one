@@ -23,9 +23,11 @@
 # 3. Container names are pinned: podman-compose and docker compose generate
 #    different ones.
 #
-# 4. The api, and only the api, mounts the two directories it shares with
-#    the updater. It writes update requests into the first (`U` chowns it to
-#    the api's uid) and reads results from the second, which it cannot write.
+# 4. Only the api mounts the requests directory, so only the api can ask for
+#    an update (`U` chowns it to the api's uid). The api and mcp both mount
+#    the results directory read-only: the api reads results from it, and
+#    both refuse writes while the updater's switching marker is in it
+#    (laysi_license_token::update::switching).
 #
 # Nothing here or in docker-compose.prod.yml may use `restart: always`:
 # podman-restart.service would start such a container at boot before the
@@ -58,6 +60,8 @@ services:
   mcp:
     container_name: laysi-one-mcp
     image: ${LAYSI_REGISTRY:?}/laysi-one-api@${LAYSI_API_DIGEST:?}
+    volumes:
+      - ${LAYSI_HOST_DIR:?}/results:/var/lib/laysi-update/results:ro,z
 
   backup:
     container_name: laysi-one-backup
