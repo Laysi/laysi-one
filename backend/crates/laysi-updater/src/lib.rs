@@ -10,5 +10,12 @@
 
 pub mod envfile;
 pub mod fsx;
+pub mod host;
 pub mod journal;
 pub mod layout;
+pub mod machine;
+
+#[cfg(test)]
+mod fake;
+#[cfg(test)]
+mod machine_tests;

@@ -1,0 +1,1435 @@
+//! The state machine against the fake host, including a power cut at every
+//! call it makes.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::rc::Rc;
+
+use ed25519_dalek::{Signer, SigningKey};
+use laysi_license_token::release::{self, Image, ImageDigest, KeyId, ReleaseVersion};
+use laysi_license_token::update::{
+    RequestId, UpdateRequest, UpdateResult, UpdateStatus, REQUEST_FILE,
+};
+
+use crate::envfile::EnvFile;
+use crate::fake::{Behaviour, FakeHost, ImageSpec, World};
+use crate::fsx;
+use crate::journal::{self, Phase, Release};
+use crate::layout::{Layout, COMPOSE_FILES, IMAGE_SHARE, IMAGE_UPDATER};
+use crate::machine::{Config, Machine};
+
+const REGISTRY: &str = "ghcr.io/laysi";
+const SERVICES: [&str; 6] = ["postgres", "rustfs", "api", "mcp", "backup", "web"];
+
+fn digest(tag: &str) -> String {
+    let hex: String = tag.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{hex:0>64}")
+}
+
+/// What a release is made of, for the fake registry.
+#[derive(Clone)]
+struct Spec {
+    version: &'static str,
+    api: Behaviour,
+    web: Behaviour,
+    migrates: &'static str,
+    secrets: &'static str,
+    adds_secret: Option<&'static str>,
+    rustfs: &'static str,
+    postgres: &'static str,
+    updater: &'static [u8],
+}
+
+impl Spec {
+    fn good(version: &'static str, migrates: &'static str) -> Spec {
+        Spec {
+            version,
+            api: Behaviour::Healthy,
+            web: Behaviour::Plain,
+            migrates,
+            secrets: "alpine-1",
+            adds_secret: None,
+            rustfs: "rustfs-1",
+            postgres: "postgres-1",
+            updater: b"updater ok",
+        }
+    }
+
+    fn own(&self, image: Image) -> String {
+        digest(&format!("{}-{}", image.name(), self.version))
+    }
+
+    fn release(&self) -> Release {
+        Release {
+            version: ReleaseVersion::parse(self.version).unwrap(),
+            digests: Image::ALL.map(|i| ImageDigest::parse(&self.own(i)).unwrap()),
+        }
+    }
+
+    fn compose(&self) -> String {
+        format!(
+            "service secrets docker.io/library/alpine@{}\n\
+             service postgres docker.io/library/postgres@{}\n\
+             service rustfs docker.io/rustfs/rustfs@{}\n\
+             service api ${{LAYSI_REGISTRY}}/laysi-one-api@${{LAYSI_API_DIGEST}}\n\
+             service mcp ${{LAYSI_REGISTRY}}/laysi-one-api@${{LAYSI_API_DIGEST}}\n\
+             service backup ${{LAYSI_REGISTRY}}/laysi-one-backup@${{LAYSI_BACKUP_DIGEST}}\n\
+             service web ${{LAYSI_REGISTRY}}/laysi-one-web@${{LAYSI_WEB_DIGEST}}\n",
+            digest(self.secrets),
+            digest(self.postgres),
+            digest(self.rustfs)
+        )
+    }
+
+    fn publish(&self, world: &mut World) {
+        let image = |repo: &str, release: &'static str, behaviour| ImageSpec {
+            repo: repo.to_string(),
+            release,
+            behaviour,
+            migrates: None,
+            adds_secret: None,
+            files: BTreeMap::new(),
+            size: 100 * 1024 * 1024,
+        };
+        let mut api = image(&format!("{REGISTRY}/laysi-one-api"), self.version, self.api);
+        api.migrates = Some(self.migrates);
+        api.files.insert(
+            format!("{IMAGE_SHARE}/{}", COMPOSE_FILES[0]),
+            self.compose().into_bytes(),
+        );
+        api.files.insert(
+            format!("{IMAGE_SHARE}/{}", COMPOSE_FILES[1]),
+            b"overlay\n".to_vec(),
+        );
+        api.files
+            .insert(IMAGE_UPDATER.to_string(), self.updater.to_vec());
+        world.registry.insert(self.own(Image::Api), api);
+        world.registry.insert(
+            self.own(Image::Web),
+            image(&format!("{REGISTRY}/laysi-one-web"), self.version, self.web),
+        );
+        world.registry.insert(
+            self.own(Image::Backup),
+            image(
+                &format!("{REGISTRY}/laysi-one-backup"),
+                self.version,
+                Behaviour::Plain,
+            ),
+        );
+        let mut secrets = image("docker.io/library/alpine", "", Behaviour::Oneshot);
+        secrets.adds_secret = self.adds_secret;
+        world
+            .registry
+            .entry(digest(self.secrets))
+            .or_insert(secrets);
+        world
+            .registry
+            .entry(digest(self.postgres))
+            .or_insert_with(|| image("docker.io/library/postgres", "", Behaviour::Healthy));
+        world
+            .registry
+            .entry(digest(self.rustfs))
+            .or_insert_with(|| image("docker.io/rustfs/rustfs", "", Behaviour::Healthy));
+    }
+}
+
+struct Rig {
+    layout: Layout,
+    world: Rc<RefCell<World>>,
+    key: SigningKey,
+    config: Config,
+    specs: Vec<Spec>,
+}
+
+impl Rig {
+    /// A host that runs `installed`, booted, with `offered` published.
+    fn new(installed: Spec, offered: &[Spec]) -> Rig {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let root =
+            std::env::temp_dir().join(format!("laysi-updater-rig-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = Layout::new(root);
+        for (dir, mode) in layout.directories() {
+            fsx::ensure_dir(&dir, mode).unwrap();
+        }
+        let mut world = World::new();
+        installed.publish(&mut world);
+        for spec in offered {
+            spec.publish(&mut world);
+        }
+        // An image from a release before the installed one, which the
+        // clean-up after a successful update should remove.
+        let ancient = Spec::good("v0.0.9", "m0");
+        ancient.publish(&mut world);
+        world.local.insert(ancient.own(Image::Api));
+
+        let stack = layout.stack_files();
+        std::fs::write(&stack[0], installed.compose()).unwrap();
+        std::fs::write(&stack[1], "overlay\n").unwrap();
+        let env =
+            EnvFile::default().for_release(&installed.release(), &layout.root.to_string_lossy());
+        std::fs::write(&stack[2], env.render()).unwrap();
+        std::fs::write(
+            layout.installed(),
+            journal::encode_installed(&installed.release()),
+        )
+        .unwrap();
+        std::fs::write(layout.current_updater(), b"updater installed").unwrap();
+        for i in Image::ALL {
+            world.local.insert(installed.own(i));
+        }
+
+        let rig = Rig {
+            layout,
+            world: Rc::new(RefCell::new(world)),
+            key: SigningKey::from_bytes(&[7; 32]),
+            config: Config {
+                health_timeout_secs: 60,
+                entry_timeout_secs: 30,
+                poll_secs: 5,
+                disk_reserve_bytes: 1024,
+            },
+            specs: std::iter::once(installed)
+                .chain(offered.iter().cloned())
+                .collect(),
+        };
+        rig.machine(|m| m.boot())
+            .expect("the installed release boots");
+        rig.world.borrow_mut().violations.clear();
+        rig
+    }
+
+    fn machine<T>(&self, f: impl FnOnce(&mut Machine<FakeHost>) -> T) -> T {
+        let mut host = FakeHost {
+            world: self.world.clone(),
+        };
+        let mut m = Machine::new(
+            &mut host,
+            self.layout.clone(),
+            vec![self.key.verifying_key()],
+            self.config.clone(),
+        );
+        f(&mut m)
+    }
+
+    fn manifest(&self, version: &str) -> String {
+        let spec = self
+            .specs
+            .iter()
+            .find(|s| s.version == version)
+            .expect("published");
+        signed_manifest(&self.key, spec)
+    }
+
+    fn request(&self, id: &str, manifest: &str) -> RequestId {
+        let id = RequestId::parse(id).unwrap();
+        let text = UpdateRequest::new(id.clone(), manifest).unwrap().encode();
+        std::fs::write(self.layout.requests_dir().join(REQUEST_FILE), text).unwrap();
+        id
+    }
+
+    /// What systemd does when a request appears: the run, then
+    /// `ExecStopPost=`.
+    fn run(&self) -> Result<(), String> {
+        let outcome = self.machine(|m| m.run_request());
+        self.machine(|m| m.discard_requests()).unwrap();
+        outcome
+    }
+
+    fn result(&self, id: &RequestId) -> UpdateResult {
+        self.machine(|m| m.read_result(id))
+            .expect("a result was written")
+    }
+
+    fn installed(&self) -> String {
+        self.machine(|m| m.load_installed())
+            .unwrap()
+            .version
+            .to_string()
+    }
+
+    fn spec(&self, version: &str) -> &Spec {
+        self.specs.iter().find(|s| s.version == version).unwrap()
+    }
+
+    fn backups(&self) -> Vec<String> {
+        std::fs::read_dir(self.layout.backup_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn requests_left(&self) -> usize {
+        std::fs::read_dir(self.layout.requests_dir())
+            .unwrap()
+            .count()
+    }
+
+    /// Every service runs, all of one release, the database matches it, and
+    /// nothing was left behind.
+    fn assert_settled(&self, id: &RequestId) {
+        let installed = self.installed();
+        let spec = self.spec(&installed).clone();
+        let w = self.world.borrow();
+        for service in SERVICES {
+            let c = w
+                .containers
+                .get(service)
+                .unwrap_or_else(|| panic!("{service} has no container"));
+            assert!(c.running, "{service} is not running ({installed})");
+            let image = w.registry.get(&c.digest).unwrap();
+            if !image.release.is_empty() {
+                assert_eq!(image.release, installed, "{service} runs another release");
+            }
+        }
+        assert_eq!(w.containers["rustfs"].digest, digest(spec.rustfs));
+        assert_eq!(w.containers["postgres"].digest, digest(spec.postgres));
+        let db = w.db.as_ref().expect("the database exists");
+        assert!(db.rows.contains(&"written-before-the-update".to_string()));
+        let expected: Vec<&str> = self
+            .specs
+            .iter()
+            .filter(|s| {
+                ReleaseVersion::parse(s.version).unwrap()
+                    <= ReleaseVersion::parse(&installed).unwrap()
+            })
+            .map(|s| s.migrates)
+            .collect();
+        let mut have: Vec<&str> = db.migrations.iter().map(String::as_str).collect();
+        have.sort();
+        let mut want = expected.clone();
+        want.sort();
+        want.dedup();
+        assert_eq!(have, want, "the database matches {installed}");
+        assert!(w.violations.is_empty(), "{:?}", w.violations);
+        drop(w);
+        assert!(
+            self.backups().is_empty(),
+            "backups left: {:?}",
+            self.backups()
+        );
+        assert!(self.machine(|m| m.load_journal()).unwrap().is_none());
+        let result = self.result(id);
+        assert!(result.status.is_final(), "{:?}", result.status);
+        let running = result.running.as_ref().map(|v| v.to_string());
+        assert_eq!(running.as_deref(), Some(installed.as_str()), "{:?}", result);
+        assert_eq!(self.requests_left(), 0);
+    }
+}
+
+fn signed_manifest(key: &SigningKey, spec: &Spec) -> String {
+    let body = format!(
+        "laysi-release-manifest 1\nversion {}\nimage api {}\nimage web {}\nimage backup {}\n",
+        spec.version,
+        spec.own(Image::Api),
+        spec.own(Image::Web),
+        spec.own(Image::Backup)
+    );
+    let sig: String = key
+        .sign(body.as_bytes())
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(
+        "{body}signature {} {sig}\n",
+        KeyId::of(&key.verifying_key())
+    )
+}
+
+fn v1() -> Spec {
+    Spec::good("v0.1.0", "m1")
+}
+
+fn v2() -> Spec {
+    Spec::good("v0.2.0", "m2")
+}
+
+#[test]
+fn an_update_installs_the_new_release() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let id = rig.request("req-success-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert_eq!(rig.installed(), "v0.2.0");
+    rig.assert_settled(&id);
+    let (from, to) = (result.downtime_from.unwrap(), result.downtime_to.unwrap());
+    assert!(from < to);
+    assert_eq!(result.offered.unwrap().to_string(), "v0.2.0");
+
+    // The updater was replaced and the previous one kept.
+    assert_eq!(
+        std::fs::read(rig.layout.current_updater()).unwrap(),
+        b"updater ok"
+    );
+    assert_eq!(
+        std::fs::read(rig.layout.previous_updater()).unwrap(),
+        b"updater installed"
+    );
+    // The previous stack files are kept beside the current ones.
+    let prod = rig.layout.stack_files()[0].clone();
+    assert_eq!(
+        std::fs::read_to_string(Layout::previous_of(&prod)).unwrap(),
+        v1().compose()
+    );
+
+    // Only this release's images and the previous release's remain.
+    let w = rig.world.borrow();
+    for digest in &w.local {
+        let release = w.registry[digest].release;
+        assert!(
+            release.is_empty() || release == "v0.1.0" || release == "v0.2.0",
+            "{digest} from {release} survived"
+        );
+    }
+    assert!(w.local.contains(&v1().own(Image::Api)));
+    assert!(std::fs::read_dir(rig.layout.incoming_dir())
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+#[test]
+fn a_new_release_that_never_passes_is_rolled_back_with_the_database() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken]);
+    let id = rig.request("req-unhealthy-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    assert!(result.reason.unwrap().contains("api"));
+    assert_eq!(rig.installed(), "v0.1.0");
+    // The new api ran its migration; the restore took it out again, and the
+    // row written before step 4 is still there.
+    assert_eq!(rig.world.borrow().restores, 1);
+    rig.assert_settled(&id);
+    // Neither entry point ever ran on the new release.
+    let w = rig.world.borrow();
+    assert!(w.violations.is_empty());
+    assert_eq!(w.containers["web"].digest, v1().own(Image::Web));
+}
+
+#[test]
+fn an_api_that_exits_at_start_is_rolled_back() {
+    let mut broken = v2();
+    broken.api = Behaviour::ExitsAtStart;
+    let rig = Rig::new(v1(), &[broken]);
+    let id = rig.request("req-exits-01", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn entry_points_never_start_before_the_rest_has_passed() {
+    // web is the one that fails, so the core of the new release did pass and
+    // web and mcp were started on it; the rollback then has to undo them.
+    let mut broken = v2();
+    broken.web = Behaviour::ExitsAtStart;
+    let rig = Rig::new(v1(), &[broken]);
+    let id = rig.request("req-webfail-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    // web and mcp were reachable on the new release for a while, and the
+    // result says that what they took in went back with the database.
+    assert!(rig.result(&id).reason.unwrap().contains("一併還原"));
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn when_the_old_release_does_not_come_back_either_it_stays_and_is_not_restored_again() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken]);
+    // The old web image no longer starts either.
+    let old_web = v1().own(Image::Web);
+    rig.world
+        .borrow_mut()
+        .registry
+        .get_mut(&old_web)
+        .unwrap()
+        .behaviour = Behaviour::ExitsAtStart;
+
+    let id = rig.request("req-rbfail-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed, "{result:?}");
+    assert!(result.reason.is_some() && result.rollback_reason.is_some());
+    assert_eq!(result.running.unwrap().to_string(), "v0.1.0");
+    assert_eq!(rig.installed(), "v0.1.0");
+    // The restore succeeded, so its dump is gone.
+    assert!(rig.backups().is_empty());
+    assert_eq!(rig.world.borrow().restores, 1);
+    let journal = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(journal.phase, Phase::RollbackFailed);
+
+    // Every later boot starts the stack and never restores again.
+    for _ in 0..3 {
+        rig.world.borrow_mut().reboot();
+        let booted = rig.machine(|m| m.boot());
+        assert!(booted.is_err(), "web still does not start");
+        assert_eq!(rig.world.borrow().restores, 1);
+        assert!(rig.world.borrow().containers["api"].running);
+        assert_eq!(
+            rig.world.borrow().containers["api"].digest,
+            v1().own(Image::Api)
+        );
+    }
+    assert!(rig.world.borrow().db.as_ref().unwrap().migrations.len() == 1);
+}
+
+#[test]
+fn a_failed_restore_keeps_the_dump_and_blocks_further_updates() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let mut v3 = Spec::good("v0.3.0", "m3");
+    v3.api = Behaviour::Healthy;
+    let rig = Rig::new(v1(), &[broken, v3]);
+    rig.world.borrow_mut().fail_restore = true;
+    let id = rig.request("req-restorefail", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed);
+    assert!(result.rollback_reason.unwrap().contains("備份保留"));
+    assert_eq!(rig.backups(), vec!["req-restorefail.dump".to_string()]);
+    assert!(rig.world.borrow().db.is_none(), "a half restore is dropped");
+    // The services other than postgres stay stopped.
+    assert!(!rig.world.borrow().containers["web"].running);
+
+    let next = rig.request("req-after-fail", &rig.manifest("v0.3.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&next).status, UpdateStatus::RefusedBlocked);
+    assert_eq!(rig.backups(), vec!["req-restorefail.dump".to_string()]);
+
+    // Every later boot starts postgres alone, and restores nothing.
+    for _ in 0..2 {
+        rig.world.borrow_mut().reboot();
+        assert!(rig.machine(|m| m.boot()).is_ok());
+        let w = rig.world.borrow();
+        assert!(w.containers["postgres"].running);
+        for service in ["api", "mcp", "web", "backup", "rustfs"] {
+            assert!(!w.containers[service].running, "{service} started");
+        }
+        assert_eq!(w.restores, 1);
+    }
+}
+
+#[test]
+fn too_little_disk_stops_before_anything_changes() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let before = rig.world.borrow().containers.clone();
+    let pulls = rig.world.borrow().pulls;
+    rig.world.borrow_mut().free = 10 * 1024 * 1024;
+    let id = rig.request("req-diskspace", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RefusedDiskSpace, "{result:?}");
+    assert!(result.reason.unwrap().contains("磁碟"));
+    let w = rig.world.borrow();
+    assert_eq!(w.pulls, pulls, "nothing was pulled");
+    assert_eq!(w.dumps, 0);
+    for (service, c) in &w.containers {
+        assert_eq!(
+            c.created, before[service].created,
+            "{service} was not touched"
+        );
+        assert_eq!(c.running, before[service].running);
+    }
+    drop(w);
+    assert!(rig.machine(|m| m.load_journal()).unwrap().is_none());
+    assert_eq!(rig.installed(), "v0.1.0");
+    assert_eq!(rig.requests_left(), 0);
+}
+
+#[test]
+fn refusals_are_answered_with_the_request_id() {
+    let rig = Rig::new(v2(), &[v1()]);
+
+    // Same version.
+    let id = rig.request("req-same-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RefusedSameVersion);
+
+    // An older release.
+    let id = rig.request("req-down-0001", &rig.manifest("v0.1.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RefusedDowngrade);
+    assert!(result.reason.unwrap().contains("低於"));
+
+    // Signed by a key this build does not trust.
+    let other = SigningKey::from_bytes(&[9; 32]);
+    let id = rig.request("req-badsig-001", &signed_manifest(&other, &v1()));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RefusedSignature);
+
+    // Edited after signing.
+    let edited = rig.manifest("v0.1.0").replace("v0.1.0", "v0.9.0");
+    let id = rig.request("req-edited-001", &edited);
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RefusedSignature);
+
+    assert_eq!(rig.installed(), "v0.2.0");
+    assert_eq!(rig.world.borrow().dumps, 0);
+    assert_eq!(rig.requests_left(), 0);
+}
+
+#[test]
+fn a_request_while_another_run_holds_the_lock_is_refused_as_busy() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let held = fsx::Lock::acquire(&rig.layout.lock(), false)
+        .unwrap()
+        .unwrap();
+    let id = rig.request("req-busy-00001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RefusedBusy);
+    assert_eq!(rig.installed(), "v0.1.0");
+    assert_eq!(rig.requests_left(), 0);
+    drop(held);
+}
+
+#[test]
+fn a_request_written_during_a_run_is_discarded_and_told_so() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let first = rig.request("req-first-0001", &rig.manifest("v0.2.0"));
+    rig.machine(|m| m.run_request()).unwrap();
+    // Arrives while the run is ending; the next ExecStopPost sees it.
+    let second = rig.request("req-second-001", &rig.manifest("v0.2.0"));
+    rig.machine(|m| m.discard_requests()).unwrap();
+    assert_eq!(rig.result(&first).status, UpdateStatus::Succeeded);
+    assert_eq!(rig.result(&second).status, UpdateStatus::RefusedBusy);
+    assert_eq!(rig.requests_left(), 0);
+    assert_eq!(rig.installed(), "v0.2.0");
+}
+
+#[test]
+fn a_request_that_is_not_a_regular_file_is_ignored_and_cleared() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let outside = rig.layout.root.join("state/installed");
+    std::os::unix::fs::symlink(&outside, rig.layout.requests_dir().join(REQUEST_FILE)).unwrap();
+    rig.run().unwrap();
+    assert_eq!(rig.installed(), "v0.1.0");
+    assert_eq!(rig.requests_left(), 0);
+    assert!(outside.exists(), "the symlink target was not touched");
+
+    std::fs::write(
+        rig.layout.requests_dir().join(REQUEST_FILE),
+        "not a request",
+    )
+    .unwrap();
+    rig.run().unwrap();
+    assert_eq!(rig.requests_left(), 0);
+    assert_eq!(rig.installed(), "v0.1.0");
+}
+
+#[test]
+fn an_updater_that_fails_its_self_check_is_not_installed() {
+    let mut next = v2();
+    next.updater = b"broken updater";
+    let rig = Rig::new(v1(), &[next]);
+    let id = rig.request("req-selfcheck1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::SucceededUpdaterKept);
+    assert!(result.reason.unwrap().contains("自我檢查"));
+    assert_eq!(
+        std::fs::read(rig.layout.current_updater()).unwrap(),
+        b"updater installed"
+    );
+    assert!(!rig.layout.previous_updater().exists());
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn an_updater_that_cannot_write_its_units_is_put_back() {
+    let mut next = v2();
+    next.updater = b"no-units updater";
+    let rig = Rig::new(v1(), &[next]);
+    let id = rig.request("req-units-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::SucceededUpdaterKept);
+    assert_eq!(
+        std::fs::read(rig.layout.current_updater()).unwrap(),
+        b"updater installed"
+    );
+}
+
+#[test]
+fn a_new_secret_is_generated_and_the_old_ones_kept() {
+    let mut next = v2();
+    next.secrets = "alpine-2";
+    next.adds_secret = Some("mcp_signing_key");
+    let rig = Rig::new(v1(), &[next]);
+    let id = rig.request("req-secret-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    let secrets = rig.world.borrow().secrets.clone();
+    for s in ["pg_password", "setup_token", "mcp_signing_key"] {
+        assert!(secrets.contains(s), "{s}");
+    }
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_release_that_only_changes_rustfs_runs_the_new_rustfs() {
+    let mut next = v2();
+    next.rustfs = "rustfs-2";
+    let rig = Rig::new(v1(), &[next]);
+    let id = rig.request("req-rustfs-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    assert_eq!(
+        rig.world.borrow().containers["rustfs"].digest,
+        digest("rustfs-2")
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn ten_updates_in_a_row_keep_two_releases_of_images() {
+    let versions: Vec<&'static str> = vec![
+        "v0.2.0", "v0.3.0", "v0.4.0", "v0.5.0", "v0.6.0", "v0.7.0", "v0.8.0", "v0.9.0", "v0.10.0",
+        "v0.11.0",
+    ];
+    let migrations: Vec<&'static str> =
+        vec!["m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11"];
+    let specs: Vec<Spec> = versions
+        .iter()
+        .zip(&migrations)
+        .map(|(v, m)| Spec::good(v, m))
+        .collect();
+    let rig = Rig::new(v1(), &specs);
+    for (n, version) in versions.iter().enumerate() {
+        let id = rig.request(&format!("req-tenfold-{n:02}"), &rig.manifest(version));
+        rig.run().unwrap();
+        assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded, "{version}");
+        assert_eq!(&rig.installed(), version);
+        rig.assert_settled(&id);
+        let w = rig.world.borrow();
+        let releases: std::collections::BTreeSet<&str> = w
+            .local
+            .iter()
+            .map(|d| w.registry[d].release)
+            .filter(|r| !r.is_empty())
+            .collect();
+        assert!(releases.len() <= 2, "{releases:?}");
+    }
+}
+
+#[test]
+fn an_unreadable_journal_starts_nothing_and_fails_the_boot() {
+    let rig = Rig::new(v1(), &[]);
+    std::fs::write(
+        rig.layout.journal(),
+        "laysi-updater-journal 1\nphase dancing\n",
+    )
+    .unwrap();
+    rig.world.borrow_mut().reboot();
+    // The boot unit's OnFailure= then runs the previous updater.
+    assert!(rig.machine(|m| m.boot()).is_err());
+    let w = rig.world.borrow();
+    for service in SERVICES {
+        assert!(!w.containers[service].running, "{service} started");
+    }
+    drop(w);
+    // An updater that reads it, here the same one once the file is whole,
+    // finishes and starts.
+    std::fs::remove_file(rig.layout.journal()).unwrap();
+    assert!(rig.machine(|m| m.boot()).is_ok());
+    assert!(rig.world.borrow().containers["web"].running);
+}
+
+/// Run `scenario` once to count its calls, then again with the power cut at
+/// each of them, reboot, boot and let the path unit see the request again.
+/// Wherever it was cut, the machine ends on one release with everything
+/// running, the database matching it and the request answered.
+#[derive(Clone, Copy, PartialEq)]
+enum Cut {
+    /// The power goes: every container stops with the updater.
+    Power,
+    /// The power goes again during the recovery at boot.
+    PowerTwice,
+    /// Only the updater dies; what it started keeps running, and the
+    /// recovery unit (`OnFailure=`) runs next.
+    Process,
+}
+
+fn sweep(installed: Spec, offered: Spec, expect_final: &[UpdateStatus], cut: Cut) {
+    let double = cut == Cut::PowerTwice;
+    let calls = {
+        let rig = Rig::new(installed.clone(), std::slice::from_ref(&offered));
+        rig.request("req-sweep-0000", &rig.manifest(offered.version));
+        let start = rig.world.borrow().calls;
+        rig.machine(|m| m.run_request()).unwrap();
+        let end = rig.world.borrow().calls;
+        end - start
+    };
+    assert!(calls > 20, "only {calls} calls");
+    let step = if double { 3 } else { 1 };
+    for k in (1..=calls).step_by(step) {
+        let rig = Rig::new(installed.clone(), std::slice::from_ref(&offered));
+        let id = rig.request("req-sweep-0001", &rig.manifest(offered.version));
+        let at = rig.world.borrow().calls + k;
+        rig.world.borrow_mut().crash_at = Some(at);
+        let first = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+        assert!(first.is_err(), "the cut at call {k} of {calls} happened");
+        if cut == Cut::Process {
+            rig.world.borrow_mut().restart_updater();
+        } else {
+            rig.world.borrow_mut().reboot();
+        }
+
+        if double {
+            // A second cut, during the recovery at boot.
+            let j = (k % 11) + 1;
+            let at = rig.world.borrow().calls + j;
+            rig.world.borrow_mut().crash_at = Some(at);
+            let _ = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.boot())));
+            rig.world.borrow_mut().reboot();
+        }
+
+        let booted = rig.machine(|m| m.boot());
+        assert!(booted.is_ok(), "boot after a cut at call {k}: {booted:?}");
+        // The request is still in its directory: no ExecStopPost ran.
+        rig.run()
+            .unwrap_or_else(|e| panic!("run after a cut at call {k}: {e}"));
+
+        let result = rig.result(&id);
+        assert!(
+            expect_final.contains(&result.status),
+            "cut at call {k}: {:?} {:?}",
+            result.status,
+            result.reason
+        );
+        rig.assert_settled(&id);
+    }
+}
+
+#[test]
+fn a_power_cut_at_any_point_of_a_successful_update_ends_on_one_release() {
+    sweep(
+        v1(),
+        v2(),
+        &[
+            UpdateStatus::Succeeded,
+            UpdateStatus::RolledBack,
+            UpdateStatus::FailedUnchanged,
+        ],
+        Cut::Power,
+    );
+}
+
+#[test]
+fn a_power_cut_at_any_point_of_a_rollback_ends_on_the_old_release() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    sweep(
+        v1(),
+        broken,
+        &[UpdateStatus::RolledBack, UpdateStatus::FailedUnchanged],
+        Cut::Power,
+    );
+}
+
+#[test]
+fn a_second_power_cut_during_recovery_still_ends_on_one_release() {
+    sweep(
+        v1(),
+        v2(),
+        &[
+            UpdateStatus::Succeeded,
+            UpdateStatus::RolledBack,
+            UpdateStatus::FailedUnchanged,
+        ],
+        Cut::PowerTwice,
+    );
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    sweep(
+        v1(),
+        broken,
+        &[UpdateStatus::RolledBack, UpdateStatus::FailedUnchanged],
+        Cut::PowerTwice,
+    );
+}
+
+#[test]
+fn an_updater_killed_at_any_point_with_the_stack_running_ends_on_one_release() {
+    sweep(
+        v1(),
+        v2(),
+        &[
+            UpdateStatus::Succeeded,
+            UpdateStatus::RolledBack,
+            UpdateStatus::FailedUnchanged,
+        ],
+        Cut::Process,
+    );
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    sweep(
+        v1(),
+        broken,
+        &[UpdateStatus::RolledBack, UpdateStatus::FailedUnchanged],
+        Cut::Process,
+    );
+}
+
+#[test]
+fn every_journal_phase_is_reached_by_the_tests() {
+    // The sweeps above cut the power after each phase is written, because a
+    // checkpoint follows every journal write. This lists the phases a
+    // success and a rollback pass through, so a phase nobody reaches shows up.
+    let mut seen = std::collections::BTreeSet::new();
+    for offered in [v2(), {
+        let mut b = v2();
+        b.api = Behaviour::NeverHealthy;
+        b
+    }] {
+        let rig = Rig::new(v1(), std::slice::from_ref(&offered));
+        rig.request("req-phases-001", &rig.manifest(offered.version));
+        rig.run().unwrap();
+        let log = std::fs::read_to_string(rig.layout.log()).unwrap();
+        for phase in Phase::all() {
+            if log.contains(&format!(": {phase}\n")) {
+                seen.insert(phase.name());
+            }
+        }
+    }
+    let missing: Vec<_> = Phase::all()
+        .iter()
+        .filter(|p| !seen.contains(p.name()) && **p != Phase::RollbackFailed)
+        .collect();
+    assert!(missing.is_empty(), "never reached: {missing:?}");
+}
+
+#[test]
+fn manifests_verify_against_the_release_module() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let text = rig.manifest("v0.2.0");
+    let m = release::verify_with(&text, &[rig.key.verifying_key()]).unwrap();
+    assert_eq!(Release::of(&m), v2().release());
+}
+
+#[test]
+fn a_release_whose_compose_file_names_a_tag_is_refused_before_anything_stops() {
+    let mut next = v2();
+    next.rustfs = "latest";
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    // Publish a compose file with the tag in place of the digest.
+    let tagged = next
+        .compose()
+        .replace(&format!("@{}", digest("latest")), ":latest");
+    rig.world
+        .borrow_mut()
+        .registry
+        .get_mut(&next.own(Image::Api))
+        .unwrap()
+        .files
+        .insert(
+            format!("{IMAGE_SHARE}/{}", COMPOSE_FILES[0]),
+            tagged.into_bytes(),
+        );
+    let before = rig.world.borrow().containers.clone();
+    let id = rig.request("req-tagged-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert!(result.reason.unwrap().contains("digest"));
+    assert!(result.downtime_from.is_none());
+    let w = rig.world.borrow();
+    // What the preparation pulled went again.
+    for image in Image::ALL {
+        assert!(
+            !w.local.contains(&next.own(image)),
+            "{image} was left behind"
+        );
+        assert!(
+            w.local.contains(&v1().own(image)),
+            "{image} of v1 was removed"
+        );
+    }
+    for (service, c) in &w.containers {
+        assert_eq!(c.created, before[service].created, "{service}");
+        assert_eq!(c.running, before[service].running, "{service}");
+    }
+}
+
+#[test]
+fn a_container_not_created_from_the_compose_file_does_not_pass() {
+    use crate::host::{Container, Service};
+    use crate::machine::judge;
+    let at = chrono::Utc::now();
+    let container = |image: &str, digest: &str| Container {
+        id: "x".into(),
+        name: "laysi-one-rustfs".into(),
+        service: "rustfs".into(),
+        running: true,
+        exit_code: None,
+        restarts: 0,
+        has_healthcheck: true,
+        health: Some("healthy".into()),
+        image_name: image.into(),
+        image_digest: digest.into(),
+        created: at,
+    };
+    let (old, new) = (digest("rustfs-1"), digest("rustfs-2"));
+    let service = Service {
+        name: "rustfs".into(),
+        image: format!("docker.io/rustfs/rustfs:1.0.1@{new}"),
+    };
+    let services = std::slice::from_ref(&service);
+    let ok = container(&format!("docker.io/rustfs/rustfs:1.0.1@{new}"), &new);
+    assert_eq!(judge(&[ok], services, None, REGISTRY, None), Ok(()));
+    // The container a failed recreate left in place.
+    let stale = container(&format!("docker.io/rustfs/rustfs@{old}"), &old);
+    assert!(judge(&[stale], services, None, REGISTRY, None).is_err());
+    // Created from the right reference, running something else.
+    let other = container(&format!("docker.io/rustfs/rustfs@{new}"), &old);
+    assert!(judge(&[other], services, None, REGISTRY, None).is_err());
+    // A tag in the compose file never passes.
+    let tagged = Service {
+        name: "rustfs".into(),
+        image: "docker.io/rustfs/rustfs:1.0.1".into(),
+    };
+    let running = container("docker.io/rustfs/rustfs:1.0.1", &new);
+    assert!(judge(&[running], &[tagged], None, REGISTRY, None).is_err());
+    // Older than the switch.
+    let early = container(&format!("docker.io/rustfs/rustfs@{new}"), &new);
+    let since = Some(at + chrono::Duration::seconds(30));
+    assert!(judge(&[early], services, None, REGISTRY, since).is_err());
+}
+
+#[test]
+fn a_service_that_does_not_stop_is_never_dumped_around() {
+    let rig = Rig::new(v1(), &[v2()]);
+    rig.world.borrow_mut().unstoppable = Some(v1().own(Image::Backup));
+    let id = rig.request("req-nostop-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    // Step 4 could not stop backup: no dump, nothing switched, back up.
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    assert!(result.reason.unwrap().contains("backup"));
+    assert_eq!(rig.world.borrow().dumps, 0);
+    rig.world.borrow_mut().unstoppable = None;
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_rollback_that_cannot_stop_the_new_release_keeps_the_dump() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken.clone()]);
+    rig.world.borrow_mut().unstoppable = Some(broken.own(Image::Api));
+    let id = rig.request("req-nostop-002", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed, "{result:?}");
+    assert!(result.rollback_reason.unwrap().contains("api"));
+    assert_eq!(rig.world.borrow().restores, 0, "no restore under a writer");
+    assert_eq!(rig.backups(), vec!["req-nostop-002.dump".to_string()]);
+    // The files name the old release, so that is what a boot starts.
+    let env = std::fs::read_to_string(&rig.layout.stack_files()[2]).unwrap();
+    assert!(env.contains(&v1().own(Image::Api)));
+    assert_eq!(rig.installed(), "v0.1.0");
+}
+
+#[test]
+fn the_same_updater_whose_units_fail_is_kept_and_the_update_finishes() {
+    let mut next = v2();
+    next.updater = b"no-units same";
+    let rig = Rig::new(v1(), &[next]);
+    std::fs::write(rig.layout.current_updater(), b"no-units same").unwrap();
+    let id = rig.request("req-sameupd-01", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(
+        result.status,
+        UpdateStatus::SucceededUpdaterKept,
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read(rig.layout.current_updater()).unwrap(),
+        b"no-units same"
+    );
+    assert!(!rig.layout.previous_updater().exists());
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_tagged_reference_to_an_own_image_is_still_checked_against_the_release() {
+    use crate::host::{Container, Service};
+    use crate::machine::judge;
+    let release = v1().release();
+    let other = v2().own(Image::Api);
+    let tagged = format!("{REGISTRY}/laysi-one-api:v0.1.0@{other}");
+    let service = Service {
+        name: "api".into(),
+        image: tagged.clone(),
+    };
+    let container = Container {
+        id: "x".into(),
+        name: "laysi-one-api".into(),
+        service: "api".into(),
+        running: true,
+        exit_code: None,
+        restarts: 0,
+        has_healthcheck: false,
+        health: None,
+        image_name: tagged,
+        image_digest: other,
+        created: chrono::Utc::now(),
+    };
+    let verdict = judge(&[container], &[service], Some(&release), REGISTRY, None);
+    assert!(verdict.unwrap_err().contains("v0.1.0"));
+}
+
+#[test]
+fn a_restore_that_fails_while_recovering_starts_postgres_alone() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken]);
+    rig.world.borrow_mut().crash_on = Some("restoring");
+    let id = rig.request("req-recoverfail", &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err(), "the power went in the restoring phase");
+    rig.world.borrow_mut().reboot();
+    rig.world.borrow_mut().fail_restore = true;
+
+    // The boot finishes the rollback, the restore fails, and what started is
+    // postgres alone.
+    assert!(rig.machine(|m| m.boot()).is_ok());
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    assert_eq!(rig.backups(), vec!["req-recoverfail.dump".to_string()]);
+    let w = rig.world.borrow();
+    assert!(w.containers["postgres"].running);
+    for service in ["api", "mcp", "web", "backup", "rustfs"] {
+        assert!(!w.containers[service].running, "{service} started");
+    }
+}
+
+#[test]
+fn a_release_that_leaves_a_service_out_is_refused_before_anything_stops() {
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    let without_api: String = next
+        .compose()
+        .lines()
+        .filter(|l| !l.starts_with("service api "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    rig.world
+        .borrow_mut()
+        .registry
+        .get_mut(&next.own(Image::Api))
+        .unwrap()
+        .files
+        .insert(
+            format!("{IMAGE_SHARE}/{}", COMPOSE_FILES[0]),
+            without_api.into_bytes(),
+        );
+    let id = rig.request("req-noapi-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert!(result.reason.unwrap().contains("api"));
+    assert!(result.downtime_from.is_none());
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_request_whose_journal_cannot_be_written_is_answered_as_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = Rig::new(v1(), &[v2()]);
+    let state = rig.layout.state_dir();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let id = rig.request("req-nojournal1", &rig.manifest("v0.2.0"));
+    let outcome = rig.run();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(outcome.is_err());
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    rig.assert_settled(&id);
+
+    // Killed between accepting a request and writing its journal: the
+    // ExecStopPost that follows answers it.
+    let id = RequestId::parse("req-killed-0001").unwrap();
+    let text = UpdateRequest::new(id.clone(), &rig.manifest("v0.2.0"))
+        .unwrap()
+        .encode();
+    std::fs::write(rig.layout.requests_dir().join(REQUEST_FILE), text).unwrap();
+    let accepted = UpdateResult::new(id.clone(), UpdateStatus::Accepted, chrono::Utc::now());
+    std::fs::write(
+        rig.layout.results_dir().join(id.as_str()),
+        accepted.encode(),
+    )
+    .unwrap();
+    rig.machine(|m| m.discard_requests()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::FailedUnchanged);
+    assert_eq!(rig.requests_left(), 0);
+}
+
+#[test]
+fn a_rollback_that_cannot_put_the_files_back_starts_nothing() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken]);
+    rig.world.borrow_mut().crash_on = Some("rolling-back");
+    let id = rig.request("req-nofiles-001", &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err());
+    rig.world.borrow_mut().reboot();
+    for file in rig.layout.stack_files() {
+        std::fs::remove_file(Layout::previous_of(&file)).unwrap();
+    }
+    assert!(rig.machine(|m| m.boot()).is_ok());
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed, "{result:?}");
+    assert_eq!(
+        result.running, None,
+        "the files name no release the host had"
+    );
+    assert_eq!(rig.backups(), vec!["req-nofiles-001.dump".to_string()]);
+    let w = rig.world.borrow();
+    for (service, c) in &w.containers {
+        assert!(!c.running, "{service} started");
+    }
+}
+
+#[test]
+fn a_release_that_runs_an_image_in_the_wrong_service_is_refused() {
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    let swapped = next.compose().replace(
+        "service web ${LAYSI_REGISTRY}/laysi-one-web@${LAYSI_WEB_DIGEST}",
+        "service web ${LAYSI_REGISTRY}/laysi-one-backup@${LAYSI_BACKUP_DIGEST}",
+    );
+    assert_ne!(swapped, next.compose());
+    rig.world
+        .borrow_mut()
+        .registry
+        .get_mut(&next.own(Image::Api))
+        .unwrap()
+        .files
+        .insert(
+            format!("{IMAGE_SHARE}/{}", COMPOSE_FILES[0]),
+            swapped.into_bytes(),
+        );
+    let id = rig.request("req-swapped-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert!(result.reason.unwrap().contains("web"));
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_release_without_rustfs_is_refused() {
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    let without: String = next
+        .compose()
+        .lines()
+        .filter(|l| !l.starts_with("service rustfs "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    rig.world
+        .borrow_mut()
+        .registry
+        .get_mut(&next.own(Image::Api))
+        .unwrap()
+        .files
+        .insert(
+            format!("{IMAGE_SHARE}/{}", COMPOSE_FILES[0]),
+            without.into_bytes(),
+        );
+    let id = rig.request("req-norustfs01", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert!(result.reason.unwrap().contains("rustfs"));
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_kept_dump_starts_no_database_under_a_service_that_will_not_stop() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), std::slice::from_ref(&broken));
+    rig.world.borrow_mut().fail_restore = true;
+    let id = rig.request("req-stuckdump1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    // The old rustfs, still running from the failed rollback, now ignores
+    // podman stop; postgres is stopped.
+    {
+        let mut w = rig.world.borrow_mut();
+        w.containers.get_mut("rustfs").unwrap().running = true;
+        w.containers.get_mut("postgres").unwrap().running = false;
+        let rustfs = w.containers["rustfs"].digest.clone();
+        w.unstoppable = Some(rustfs);
+    }
+    assert!(rig.machine(|m| m.boot()).is_ok());
+    assert!(!rig.world.borrow().containers["postgres"].running);
+}
+
+#[test]
+fn a_rollback_failure_cut_before_its_result_is_answered_at_boot() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), std::slice::from_ref(&broken));
+    // The old web no longer starts, so the rollback fails; the power goes
+    // right after the journal says so and before the result does.
+    let old_web = v1().own(Image::Web);
+    rig.world
+        .borrow_mut()
+        .registry
+        .get_mut(&old_web)
+        .unwrap()
+        .behaviour = Behaviour::ExitsAtStart;
+    rig.world.borrow_mut().crash_on = Some("rollback-failed");
+    let id = rig.request("req-cutfinal-01", &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err());
+    assert!(!rig.result(&id).status.is_final());
+    rig.world.borrow_mut().reboot();
+    let _ = rig.machine(|m| m.boot());
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    // The request still in its directory is not taken for a new one.
+    let restores = rig.world.borrow().restores;
+    let _ = rig.run();
+    assert_eq!(rig.world.borrow().restores, restores);
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+}
+
+#[test]
+fn a_final_result_that_cannot_be_written_keeps_the_journal_until_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = Rig::new(v1(), &[v2()]);
+    let results = rig.layout.results_dir();
+    let id = rig.request("req-noresult-01", &rig.manifest("v0.2.0"));
+    // The results directory turns read-only once the update is under way.
+    let journal = rig.layout.journal();
+    let outcome = {
+        let mut host = FakeHost {
+            world: rig.world.clone(),
+        };
+        let mut m = Machine::new(
+            &mut host,
+            rig.layout.clone(),
+            vec![rig.key.verifying_key()],
+            rig.config.clone(),
+        );
+        std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let outcome = m.run_request();
+        std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o755)).unwrap();
+        outcome
+    };
+    assert!(outcome.is_err(), "the final result could not be written");
+    assert!(journal.exists(), "the journal waits for the result");
+    // ExecStopPost does not take it for a request that never started.
+    rig.machine(|m| m.discard_requests()).unwrap();
+    assert!(rig.machine(|m| m.read_result(&id)).is_none());
+    // The recovery unit finishes the journal and writes the result.
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    assert!(!journal.exists());
+}
+
+#[test]
+fn an_unreadable_env_file_stops_the_update_before_anything_changes() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let env = rig.layout.stack_files()[2].clone();
+    std::fs::write(&env, [0xff, 0xfe, b'\n']).unwrap();
+    let id = rig.request("req-badenv-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert!(result.downtime_from.is_none());
+    assert_eq!(std::fs::read(&env).unwrap(), [0xff, 0xfe, b'\n']);
+    assert_eq!(rig.installed(), "v0.1.0");
+}
+
+#[test]
+fn a_release_larger_than_the_disk_is_refused_after_pulling_before_anything_stops() {
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    let before = rig.world.borrow().containers.clone();
+    {
+        let mut w = rig.world.borrow_mut();
+        // Enough for twice the running images, not for what the release
+        // turns out to weigh.
+        w.free = 4 * 1024 * 1024 * 1024;
+        for image in Image::ALL {
+            w.registry.get_mut(&next.own(image)).unwrap().size = 1500 * 1024 * 1024;
+        }
+    }
+    let id = rig.request("req-toolarge-01", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RefusedDiskSpace, "{result:?}");
+    assert!(result.downtime_from.is_none());
+    let w = rig.world.borrow();
+    assert_eq!(w.dumps, 0);
+    for image in Image::ALL {
+        assert!(!w.local.contains(&next.own(image)), "{image} was kept");
+    }
+    for (service, c) in &w.containers {
+        assert_eq!(c.created, before[service].created, "{service}");
+        assert_eq!(c.running, before[service].running, "{service}");
+    }
+}
+
+#[test]
+fn a_rollback_removes_the_images_of_the_release_it_left() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    broken.rustfs = "rustfs-2";
+    let rig = Rig::new(v1(), std::slice::from_ref(&broken));
+    let id = rig.request("req-rbprune-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    let w = rig.world.borrow();
+    for image in Image::ALL {
+        assert!(!w.local.contains(&broken.own(image)), "{image} was kept");
+        assert!(w.local.contains(&v1().own(image)), "{image} of v1 went");
+    }
+    assert!(
+        !w.local.contains(&digest("rustfs-2")),
+        "the new rustfs was kept"
+    );
+    assert!(w.local.contains(&digest("rustfs-1")));
+}
+
+#[test]
+fn a_swap_cut_before_it_began_does_not_bring_back_an_older_updater() {
+    let mut next = v2();
+    next.updater = b"broken updater";
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    // The journal says the swap was begun; the power went before the
+    // current updater was copied anywhere. `previous` is from long ago.
+    std::fs::write(rig.layout.previous_updater(), b"updater ancient").unwrap();
+    std::fs::write(rig.layout.incoming_updater(), b"broken updater").unwrap();
+    let mut j = journal::Journal::new(
+        RequestId::parse("req-swapcut-001").unwrap(),
+        chrono::Utc::now(),
+        v1().release(),
+        next.release(),
+    );
+    j.phase = Phase::Committed;
+    j.updater_swapped = true;
+    std::fs::write(rig.layout.journal(), j.encode()).unwrap();
+    let _ = rig.machine(|m| m.boot());
+    assert_eq!(
+        std::fs::read(rig.layout.current_updater()).unwrap(),
+        b"updater installed"
+    );
+    let id = RequestId::parse("req-swapcut-001").unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::SucceededUpdaterKept);
+}

@@ -184,6 +184,10 @@ pub struct Journal {
     /// When the containers being judged were created from. A container older
     /// than this is left over from before, whatever it reports.
     pub switch_started: Option<DateTime<Utc>>,
+    /// When web and mcp were first started on the new release. From then on
+    /// the new release could take writes, which a rollback restores away;
+    /// kept across interruptions so the result says how long that was.
+    pub entries_opened: Option<DateTime<Utc>>,
     /// The dump, a file name inside the backup directory.
     pub backup: Option<String>,
     /// Image references the stack ran before the switch, kept for a later
@@ -193,6 +197,9 @@ pub struct Journal {
     pub restore_files: bool,
     /// Rolling back has to restore the database from `backup`.
     pub restore_db: bool,
+    /// The current updater binary is being, or has been, replaced by the
+    /// new release's.
+    pub updater_swapped: bool,
     pub reason: Option<String>,
     pub rollback_reason: Option<String>,
     /// Why the new updater was not installed, when it was not.
@@ -215,10 +222,12 @@ impl Journal {
             downtime_from: None,
             downtime_to: None,
             switch_started: None,
+            entries_opened: None,
             backup: None,
             keep: Vec::new(),
             restore_files: false,
             restore_db: false,
+            updater_swapped: false,
             reason: None,
             rollback_reason: None,
             updater_note: None,
@@ -242,9 +251,11 @@ impl Journal {
         line("downtime-from", self.downtime_from.as_ref().map(stamp));
         line("downtime-to", self.downtime_to.as_ref().map(stamp));
         line("switch-started", self.switch_started.as_ref().map(stamp));
+        line("entries-opened", self.entries_opened.as_ref().map(stamp));
         line("backup", self.backup.clone());
         line("restore-files", Some(yes_no(self.restore_files)));
         line("restore-db", Some(yes_no(self.restore_db)));
+        line("updater-swapped", Some(yes_no(self.updater_swapped)));
         line("reason", self.reason.as_deref().map(single_line));
         line(
             "rollback-reason",
@@ -273,11 +284,13 @@ impl Journal {
                 })
                 .transpose()
         };
+        // Always written, so a journal without one is damaged rather than a
+        // journal that says no.
         let flag = |key: &str| -> Result<bool, String> {
-            match fields.optional(key)? {
-                None | Some("no") => Ok(false),
-                Some("yes") => Ok(true),
-                Some(other) => Err(format!("bad {key} {other}")),
+            match fields.one(key)? {
+                "no" => Ok(false),
+                "yes" => Ok(true),
+                other => Err(format!("bad {key} {other}")),
             }
         };
         Ok(Journal {
@@ -289,10 +302,17 @@ impl Journal {
             downtime_from: time("downtime-from")?,
             downtime_to: time("downtime-to")?,
             switch_started: time("switch-started")?,
+            entries_opened: time("entries-opened")?,
             backup: fields.optional("backup")?.map(str::to_string),
             keep: fields.all("keep").map(str::to_string).collect(),
             restore_files: flag("restore-files")?,
             restore_db: flag("restore-db")?,
+            // Added after the first journals: a journal without it comes
+            // from an updater that never replaced itself mid-step.
+            updater_swapped: match fields.optional("updater-swapped")? {
+                None => false,
+                Some(_) => flag("updater-swapped")?,
+            },
             reason: fields.optional("reason")?.map(str::to_string),
             rollback_reason: fields.optional("rollback-reason")?.map(str::to_string),
             updater_note: fields.optional("updater-note")?.map(str::to_string),
@@ -409,6 +429,7 @@ mod tests {
             j.phase = phase;
             j.downtime_from = Some(at + chrono::Duration::nanoseconds(123_456_789));
             j.switch_started = Some(at);
+            j.entries_opened = Some(at + chrono::Duration::seconds(30));
             j.backup = Some("abcdefgh-1234.dump".into());
             j.keep = vec![
                 "docker.io/library/postgres@sha256:aa".into(),
@@ -416,6 +437,7 @@ mod tests {
             ];
             j.restore_files = true;
             j.restore_db = phase >= Phase::Switching;
+            j.updater_swapped = phase >= Phase::Committed;
             j.reason = Some("api 沒有通過\n健康檢查".into());
             assert_eq!(Phase::from_name(phase.name()), Some(phase));
             let back = Journal::decode(&j.encode()).unwrap();
@@ -439,5 +461,19 @@ mod tests {
         assert!(Journal::decode(&text.replace("phase preparing", "phase dancing")).is_err());
         assert!(Journal::decode(&format!("{text}phase committed\n")).is_err());
         assert!(Journal::decode("").is_err());
+        for key in ["restore-files ", "restore-db "] {
+            let without: String = text
+                .lines()
+                .filter(|l| !l.starts_with(key))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            assert!(Journal::decode(&without).is_err(), "{key}");
+        }
+        let older: String = text
+            .lines()
+            .filter(|l| !l.starts_with("updater-swapped "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(!Journal::decode(&older).unwrap().updater_swapped);
     }
 }
