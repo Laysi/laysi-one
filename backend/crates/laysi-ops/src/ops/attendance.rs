@@ -552,9 +552,9 @@ pub(crate) struct DayLeave {
     pub leave_no: String,
     pub kind: String,
     pub status: String,
-    /// Working seconds of the request on this date, or `None` without both
-    /// work times.
-    pub seconds: Option<i64>,
+    /// The request's hours on this date, by the split recorded when it was
+    /// sent (see [`leave_by_date`]).
+    pub hours: Money,
 }
 
 /// Employment types absence is not judged for. A part timer works the days
@@ -582,7 +582,12 @@ pub(crate) fn judges_absence(
 /// Attach leave to each day and mark the days nobody accounted for.
 ///
 /// `leaves` are one person's requests; only those still holding their hours
-/// are attached (see [`holds_hours`]). A day is
+/// are attached (see [`holds_hours`]), each on the dates and with the hours
+/// recorded when it was sent ([`leave_by_date`]), which is also what payroll
+/// and annual leave read. A date declared a day off afterwards still shows the
+/// leave counted on it, and changing the working window afterwards does not
+/// take a request off a date and leave that date absent. A request with no
+/// recorded split is the exception (see [`shown_by_date`]). A day is
 /// absent when the calendar calls it a working day, it ended before `today`,
 /// and it has neither a punch, a leave request, nor a punch correction under
 /// review (`awaiting_fix`). A request still waiting for a decision counts:
@@ -596,23 +601,27 @@ pub(crate) fn mark_days(
     judge_absence: bool,
     today: NaiveDate,
 ) {
+    let parts: Vec<(&LeaveRequest, Vec<LeaveDate>)> = leaves
+        .iter()
+        .filter(|l| holds_hours(&l.status))
+        .map(|l| (*l, shown_by_date(l, schedule)))
+        .collect();
     for day in days.iter_mut() {
-        let (open, close) = (
-            day.date.and_time(NaiveTime::MIN),
-            day.date.and_time(NaiveTime::MIN) + chrono::Duration::days(1),
-        );
-        day.leaves = leaves
+        // A date the request took nothing from when it was sent has no part,
+        // so a weekend inside a range does not read as leave taken on it.
+        day.leaves = parts
             .iter()
-            .filter(|l| holds_hours(&l.status) && l.from_at < close && l.to_at > open)
-            .map(|l| DayLeave {
-                leave_no: l.leave_no.clone(),
-                kind: l.kind.clone(),
-                status: l.status.clone(),
-                seconds: schedule.leave_seconds(l.from_at.max(open), l.to_at.min(close)),
+            .filter_map(|(l, dates)| {
+                let part = dates
+                    .iter()
+                    .find(|p| p.date == day.date && !p.hours.is_zero())?;
+                Some(DayLeave {
+                    leave_no: l.leave_no.clone(),
+                    kind: l.kind.clone(),
+                    status: l.status.clone(),
+                    hours: part.hours,
+                })
             })
-            // A range across a weekend or a holiday takes nothing from those
-            // dates, and printing it there reads as leave taken on a day off.
-            .filter(|l| l.seconds != Some(0))
             .collect();
         day.absent = judge_absence
             && day.date < today
@@ -621,6 +630,35 @@ pub(crate) fn mark_days(
             && day.left.is_none()
             && day.leaves.is_empty()
             && !awaiting_fix.contains(&day.date);
+    }
+}
+
+/// Where a request shows in the daily detail: the split recorded when it was
+/// sent, or, for a request with none, the split today's working window and
+/// calendar give.
+///
+/// A request without a recorded split comes only from the backfill that
+/// added `leave_request_day`, run while a work time was blank. Read the way
+/// payroll reads it, wholly on its first date, its later dates would turn
+/// absent once the window is stated again; today's split is what the detail
+/// showed for every request before splits were recorded.
+fn shown_by_date(l: &LeaveRequest, schedule: &WorkSchedule) -> Vec<LeaveDate> {
+    if !l.day_seconds.is_empty() {
+        return leave_by_date(l);
+    }
+    match (
+        schedule.leave_seconds_by_date(l.from_at, l.to_at),
+        schedule.daily_seconds(),
+    ) {
+        (Some(split), Some(daily)) if !split.is_empty() => split
+            .into_iter()
+            .map(|(date, seconds)| LeaveDate {
+                date,
+                days: Money::from(seconds) / Money::from(daily),
+                hours: Money::from(seconds) / Money::from(3600),
+            })
+            .collect(),
+        _ => leave_by_date(l),
     }
 }
 
@@ -661,7 +699,7 @@ impl PunchDay {
                 "kind_label": leave_kind_label(&l.kind),
                 "status": l.status,
                 "status_label": leave_status_label(&l.status),
-                "hours": l.seconds.map(|s| hours(s).to_string()),
+                "hours": l.hours.round_dp(1).normalize().to_string(),
             })).collect::<Vec<_>>(),
             "absent": self.absent,
             "in_at": clock(self.arrived),
@@ -3077,6 +3115,19 @@ mod tests {
         }
     }
 
+    /// A request as `request_leave` stores it under `sched`: the working
+    /// seconds of each date, and the hours and days they add up to.
+    fn sent(sched: &WorkSchedule, l: LeaveRequest) -> LeaveRequest {
+        let day_seconds = sched.leave_seconds_by_date(l.from_at, l.to_at).unwrap();
+        let seconds: i64 = day_seconds.iter().map(|(_, s)| s).sum();
+        LeaveRequest {
+            hours: Money::from(seconds) / Money::from(3600),
+            days: Money::from(seconds) / Money::from(sched.daily_seconds().unwrap()),
+            day_seconds,
+            ..l
+        }
+    }
+
     /// Absence is a working day that is over, with neither a punch nor a
     /// leave request that has not been turned down.
     #[test]
@@ -3146,6 +3197,7 @@ mod tests {
                 "2026-06-21T17:00",
             ),
         ];
+        let requests = requests.map(|l| sent(&sched, l));
         let mut days = month_days(punched, "2026-06", on("2026-06-15"), on("2026-06-24"));
         let requests = requests.iter().collect::<Vec<_>>();
         let absent = |days: &[PunchDay]| -> Vec<String> {
@@ -3177,13 +3229,13 @@ mod tests {
                 .unwrap()
                 .leaves
                 .iter()
-                .map(|l| (l.leave_no.clone(), l.seconds))
+                .map(|l| (l.leave_no.clone(), l.hours.round_dp(2)))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(hours_on("2026-06-17"), [("LV1".into(), Some(4 * 3600))]);
-        assert_eq!(hours_on("2026-06-18"), [("LV2".into(), Some(7 * 3600))]);
-        assert_eq!(hours_on("2026-06-23"), [("LV4".into(), Some(4 * 3600))]);
-        assert_eq!(hours_on("2026-06-24"), [("LV4".into(), Some(3 * 3600))]);
+        assert_eq!(hours_on("2026-06-17"), [("LV1".into(), Money::from(4))]);
+        assert_eq!(hours_on("2026-06-18"), [("LV2".into(), Money::from(7))]);
+        assert_eq!(hours_on("2026-06-23"), [("LV4".into(), Money::from(4))]);
+        assert_eq!(hours_on("2026-06-24"), [("LV4".into(), Money::from(3))]);
         assert!(
             hours_on("2026-06-16").is_empty(),
             "駁回、撤回與撤銷的單不算請假"
@@ -3194,6 +3246,97 @@ mod tests {
 
         mark_days(&mut days, &[], &[], &sched, false, on("2026-06-24"));
         assert!(days.iter().all(|d| !d.absent), "不判定時一天都不算曠職");
+    }
+
+    /// A request keeps the dates and hours it was sent with. A day inside it
+    /// declared 天災停班 afterwards still carries the leave counted on it, and
+    /// moving the working window afterwards does not take a morning's leave
+    /// off its date and call that date absent.
+    #[test]
+    fn a_change_after_sending_leaves_a_request_where_it_was_counted() {
+        let on = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+        let hour = |h: u32| NaiveTime::from_hms_opt(h, 0, 0);
+        let mut sched = schedule(Some("09:00"), Some("17:00"), 0);
+        (sched.break_start, sched.break_end) = (hour(12), hour(13));
+        let requests = [
+            leave(
+                "LV1",
+                "annual",
+                "approved",
+                "2026-07-27T09:00",
+                "2026-07-29T17:00",
+            ),
+            leave(
+                "LV2",
+                "personal",
+                "approved",
+                "2026-07-30T09:00",
+                "2026-07-30T12:00",
+            ),
+        ]
+        .map(|l| sent(&sched, l));
+        let requests = requests.iter().collect::<Vec<_>>();
+        let mut days = month_days(Vec::new(), "2026-07", on("2026-07-27"), on("2026-07-31"));
+        let on_day = |days: &[PunchDay], d: &str| {
+            let day = days.iter().find(|day| day.date == on(d)).unwrap();
+            let leaves = day
+                .leaves
+                .iter()
+                .map(|l| (l.leave_no.clone(), l.hours.round_dp(2)))
+                .collect::<Vec<_>>();
+            (leaves, day.absent)
+        };
+
+        sched
+            .calendar
+            .insert(on("2026-07-28"), (DayKind::NaturalDisaster, "颱風".into()));
+        mark_days(&mut days, &requests, &[], &sched, true, on("2026-08-01"));
+        for d in ["2026-07-27", "2026-07-28", "2026-07-29"] {
+            assert_eq!(
+                on_day(&days, d),
+                (vec![("LV1".into(), Money::from(7))], false),
+                "{d}"
+            );
+        }
+
+        let mut evening = schedule(Some("13:00"), Some("21:00"), 0);
+        (evening.break_start, evening.break_end) = (hour(17), hour(18));
+        mark_days(&mut days, &requests, &[], &evening, true, on("2026-08-01"));
+        assert_eq!(
+            on_day(&days, "2026-07-30"),
+            (vec![("LV2".into(), Money::from(3))], false)
+        );
+        assert!(on_day(&days, "2026-07-31").1, "07-31 沒有打卡也沒有休假");
+    }
+
+    /// A request the backfill could not split, because a work time was blank
+    /// then, shows on each of its dates by today's window once there is one
+    /// again, rather than wholly on its first date with the rest absent.
+    #[test]
+    fn a_request_with_no_recorded_split_shows_by_todays_window() {
+        let on = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+        let hour = |h: u32| NaiveTime::from_hms_opt(h, 0, 0);
+        let mut sched = schedule(Some("09:00"), Some("17:00"), 0);
+        (sched.break_start, sched.break_end) = (hour(12), hour(13));
+        let unsplit = LeaveRequest {
+            hours: Money::from(21),
+            days: Money::from(3),
+            ..leave(
+                "LV1",
+                "personal",
+                "approved",
+                "2026-07-27T09:00",
+                "2026-07-29T17:00",
+            )
+        };
+        assert!(unsplit.day_seconds.is_empty());
+        let mut days = month_days(Vec::new(), "2026-07", on("2026-07-27"), on("2026-07-29"));
+        mark_days(&mut days, &[&unsplit], &[], &sched, true, on("2026-08-01"));
+        for day in &days {
+            let hours: Vec<Money> = day.leaves.iter().map(|l| l.hours.round_dp(2)).collect();
+            assert_eq!(hours, [Money::from(7)], "{}", day.date);
+            assert!(!day.absent, "{} 判成曠職", day.date);
+        }
     }
 
     #[test]

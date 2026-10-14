@@ -348,6 +348,27 @@ effective_from, source_note }`。
 （屬勞資協商），與國定假日的「工資照給、出勤加倍」是兩件事，所以它是第五種日別而不是
 換個名字的國定假日。目前兩者共同的效果只有「不是工作日」。
 
+**日曆事後改動不改寫已送出的休假單**。休假單在送出當下依當時的工作日曆記下每一天的
+上班秒數（`leave_request_day`），之後登記停班日、更新政府日曆或把某天改成補行上班，
+那張單的時數、天數與各日拆法都不動：停班日那一天仍以請假計，特休照扣、事假照扣那天的
+工資；反過來，事後改成工作日的那一天不在單上。依據：已經請好的假遇到停止上班，法規
+沒有明文，銷不銷假由勞資協商或工作規則決定；唯一的函釋（臺(78)勞動2字第24973號）是
+婚假期間遇颱風停止工作之日計入婚假期間。天然災害出勤要點禁止的是把**沒有出勤的人**
+強迫改記成請假，與事先請好假的人是兩件事。自動重算等於替每一家公司選了「一律銷假」，
+婚假還會與那份函釋相反。
+
+公司同意銷假時走既有的路：人資撤銷那張單（`revoke_leave_request`，理由必填），本人依
+新日曆重送，再簽核。撤銷沿用「讀過那張單的薪資作業還在就拒絕」，所以已發薪的期別不會
+被改寫。
+
+讓人資知道要找誰的是 `set_work_calendar_day` 與 `refresh_work_calendar` 回應裡的
+`leave_overlaps`：改動的日期上，待簽核或已核准的單與新日曆一邊計入上班時數、另一邊
+不計，就列一列（日期、單號、員工、假別、狀態、本單計入的時數、依日曆的時數），稽核
+摘要寫出幾張。更新政府日曆只看日別真的變了的日期，所以之前登記的停班日不會每次更新都
+再列一次。呼叫者自己讀不到休假單時（矩陣沒有 `list_leave_requests`，或 MCP 通道上那個
+工具關著）回 `null`——誰請了什麼假不是維護日曆需要知道的事。「工作日曆」畫面把清單印在
+年曆上方，持有 `revoke_leave_request` 的人多一顆「前往出勤與休假」。
+
 **每一種休息日都以休息日費率計價**（`DayKind::overtime_code`）。勞基法第 39、40 條
 是按日加倍而不是時數級距，payload 沒有那個形狀，加上去要新增 day_types 的欄位與一個
 日薪基數，兩者都是有生效日的法規值；天災停班日更是連法定費率都沒有。程式裡以
@@ -1517,8 +1538,8 @@ impl Registry {
 | `search_vouchers` | ReadOnly | `{ status?, q?, limit? }` | `{ vouchers: Voucher[] }` |
 | `list_ai_audit` | ReadOnly | `{ limit? }` | `{ entries: [...] }` |
 | `list_work_calendar` | ReadOnly | `{ year?: int }` | `{ year, months[], workdays, holidays, kinds[] }` |
-| `set_work_calendar_day` | NeedsConfirm | `{ on_date, kind, name? }` | `{ on_date, kind, kind_label, default, changed }` |
-| `refresh_work_calendar` | NeedsConfirm | `{ year?: int }` | `{ year, source, read, written, kept }` |
+| `set_work_calendar_day` | NeedsConfirm | `{ on_date, kind, name? }` | `{ on_date, kind, kind_label, default, changed, leave_overlaps }` |
+| `refresh_work_calendar` | NeedsConfirm | `{ year?: int }` | `{ year, source, read, written, kept, leave_overlaps }` |
 | `list_regulations` | ReadOnly | `{ as_of?: date }` | `{ as_of, domains: [{domain, label, applicable, version, versions: [{version, effective_from, effective_to, source_note, in_force, payload, fields}]}] }` |
 | `save_regulation` | AdminOnly | `{ domain, version, effective_from, effective_to?, source_note, payload }` | `{ domain, label, version, effective_from, rulesets }` |
 | `delete_regulation` | AdminOnly | `{ domain, version }` | `{ domain, label, version, rulesets }` |
@@ -1810,7 +1831,7 @@ column，因此不可能與上面的區間不一致。
   之後整張單落到第一天，跨週年的單就有一天從一個特休年度搬到另一個，計薪的期別也一樣會搬。
   表建立之前的單由建表的那份 migration 依當時的上下班時間與工作日曆以 SQL 補寫，算法與
   `leave_seconds_by_date` 相同（`tests/annual_leave_year.rs` 比對兩者）；那一刻每一天都沒有
-  上班時數的單沒有列，讀成整張落在第一天。工作日曆事後改動要不要改寫這張表由 #143 決定。
+  上班時數的單沒有列，讀成整張落在第一天。工作日曆事後改動不改寫這張表（見「工作日曆」）。
 - **四處同一個答案**：休假頁、名冊、個人專區／我的休假／休假申請、法遵檢核都走
   `annual_balances()`／`annual_balance()`，同一人同一天回同一組數字，回應帶區間起訖
   （`from_on`／`to_on`，名冊是 `annual_leave_from`／`annual_leave_to`），畫面印出區間。
@@ -2422,6 +2443,12 @@ status = 'submitted'` 是部分索引，決定過的列不在裡面，所以同�
 曠職日、端午節與已准事假是三列一模一樣的空白，人資端的明細則直接沒有那一天。
 `mark_days` 在 `month_days` 之上掛上碰到該日的休假單（待簽核與已核准，駁回、撤回與撤銷的不算）與
 該日的請假時數，並標出曠職：工作日曆說是工作日、已經過完、沒有任何打卡、也沒有休假單。
+**哪一天掛哪張單、掛幾小時讀 `leave_by_date()`**，與計薪攤日、特休已休同一個函式，不依
+現行的上下班時間與工作日曆重算：事後登記的停班日照樣掛著那天的假，三處講同一個天數；
+事後改上下班時間也不會讓上午的假從那天消失、把那天判成曠職。唯一的例外是沒有拆法記錄的單
+（只會來自補寫 `leave_request_day` 那一刻上下班時間是空的）：照計薪的讀法整張落在第一天，
+上下班時間設回來之後其餘幾天會變成曠職，所以逐日明細改依現行上下班時間與工作日曆拆
+（`shown_by_date`），與這張表建立之前的顯示相同；計薪與特休仍放在第一天，總天數不變。
 **待簽核的單與審核中的補登也擋掉曠職**——准不准是簽核的人要回答的問題，先標曠職等於
 替他回答；送了補登就是本人說那天有到。
 **「今天」是真的時鐘**，與打卡同一條理由（`LAYSI_TODAY` 不移動時鐘）。三個情況不判定：
