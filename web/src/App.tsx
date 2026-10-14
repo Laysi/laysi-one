@@ -608,7 +608,9 @@ function Workspace() {
                   reloadKey={reloadKey}
                 />
               )}
-              {screen === 'cal' && <WorkCalendar onToast={showToast} reloadKey={reloadKey} />}
+              {screen === 'cal' && (
+                <WorkCalendar onGo={go} onToast={showToast} reloadKey={reloadKey} />
+              )}
               {screen === 'notice' && (
                 <Notices
                   onToast={showToast}

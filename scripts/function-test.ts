@@ -1294,6 +1294,101 @@ async function main() {
       }
     });
 
+    console.log("\nC 工作日曆事後改動");
+    // Last month: the daily detail lists days up to today. The namesake sends
+    // the requests and the owner decides them: the namesake holds no payslip
+    // anywhere, so nothing refuses the approval, while the owner's of this
+    // month reaches back over the year's sickness allowance and would.
+    const leaveOn = async (month: string, empNo: string, date: string, leaveNo: string) => {
+      const detail = await must("list_attendance_punches", { month, emp_no: empNo });
+      const day = detail.days.find((d: any) => d.date === date);
+      return { day, leave: day.leaves.find((l: any) => l.leave_no === leaveNo) };
+    };
+    const approved = async (span: Record<string, string>) => {
+      const leaveNo = await asNamesake(async () => (await must("request_leave", span)).request.leave_no);
+      const decided = await must("decide_leave_request", { leave_no: leaveNo, approve: true });
+      return { leaveNo, empNo: decided.request.emp_no as string };
+    };
+
+    await check("C1", "特休核准後才登記其中一天天災停班：逐日明細照掛三天，特休已休不變，登記的回應列出那張單", async () => {
+      const days = [await workday(-1, 6), await workday(-1, 7), await workday(-1, 8)];
+      const month = days[0].slice(0, 7);
+      const { leaveNo, empNo } = await approved({
+        kind: "annual", from_at: `${days[0]}T09:00:00`, to_at: `${days[2]}T18:00:00`,
+      });
+      const row = async () =>
+        (await must("list_leave_requests", { month, include_done: true })).requests.find(
+          (r: any) => r.leave_no === leaveNo,
+        );
+      const before = await row();
+      expectEq(money(before.days), 300, "核准時存下的天數");
+
+      const set = await must("set_work_calendar_day", { on_date: days[1], kind: "natural_disaster", name: "颱風" });
+      const listed = (set.leave_overlaps ?? []).filter((o: any) => o.leave_no === leaveNo);
+      expectEq(listed.length, 1, "回應列出的列數");
+      expectEq(listed[0].on_date, days[1], "列出的日期");
+      expectEq(money(listed[0].hours), 800, "本單計入的時數");
+      expectEq(money(listed[0].calendar_hours), 0, "依日曆的時數");
+
+      const after = await row();
+      expectEq(money(after.days), 300, "登記之後單上的天數");
+      expectEq(after.annual_leave.taken, before.annual_leave.taken, "特休已休");
+      let hours = 0;
+      for (const date of days) {
+        const { day, leave } = await leaveOn(month, empNo, date, leaveNo);
+        expect(leave, `${date} 的逐日明細沒有 ${leaveNo}`);
+        expectEq(day.absent, false, `${date} 判成曠職`);
+        hours += money(leave.hours);
+      }
+      expectEq(hours, money(after.hours), "逐日明細的時數合計");
+      const { day } = await leaveOn(month, empNo, days[1], leaveNo);
+      expectEq(day.day_kind, "natural_disaster", `${days[1]} 的日別`);
+      const quiet = await must("set_work_calendar_day", {
+        on_date: await workday(-1, 9), kind: "natural_disaster", name: "颱風",
+      });
+      expectEq(JSON.stringify(quiet.leave_overlaps), "[]", "沒有人請假的那天列出的單");
+      return `${leaveNo} ${after.days} 日 · 已休 ${after.annual_leave.taken} 日 · ${days[1]} 天災停班仍計 ${listed[0].hours} 小時`;
+    });
+
+    // Payroll's side of the same request is a laysi-ops unit test: a run here
+    // stops at the first salary-less person the earlier checks put on the roster.
+    await check("C2", "事假核准後才登記天災停班，逐日明細照掛三天；已算好的薪資單不因日曆改動而變", async () => {
+      const days = [await workday(-1, 20), await workday(-1, 21), await workday(-1, 22)];
+      const month = days[0].slice(0, 7);
+      const { leaveNo, empNo } = await approved({
+        kind: "personal", from_at: `${days[0]}T09:00:00`, to_at: `${days[2]}T18:00:00`,
+      });
+      const set = await must("set_work_calendar_day", { on_date: days[1], kind: "natural_disaster", name: "颱風" });
+      expect(
+        (set.leave_overlaps ?? []).some((o: any) => o.leave_no === leaveNo && o.on_date === days[1]),
+        `回應沒有列出 ${leaveNo}：${JSON.stringify(set.leave_overlaps)}`,
+      );
+      let detailDays = 0;
+      for (const date of days) {
+        const { leave } = await leaveOn(month, empNo, date, leaveNo);
+        expect(leave, `${date} 的逐日明細沒有 ${leaveNo}`);
+        detailDays += money(leave.hours) / 8;
+      }
+      expectEq(detailDays, 300, "逐日明細的天數");
+      const back = await must("set_work_calendar_day", { on_date: days[1], kind: "workday", name: "測試工作日" });
+      expect(
+        !(back.leave_overlaps ?? []).some((o: any) => o.leave_no === leaveNo),
+        `改回工作日後仍列出 ${leaveNo}`,
+      );
+
+      // This month was computed in H5.
+      const period = TODAY.slice(0, 7);
+      const slips = async () =>
+        (await must("list_payslips", { period })).rows.map((r: any) => [r.emp_no, r.net, r.note, r.recompute_matches]);
+      const before = await slips();
+      expect(before.length > 0, `${period} 沒有薪資單`);
+      const typhoon = await workday(0, 3);
+      await must("set_work_calendar_day", { on_date: typhoon, kind: "natural_disaster", name: "颱風" });
+      expectEq(JSON.stringify(await slips()), JSON.stringify(before), `${typhoon} 登記天災停班之後的薪資單`);
+      await must("set_work_calendar_day", { on_date: typhoon, kind: "workday", name: "測試工作日" });
+      return `${leaveNo} 計 ${detailDays / 100} 日 · ${period} 薪資單 ${before.length} 張不變`;
+    });
+
     console.log("\nD 文件下載連結");
     // A file past the 25 MB that base64 carries, sent the way the documents
     // screen sends it: through an upload link, then back through a download
