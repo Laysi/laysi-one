@@ -3578,6 +3578,14 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 | `restored` | 起舊版並判斷 |
 | `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres |
 
+**斷電會留下讀不了的容器**：斷電前一刻建立的容器，它那一層的 `link` 與 `lower` 檔已經
+建立卻是空的；`podman ps` 列得出它，任何 inspect 都失敗在 `getting graph driver info`，
+後面接著 `readlink …/overlay: invalid argument`——空的 link 被讀成 overlay 目錄本身。
+容器不存資料，所以列容器時 inspect 失敗在這一整串、又不在執行的專案容器一律 `podman rm --force`，
+之後照常重建；在執行、暫停或正在停止的，以及其他錯誤（同一個開頭底下的權限與 I/O 錯誤也算），
+照樣回錯誤。少了這一步，`rolling-back` 斷電之後重做回退的第一步就失敗，直接落到
+`rollback-failed`，重開機也起不來。
+
 日誌存在、階段在 `stopping` 之後且結果還不是最終時，切換標記一定在；收尾一個這樣的日誌時
 更新程式先補寫標記。最終結果寫出、日誌刪掉之後才刪標記，所以中斷在兩者之間也只會多擋一段。
 

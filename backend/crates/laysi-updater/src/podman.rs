@@ -260,6 +260,44 @@ fn wait(child: &mut Child, timeout: Option<Duration>) -> std::io::Result<std::pr
     }
 }
 
+/// What to do with a project container `podman container inspect` fails on.
+#[derive(Debug, PartialEq, Eq)]
+enum Unreadable {
+    /// Removed between `podman ps` and the inspect.
+    Gone,
+    /// It holds nothing, since the data lives in volumes, and recreating
+    /// its service fails until it is gone.
+    Remove,
+    Fail,
+}
+
+/// A podman cut off halfway leaves a container nothing can read in two
+/// ways. A create or a remove killed in the middle leaves its record in
+/// podman's database without its storage ("container not known"), stuck in
+/// "removing" with its name taken. A power cut leaves the storage of a
+/// container created just before it half written: the `link` and `lower`
+/// files of its layer exist and are empty, and every inspect fails on
+/// "getting graph driver info", reading the empty link as the overlay
+/// directory itself, which is no symlink. Either is removed, the second
+/// only when the container does not run and is not being stopped: removing
+/// one that does would stop a service. Any other error is returned, the
+/// same wrapper around a permission or I/O error included, since it may
+/// pass and says nothing about the container being broken.
+fn unreadable(state: &str, error: &str) -> Unreadable {
+    let empty_link = error.contains("getting graph driver info")
+        && error.contains("readlink ")
+        && error.contains("/overlay: invalid argument");
+    if error.contains("no such container") {
+        Unreadable::Gone
+    } else if error.contains("container not known")
+        || (empty_link && !matches!(state, "running" | "paused" | "stopping"))
+    {
+        Unreadable::Remove
+    } else {
+        Unreadable::Fail
+    }
+}
+
 /// The command line, for errors. Not `{cmd:?}`, which starts with
 /// `cd "<dir>" &&` when a working directory is set.
 fn describe(cmd: &Command) -> String {
@@ -538,44 +576,57 @@ impl Host for PodmanHost {
 
     /// One container at a time when inspecting them together fails: one
     /// removed between the two calls is skipped, and one an interrupted
-    /// podman left half created or half removed is removed.
+    /// podman or a power cut left unreadable is removed, as `unreadable`
+    /// decides. The removal goes to stderr, which the unit's journal keeps.
     fn containers(&mut self) -> HostResult<Vec<Container>> {
         let mut ps = self.podman();
-        ps.args(["ps", "--all", "--quiet", "--no-trunc", "--filter"])
-            .arg(format!("label={PROJECT_LABEL}={PROJECT}"));
-        let ids: Vec<String> = run(ps, None)?
+        ps.args([
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--format",
+            "{{.ID}} {{.State}}",
+        ])
+        .arg("--filter")
+        .arg(format!("label={PROJECT_LABEL}={PROJECT}"));
+        let listed: Vec<(String, String)> = run(ps, None)?
             .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let id = fields.next()?.to_string();
+                Some((id, fields.next().unwrap_or_default().to_string()))
+            })
             .collect();
-        if ids.is_empty() {
+        if listed.is_empty() {
             return Ok(Vec::new());
         }
         let mut inspect = self.podman();
-        inspect.args(["container", "inspect"]).args(&ids);
+        inspect
+            .args(["container", "inspect"])
+            .args(listed.iter().map(|(id, _)| id));
         if let Ok(json) = run(inspect, None) {
             return parse_containers(&json);
         }
         let mut found = Vec::new();
-        for id in &ids {
+        for (id, state) in &listed {
             let mut inspect = self.podman();
             inspect.args(["container", "inspect", id]);
             match run(inspect, None) {
                 Ok(json) => found.extend(parse_containers(&json)?),
-                Err(e) if e.contains("no such container") => {}
-                // Its record is in podman's database and its storage is not:
-                // a create or a remove was killed halfway, which leaves the
-                // container stuck in "removing" and its name taken. It holds
-                // nothing, since the data lives in volumes, and recreating
-                // its service fails until it is gone.
-                Err(e) if e.contains("container not known") => {
-                    let mut rm = self.podman();
-                    rm.args(["rm", "--force", id]);
-                    run(rm, Some(Duration::from_secs(120)))
-                        .map_err(|rm| format!("{e}; removing it: {rm}"))?;
-                }
-                Err(e) => return Err(e),
+                Err(e) => match unreadable(state, &e) {
+                    Unreadable::Gone => {}
+                    Unreadable::Remove => {
+                        let mut rm = self.podman();
+                        rm.args(["rm", "--force", id]);
+                        run(rm, Some(Duration::from_secs(120)))
+                            .map_err(|rm| format!("{e}; removing it: {rm}"))?;
+                        eprintln!(
+                            "{} removed container {id} ({state}), which podman could not read: {e}",
+                            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        );
+                    }
+                    Unreadable::Fail => return Err(e),
+                },
             }
         }
         Ok(found)
@@ -747,6 +798,33 @@ mod tests {
         assert!(cmd
             .get_envs()
             .any(|(key, value)| key == "INVOCATION_ID" && value.is_none()));
+    }
+
+    /// The error is what podman 4.9.3 printed after a power cut during a
+    /// rollback, for the postgres container it had just created (#64).
+    #[test]
+    fn only_a_container_podman_left_broken_is_removed() {
+        let half_written = "podman exited with exit status: 125: Error: getting graph driver info \"33ae49a17a82\": readlink /home/stack/.local/share/containers/storage/overlay: invalid argument";
+        assert_eq!(unreadable("created", half_written), Unreadable::Remove);
+        assert_eq!(unreadable("exited", half_written), Unreadable::Remove);
+        assert_eq!(unreadable("configured", half_written), Unreadable::Remove);
+        assert_eq!(unreadable("running", half_written), Unreadable::Fail);
+        assert_eq!(unreadable("paused", half_written), Unreadable::Fail);
+        assert_eq!(unreadable("stopping", half_written), Unreadable::Fail);
+        let no_storage = "Error: container not known";
+        assert_eq!(unreadable("removing", no_storage), Unreadable::Remove);
+        assert_eq!(unreadable("running", no_storage), Unreadable::Remove);
+        assert_eq!(
+            unreadable("exited", "Error: no such container 33ae49a17a82"),
+            Unreadable::Gone
+        );
+        for other in [
+            "Error: getting graph driver info \"33ae49a17a82\": readlink /home/stack/.local/share/containers/storage/overlay/l/QJ3V: permission denied",
+            "Error: getting graph driver info \"33ae49a17a82\": open /home/stack/.local/share/containers/storage/overlay/33ae49a17a82/lower: input/output error",
+            "Error: permission denied",
+        ] {
+            assert_eq!(unreadable("exited", other), Unreadable::Fail, "{other}");
+        }
     }
 
     #[test]

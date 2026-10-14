@@ -28,9 +28,9 @@
 // release can make it exit at start or never pass.
 
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -835,6 +835,25 @@ exec ${realPodman} "$@"
   check(readResult("e2e-power-cut-1")?.status === "rolled-back", "an update cut before the switch is returned at boot");
   assertSettledOn(settledVersion);
   check(psql("select count(*) from e2e_rows") === "1", "the data is still there");
+
+  // A power cut also leaves the layers of containers created just before it
+  // half written: their link and lower files are there and empty, podman ps
+  // still lists them and every inspect of them fails. Containers hold no
+  // data, so the boot removes them and starts their services again.
+  const damaged = ["web", "backup"].map((service) => {
+    const c = byService().get(service);
+    if (!c) fail(`no ${service} container`);
+    return c;
+  });
+  podman("stop", ...damaged.map((c) => c.name));
+  for (const c of damaged) {
+    const upper = podman("container", "inspect", "--format", "{{.GraphDriver.Data.UpperDir}}", c.name);
+    for (const file of ["link", "lower"]) truncateSync(join(dirname(upper), file), 0);
+    check(sh(["podman", "container", "inspect", c.name], { ok: false }).code !== 0, `${c.service}'s container can no longer be inspected`);
+  }
+  check(powerCutAndBoot().code === 0, "the boot after a power cut that left container layers half written succeeds");
+  assertSettledOn(settledVersion);
+  for (const c of damaged) check(byService().get(c.service)?.created !== c.created, `${c.service} runs in a container created again`);
 
   // --- the rollback fails too: stay, and never restore again ---------------
   const v11 = buildRelease({ version: "v1.10.0", api: "never-healthy", rustfs: newRustfs }, known);
