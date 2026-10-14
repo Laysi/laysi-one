@@ -3600,6 +3600,11 @@ systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一
   `ExecStopPost=` 在每一次結束時清空請求目錄，失敗也一樣——檔案還在，path unit 會在
   service 結束時再觸發、一秒五次之後轉為 `failed` 而不再監看。執行期間寫入的旗標因此被丟棄
   並回 `refused-busy`，不排隊也不合併；`StartLimitIntervalSec=0`。
+  例外是執行本身失敗、而且沒有進行中的更新（沒有日誌）：沒有結果的旗標改回
+  `failed-unchanged`（更新程式在開始更新前中斷）。現行更新程式根本起不來時，旗標從來沒有
+  被讀過，回 busy 會讓畫面請人稍後再試一個每次都失敗的更新程式。執行成敗取 systemd 交給
+  `ExecStopPost=` 的 `SERVICE_RESULT`。這時回答旗標的是前一版的 `discard-requests`，所以
+  前一版也帶著這條規則才生效。
   它排在開機 unit 之後才開始監看，並設 `DefaultDependencies=no`：path unit 預設排在
   `paths.target` 之前，而開機 unit 是 service、排在 `basic.target`（也就在 `paths.target`）
   之後，兩者相加是循環，systemd 每次開機都刪掉 path unit 的啟動工作，重開過的機器就再也

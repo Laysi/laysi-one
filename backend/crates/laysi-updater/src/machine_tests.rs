@@ -237,7 +237,8 @@ impl Rig {
     /// `ExecStopPost=`.
     fn run(&self) -> Result<(), String> {
         let outcome = self.machine(|m| m.run_request());
-        self.machine(|m| m.discard_requests()).unwrap();
+        let failed = outcome.is_err();
+        self.machine(|m| m.discard_requests(failed)).unwrap();
         outcome
     }
 
@@ -647,11 +648,43 @@ fn a_request_written_during_a_run_is_discarded_and_told_so() {
     rig.machine(|m| m.run_request()).unwrap();
     // Arrives while the run is ending; the next ExecStopPost sees it.
     let second = rig.request("req-second-001", &rig.manifest("v0.2.0"));
-    rig.machine(|m| m.discard_requests()).unwrap();
+    rig.machine(|m| m.discard_requests(false)).unwrap();
     assert_eq!(rig.result(&first).status, UpdateStatus::Succeeded);
     assert_eq!(rig.result(&second).status, UpdateStatus::RefusedBusy);
     assert_eq!(rig.requests_left(), 0);
     assert_eq!(rig.installed(), "v0.2.0");
+}
+
+#[test]
+fn a_request_a_failed_run_never_read_is_answered_as_not_started() {
+    let rig = Rig::new(v1(), &[v2()]);
+    // The current updater cannot start at all: the run fails without
+    // touching the request, and the previous updater's ExecStopPost sees it.
+    let id = rig.request("req-unread-0001", &rig.manifest("v0.2.0"));
+    rig.machine(|m| m.discard_requests(true)).unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged);
+    assert!(result.reason.is_some_and(|r| r.contains("開始更新前")));
+    assert_eq!(rig.requests_left(), 0);
+    assert_eq!(rig.installed(), "v0.1.0");
+}
+
+#[test]
+fn a_request_written_during_a_failed_run_with_an_update_pending_is_busy() {
+    let rig = Rig::new(v1(), &[v2()]);
+    let first = rig.request("req-pending-001", &rig.manifest("v0.2.0"));
+    // The final result cannot be written, so the run fails with the
+    // journal kept for the recovery.
+    let blocker = rig.layout.results_dir().join(first.as_str());
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("x"), "").unwrap();
+    assert!(rig.machine(|m| m.run_request()).is_err());
+    std::fs::remove_dir_all(&blocker).unwrap();
+    let second = rig.request("req-pending-002", &rig.manifest("v0.2.0"));
+    rig.machine(|m| m.discard_requests(true)).unwrap();
+    assert_eq!(rig.result(&second).status, UpdateStatus::RefusedBusy);
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&first).status, UpdateStatus::Succeeded);
 }
 
 #[test]
@@ -1261,7 +1294,7 @@ fn a_request_whose_journal_cannot_be_written_is_answered_as_failed() {
         accepted.encode(),
     )
     .unwrap();
-    rig.machine(|m| m.discard_requests()).unwrap();
+    rig.machine(|m| m.discard_requests(true)).unwrap();
     assert_eq!(rig.result(&id).status, UpdateStatus::FailedUnchanged);
     assert_eq!(rig.requests_left(), 0);
 }
@@ -1425,7 +1458,7 @@ fn a_final_result_that_cannot_be_written_keeps_the_journal_until_it_is() {
     assert!(journal.exists(), "the journal waits for the result");
     assert!(rig.switching(), "and so does the marker");
     // ExecStopPost does not take it for a request that never started.
-    rig.machine(|m| m.discard_requests()).unwrap();
+    rig.machine(|m| m.discard_requests(true)).unwrap();
     assert!(rig.machine(|m| m.read_result(&id)).is_none());
     // The recovery unit finishes the journal and writes the result.
     rig.machine(|m| m.boot()).unwrap();

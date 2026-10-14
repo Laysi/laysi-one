@@ -762,14 +762,24 @@ exec ${realPodman} "$@"
     const done = !["activating", "active"].includes(unitState("laysi-updater-fallback.service"));
     return done && s === "success";
   });
-  writeFileSync(current, saved);
   check(unitState("laysi-updater-boot.service", "Result") !== "success", "the current updater failed at boot");
+  // A request it cannot run either: the previous updater's ExecStopPost
+  // answers it as never started, which busy would not be.
+  const v7 = buildRelease({ version: "v1.6.0", rustfs: newRustfs }, known);
+  known.push(v7.migration);
+  const fallbackBefore = unitState("laysi-updater-fallback.service", "InvocationID");
+  r = await update("e2e-broken-run", v7.manifest, 300);
+  check(r.status === "failed-unchanged" && (r.reason ?? "").includes("開始更新前"), "a request the current updater cannot run is answered as not started, not busy");
+  await waitFor("the fallback unit to run after the failed recovery", 300, () => {
+    const again = unitState("laysi-updater-fallback.service", "InvocationID") !== fallbackBefore;
+    return again && !["activating", "active"].includes(unitState("laysi-updater-fallback.service"));
+  });
+  check(installed() === "v1.5.0", "and nothing was installed");
+  writeFileSync(current, saved);
   assertSettledOn("v1.5.0");
   systemctl("reset-failed", ...UNITS);
 
   // --- the lock -------------------------------------------------------------
-  const v7 = buildRelease({ version: "v1.6.0", rustfs: newRustfs }, known);
-  known.push(v7.migration);
   // -o: only flock itself holds the lock, so killing it releases it.
   const holder = Bun.spawn(["flock", "-o", join(ROOT, "state/lock"), "sleep", "30"]);
   await sleep(1000);
