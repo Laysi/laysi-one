@@ -55,6 +55,25 @@ jobs:
 
       - run: cargo test --workspace
 
+      # The host-side updater depends on laysi-license-token and is linked for
+      # musl with rust-lld alone, so nothing that crate pulls in for those
+      # targets may compile C.
+      - name: laysi-license-token needs no C compiler
+        run: |
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+              tree=$(cargo tree -p laysi-license-token -e normal,build --target "$target" --prefix none)
+              if printf '%s\n' "$tree" | grep -E '^(cc|cmake|ring|blake3) '; then
+                  echo "laysi-license-token pulls in a C build dependency for $target"
+                  exit 1
+              fi
+          done
+
+      # The script release.yml signs with, against the Rust verifier, with
+      # throwaway keys drawn in the test.
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun ../scripts/release-manifest-test.ts
+
       - name: cargo test --workspace -- --ignored
         run: cargo test --workspace -- --ignored
         env:
