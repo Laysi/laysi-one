@@ -1560,12 +1560,7 @@ impl Operation for ListMyPunches {
         let this_month = local_today.format("%Y-%m").to_string();
         let elsewhere = match this_month == month {
             true => None,
-            false => punch_days(
-                &ctx.store.punches(&this_month, Some(employee.id)).await?,
-                ctx.offset,
-            )
-            .into_iter()
-            .find(|d| d.date == local_today),
+            false => punch_day(ctx, employee.id, local_today, &schedule).await?,
         };
 
         // What the button on screen should offer next. Derived here so the
