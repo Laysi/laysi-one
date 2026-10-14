@@ -199,6 +199,7 @@ fn tool_env() -> Result<String, String> {
         ("LAYSI_PODMAN", "podman"),
         ("LAYSI_PODMAN_COMPOSE", "podman-compose"),
         ("LAYSI_SYSTEMCTL", "systemctl"),
+        ("LAYSI_SYSTEMD_RUN", "systemd-run"),
     ] {
         let found = which(name).ok_or_else(|| format!("{name} is not on PATH"))?;
         if !units::plain_path(&found) {

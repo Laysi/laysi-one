@@ -11,8 +11,7 @@ export function DayMarks({ day }: { day: PunchDay }) {
             {l.status === 'pending' && `（${l.status_label}）`}
           </span>
           <span className="cell-hint num">
-            {l.leave_no}
-            {l.hours && ` · ${trimDecimal(l.hours)} 小時`}
+            {l.leave_no} · {trimDecimal(l.hours)} 小時
           </span>
         </span>
       ))}

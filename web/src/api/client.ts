@@ -959,12 +959,38 @@ export const workCalendarYear = z.object({
 });
 export type WorkCalendarYear = z.infer<typeof workCalendarYear>;
 
+export const leaveOverlap = z.object({
+  on_date: z.string(),
+  leave_no: z.string(),
+  emp_no: z.string(),
+  name: z.string(),
+  kind_label: z.string(),
+  status: z.string(),
+  status_label: z.string(),
+  from_at: z.string(),
+  to_at: z.string(),
+  hours: z.string(),
+  calendar_hours: z.string(),
+});
+export type LeaveOverlap = z.infer<typeof leaveOverlap>;
+
+export const workCalendarSet = z.object({
+  on_date: z.string(),
+  kind: z.string(),
+  kind_label: z.string(),
+  default: z.boolean(),
+  changed: z.boolean(),
+  leave_overlaps: z.array(leaveOverlap).nullable(),
+});
+export type WorkCalendarSet = z.infer<typeof workCalendarSet>;
+
 export const workCalendarRefresh = z.object({
   year: z.number(),
   source: z.string(),
   read: z.number(),
   written: z.number(),
   kept: z.number(),
+  leave_overlaps: z.array(leaveOverlap).nullable(),
 });
 export type WorkCalendarRefresh = z.infer<typeof workCalendarRefresh>;
 
@@ -2696,7 +2722,7 @@ export const dayLeave = z.object({
   kind_label: z.string(),
   status: z.string(),
   status_label: z.string(),
-  hours: z.string().nullable(),
+  hours: z.string(),
 });
 export type DayLeave = z.infer<typeof dayLeave>;
 

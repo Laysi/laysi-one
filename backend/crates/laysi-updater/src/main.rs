@@ -40,7 +40,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
     match command {
         "run" => with_machine(|m| m.run_request()),
         "boot" => with_machine(|m| m.boot()),
-        "discard-requests" => with_machine(|m| m.discard_requests()),
+        "discard-requests" => with_machine(|m| m.discard_requests(run_failed())),
         "clear-requests-inside" => clear_requests_inside(args.get(1)),
         "stop-stack" => stop_stack(),
         "self-check" => self_check(),
@@ -53,6 +53,13 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         }
         _ => Err("usage: laysi-updater install|run|boot|discard-requests|stop-stack|self-check|write-units|status|version".into()),
     }
+}
+
+/// Whether the run this `ExecStopPost=` follows failed. systemd sets
+/// `SERVICE_RESULT` for the commands it runs after a service; run by hand,
+/// there is no run to have failed.
+fn run_failed() -> bool {
+    std::env::var("SERVICE_RESULT").is_ok_and(|r| r != "success")
 }
 
 fn version() -> String {

@@ -28,9 +28,9 @@
 // release can make it exit at start or never pass.
 
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -396,8 +396,20 @@ async function update(id: string, manifest: string, seconds = 1800, during?: () 
   return result;
 }
 
+// The ports docker-compose.prod.yml publishes by default. Rootless podman
+// forwards each with a process that stays in the cgroup of the unit that
+// started the container, and dies with it.
+const PUBLISHED: Record<string, number> = { web: 8088, mcp: 8089 };
+
+/// A TCP connection to the host port opens. The fakes serve nothing, but the
+/// forwarder listens on the host whatever is behind it, so this says whether
+/// the forwarder is alive.
+function accepts(port: number): boolean {
+  return sh(["timeout", "5", "bash", "-c", `exec 3<>/dev/tcp/127.0.0.1/${port}`], { ok: false }).code === 0;
+}
+
 /// Every service of the compose project running, all on the release the
-/// host records, nothing left over.
+/// host records, reachable on the ports it publishes, nothing left over.
 function assertSettledOn(version: string) {
   const release = releases.get(version);
   if (!release) fail(`unknown release ${version}`);
@@ -409,6 +421,9 @@ function assertSettledOn(version: string) {
     if (!c?.running) fail(`${service} is not running on ${version}`);
     if (own[service] && c.digest !== own[service]) fail(`${service} runs ${c.digest}, not ${version}'s ${own[service]}`);
     if (c.health && c.health !== "healthy") fail(`${service} is ${c.health}`);
+  }
+  for (const [service, port] of Object.entries(PUBLISHED)) {
+    check(accepts(port), `${service}'s published port ${port} accepts connections`);
   }
   const rustfs = release.spec.rustfs ?? RUSTFS;
   check(services.get("rustfs")?.digest === rustfs.split("@")[1], `rustfs runs the image ${version} names`);
@@ -747,14 +762,24 @@ exec ${realPodman} "$@"
     const done = !["activating", "active"].includes(unitState("laysi-updater-fallback.service"));
     return done && s === "success";
   });
-  writeFileSync(current, saved);
   check(unitState("laysi-updater-boot.service", "Result") !== "success", "the current updater failed at boot");
+  // A request it cannot run either: the previous updater's ExecStopPost
+  // answers it as never started, which busy would not be.
+  const v7 = buildRelease({ version: "v1.6.0", rustfs: newRustfs }, known);
+  known.push(v7.migration);
+  const fallbackBefore = unitState("laysi-updater-fallback.service", "InvocationID");
+  r = await update("e2e-broken-run", v7.manifest, 300);
+  check(r.status === "failed-unchanged" && (r.reason ?? "").includes("開始更新前"), "a request the current updater cannot run is answered as not started, not busy");
+  await waitFor("the fallback unit to run after the failed recovery", 300, () => {
+    const again = unitState("laysi-updater-fallback.service", "InvocationID") !== fallbackBefore;
+    return again && !["activating", "active"].includes(unitState("laysi-updater-fallback.service"));
+  });
+  check(installed() === "v1.5.0", "and nothing was installed");
+  writeFileSync(current, saved);
   assertSettledOn("v1.5.0");
   systemctl("reset-failed", ...UNITS);
 
   // --- the lock -------------------------------------------------------------
-  const v7 = buildRelease({ version: "v1.6.0", rustfs: newRustfs }, known);
-  known.push(v7.migration);
   // -o: only flock itself holds the lock, so killing it releases it.
   const holder = Bun.spawn(["flock", "-o", join(ROOT, "state/lock"), "sleep", "30"]);
   await sleep(1000);
@@ -820,6 +845,25 @@ exec ${realPodman} "$@"
   check(readResult("e2e-power-cut-1")?.status === "rolled-back", "an update cut before the switch is returned at boot");
   assertSettledOn(settledVersion);
   check(psql("select count(*) from e2e_rows") === "1", "the data is still there");
+
+  // A power cut also leaves the layers of containers created just before it
+  // half written: their link and lower files are there and empty, podman ps
+  // still lists them and every inspect of them fails. Containers hold no
+  // data, so the boot removes them and starts their services again.
+  const damaged = ["web", "backup"].map((service) => {
+    const c = byService().get(service);
+    if (!c) fail(`no ${service} container`);
+    return c;
+  });
+  podman("stop", ...damaged.map((c) => c.name));
+  for (const c of damaged) {
+    const upper = podman("container", "inspect", "--format", "{{.GraphDriver.Data.UpperDir}}", c.name);
+    for (const file of ["link", "lower"]) truncateSync(join(dirname(upper), file), 0);
+    check(sh(["podman", "container", "inspect", c.name], { ok: false }).code !== 0, `${c.service}'s container can no longer be inspected`);
+  }
+  check(powerCutAndBoot().code === 0, "the boot after a power cut that left container layers half written succeeds");
+  assertSettledOn(settledVersion);
+  for (const c of damaged) check(byService().get(c.service)?.created !== c.created, `${c.service} runs in a container created again`);
 
   // --- the rollback fails too: stay, and never restore again ---------------
   const v11 = buildRelease({ version: "v1.10.0", api: "never-healthy", rustfs: newRustfs }, known);

@@ -535,12 +535,18 @@ impl<'h, H: Host> Machine<'h, H> {
     /// died in between, is answered as failed here: nothing will pick it up
     /// again once it is cleared. One whose journal exists, or might, is left
     /// to the recovery.
-    pub fn discard_requests(&mut self) -> Result<(), String> {
+    ///
+    /// `run_failed` is whether the run itself ended in failure.
+    pub fn discard_requests(&mut self, run_failed: bool) -> Result<(), String> {
         if let Some(request) = self.read_request() {
             // A journal is kept until its final result is written: the
-            // request it names is the recovery's to answer. Without one, a
-            // request with no result arrived during the run, and one left
-            // without a final result never got a journal at all.
+            // request it names is the recovery's to answer. Otherwise a
+            // request with no result arrived during the run, unless the run
+            // failed with no update under way: then it may never have been
+            // read, as when the current updater cannot start at all, and
+            // "busy" would have the administrator retry an updater that fails
+            // every time. One left without a final result never got a journal
+            // at all.
             match (self.load_journal(), self.read_result(&request.id)) {
                 (Err(_), _) => {}
                 (Ok(Some(j)), _) if j.request == request.id => {
@@ -548,6 +554,7 @@ impl<'h, H: Host> Machine<'h, H> {
                         self.answer_final(&j);
                     }
                 }
+                (Ok(None), None) if run_failed => self.answer_not_started(&request.id),
                 (Ok(_), None) => self.answer_busy(&request.id),
                 (Ok(_), Some(result)) if !result.status.is_final() => {
                     self.refuse(result, UpdateStatus::FailedUnchanged, NOT_STARTED.into())
@@ -557,6 +564,12 @@ impl<'h, H: Host> Machine<'h, H> {
         }
         let dir = self.layout.requests_dir();
         self.host.clear_requests(&dir)
+    }
+
+    fn answer_not_started(&mut self, id: &RequestId) {
+        let now = self.host.now();
+        let result = UpdateResult::new(id.clone(), UpdateStatus::Accepted, now);
+        self.refuse(result, UpdateStatus::FailedUnchanged, NOT_STARTED.into());
     }
 
     fn answer_busy(&mut self, id: &RequestId) {

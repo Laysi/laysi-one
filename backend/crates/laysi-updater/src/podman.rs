@@ -1,9 +1,11 @@
-//! The real host: podman, podman-compose and systemctl as the stack user.
+//! The real host: podman, podman-compose, systemctl and systemd-run as the
+//! stack user.
 //!
 //! Tool paths come from `state/updater.env`, which `install` writes with the
 //! absolute paths it found, because a systemd user unit does not see the
 //! PATH of an interactive shell.
 
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -28,6 +30,7 @@ pub struct PodmanHost {
     pub podman: String,
     pub compose: String,
     pub systemctl: String,
+    pub systemd_run: String,
     pub root: PathBuf,
     /// For pulls, which wait on the network.
     pub pull_timeout: Duration,
@@ -45,6 +48,8 @@ impl PodmanHost {
             podman: var("LAYSI_PODMAN", "podman"),
             compose: var("LAYSI_PODMAN_COMPOSE", "podman-compose"),
             systemctl: var("LAYSI_SYSTEMCTL", "systemctl"),
+            // Installs from before it was in updater.env find it on PATH.
+            systemd_run: var("LAYSI_SYSTEMD_RUN", "systemd-run"),
             root: root.to_path_buf(),
             pull_timeout: Duration::from_secs(60 * 60),
         }
@@ -82,6 +87,39 @@ impl PodmanHost {
         }
         cmd
     }
+
+    /// `podman-compose up` in a transient scope of its own.
+    ///
+    /// Rootless podman forwards each published port with a `rootlessport`
+    /// process, and unlike conmon it stays in the cgroup of whoever started
+    /// the container whatever `INVOCATION_ID` says. Started from the run or
+    /// recovery unit, both oneshots without `RemainAfterExit=`, it is killed
+    /// with the unit's cgroup the moment the run ends: every container stays
+    /// up and healthy and nothing outside the machine reaches them. The scope
+    /// outlives the run and goes away when its last process does.
+    ///
+    /// systemd-run sets `INVOCATION_ID` for what it runs in a scope, so it is
+    /// removed again inside and conmon keeps the scope podman gives it. That
+    /// scope has no default dependencies and neither has this one: at
+    /// shutdown neither is stopped alongside the boot unit while its
+    /// `ExecStop=` is still stopping the stack, postgres last.
+    fn up_command(&self, files: &StackFiles, services: &[String], recreate: bool) -> Command {
+        let mut compose = self.compose(files);
+        compose.args(["up", "-d", "--no-deps"]);
+        if recreate {
+            compose.arg("--force-recreate");
+        }
+        compose.args(services);
+        let mut cmd = detached(Command::new(&self.systemd_run));
+        cmd.args(["--user", "--scope", "--collect", "--quiet"]);
+        cmd.arg("--property=DefaultDependencies=no");
+        cmd.args(["--", "env", "-u", "INVOCATION_ID"]);
+        cmd.arg(compose.get_program()).args(compose.get_args());
+        if let Some(dir) = compose.get_current_dir() {
+            cmd.current_dir(dir);
+        }
+        cmd
+    }
 }
 
 /// podman leaves conmon in the calling unit's cgroup when `INVOCATION_ID` says
@@ -95,7 +133,14 @@ fn detached(mut cmd: Command) -> Command {
 
 /// Run to completion, with stdin from nowhere unless given. `Ok(stdout)` on
 /// a zero exit, otherwise the tail of stderr.
-fn run(mut cmd: Command, timeout: Option<Duration>) -> HostResult<String> {
+fn run(cmd: Command, timeout: Option<Duration>) -> HostResult<String> {
+    let name = program_of(&cmd);
+    run_as(cmd, &name, timeout)
+}
+
+/// `run`, with errors naming `name`: a wrapper that execs the program the
+/// exit status belongs to would otherwise be named for it.
+fn run_as(mut cmd: Command, name: &str, timeout: Option<Duration>) -> HostResult<String> {
     let shown = describe(&cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -109,8 +154,7 @@ fn run(mut cmd: Command, timeout: Option<Duration>) -> HostResult<String> {
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
         Err(format!(
-            "{} exited with {status}: {}",
-            program_of(&cmd),
+            "{name} exited with {status}: {}",
             tail(&String::from_utf8_lossy(&stderr))
         ))
     }
@@ -216,6 +260,44 @@ fn wait(child: &mut Child, timeout: Option<Duration>) -> std::io::Result<std::pr
     }
 }
 
+/// What to do with a project container `podman container inspect` fails on.
+#[derive(Debug, PartialEq, Eq)]
+enum Unreadable {
+    /// Removed between `podman ps` and the inspect.
+    Gone,
+    /// It holds nothing, since the data lives in volumes, and recreating
+    /// its service fails until it is gone.
+    Remove,
+    Fail,
+}
+
+/// A podman cut off halfway leaves a container nothing can read in two
+/// ways. A create or a remove killed in the middle leaves its record in
+/// podman's database without its storage ("container not known"), stuck in
+/// "removing" with its name taken. A power cut leaves the storage of a
+/// container created just before it half written: the `link` and `lower`
+/// files of its layer exist and are empty, and every inspect fails on
+/// "getting graph driver info", reading the empty link as the overlay
+/// directory itself, which is no symlink. Either is removed, the second
+/// only when the container does not run and is not being stopped: removing
+/// one that does would stop a service. Any other error is returned, the
+/// same wrapper around a permission or I/O error included, since it may
+/// pass and says nothing about the container being broken.
+fn unreadable(state: &str, error: &str) -> Unreadable {
+    let empty_link = error.contains("getting graph driver info")
+        && error.contains("readlink ")
+        && error.contains("/overlay: invalid argument");
+    if error.contains("no such container") {
+        Unreadable::Gone
+    } else if error.contains("container not known")
+        || (empty_link && !matches!(state, "running" | "paused" | "stopping"))
+    {
+        Unreadable::Remove
+    } else {
+        Unreadable::Fail
+    }
+}
+
 /// The command line, for errors. Not `{cmd:?}`, which starts with
 /// `cd "<dir>" &&` when a working directory is set.
 fn describe(cmd: &Command) -> String {
@@ -227,9 +309,13 @@ fn describe(cmd: &Command) -> String {
 }
 
 fn program_of(cmd: &Command) -> String {
-    Path::new(cmd.get_program())
+    file_name(cmd.get_program())
+}
+
+fn file_name(program: &OsStr) -> String {
+    Path::new(program)
         .file_name()
-        .unwrap_or(cmd.get_program())
+        .unwrap_or(program)
         .to_string_lossy()
         .into_owned()
 }
@@ -483,55 +569,64 @@ impl Host for PodmanHost {
         if services.is_empty() {
             return Ok(());
         }
-        let mut cmd = self.compose(files);
-        cmd.args(["up", "-d", "--no-deps"]);
-        if recreate {
-            cmd.arg("--force-recreate");
-        }
-        cmd.args(services);
-        run(cmd, Some(Duration::from_secs(30 * 60))).map(drop)
+        let cmd = self.up_command(files, services, recreate);
+        let name = file_name(OsStr::new(&self.compose));
+        run_as(cmd, &name, Some(Duration::from_secs(30 * 60))).map(drop)
     }
 
     /// One container at a time when inspecting them together fails: one
     /// removed between the two calls is skipped, and one an interrupted
-    /// podman left half created or half removed is removed.
+    /// podman or a power cut left unreadable is removed, as `unreadable`
+    /// decides. The removal goes to stderr, which the unit's journal keeps.
     fn containers(&mut self) -> HostResult<Vec<Container>> {
         let mut ps = self.podman();
-        ps.args(["ps", "--all", "--quiet", "--no-trunc", "--filter"])
-            .arg(format!("label={PROJECT_LABEL}={PROJECT}"));
-        let ids: Vec<String> = run(ps, None)?
+        ps.args([
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--format",
+            "{{.ID}} {{.State}}",
+        ])
+        .arg("--filter")
+        .arg(format!("label={PROJECT_LABEL}={PROJECT}"));
+        let listed: Vec<(String, String)> = run(ps, None)?
             .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let id = fields.next()?.to_string();
+                Some((id, fields.next().unwrap_or_default().to_string()))
+            })
             .collect();
-        if ids.is_empty() {
+        if listed.is_empty() {
             return Ok(Vec::new());
         }
         let mut inspect = self.podman();
-        inspect.args(["container", "inspect"]).args(&ids);
+        inspect
+            .args(["container", "inspect"])
+            .args(listed.iter().map(|(id, _)| id));
         if let Ok(json) = run(inspect, None) {
             return parse_containers(&json);
         }
         let mut found = Vec::new();
-        for id in &ids {
+        for (id, state) in &listed {
             let mut inspect = self.podman();
             inspect.args(["container", "inspect", id]);
             match run(inspect, None) {
                 Ok(json) => found.extend(parse_containers(&json)?),
-                Err(e) if e.contains("no such container") => {}
-                // Its record is in podman's database and its storage is not:
-                // a create or a remove was killed halfway, which leaves the
-                // container stuck in "removing" and its name taken. It holds
-                // nothing, since the data lives in volumes, and recreating
-                // its service fails until it is gone.
-                Err(e) if e.contains("container not known") => {
-                    let mut rm = self.podman();
-                    rm.args(["rm", "--force", id]);
-                    run(rm, Some(Duration::from_secs(120)))
-                        .map_err(|rm| format!("{e}; removing it: {rm}"))?;
-                }
-                Err(e) => return Err(e),
+                Err(e) => match unreadable(state, &e) {
+                    Unreadable::Gone => {}
+                    Unreadable::Remove => {
+                        let mut rm = self.podman();
+                        rm.args(["rm", "--force", id]);
+                        run(rm, Some(Duration::from_secs(120)))
+                            .map_err(|rm| format!("{e}; removing it: {rm}"))?;
+                        eprintln!(
+                            "{} removed container {id} ({state}), which podman could not read: {e}",
+                            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        );
+                    }
+                    Unreadable::Fail => return Err(e),
+                },
             }
         }
         Ok(found)
@@ -658,6 +753,88 @@ impl Host for PodmanHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The run unit ends, and its cgroup with it, right after the last
+    /// `compose up`; a port forwarder started from there must not be in it.
+    #[test]
+    fn containers_are_started_in_a_scope_that_outlives_the_run() {
+        let host = PodmanHost {
+            podman: "/usr/bin/podman".into(),
+            compose: "/opt/bin/podman-compose".into(),
+            systemctl: "/usr/bin/systemctl".into(),
+            systemd_run: "/usr/bin/systemd-run".into(),
+            root: "/home/stack/.local/share/laysi-one".into(),
+            pull_timeout: Duration::from_secs(1),
+        };
+        let stack = Path::new("/home/stack/.local/share/laysi-one/stack");
+        let files = [
+            stack.join("docker-compose.prod.yml"),
+            stack.join("docker-compose.ship.yml"),
+            stack.join(".env"),
+        ];
+        let cmd = host.up_command(&files, &["web".into(), "mcp".into()], true);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+        assert_eq!(cmd.get_program(), "/usr/bin/systemd-run");
+        assert_eq!(
+            args[..10],
+            [
+                "--user",
+                "--scope",
+                "--collect",
+                "--quiet",
+                "--property=DefaultDependencies=no",
+                "--",
+                "env",
+                "-u",
+                "INVOCATION_ID",
+                "/opt/bin/podman-compose"
+            ]
+        );
+        assert_eq!(
+            args[args.len() - 6..],
+            ["up", "-d", "--no-deps", "--force-recreate", "web", "mcp"]
+        );
+        assert_eq!(cmd.get_current_dir(), Some(stack));
+        assert!(cmd
+            .get_envs()
+            .any(|(key, value)| key == "INVOCATION_ID" && value.is_none()));
+    }
+
+    /// The error is what podman 4.9.3 printed after a power cut during a
+    /// rollback, for the postgres container it had just created (#64).
+    #[test]
+    fn only_a_container_podman_left_broken_is_removed() {
+        let half_written = "podman exited with exit status: 125: Error: getting graph driver info \"33ae49a17a82\": readlink /home/stack/.local/share/containers/storage/overlay: invalid argument";
+        assert_eq!(unreadable("created", half_written), Unreadable::Remove);
+        assert_eq!(unreadable("exited", half_written), Unreadable::Remove);
+        assert_eq!(unreadable("configured", half_written), Unreadable::Remove);
+        assert_eq!(unreadable("running", half_written), Unreadable::Fail);
+        assert_eq!(unreadable("paused", half_written), Unreadable::Fail);
+        assert_eq!(unreadable("stopping", half_written), Unreadable::Fail);
+        let no_storage = "Error: container not known";
+        assert_eq!(unreadable("removing", no_storage), Unreadable::Remove);
+        assert_eq!(unreadable("running", no_storage), Unreadable::Remove);
+        assert_eq!(
+            unreadable("exited", "Error: no such container 33ae49a17a82"),
+            Unreadable::Gone
+        );
+        for other in [
+            "Error: getting graph driver info \"33ae49a17a82\": readlink /home/stack/.local/share/containers/storage/overlay/l/QJ3V: permission denied",
+            "Error: getting graph driver info \"33ae49a17a82\": open /home/stack/.local/share/containers/storage/overlay/33ae49a17a82/lower: input/output error",
+            "Error: permission denied",
+        ] {
+            assert_eq!(unreadable("exited", other), Unreadable::Fail, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_wrapped_command_fails_under_the_name_given() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo broken >&2; exit 3"]);
+        let error = run_as(cmd, "podman-compose", None).unwrap_err();
+        assert!(error.starts_with("podman-compose exited with"), "{error}");
+        assert!(error.ends_with("broken"), "{error}");
+    }
 
     #[test]
     fn a_deadline_ends_what_the_command_started_too() {

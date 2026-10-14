@@ -18,6 +18,7 @@ on:
       - backend/crates/laysi-updater/**
       - backend/crates/laysi-license-token/**
       - backend/Cargo.lock
+      - backend/Cargo.toml
       - docker-compose.prod.yml
       - docker-compose.ship.yml
       - scripts/updater-e2e.ts

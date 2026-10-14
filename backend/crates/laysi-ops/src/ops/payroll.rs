@@ -1739,6 +1739,57 @@ mod tests {
         assert_eq!(c.slip.note, "事假 1 日扣 1,355、病假 2 日扣 1,355");
     }
 
+    /// Personal leave over three working days, approved before the middle one
+    /// was declared 天災停班. The request keeps what it recorded: payroll
+    /// charges three days, and the daily detail carries the same three.
+    #[test]
+    fn a_day_declared_off_after_approval_is_charged_as_recorded() {
+        let mut e = emp(d(2026, 7, 1), None);
+        e.base_salary = n("31000");
+        let requests = [leave(
+            "LV1",
+            "personal",
+            "approved",
+            "2026-07-27T09:00",
+            "2026-07-29T17:00",
+            "21",
+        )];
+        let requests: Vec<&LeaveRequest> = requests.iter().collect();
+        let mut schedule = office();
+        schedule
+            .calendar
+            .insert(d(2026, 7, 28), (DayKind::NaturalDisaster, "颱風".into()));
+        let (from, to) = (d(2026, 7, 1), d(2026, 7, 31));
+
+        let leave = leave_in_period(&e, &requests, from, to).unwrap();
+        assert_eq!(leave["personal"].days.round_dp(2), n("3"));
+        let mut days = month_days(Vec::new(), "2026-07", from, to);
+        mark_days(&mut days, &requests, &[], &schedule, true, d(2026, 8, 1));
+        let detail: Money = days
+            .iter()
+            .flat_map(|day| &day.leaves)
+            .map(|l| l.hours)
+            .sum::<Money>()
+            / n("7");
+        assert_eq!(detail.round_dp(2), n("3"), "逐日明細的天數");
+        assert!(days
+            .iter()
+            .find(|day| day.date == d(2026, 7, 28))
+            .is_some_and(|day| day.leaves.len() == 1));
+
+        let c = compute_one(
+            &e,
+            from,
+            to,
+            d(2026, 8, 5),
+            Money::ZERO,
+            Money::ZERO,
+            &leave,
+        )
+        .unwrap();
+        assert_eq!(c.slip.note, "事假 3 日扣 3,000");
+    }
+
     /// The payslip charges the dependants covered on the last day of the
     /// period and records how many, so recomputing it later uses the same
     /// count whatever the list says by then.

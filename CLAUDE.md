@@ -347,7 +347,9 @@ workspace**：它多租戶、經銷商與代理商在那裡開立啟動金鑰，
 hook**。**每個 clone 跑一次** `/codex-review:init`，它寫入 `.githooks/pre-commit` 並設定
 `core.hooksPath`；外掛在啟動時發現沒裝會提示。hook 把暫存區的 diff 交給 `codex`，第一行
 不是 `ALLOW:` 就擋下，理由印在 stderr；`codex` 沒裝、沒登入或出錯一樣擋下。merge、
-cherry-pick 與 revert 不審。
+cherry-pick 與 revert 只審 git 自動結果之上多出來的部分（解衝突與另外加的修改），與自動
+結果相同的直接放行；算不出自動結果時（git 2.40 以前、octopus merge）整份暫存區都審。
+本機的 hook 若是舊版，SessionStart 會提示，再跑一次 `/codex-review:init` 更新。
 
 它掛在 git 而不是 Claude Code 的 `PreToolUse` 上：審的是實際的暫存區，不是去猜指令字串，
 所以同一個 clone 裡終端機與其他 agent 的 commit 都會經過它；**沒跑過 init 的 clone 與 CI
@@ -939,6 +941,11 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 與出勤加給都沒有明文，與國定假日的「工資照給、出勤加倍」是兩件事，所以是第五種日別而
 不是換個名字的國定假日。**每一種休息日仍以休息日費率計價**：第 39、40 條是按日加倍而
 不是時數級距，payload 沒有那個形狀。
+
+**日曆事後改動不改寫已送出的休假單**：停班日之前請好的假照原單計（銷不銷假由勞資協商，
+婚假遇颱風計入婚假有函釋），逐日明細（`mark_days`）、計薪與特休已休都讀 `leave_by_date()`，
+三處同一個天數（沒有拆法記錄的舊單，明細依現行日曆拆，見 `shown_by_date`）。公司同意銷假就撤銷再重送。`set_work_calendar_day`／`refresh_work_calendar`
+回 `leave_overlaps` 列出與新日曆不一致的單，呼叫者讀不到休假單時是 `null`。
 
 **加班要先申請再核准，加班費由規則庫算**：`submit_my_overtime_request` 收起訖
 時刻，時數等於區間長度扣掉休息時間；`decide_overtime_request` 核准後，`run_payroll` 依 `overtime.toml`
