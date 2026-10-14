@@ -101,15 +101,16 @@ const MAX_REQUEST_ID_LEN: usize = 64;
 /// while [`SWITCHING_FILE`] is in `dir`. One `lstat`, cheap enough to ask on
 /// every write.
 ///
-/// False when the file is not there, and when `dir` itself is missing or is
-/// not a directory: an install without the host-side updater, a development
-/// one for instance, never switches. Any other error, such as a directory
-/// that cannot be searched, counts as switching. A refused write can be made
-/// again; one the rollback takes back is lost without anybody being told.
+/// False when the file is not there, and when `dir` itself is missing: an
+/// install without the host-side updater, a development one for instance,
+/// never switches. Any other error, such as a directory that cannot be
+/// searched or a file where the directory should be, counts as switching. A
+/// refused write can be made again; one the rollback takes back is lost
+/// without anybody being told.
 pub fn switching_in(dir: &Path) -> bool {
     match std::fs::symlink_metadata(dir.join(SWITCHING_FILE)) {
         Ok(_) => true,
-        Err(e) => !matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory),
+        Err(e) => e.kind() != ErrorKind::NotFound,
     }
 }
 
@@ -851,10 +852,11 @@ mod tests {
         assert!(switching_in(&dir));
         std::fs::remove_file(&marker).unwrap();
         assert!(!switching_in(&dir));
-        // A file where the directory should be is no results directory.
+        // A file where the directory should be is a broken mount, not an
+        // install without the updater: writes stop.
         let file = dir.join("plain");
         std::fs::write(&file, "").unwrap();
-        assert!(!switching_in(&file));
+        assert!(switching_in(&file));
         std::fs::remove_dir_all(&dir).unwrap();
 
         // Never a result's name, so never pruned or overwritten as one.
