@@ -1010,6 +1010,31 @@ exec ${realPodman} "$@"
   check(unitState("laysi-updater.path") === "active", "after every run the path unit is still watching (ActiveState=active)");
   check(requestsLeft().length === 0, "and the requests directory is empty");
 
+  // --- rustfs moves again, and the next update is rolled back ---------------
+  // The rollback puts v1.12.0's files over `.previous`, so no later update
+  // reads v1.11.0's again: the rustfs of the repository only v1.11.0 used
+  // has to go with the rollback. Squashed for the reason given above.
+  const nextDir = mkdtempSync(join(workDir, "rustfs-next-"));
+  writeFileSync(join(nextDir, "Containerfile"), `FROM ${newRustfs}\nLABEL e2e.rustfs=3\n`);
+  podman("build", "-q", "--pull=never", "--squash-all", "-t", `localhost:${REGISTRY_PORT}/rustfs-next/rustfs:e2e`, nextDir);
+  const nextFile = join(nextDir, "digest");
+  podman("push", "-q", "--tls-verify=false", "--digestfile", nextFile, `localhost:${REGISTRY_PORT}/rustfs-next/rustfs:e2e`);
+  podman("rmi", `localhost:${REGISTRY_PORT}/rustfs-next/rustfs:e2e`);
+  const nextRustfs = `localhost:${REGISTRY_PORT}/rustfs-next/rustfs@${readFileSync(nextFile, "utf8").trim()}`;
+  const nextRustfsDigest = nextRustfs.split("@")[1];
+  const v13 = buildRelease({ version: "v1.12.0", rustfs: nextRustfs }, known);
+  known.push(v13.migration);
+  r = await update("e2e-rustfs-again", v13.manifest);
+  check(r.status === "succeeded", "a release that moves rustfs to a third repository is installed");
+  downtime(r, "v1.12.0");
+  assertSettledOn("v1.12.0");
+  check(hasImage(movedRustfs) && hasImage(nextRustfsDigest), "the previous release's rustfs is kept beside the new one");
+  const v14 = buildRelease({ version: "v1.13.0", api: "never-healthy", rustfs: nextRustfs }, known);
+  r = await update("e2e-rustfs-rollback", v14.manifest);
+  check(r.status === "rolled-back" && r.running === "v1.12.0", "the release after it never passes and is rolled back");
+  assertSettledOn("v1.12.0");
+  check(!hasImage(movedRustfs) && hasImage(nextRustfsDigest), "the rollback removes the rustfs only the release two back used, the current one kept");
+
   console.log("\nDowntime, step 4 to the end of step 8:");
   for (const d of downtimes) console.log(`  ${d.version}: ${d.seconds} s`);
   console.log("\nall checks passed");
