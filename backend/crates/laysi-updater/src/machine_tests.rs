@@ -38,6 +38,8 @@ struct Spec {
     secrets: &'static str,
     adds_secret: Option<&'static str>,
     rustfs: &'static str,
+    /// The repository the rustfs image is pulled from.
+    rustfs_repo: &'static str,
     postgres: &'static str,
     updater: &'static [u8],
 }
@@ -52,6 +54,7 @@ impl Spec {
             secrets: "alpine-1",
             adds_secret: None,
             rustfs: "rustfs-1",
+            rustfs_repo: "docker.io/rustfs/rustfs",
             postgres: "postgres-1",
             updater: b"updater ok",
         }
@@ -72,13 +75,14 @@ impl Spec {
         format!(
             "service secrets docker.io/library/alpine@{}\n\
              service postgres docker.io/library/postgres@{}\n\
-             service rustfs docker.io/rustfs/rustfs@{}\n\
+             service rustfs {}@{}\n\
              service api ${{LAYSI_REGISTRY}}/laysi-one-api@${{LAYSI_API_DIGEST}}\n\
              service mcp ${{LAYSI_REGISTRY}}/laysi-one-api@${{LAYSI_API_DIGEST}}\n\
              service backup ${{LAYSI_REGISTRY}}/laysi-one-backup@${{LAYSI_BACKUP_DIGEST}}\n\
              service web ${{LAYSI_REGISTRY}}/laysi-one-web@${{LAYSI_WEB_DIGEST}}\n",
             digest(self.secrets),
             digest(self.postgres),
+            self.rustfs_repo,
             digest(self.rustfs)
         )
     }
@@ -131,7 +135,7 @@ impl Spec {
         world
             .registry
             .entry(digest(self.rustfs))
-            .or_insert_with(|| image("docker.io/rustfs/rustfs", "", Behaviour::Healthy));
+            .or_insert_with(|| image(self.rustfs_repo, "", Behaviour::Healthy));
     }
 }
 
@@ -799,6 +803,73 @@ fn ten_updates_in_a_row_keep_two_releases_of_images() {
             .collect();
         assert!(releases.len() <= 2, "{releases:?}");
     }
+}
+
+/// Every image the compose files of `spec` name, Laysi's own and the
+/// third-party ones.
+fn images_of(spec: &Spec) -> std::collections::BTreeSet<String> {
+    Image::ALL
+        .into_iter()
+        .map(|image| spec.own(image))
+        .chain([spec.secrets, spec.postgres, spec.rustfs].map(digest))
+        .collect()
+}
+
+/// Installs `releases` one after another from `installed`, and after each
+/// success expects exactly the images of the running and the previous
+/// release on the host: the previous one's, third-party ones included, so a
+/// rollback can still start it.
+fn update_through(installed: Spec, releases: &[Spec]) -> Rig {
+    let rig = Rig::new(installed.clone(), releases);
+    let mut previous = installed;
+    for (n, spec) in releases.iter().enumerate() {
+        let id = rig.request(&format!("req-images-{n:04}"), &rig.manifest(spec.version));
+        rig.run().unwrap();
+        assert_eq!(
+            rig.result(&id).status,
+            UpdateStatus::Succeeded,
+            "{}",
+            spec.version
+        );
+        rig.assert_settled(&id);
+        let left = rig.world.borrow().local.clone();
+        let wanted: std::collections::BTreeSet<String> = images_of(&previous)
+            .union(&images_of(spec))
+            .cloned()
+            .collect();
+        assert_eq!(left, wanted, "images after {}", spec.version);
+        previous = spec.clone();
+    }
+    rig
+}
+
+#[test]
+fn third_party_images_older_than_the_previous_release_are_removed() {
+    let mut second = v2();
+    second.secrets = "alpine-2";
+    second.postgres = "postgres-2";
+    second.rustfs = "rustfs-2";
+    let mut third = Spec::good("v0.3.0", "m3");
+    third.secrets = "alpine-3";
+    third.postgres = "postgres-3";
+    third.rustfs = "rustfs-3";
+    let rig = update_through(v1(), &[second, third]);
+    let w = rig.world.borrow();
+    for gone in ["alpine-1", "postgres-1", "rustfs-1"] {
+        assert!(!w.local.contains(&digest(gone)), "{gone} was kept");
+    }
+}
+
+#[test]
+fn a_third_party_image_whose_repository_changed_is_removed_two_releases_later() {
+    let mut second = v2();
+    second.rustfs = "rustfs-2";
+    second.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    let mut third = Spec::good("v0.3.0", "m3");
+    third.rustfs = "rustfs-2";
+    third.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    let rig = update_through(v1(), &[second, third]);
+    assert!(!rig.world.borrow().local.contains(&digest("rustfs-1")));
 }
 
 #[test]

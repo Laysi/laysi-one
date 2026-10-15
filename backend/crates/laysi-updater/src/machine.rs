@@ -747,6 +747,7 @@ impl<'h, H: Host> Machine<'h, H> {
                     if let Err(Abandoned { status, reason }) = self.prepare(&j) {
                         return self.abandon(j, status, reason);
                     }
+                    j.superseded_repos = self.superseded_repos();
                     j.phase = Phase::Prepared;
                     self.save(&j)?;
                 }
@@ -868,7 +869,7 @@ impl<'h, H: Host> Machine<'h, H> {
                     self.save(&j)?;
                 }
                 Phase::Finishing => {
-                    self.prune_images(&j, &[&j.from, &j.to], &[]);
+                    self.prune_images(&j, &[&j.from, &j.to], &j.superseded_repos);
                     self.remove_backup(&j)?;
                     self.empty_incoming();
                     let status = if j.updater_note.is_some() {
@@ -1076,6 +1077,30 @@ impl<'h, H: Host> Machine<'h, H> {
     fn empty_incoming(&mut self) {
         if let Err(e) = fsx::empty_own_dir(&self.layout.incoming_dir()) {
             self.log(format!("could not empty incoming/: {e}"));
+        }
+    }
+
+    /// The repositories the stack files kept from the switch before this
+    /// one name, which step 6 is about to replace. None on a host that has
+    /// not switched since it was installed, or whose files cannot be read:
+    /// the clean-up then removes less, never more.
+    fn superseded_repos(&mut self) -> Vec<String> {
+        let files = self.stack_files().map(|file| Layout::previous_of(&file));
+        if !files.iter().all(|file| file.exists()) {
+            return Vec::new();
+        }
+        match self.host.compose_config(&files) {
+            Ok(services) => services
+                .iter()
+                .filter_map(|s| split_reference(&s.image).map(|(repo, _)| repo.to_string()))
+                .filter(|repo| !repo.contains(char::is_whitespace))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            Err(e) => {
+                self.log(format!("reading the previous stack files: {e}"));
+                Vec::new()
+            }
         }
     }
 

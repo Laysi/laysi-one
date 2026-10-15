@@ -193,6 +193,11 @@ pub struct Journal {
     /// Image references the stack ran before the switch, kept for a later
     /// rollback by hand and never deleted by the clean-up.
     pub keep: Vec<String>,
+    /// Repositories the stack files of the release before `from` name,
+    /// read before step 6 replaces those files. The clean-up after a
+    /// success removes their images too: a third-party image whose
+    /// repository `from` and `to` no longer use is otherwise never removed.
+    pub superseded_repos: Vec<String>,
     /// Rolling back has to put the previous stack files back.
     pub restore_files: bool,
     /// Rolling back has to restore the database from `backup`.
@@ -229,6 +234,7 @@ impl Journal {
             entries_opened: None,
             backup: None,
             keep: Vec::new(),
+            superseded_repos: Vec::new(),
             restore_files: false,
             restore_db: false,
             updater_swapped: false,
@@ -277,6 +283,9 @@ impl Journal {
         for reference in &self.keep {
             out.push_str(&format!("keep {reference}\n"));
         }
+        for repo in &self.superseded_repos {
+            out.push_str(&format!("superseded-repo {repo}\n"));
+        }
         out
     }
 
@@ -314,6 +323,9 @@ impl Journal {
             entries_opened: time("entries-opened")?,
             backup: fields.optional("backup")?.map(str::to_string),
             keep: fields.all("keep").map(str::to_string).collect(),
+            // Added later. A journal from an updater before it has none, and
+            // an updater before it skips the line; those images then stay.
+            superseded_repos: fields.all("superseded-repo").map(str::to_string).collect(),
             restore_files: flag("restore-files")?,
             restore_db: flag("restore-db")?,
             // Added after the first journals: a journal without it comes
@@ -447,6 +459,7 @@ mod tests {
                 "docker.io/library/postgres@sha256:aa".into(),
                 "docker.io/rustfs/rustfs@sha256:bb".into(),
             ];
+            j.superseded_repos = vec!["docker.io/rustfs/rustfs".into()];
             j.restore_files = true;
             j.restore_db = phase >= Phase::Switching;
             j.updater_swapped = phase >= Phase::Committed;

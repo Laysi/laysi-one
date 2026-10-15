@@ -341,6 +341,11 @@ function byService(): Map<string, Ctr> {
   return map;
 }
 
+/** Whether local storage holds an image pulled by this digest. */
+function hasImage(digest: string): boolean {
+  return JSON.parse(podman("images", "--format", "json")).some((i: any) => (i.RepoDigests ?? []).some((d: string) => d.endsWith(`@${digest}`)));
+}
+
 function psql(sql: string): string {
   return podman("exec", `${PROJECT}-postgres`, "psql", "-U", "laysi", "-d", "laysi", "-Atc", sql);
 }
@@ -728,10 +733,13 @@ exec ${realPodman} "$@"
   );
 
   // --- a release that only changes rustfs -----------------------------------
+  // Squashed, so the pinned rustfs is not its parent image: podman does not
+  // remove an image that another one is built on, and the clean-up below has
+  // to be able to remove the pinned one.
   const rustfsDir = mkdtempSync(join(workDir, "rustfs-"));
   writeFileSync(join(rustfsDir, "Containerfile"), `FROM ${RUSTFS}\nLABEL e2e.rustfs=2\n`);
   podman("pull", "-q", RUSTFS);
-  podman("build", "-q", "--pull=never", "-t", `localhost:${REGISTRY_PORT}/rustfs/rustfs:e2e`, rustfsDir);
+  podman("build", "-q", "--pull=never", "--squash-all", "-t", `localhost:${REGISTRY_PORT}/rustfs/rustfs:e2e`, rustfsDir);
   const rustfsFile = join(rustfsDir, "digest");
   podman("push", "-q", "--tls-verify=false", "--digestfile", rustfsFile, `localhost:${REGISTRY_PORT}/rustfs/rustfs:e2e`);
   podman("rmi", `localhost:${REGISTRY_PORT}/rustfs/rustfs:e2e`);
@@ -742,6 +750,8 @@ exec ${realPodman} "$@"
   check(r.status === "succeeded", "a release that only changes rustfs is installed");
   downtime(r, "v1.4.0");
   assertSettledOn("v1.4.0");
+  const [pinnedRustfs, movedRustfs] = [RUSTFS, newRustfs].map((ref) => ref.split("@")[1]);
+  check(hasImage(pinnedRustfs) && hasImage(movedRustfs), "the previous release's rustfs is kept beside the new one");
 
   // --- a new updater that fails its self-check ------------------------------
   const updaterNow = sha256(readFileSync(join(ROOT, "bin/laysi-updater")));
@@ -751,6 +761,9 @@ exec ${realPodman} "$@"
   check(r.status === "succeeded-updater-kept" && (r.reason ?? "").includes("自我檢查"), "a new updater that fails its self-check is not installed, and the result says why");
   check(sha256(readFileSync(join(ROOT, "bin/laysi-updater"))) === updaterNow, "the running updater stays");
   assertSettledOn("v1.5.0");
+  // v1.3.0 ran the pinned rustfs from another repository; neither v1.4.0 nor
+  // v1.5.0 names it.
+  check(!hasImage(pinnedRustfs) && hasImage(movedRustfs), "a third-party image two releases old is removed, the current one kept");
 
   // --- the current updater fails at boot: the previous one starts the stack -
   const current = join(ROOT, "bin/laysi-updater");
