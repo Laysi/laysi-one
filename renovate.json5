@@ -1,0 +1,126 @@
+// Renovate configuration. Renovate runs as the Renovate GitHub App installed on the Laysi
+// organization; the values follow Laysi/trustiot-v2's renovate.json5.
+//
+// Rules that every Renovate pull request keeps:
+// - GitHub Actions stay pinned to a full commit SHA, with the release tag in a trailing comment.
+// - Container images stay pinned by digest.
+// - Rust crates, npm packages and the tools in `.prototools` are updated as exact versions.
+// - Every copy of a pin is read by exactly one manager, so one pull request updates all of them.
+// - PostgreSQL stays on its current major.
+// - Every pull request is labelled review:human: its commits are made by the app, so they never
+//   pass the Codex pre-commit gate that an agent merge requires.
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    // Pins every `uses:` to a commit SHA and keeps `# vX.Y.Z` next to it.
+    "helpers:pinGitHubActionDigestsToSemver",
+    // Dependency Dashboard issue and one PR per update group.
+    ":dependencyDashboard",
+  ],
+  // The default preset skips every `tests/` directory; pins in tests have to move with the rest.
+  ignorePresets: [":ignoreModulesAndTests"],
+  ignorePaths: ["**/node_modules/**", "**/target/**"],
+  // Commit messages and PR titles follow Angular format, like every commit in this repository.
+  semanticCommits: "enabled",
+  semanticCommitType: "chore",
+  semanticCommitScope: "deps",
+  labels: ["ci/cd", "review:human"],
+  // The Dependency Dashboard is an issue like any other here: CLAUDE.md wants a category label and
+  // exactly one priority label on every issue.
+  dependencyDashboardLabels: ["ci/cd", "priority:P2"],
+  // Exact versions in Cargo.toml and package.json: a bump is a reviewed change, never a range.
+  rangeStrategy: "pin",
+  // At most this many open pull requests: CI is the only check, and Actions minutes are limited.
+  prConcurrentLimit: 5,
+  prHourlyLimit: 2,
+  // Weekly, before the working week, in Taipei time; security updates ignore the schedule.
+  timezone: "Asia/Taipei",
+  schedule: ["before 6am on monday"],
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 6am on the first day of the month"],
+  },
+  vulnerabilityAlerts: {
+    // Security fixes open right away, whatever the schedule is.
+    schedule: ["at any time"],
+    labels: ["ci/cd", "review:human", "bug"],
+  },
+  // Container images are always pinned by digest, in every file type Renovate reads here.
+  pinDigests: true,
+  packageRules: [
+    {
+      description: "Our own images are built by release.yml for a v* tag, not by Renovate",
+      matchPackageNames: ["ghcr.io/laysi/**"],
+      enabled: false,
+    },
+    {
+      description: "Every container image stays pinned by digest",
+      matchDatasources: ["docker"],
+      pinDigests: true,
+    },
+    {
+      description: "The proto manager reads tool versions from .prototools, which has no place for a digest: a digest pin there would be a no-op update. proto verifies the tools it installs",
+      matchManagers: ["proto"],
+      pinDigests: false,
+    },
+    {
+      description: "The runner of every job (runs-on) is a deliberate choice; a runner image upgrade is a reviewed change, not a bot PR",
+      matchDatasources: ["github-runners"],
+      enabled: false,
+    },
+    {
+      description: "Pin and bump GitHub Actions together as one group",
+      matchManagers: ["github-actions"],
+      matchDepTypes: ["action"],
+      groupName: "github actions",
+      pinDigests: true,
+    },
+    {
+      description: "dtolnay/rust-toolchain is read by the custom manager below as the Rust version, not as an action: its ref is a branch named after the toolchain, not a release tag",
+      matchManagers: ["github-actions"],
+      matchPackageNames: ["dtolnay/rust-toolchain"],
+      enabled: false,
+    },
+    {
+      description: "The Rust toolchain: both .prototools files (proto manager) and the dtolnay/rust-toolchain refs in the workflows change in one pull request, so local builds and CI use the same compiler",
+      matchDepNames: ["rust"],
+      matchManagers: ["proto", "custom.regex"],
+      groupName: "rust toolchain",
+    },
+    {
+      description: "PostgreSQL stays on 18: a new major cannot open an existing data directory without pg_upgrade, so every installation would fail to start. A new major is a deliberate migration, not a bot PR",
+      matchDatasources: ["docker"],
+      matchPackageNames: ["postgres", "docker.io/library/postgres"],
+      allowedVersions: "/^18(\\.|$)/",
+    },
+    {
+      description: "Rust crates: one weekly pull request for the semver-compatible updates of both workspaces",
+      matchManagers: ["cargo"],
+      matchUpdateTypes: ["patch"],
+      groupName: "rust crates",
+    },
+    {
+      description: "A minor update is semver-compatible only from 1.0.0: Cargo treats 0.5 to 0.6 as breaking, so those get a pull request of their own instead of holding the weekly group back",
+      matchManagers: ["cargo"],
+      matchUpdateTypes: ["minor"],
+      matchCurrentVersion: ">=1.0.0",
+      groupName: "rust crates",
+    },
+    {
+      description: "npm packages for web and scripts: one weekly pull request",
+      matchManagers: ["npm", "bun"],
+      groupName: "npm packages",
+    },
+  ],
+  customManagers: [
+    {
+      description: "The Rust version CI installs: the ref of dtolnay/rust-toolchain in the workflows",
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      matchStrings: ["uses: dtolnay/rust-toolchain@(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      depNameTemplate: "rust",
+      datasourceTemplate: "rust-version",
+    },
+  ],
+}
