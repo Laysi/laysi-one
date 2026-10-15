@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { OpFailed, type UpdateResultView } from './api/client';
+import { OpFailed, type LicenseState, type UpdateResultView } from './api/client';
 
 export const DOWNTIME_PHRASE = '約一分鐘';
 export const POLL_MS = 3000;
@@ -28,6 +28,13 @@ export const UNCONFIRMED_MESSAGE =
   '無法確認更新結果，請重新整理本頁查看目前版本。仍無法確認時請洽經銷商。';
 
 export const UNREACHABLE_MESSAGE = '系統更新後一直沒有回應。請盡快洽經銷商。';
+
+export const FALLBACK_BOOT_MESSAGE =
+  '上次啟動系統時改用備用的更新程式，請洽經銷商檢修；系統可以繼續使用。';
+
+export function updaterNotice(licence: Pick<LicenseState, 'fallback_boot'>): string | null {
+  return licence.fallback_boot ? FALLBACK_BOOT_MESSAGE : null;
+}
 
 export type Phase =
   | { kind: 'progress' }

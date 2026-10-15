@@ -17,6 +17,7 @@ import {
   saveRun,
   startRun,
   updateAction,
+  updaterNotice,
   within,
   type Phase,
   type UpdateRun,
@@ -120,6 +121,7 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
 
   const released = licence.released_version;
   const action = updateAction(released, licence.updater_present, canUpdate, phase);
+  const notice = updaterNotice(licence);
 
   return (
     <section className="licence-card">
@@ -150,6 +152,8 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
           </>
         )}
       </div>
+
+      {notice && <p className="state-note state-note--error">{notice}</p>}
 
       {action === 'no-release' && <p className="state-note">目前沒有可安裝的版本。</p>}
 

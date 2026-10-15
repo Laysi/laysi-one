@@ -8,9 +8,10 @@
 //
 //   bun scripts/update-test.ts
 
-import { OpFailed, updateResult, type UpdateResultView } from "../web/src/api/client";
+import { OpFailed, licenseState, updateResult, type UpdateResultView } from "../web/src/api/client";
 import {
   ACCEPT_WAIT_MS,
+  FALLBACK_BOOT_MESSAGE,
   GIVE_UP_MS,
   STORAGE_KEY,
   STORED_RUN_TTL_MS,
@@ -25,6 +26,7 @@ import {
   serverUnreachable,
   startRun,
   updateAction,
+  updaterNotice,
   within,
   type KeyValueStore,
   type Phase,
@@ -290,6 +292,19 @@ ok("a refusal from the operation itself clears it", !serverUnreachable(new OpFai
   const outcome = await hung.then(() => "resolved", () => "rejected");
   ok("a poll that hangs is cut off", outcome === "rejected");
   ok("a poll that answers passes through", (await within(Promise.resolve(7), 20)) === 7);
+}
+
+// The previous updater started the system because the current one failed:
+// the card says so until the current one starts it again.
+ok("a start by the previous updater puts the notice on the card", updaterNotice({ fallback_boot: true }) === FALLBACK_BOOT_MESSAGE);
+ok("a start by the current updater leaves the card as it is", updaterNotice({ fallback_boot: false }) === null);
+{
+  const licence = {
+    standing: "使用中", writes_allowed: true, note: "", reason: "", fingerprint: "f", last_check_at: null, last_error: "",
+    has_activation_key: true, grace_until: null, running_version: "v0.1.12", released_version: null, updater_present: true,
+  };
+  ok("get_license says whether the previous updater started the system", licenseState.safeParse({ ...licence, fallback_boot: true }).success);
+  ok("a get_license without it fails at the boundary", !licenseState.safeParse(licence).success);
 }
 
 console.log(failed === 0 ? "\n全部通過" : `\n${failed} 項未通過`);
