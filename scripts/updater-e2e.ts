@@ -748,6 +748,51 @@ exec ${realPodman} "$@"
   const retryImages = JSON.parse(podman("images", "--format", "json")).filter((i: any) => (i.RepoDigests ?? []).some((d: string) => Object.values(vRetry.digests).some((x) => d.endsWith(x))));
   check(retryImages.length === 0, "the new release's images are gone");
 
+  // --- the restore fails twice: rollback-failed, then retry-rollback --------
+  // Every restore fails while the file is there, the way a full disk would
+  // until someone frees it.
+  const failRestores = join(workDir, "fail-restores");
+  const podmanFailingRestores = join(workDir, "podman-failing-restores");
+  writeFileSync(
+    podmanFailingRestores,
+    `#!/bin/sh
+case "$*" in
+*"pg_restore --create"*)
+  if [ -e ${failRestores} ]; then
+    cat > /dev/null
+    echo 'pg_restore: error: could not write to file: No space left on device' >&2
+    exit 1
+  fi ;;
+esac
+exec ${realPodman} "$@"
+`,
+  );
+  chmodSync(podmanFailingRestores, 0o755);
+  writeFileSync(failRestores, "");
+  writeFileSync(toolEnv, `${envBeforeRetry}LAYSI_PODMAN=${podmanFailingRestores}\n`);
+  const vStuck = buildRelease({ version: "v1.2.2", api: "exit" }, known);
+  r = await update("e2e-rollback-stuck", vStuck.manifest);
+  check(r.status === "rollback-failed", "a rollback whose restore fails twice ends in rollback-failed");
+  check(journalPhase() === "rollback-failed" && backups().length === 1, "the journal stays and the dump is kept");
+  powerCutAndBoot();
+  await settledRun();
+  const up = [...byService().values()].filter((c) => c.running).map((c) => c.service);
+  check(up.length === 1 && up[0] === "postgres", "a boot starts postgres alone");
+  check(sh(["podman", "exec", `${PROJECT}-postgres`, "psql", "-U", "laysi", "-d", "laysi", "-Atc", "select 1"], { ok: false }).code !== 0, "the database is gone");
+  // The disk is freed; the updater runs the podman it was installed with.
+  rmSync(failRestores);
+  writeFileSync(toolEnv, envBeforeRetry);
+  const retried = sh([join(ROOT, "bin/laysi-updater"), "retry-rollback"]);
+  log(retried.out.trim());
+  r = readResult("e2e-rollback-stuck")!;
+  check(r.status === "rolled-back" && r.running === "v1.0.0", "retry-rollback restores the dump and rolls back to the release before the update");
+  check(/人工指令重新還原/.test(r["rollback-reason"] ?? ""), "rollback-reason says the restore was retried by hand");
+  assertSettledOn("v1.0.0");
+  check(!migrations().includes(vStuck.migration), "the new release's migration is not in the restored database");
+  check(psql("select count(*) from e2e_rows") === "1", "the data written before step 4 is back");
+  check(backups().length === 0, "the dump is deleted once restored");
+  // The next update, a good release, follows right below.
+
   // --- a good release, with a new secret and a new updater ------------------
   const secretsBefore = podman("exec", api, "sh", "-c", "sha256sum /secrets/pg_password /secrets/setup_token /secrets/database_url");
   const updaterBefore = sha256(readFileSync(join(ROOT, "bin/laysi-updater")));

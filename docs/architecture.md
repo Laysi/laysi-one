@@ -3605,7 +3605,7 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 | `rolling-back` | 重做回退 |
 | `restoring` | 重新還原資料庫；`restore-retry` 已寫下時是續做那一次重試，不會再開始第二次 |
 | `restored` | 起舊版並判斷 |
-| `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres |
+| `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres，直到有人執行 `retry-rollback`（見「回退失敗之後」） |
 
 **斷電會留下讀不了的容器**：斷電前一刻建立的容器，它那一層的 `link` 與 `lower` 檔已經
 建立卻是空的；`podman ps` 列得出它，任何 inspect 都失敗在 `getting graph driver info`，
@@ -3664,6 +3664,33 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
 `env -u` 拿掉一次，conmon 才回到 podman 自己開的 `libpod-conmon-*.scope`。那個 scope 不帶
 預設相依（`DefaultDependencies=no`），這個 scope 也照做：帶著預設相依的 scope 會在關機時
 與開機 unit 同時停下，conmon 在 `ExecStop=` 依序停 stack、postgres 還沒停好之前就被殺掉。
+
+### 回退失敗之後
+
+停在 `rollback-failed` 而備份留著的機器只啟動 postgres，系統的資料庫已經不在：還原前先
+刪掉它，還原失敗時再刪掉還原了一半的那一份。api 沒有執行，畫面打不開，客戶自己救不回來。
+
+**由原廠救回**：客戶聯絡經銷商、經銷商轉原廠，原廠取得主機上 stack 使用者的 shell（本機
+主控台或 ssh，由客戶提供）之後執行，更新程式在 `~/.local/share/laysi-one/bin/`：
+
+1. `laysi-updater status`：日誌是 `rollback-failed`，`backup` 列出 `<請求編號>.dump`。
+2. 從 `state/updater.log` 與結果檔（`results/<請求編號>`）的 `rollback-reason` 找出還原為
+   什麼失敗，先排除。磁碟滿就清出空間；備份本身讀不了時停下來，這個指令救不回來。
+   斷電之後 `updater.log` 的尾端可能是一段 NUL、最後幾行沒有落盤（`grep` 要加 `-a`），
+   這時原因只在結果檔。
+3. `laysi-updater retry-rollback`。日誌停在 `rollback-failed`、備份還在、主機記錄的版本
+   與 stack 檔都是更新前那一版，三者都成立才把日誌改回 `restoring`，再
+   `systemctl --user start laysi-updater-recover.service`，由收尾 unit 照一般的回退做完：
+   還原與那一次重試、起舊版並判斷。工作在 unit 裡做，ssh 斷線不影響；指令等到收尾結束，
+   印出回到的版本。
+4. 成功時結果改成 `rolled-back`，`rollback-reason` 記下「以人工指令重新還原」與先前失敗的
+   原因，新的在前；畫面
+   回來之後再按一次更新，照常執行。仍然失敗就回到 `rollback-failed`、備份留著，排除原因後
+   可以再執行一次。
+
+**備份在還原成功的那一刻刪掉**，與一般回退相同：資料已經回到資料庫，之後舊版起不來也
+用不到它。沒有留下備份的 `rollback-failed`（還原成功、是舊版沒有啟動）不走這條路，指令
+會拒絕：那種機器每次開機照常啟動 stack，原因在 `state/updater.log`。
 
 ### 出貨與 compose
 

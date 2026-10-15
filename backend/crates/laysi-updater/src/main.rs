@@ -8,6 +8,7 @@
 //! laysi-updater stop-stack          # at shutdown (ExecStop of the boot unit)
 //! laysi-updater self-check          # run on a new updater before it replaces this one
 //! laysi-updater write-units
+//! laysi-updater retry-rollback      # by hand, after a rollback-failed with its dump kept
 //! laysi-updater status
 //! laysi-updater version
 //! ```
@@ -16,9 +17,10 @@
 //! `layout`); the units set it.
 
 use std::path::Path;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use laysi_updater::host::Host;
+use laysi_updater::journal::Phase;
 use laysi_updater::layout::Layout;
 use laysi_updater::machine::{Config, Machine, DATABASE, ENTRIES};
 use laysi_updater::podman::PodmanHost;
@@ -46,12 +48,13 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "self-check" => self_check(),
         "write-units" => units::write(&Layout::from_env()?),
         "install" => install::install(&args[1..]),
+        "retry-rollback" => retry_rollback(),
         "status" => status(),
         "version" | "--version" => {
             println!("{}", version());
             Ok(())
         }
-        _ => Err("usage: laysi-updater install|run|boot|discard-requests|stop-stack|self-check|write-units|status|version".into()),
+        _ => Err("usage: laysi-updater install|run|boot|discard-requests|stop-stack|self-check|write-units|retry-rollback|status|version".into()),
     }
 }
 
@@ -145,6 +148,44 @@ fn self_check() -> Result<(), String> {
     Ok(())
 }
 
+/// Set a rollback that failed with its dump kept back to restoring, have
+/// the recovery unit finish it, and say how it ended. The unit does the
+/// work rather than this process: a restore outlives the ssh session that
+/// asked for it, and the unit runs with the tool paths of `updater.env`.
+fn retry_rollback() -> Result<(), String> {
+    install::runtime_dir();
+    let layout = Layout::from_env()?;
+    let mut host = PodmanHost::from_env(&layout.root);
+    let systemctl = host.systemctl.clone();
+    let request =
+        Machine::new(&mut host, layout.clone(), Vec::new(), Config::default()).retry_rollback()?;
+    println!("{request}: 重新還原資料庫並啟動更新前的版本，完成前不要關機");
+    let started = Command::new(&systemctl)
+        .args(["--user", "start", units::RECOVER_UNIT])
+        .status()
+        .map_err(|e| format!("{systemctl}: {e}"))?;
+    let machine = Machine::new(&mut host, layout, Vec::new(), Config::default());
+    match machine.load_journal()? {
+        None => {
+            let running = machine
+                .read_result(&request)
+                .and_then(|r| r.running)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            println!("{request}: 已回到 {running}");
+            Ok(())
+        }
+        Some(j) if j.phase == Phase::RollbackFailed => Err(format!(
+            "{request}: 仍然回退失敗，資料庫備份保留著：{}",
+            j.rollback_reason.unwrap_or_default()
+        )),
+        Some(j) => Err(format!(
+            "{request}: 停在 {}，沒有做完（systemctl {started}）；下一次開機會接著做",
+            j.phase
+        )),
+    }
+}
+
 fn status() -> Result<(), String> {
     let layout = Layout::from_env()?;
     let mut host = PodmanHost::from_env(&layout.root);
@@ -158,6 +199,11 @@ fn status() -> Result<(), String> {
         Ok(Some(j)) => println!("journal {} {}", j.request, j.phase),
         Ok(None) => println!("journal none"),
         Err(e) => println!("journal unreadable ({e})"),
+    }
+    if let Ok(entries) = std::fs::read_dir(layout.backup_dir()) {
+        for entry in entries.flatten() {
+            println!("backup {}", entry.path().display());
+        }
     }
     Ok(())
 }
