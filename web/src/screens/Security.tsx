@@ -27,7 +27,7 @@ import {
   type OidcSetting,
   type SystemHealth,
 } from '../api/client';
-import { serverUnreachable } from '../update';
+import { canRequestUpdate, serverUnreachable } from '../update';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -509,7 +509,7 @@ export function Security({ onToast, reloadKey }: Props) {
       {licence && (
         <UpdateCard
           licence={licence}
-          canUpdate={me.permissions.includes('get_update_ticket')}
+          canUpdate={canRequestUpdate(me.permissions)}
           onFinished={refreshAfterUpdate}
         />
       )}

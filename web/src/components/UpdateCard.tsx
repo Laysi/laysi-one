@@ -16,6 +16,7 @@ import {
   POLL_MS,
   saveRun,
   startRun,
+  updateAction,
   within,
   type Phase,
   type UpdateRun,
@@ -117,10 +118,8 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
     }
   }
 
-  const running = phase?.kind === 'progress';
   const released = licence.released_version;
-  const ended =
-    phase?.kind === 'succeeded' || phase?.kind === 'unconfirmed' || phase?.kind === 'unreachable';
+  const action = updateAction(released, licence.updater_present, canUpdate, phase);
 
   return (
     <section className="licence-card">
@@ -152,7 +151,7 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
         )}
       </div>
 
-      {!released && !phase && <p className="state-note">目前沒有可安裝的版本。</p>}
+      {action === 'no-release' && <p className="state-note">目前沒有可安裝的版本。</p>}
 
       {phase && (
         <p
@@ -193,11 +192,11 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
         </div>
       )}
 
-      {released && !running && !ended && (
+      {(action === 'unmanaged' || action === 'button' || action === 'admin-only') && (
         <div className="row-actions">
-          {!licence.updater_present ? (
+          {action === 'unmanaged' ? (
             <span className="cell-muted">本安裝的更新由維運人員處理，請洽經銷商。</span>
-          ) : canUpdate ? (
+          ) : action === 'button' ? (
             <button className="btn" disabled={starting} onClick={() => setConfirming(true)}>
               {starting ? '送出中…' : `更新至 ${released}`}
             </button>

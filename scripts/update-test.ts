@@ -17,16 +17,19 @@ import {
   UNCONFIRMED_MESSAGE,
   UNREACHABLE_MESSAGE,
   advance,
+  canRequestUpdate,
   clearRun,
   loadRun,
   refusedMessage,
   saveRun,
   serverUnreachable,
   startRun,
+  updateAction,
   within,
   type KeyValueStore,
   type Phase,
   type Probe,
+  type UpdateAction,
 } from "../web/src/update";
 
 let failed = 0;
@@ -242,6 +245,37 @@ function fakeStore(): KeyValueStore & { data: Map<string, string> } {
   saveRun(store, fresh);
   const loaded = loadRun(store, T0 + 2000);
   ok("a new update replaces the stored id", loaded !== null && loaded.requestId === "22222222-bbbb");
+}
+
+// What the action area under the card shows. Without a released version there
+// is nothing to install and no button; the button follows the permissions list
+// like every other entry point.
+{
+  const idle = null;
+  const progress: Phase = { kind: "progress" };
+  const succeeded: Phase = { kind: "succeeded", version: "v0.2.0" };
+  const unconfirmed: Phase = { kind: "unconfirmed", message: UNCONFIRMED_MESSAGE };
+  const unreachable: Phase = { kind: "unreachable", message: UNREACHABLE_MESSAGE };
+  const failedRestored: Phase = { kind: "failed", restored: true, version: "v0.1.12" };
+  const notRun: Phase = { kind: "not-run", why: "refused", message: refusedMessage("refused-busy") };
+  const is = (want: UpdateAction, released: string | null, updater: boolean, can: boolean, p: Phase | null) =>
+    updateAction(released, updater, can, p) === want;
+
+  ok("no released version says there is nothing to install and draws no button", is("no-release", null, true, true, idle));
+  ok("no released version says the same to someone who may not update", is("no-release", null, true, false, idle));
+  ok("no released version says the same when no updater is present", is("no-release", null, false, true, idle));
+  ok("an empty released version is no released version", is("no-release", "", true, true, idle));
+  ok("no released version with a phase on screen shows neither the line nor a button", is("hidden", null, true, true, progress) && is("hidden", null, true, false, notRun) && is("hidden", null, true, true, succeeded));
+  ok("a released version with permission and an idle card draws the button", is("button", "v0.2.0", true, true, idle));
+  ok("a released version without permission draws no button and names the administrator", is("admin-only", "v0.2.0", true, false, idle));
+  ok("a released version without an updater says who handles it, whatever the permission", is("unmanaged", "v0.2.0", false, true, idle) && is("unmanaged", "v0.2.0", false, false, idle));
+  ok("an update in progress draws no button", is("hidden", "v0.2.0", true, true, progress) && is("hidden", "v0.2.0", true, false, progress));
+  ok("a finished or unconfirmed update draws no button", is("hidden", "v0.2.0", true, true, succeeded) && is("hidden", "v0.2.0", true, true, unconfirmed) && is("hidden", "v0.2.0", true, true, unreachable));
+  ok("a failed or refused update brings the button back for someone who may update", is("button", "v0.2.0", true, true, failedRestored) && is("button", "v0.2.0", true, true, notRun));
+  ok("a failed or refused update still draws no button without permission", is("admin-only", "v0.2.0", true, false, failedRestored) && is("admin-only", "v0.2.0", true, false, notRun));
+
+  ok("the update permission is the ticket operation and nothing else", canRequestUpdate(["get_update_ticket"]) && canRequestUpdate(["list_accounts", "get_update_ticket"]));
+  ok("without the ticket operation in the list there is no permission", !canRequestUpdate([]) && !canRequestUpdate(["get_update_result", "get_licence_state", "update_ticket", "GET_UPDATE_TICKET"]));
 }
 
 // The security screen rereads everything whenever the tab is shown again. While

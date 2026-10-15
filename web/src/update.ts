@@ -37,6 +37,31 @@ export type Phase =
   | { kind: 'unconfirmed'; message: string }
   | { kind: 'unreachable'; message: string };
 
+export type UpdateAction = 'no-release' | 'unmanaged' | 'button' | 'admin-only' | 'hidden';
+
+export function canRequestUpdate(permissions: readonly string[]): boolean {
+  return permissions.includes('get_update_ticket');
+}
+
+export function updateAction(
+  released: string | null,
+  updaterPresent: boolean,
+  canUpdate: boolean,
+  phase: Phase | null,
+): UpdateAction {
+  if (!released) return phase ? 'hidden' : 'no-release';
+  if (phase?.kind === 'progress') return 'hidden';
+  if (
+    phase?.kind === 'succeeded' ||
+    phase?.kind === 'unconfirmed' ||
+    phase?.kind === 'unreachable'
+  ) {
+    return 'hidden';
+  }
+  if (!updaterPresent) return 'unmanaged';
+  return canUpdate ? 'button' : 'admin-only';
+}
+
 export function startRun(requestId: string, from: string, offered: string, now: number): UpdateRun {
   return { requestId, from, offered, startedAt: now, seenResult: false, wentDown: false };
 }
