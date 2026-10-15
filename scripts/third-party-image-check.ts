@@ -4,6 +4,9 @@
 //
 //   bun scripts/third-party-image-check.ts [--base origin/main]
 //
+// The ICU decision is icuVerdict, checked by
+// scripts/third-party-image-check-test.ts on every push and pull request.
+//
 // A rollback by the host-side updater restores the database from a dump
 // into the previous postgres image, and leaves RustFS's objects as they are:
 // they are not part of the rollback at all. So both images have to read the
@@ -181,28 +184,37 @@ async function withPostgres<T>(image: string, volume: string, f: (sql: (q: strin
   }
 }
 
-function changedMigrations(base: string): string {
+function addedMigrations(base: string): string[] {
   const files = run(["git", "-C", REPO, "diff", "--name-only", "--diff-filter=A", `${base}...HEAD`, "--", "backend/migrations"]).out.split("\n").filter(Boolean);
-  return files.map((f) => readFileSync(resolve(REPO, f), "utf8")).join("\n");
+  return files.map((f) => readFileSync(resolve(REPO, f), "utf8"));
+}
+
+/**
+ * Whether a postgres change may go from ICU `oldIcu` to `newIcu` (Debian
+ * package versions) given the migrations it adds. The migrations are read
+ * only when the major versions differ.
+ */
+export function icuVerdict(oldIcu: string, newIcu: string, added: () => string[]): { ok: boolean; message: string } {
+  if (oldIcu.split(".")[0] === newIcu.split(".")[0]) return { ok: true, message: "same ICU major version" };
+  const text = added().join("\n");
+  if (/\bREINDEX\b/i.test(text) && /REFRESH\s+COLLATION\s+VERSION/i.test(text)) {
+    return { ok: true, message: "the change brings a migration that reindexes and refreshes the collation version" };
+  }
+  return {
+    ok: false,
+    message:
+      `the new postgres image has ICU ${newIcu} where the old one has ${oldIcu}: text indexes under the zh-TW collation have to be rebuilt. ` +
+      "Add a migration that runs REINDEX and ALTER DATABASE ... REFRESH COLLATION VERSION, or keep the image on the old Debian base.",
+  };
 }
 
 async function checkPostgres(before: string, after: string, base: string) {
   console.log(`postgres: ${before} -> ${after}`);
   const [oldIcu, newIcu] = [icuVersion(before), icuVersion(after)];
   console.log(`  ICU ${oldIcu} -> ${newIcu}`);
-  if (oldIcu.split(".")[0] !== newIcu.split(".")[0]) {
-    const added = changedMigrations(base);
-    const reindexes = /\bREINDEX\b/i.test(added) && /REFRESH\s+COLLATION\s+VERSION/i.test(added);
-    if (!reindexes) {
-      fail(
-        `the new postgres image has ICU ${newIcu} where the old one has ${oldIcu}: text indexes under the zh-TW collation have to be rebuilt. ` +
-          "Add a migration that runs REINDEX and ALTER DATABASE ... REFRESH COLLATION VERSION, or keep the image on the old Debian base.",
-      );
-    }
-    console.log("  ok  the change brings a migration that reindexes and refreshes the collation version");
-  } else {
-    console.log("  ok  same ICU major version");
-  }
+  const icu = icuVerdict(oldIcu, newIcu, () => addedMigrations(base));
+  if (!icu.ok) fail(icu.message);
+  console.log(`  ok  ${icu.message}`);
   const volume = `laysi-check-pg-${tag}`;
   cli("volume", "create", volume);
   const words = ["臺北", "台中", "高雄", "Ａ公司", "a公司", "乙", "甲", "丙", "zeta", "Alpha"];
@@ -253,9 +265,11 @@ async function main() {
   console.log(checked ? "the changed images read the same data both ways" : "no third-party image changed");
 }
 
-try {
-  await main();
-} catch (e) {
-  console.error(e instanceof CheckFailed ? `FAIL: ${e.message}` : e);
-  process.exitCode = 1;
+if (import.meta.main) {
+  try {
+    await main();
+  } catch (e) {
+    console.error(e instanceof CheckFailed ? `FAIL: ${e.message}` : e);
+    process.exitCode = 1;
+  }
 }

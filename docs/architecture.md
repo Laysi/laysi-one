@@ -3695,7 +3695,9 @@ postgres 對 `secrets` 的依賴、釘住容器名稱、api 掛兩個共用目�
 **換 rustfs 或 postgres 的 digest 要先過 `scripts/third-party-image-check.ts`**（`ci.yml`
 的 `third-party-images`）：RustFS 的物件不在回退範圍內，所以新舊兩版要讀得了同一份資料，
 舊→新→舊；postgres 另外比對兩版的 ICU，不同時那次變更要帶一份執行 `REINDEX` 與
-`ALTER DATABASE … REFRESH COLLATION VERSION` 的 migration，否則不通過。
+`ALTER DATABASE … REFRESH COLLATION VERSION` 的 migration，否則不通過。那個 job 只在
+digest 變動的 PR 上真的執行，所以 ICU 的判斷（`icuVerdict`）另由
+`scripts/third-party-image-check-test.ts` 在每一次 push 與 PR 檢查。
 
 ### 資料庫還原之後的 RustFS
 
