@@ -296,4 +296,61 @@ pub mod tests {
         // A build that no longer trusts the key withholds the manifest.
         assert_eq!(forward("L2610-001", Some(text), &trusting(&new)), None);
     }
+
+    /// A file by its path from the repository root.
+    fn repo_file(path: &str) -> String {
+        let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(path);
+        std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{}: {e}", full.display()))
+    }
+
+    #[test]
+    fn the_licence_server_deploy_never_receives_the_release_manifest_signing_key() {
+        const SECRET: &str = "RELEASE_MANIFEST_SIGNING_KEY";
+        // The name the release workflow signs with. If it is renamed there,
+        // this fails rather than going on to check a name nobody uses.
+        assert!(
+            repo_file(".github/workflows/release.yml").contains(&format!("secrets.{SECRET}")),
+            "release.yml 已不以 {SECRET} 簽版本清單，請更新本測試"
+        );
+
+        let mut deploy_path = vec![
+            ".github/workflows/license-release.yml".to_string(),
+            ".github/workflows/license-deploy.yml".to_string(),
+            "license-server/Dockerfile".to_string(),
+        ];
+        let mut compose: Vec<String> = std::fs::read_dir(env!("CARGO_MANIFEST_DIR"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("docker-compose") && name.ends_with(".yml"))
+            .map(|name| format!("license-server/{name}"))
+            .collect();
+        assert!(
+            !compose.is_empty(),
+            "找不到 license-server/docker-compose*.yml"
+        );
+        compose.sort();
+        deploy_path.extend(compose);
+
+        for path in &deploy_path {
+            assert!(
+                !repo_file(path).contains(SECRET),
+                "{path} 提到 {SECRET}：授權伺服器不得持有版本清單的簽章私鑰"
+            );
+        }
+
+        // `inherit` would hand the deploy every repository secret, this one
+        // included, without the name appearing in either file.
+        for path in &deploy_path[..2] {
+            let inherits = repo_file(path)
+                .lines()
+                .map(|line| line.split('#').next().unwrap_or("").trim())
+                .any(|line| line == "secrets: inherit");
+            assert!(
+                !inherits,
+                "{path} 不得使用 secrets: inherit，請逐一傳入需要的 secret"
+            );
+        }
+    }
 }

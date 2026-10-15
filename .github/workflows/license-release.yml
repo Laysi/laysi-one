@@ -75,9 +75,17 @@ jobs:
   # Cutting the tag deploys it. Nothing else stands between the tag and the
   # host: ci.yml already guards the code, and naming the tag here is what
   # makes a rollback one run of license-deploy.yml with an earlier one.
+  #
+  # Only the secrets that workflow uses, never `inherit`: inheriting would
+  # hand this host's deploy every repository secret, the release-manifest
+  # signing key among them, and this server must be unable to produce a
+  # manifest. license-server/src/release.rs holds a test for it.
   deploy:
     needs: image
     uses: ./.github/workflows/license-deploy.yml
     with:
       version: ${{ github.ref_name }}
-    secrets: inherit
+    secrets:
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      LICENSE_SIGNING_KEY: ${{ secrets.LICENSE_SIGNING_KEY }}
+      SMTP_URL: ${{ secrets.SMTP_URL }}
