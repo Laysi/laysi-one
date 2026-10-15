@@ -4,7 +4,8 @@
 //! <root>/                   0700  the stack user
 //!   bin/laysi-updater             the current updater
 //!   bin/laysi-updater.previous    the one before it, run when the current one
-//!                                 fails at boot
+//!                                 fails at boot; until an update replaces the
+//!                                 updater, a copy `install` wrote
 //!   stack/                        compose files and .env the stack runs with,
 //!                                 each with a `.previous` copy beside it
 //!   state/installed               the release this host runs

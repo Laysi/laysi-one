@@ -3495,7 +3495,7 @@ release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯�
 | 路徑 | 權限 | 內容 |
 |---|---|---|
 | `<root>/` | 0700 | |
-| `bin/laysi-updater`、`bin/laysi-updater.previous` | 0755 | 現行與前一版的更新程式 |
+| `bin/laysi-updater`、`bin/laysi-updater.previous` | 0755 | 現行與前一版的更新程式；還沒換過更新程式的機器上，兩份是 `install` 放上的同一個檔案 |
 | `stack/` | 0700 | 兩份 compose 檔與 `.env`（0600），旁邊各一份 `.previous` |
 | `state/installed` | 0600 | 已安裝的版本與三個 digest：取自驗過的清單，不從容器讀 |
 | `state/journal`、`state/lock`、`state/updater.log`、`state/updater.env` | 0600 | 日誌、鎖、紀錄、工具路徑 |
@@ -3624,14 +3624,18 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一起換：
 
 - `laysi-updater.path` 監看 `requests/request`，觸發 `laysi-updater.service`（oneshot）。
-  `ExecStopPost=` 在每一次結束時清空請求目錄，失敗也一樣——檔案還在，path unit 會在
-  service 結束時再觸發、一秒五次之後轉為 `failed` 而不再監看。執行期間寫入的旗標因此被丟棄
-  並回 `refused-busy`，不排隊也不合併；`StartLimitIntervalSec=0`。
+  `ExecStopPost=` 在每一次結束時清空請求目錄，失敗也一樣，所以執行期間寫入的旗標被丟棄
+  並回 `refused-busy`，不排隊也不合併；`StartLimitIntervalSec=0`。檔案留著的話，path unit
+  會在 service 結束時再觸發：#64 在虛擬機量到，執行檔起不來時一輪約 10 毫秒，兩秒內滿
+  200 次就撞上 systemd 預設的觸發上限，path unit 轉為 `failed`（`trigger-limit-hit`）不再
+  監看，要重開機才回來；一輪失敗得慢就碰不到上限，一直重跑。
   例外是執行本身失敗、而且沒有進行中的更新（沒有日誌）：沒有結果的旗標改回
   `failed-unchanged`（更新程式在開始更新前中斷）。現行更新程式根本起不來時，旗標從來沒有
   被讀過，回 busy 會讓畫面請人稍後再試一個每次都失敗的更新程式。執行成敗取 systemd 交給
   `ExecStopPost=` 的 `SERVICE_RESULT`。這時回答旗標的是前一版的 `discard-requests`，所以
-  前一版也帶著這條規則才生效。
+  前一版也帶著這條規則才生效。也因此 `install` 把自己同時放成現行與前一版：`.previous`
+  原本只由換掉更新程式的那次更新寫出，在那之前現行版起不來時，開機沒有程式接手，旗標也
+  沒有程式回答、清掉。
   它排在開機 unit 之後才開始監看，並設 `DefaultDependencies=no`：path unit 預設排在
   `paths.target` 之前，而開機 unit 是 service、排在 `basic.target`（也就在 `paths.target`）
   之後，兩者相加是循環，systemd 每次開機都刪掉 path unit 的啟動工作，重開過的機器就再也
@@ -3662,7 +3666,7 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
 ### 出貨與 compose
 
 `install` 是唯一的出貨步驟：以 stack 使用者執行，收一份簽章版本清單，先驗章並檢查主機，
-才建好目錄、放上更新程式、從那一版的 api 映像取 compose 檔並檢查、寫 `.env` 與 unit、確認
+才建好目錄、放上更新程式（現行與 `.previous` 同一份）、從那一版的 api 映像取 compose 檔並檢查、寫 `.env` 與 unit、確認
 lingering（沒有就 `loginctl enable-linger`，失敗請 root 執行一次），最後寫第一份
 `state/installed` 並啟動開機 unit——它先跑完 `secrets` 才啟動其餘服務。寫下
 `state/installed` 之前失敗可以直接重跑；寫下之後就算安裝完成，由開機 unit 負責啟動。

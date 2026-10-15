@@ -598,6 +598,45 @@ async function main() {
   psql("create table if not exists e2e_rows (note text)");
   psql("insert into e2e_rows values ('written before any update')");
 
+  // --- never updated, and the current updater cannot run --------------------
+  // Until an update replaces the updater, the copy install leaves as the
+  // previous one is the only other updater the machine has.
+  const bin = join(ROOT, "bin");
+  const shipped = readFileSync(join(bin, "laysi-updater"));
+  check(sha256(shipped) === sha256(readFileSync(installer)), "install puts itself in place as the current updater");
+  check(sha256(readFileSync(join(bin, "laysi-updater.previous"))) === sha256(shipped), "and as the previous one");
+  const breakages: [string, Buffer][] = [
+    ["exits non-zero", Buffer.from("#!/bin/sh\nexit 1\n")],
+    ["is truncated", shipped.subarray(0, 4096)],
+  ];
+  for (const [what, broken] of breakages) {
+    writeFileSync(join(bin, "laysi-updater"), broken);
+    const before = unitState("laysi-updater-fallback.service", "InvocationID");
+    powerCutAndBoot();
+    await waitFor(`the fallback unit to run after the current updater that ${what}`, 900, () =>
+      unitState("laysi-updater-fallback.service", "InvocationID") !== before &&
+      !["activating", "active"].includes(unitState("laysi-updater-fallback.service")));
+    check(unitState("laysi-updater-boot.service", "Result") !== "success", `the current updater that ${what} failed at boot`);
+    check(unitState("laysi-updater-fallback.service", "Result") === "success", "the previous updater started the stack instead");
+    assertSettledOn("v1.0.0");
+  }
+  // A request it cannot read: the previous updater's ExecStopPost answers it
+  // and clears it, or the path unit would start the run again and again.
+  const freshFallback = unitState("laysi-updater-fallback.service", "InvocationID");
+  const fresh = await update("e2e-fresh-broken-run", v1.manifest, 300);
+  check(fresh.status === "failed-unchanged" && (fresh.reason ?? "").includes("開始更新前"), "a request the current updater cannot run is answered as not started");
+  const runOnce = unitState("laysi-updater.service", "InvocationID");
+  await sleep(5000);
+  check(unitState("laysi-updater.service", "InvocationID") === runOnce && requestsLeft().length === 0, "and the run is not started again");
+  check(unitState("laysi-updater.path") === "active", "the path unit is still watching");
+  await waitFor("the fallback unit to run after the failed recovery", 300, () =>
+    unitState("laysi-updater-fallback.service", "InvocationID") !== freshFallback &&
+    !["activating", "active"].includes(unitState("laysi-updater-fallback.service")));
+  check(installed() === "v1.0.0", "and nothing was installed");
+  writeFileSync(join(bin, "laysi-updater"), shipped);
+  systemctl("reset-failed", ...UNITS);
+  assertSettledOn("v1.0.0");
+
   // --- the api's and mcp's side of the directories ---------------------------
   const api = `${PROJECT}-api`;
   const mcp = `${PROJECT}-mcp`;
