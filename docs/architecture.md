@@ -3568,6 +3568,9 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
    檔指定的那個也正在執行它（多平台映像以 index digest 拉取時 podman 回報的就是 index
    digest）、自家映像等於清單、有 healthcheck 的是 healthy；反覆重啟的容器立刻算失敗。
    逾時 20 分鐘，涵蓋 migration。通過之後才起 web 與 mcp，以同樣條件確認（逾時 3 分鐘）。
+   逾時用不會跳的單調時鐘計算：沒有電池時鐘的機器（樹莓派）開機後第一次對時，牆上時鐘會
+   一口氣往前調關機的那段時間，而那正是斷電後開機復原在等服務就緒的時候。開機時起 stack
+   的等候也一樣。
 9. 失敗：先放回前一版的檔案，確認 postgres 以外都停了，以**舊版的 postgres 映像**重建
    容器，`DROP DATABASE … WITH (FORCE)` 後 `pg_restore --create`（保留 ICU zh-TW 定序），
    成功才刪備份、起舊版並以第 8 步的條件確認。**還原失敗（含之前的 DROP）在同一次執行裡

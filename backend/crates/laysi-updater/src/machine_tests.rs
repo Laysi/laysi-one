@@ -472,6 +472,44 @@ fn an_api_that_exits_at_start_is_rolled_back() {
     rig.assert_settled(&id);
 }
 
+/// Healthy after a few polls, and the time server answers in between: the
+/// wall clock jumps by more than every timeout.
+fn step_the_clock_while_starting(rig: &Rig) {
+    let mut w = rig.world.borrow_mut();
+    w.warmup_secs = 12;
+    w.clock_step = Some(chrono::Duration::hours(6));
+}
+
+#[test]
+fn a_wall_clock_set_forward_while_the_new_release_starts_does_not_fail_it() {
+    let rig = Rig::new(v1(), &[v2()]);
+    step_the_clock_while_starting(&rig);
+    let id = rig.request("req-clockstep-01", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert!(
+        rig.world.borrow().clock_step.is_none(),
+        "the clock never jumped"
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_wall_clock_set_forward_while_the_stack_starts_at_boot_does_not_fail_the_boot() {
+    let rig = Rig::new(v1(), &[]);
+    rig.world.borrow_mut().reboot();
+    step_the_clock_while_starting(&rig);
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(
+        rig.world.borrow().clock_step.is_none(),
+        "the clock never jumped"
+    );
+    for service in SERVICES {
+        assert!(rig.running(service), "{service} is not running");
+    }
+}
+
 #[test]
 fn entry_points_never_start_before_the_rest_has_passed() {
     // web is the one that fails, so the core of the new release did pass and
