@@ -249,5 +249,6 @@ NULL＝不放行，所以分批放行就是逐列設定，不需要另一張表�
 比機器上次回報還舊的版本拒絕放行。細節在產品的 `docs/architecture.md`〈授權伺服器逐台放行〉。
 
 `LICENSE_TEST_DATABASE_URL` 有值時，`release::database` 的測試對著那個資料庫跑完上傳、
-放行與檢查。**不用 `TEST_DATABASE_URL`**：那個名字指的是產品的測試資料庫，而這支測試會把
-本伺服器的 schema 套進它拿到的任何資料庫。
+放行與檢查。CI 的 `license-server` job 起一個 postgres 服務並設好它；`CI` 有值而它沒設時
+測試直接失敗，不略過：略過在 CI 上會記成通過。**不用 `TEST_DATABASE_URL`**：那個名字指的
+是產品的測試資料庫，而這支測試會把本伺服器的 schema 套進它拿到的任何資料庫。

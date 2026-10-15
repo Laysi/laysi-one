@@ -2,10 +2,11 @@
 //! forms, then the check answer each licence gets.
 //!
 //! Runs only when `LICENSE_TEST_DATABASE_URL` names a disposable database, so
-//! `cargo test` still needs none. Not `TEST_DATABASE_URL`: that one points at
-//! the product's test database, and this applies the licence server's schema
-//! to whatever it is given. Every row it writes carries a fresh tag and is
-//! deleted at the end.
+//! a local `cargo test` still needs none. Under CI (`CI` set) a missing URL
+//! fails the test instead: a skip there reports as a pass. Not
+//! `TEST_DATABASE_URL`: that one points at the product's test database, and
+//! this applies the licence server's schema to whatever it is given. Every row
+//! it writes carries a fresh tag and is deleted at the end.
 
 use std::sync::Arc;
 
@@ -164,6 +165,22 @@ async fn partner(pool: &PgPool, no: &str, name: &str) -> i32 {
         .get("id")
 }
 
+/// The disposable database every test here runs against. `None` skips the
+/// test locally; under CI an unset URL panics, so a database step that was
+/// never wired up cannot pass as tests that ran.
+fn database_url() -> Option<String> {
+    match std::env::var("LICENSE_TEST_DATABASE_URL") {
+        Ok(url) if !url.is_empty() => Some(url),
+        _ if std::env::var_os("CI").is_some_and(|v| !v.is_empty()) => {
+            panic!("CI 環境必須設定 LICENSE_TEST_DATABASE_URL：未設定時本測試會略過，CI 卻記為通過")
+        }
+        _ => {
+            eprintln!("略過：未設定 LICENSE_TEST_DATABASE_URL");
+            None
+        }
+    }
+}
+
 async fn setup(url: &str) -> Fixture {
     let pool = db::connect(url).await.unwrap();
     let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
@@ -249,8 +266,7 @@ async fn teardown(f: &Fixture, version: &str) {
 
 #[tokio::test]
 async fn a_release_reaches_only_the_licence_it_is_set_on() {
-    let Ok(url) = std::env::var("LICENSE_TEST_DATABASE_URL") else {
-        eprintln!("略過：未設定 LICENSE_TEST_DATABASE_URL");
+    let Some(url) = database_url() else {
         return;
     };
     let f = setup(&url).await;
