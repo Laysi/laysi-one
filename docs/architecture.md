@@ -3474,7 +3474,9 @@ Rust 驗證端不必約定正規化形式。純文字也讓授權伺服器只能
 
 1. `signing-key`：建映像之前，由 secret 推出公鑰，與 `TRUSTED_KEYS` 比對，不在清單裡就
    讓發布失敗——不然 ghcr.io 上會留下沒有任何安裝接受的映像。比照 `license-deploy.yml`
-   比對 `PUBLIC_KEY_HEX` 的那一步。同一個 job 也擋下已經附過清單的版本。
+   比對 `PUBLIC_KEY_HEX` 的那一步。比對由 `release-manifest.ts check-trusted` 做；這個 job
+   只在標籤上跑，所以 `release-manifest-test.ts` 每次 push 都以測試金鑰跑一遍相符與不相符
+   兩種情況。同一個 job 也擋下已經附過清單的版本。
 2. `images`：每份映像把這次推上去的 index digest 寫成 artifact（matrix job 的 output
    互相覆蓋，不能用）。
 3. `manifest`：獨立的 job 簽章，執行器上除了 checkout、Bun 與 artifact 之外什麼都不跑；
@@ -3489,7 +3491,7 @@ digest；已經照第一份清單更新的安裝認為自己是最新版，跑�
 的 job 等於換成自己）。要改就打一個新標籤。兩處都問 `.github/published-manifest.sh`：只有
 release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯誤都讓發布失敗，不當成沒有。
 
-簽章腳本是 `scripts/release-manifest.ts`（`sign`／`public-key`／`keygen`）。私鑰只從環境
+簽章腳本是 `scripts/release-manifest.ts`（`sign`／`public-key`／`check-trusted`／`keygen`）。私鑰只從環境
 變數讀，編碼與 `LICENSE_SIGNING_KEY` 相同（32 位元組 seed 的十六進位）；多把以空白分隔就
 各簽一行。`keygen` 在記憶體裡產生金鑰，私鑰經 stdin 直接交給 `gh secret set`，只印公鑰與
 識別碼；secret 已經存在就拒絕，因為 GitHub 讀不回 secret，覆寫等於丟掉每一台安裝信任的那
