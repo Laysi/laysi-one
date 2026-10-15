@@ -53,6 +53,7 @@ const row = {
   labor_insured_salary: "45800",
   health_insured_salary: "45800",
   pension_wage: "45800",
+  employment_insured: true,
   bank_accounts: [],
   dependents: [
     {
@@ -88,6 +89,7 @@ const list = {
   insured_suggestion: {
     floor: "29500",
     labor_ceiling: "45800",
+    accident_ceiling: "72800",
     note: "",
   },
   salary_note: "",

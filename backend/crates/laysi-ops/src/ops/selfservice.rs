@@ -217,6 +217,7 @@ fn payslip_json(slip: &Payslip) -> Value {
         "gross": slip.gross.to_string(),
         "deductions": {
             "labor_insurance": slip.labor_employee.to_string(),
+            "employment_insurance": slip.employment_employee.to_string(),
             "health_insurance": slip.health_employee.to_string(),
             "income_tax": slip.income_tax.to_string(),
             "total": slip.deduction.to_string(),
@@ -226,17 +227,23 @@ fn payslip_json(slip: &Payslip) -> Value {
         "net": slip.net.to_string(),
         "employer_contributions": {
             "labor_insurance": slip.labor_employer.to_string(),
+            "employment_insurance": slip.employment_employer.to_string(),
+            // Null when it was not charged: before it was, or while the
+            // company had no industry rate.
+            "occupational_accident": slip
+                .accident_rate
+                .map(|_| slip.accident_employer.to_string()),
             "health_insurance": slip.health_employer.to_string(),
             "pension": slip.pension_employer.to_string(),
-            "total": (
-                slip.labor_employer + slip.health_employer + slip.pension_employer
-            ).to_string(),
+            "total": crate::ops::payroll::slip_employer_total(slip).to_string(),
         },
         "paid_days": slip.paid_days.to_string(),
         "month_days": slip.month_days.to_string(),
         "prorated": slip.paid_days < slip.month_days,
         "rulesets": {
             "labor_insurance": slip.labor_version,
+            "employment_insurance": slip.employment_version,
+            "occupational_accident": slip.accident_version,
             "health_insurance": slip.health_version,
             "pension": slip.pension_version,
             "withholding": slip.withholding_version,

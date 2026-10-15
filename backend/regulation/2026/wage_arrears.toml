@@ -1,0 +1,22 @@
+# Arrears wage payment fund
+#
+# Contributed by the employer every month on the total labour insurance salary
+# of its workers. A whole month counts the bracket after the labour ceiling; a
+# month of enrolment or withdrawal counts the bracket times the days over
+# thirty, the same days as labour insurance. The bureau adds the salaries up
+# and applies the rate once, so the contribution is a company figure and no
+# single payslip carries a share of it.
+#
+# Nothing is contributed for an owner: the fund pays wages owed to workers,
+# and an employer insured in labour insurance is not one of them.
+#
+# Effective from the factory year. The rate is older than that, but the day it
+# took effect is not on record here.
+
+domain = "wage_arrears"
+version = "2026.1"
+effective_from = "2026-01-01"
+source_note = "勞動基準法第 28 條；積欠工資墊償基金提繳及墊償管理辦法第 3 條"
+
+[payload]
+rate = "0.00025"

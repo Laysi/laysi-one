@@ -1,7 +1,8 @@
 //! Payroll, the link where HR actually meets finance.
 //!
-//! This module contains no rates. Labour insurance, health insurance and
-//! pension go through [`crate::ops::insurance::premiums_on`] into
+//! This module contains no rates. Labour, employment, occupational accident
+//! and health insurance and pension go through
+//! [`crate::ops::insurance::premiums_on`] into
 //! `laysi-regulation`; the withholding rate for salary income is read from
 //! entry 50 of `payload.codes` in the `withholding` ruleset. The only number
 //! here is how many days a month has, which is the calendar, not regulation.
@@ -35,7 +36,8 @@
 //! Cr 1102 Bank              net pay
 //! ```
 //!
-//! The employer's insurance and pension contributions are not in this voucher.
+//! The employer's insurance premiums, pension contributions and the arrears
+//! wage payment fund are not in this voucher.
 //! They are a company expense rather than an employee deduction, and posting
 //! them needs an insurance expense account and a second voucher. That link is
 //! not built yet, so the screen reports it as not wired rather than folding it
@@ -53,13 +55,16 @@ use crate::ops::attendance::{
 #[cfg(test)]
 use crate::ops::employees::INSURED_EMPLOYEE;
 use crate::ops::employees::{pay_basis_label, service_months, BASIS_HOURLY, BASIS_MONTHLY};
-use crate::ops::insurance::{covered_dependants, percent, premiums_on, ruleset_json, Coverage};
+use crate::ops::insurance::{
+    accident_rate, percent, period_arrears_on, premiums_on, ruleset_json, slip_arrears, Coverage,
+    Enrolment,
+};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use laysi_domain::business_time;
 use laysi_domain::Money;
-use laysi_regulation::{LeaveDay, Ruleset};
+use laysi_regulation::{LeaveDay, MonthPart, Ruleset};
 use laysi_store::{Employee, LeaveRequest, NewPayslip};
 use rust_decimal::{Decimal, RoundingStrategy};
 use schemars::JsonSchema;
@@ -394,24 +399,30 @@ fn attendance_check(
 #[derive(Clone)]
 struct Versions {
     labor: String,
+    employment: String,
+    accident: String,
     health: String,
     pension: String,
     withholding: String,
     dependents: String,
     partial_month: String,
+    wage_arrears: String,
 }
 
 impl Versions {
     /// The versions as the run note and the audit summary name them.
     fn sentence(&self) -> String {
         format!(
-            "依勞保 {}、健保 {}、勞退 {}、扣繳 {}、健保眷屬計費 {}、不足月計費 {} 規則",
+            "依勞保 {}、就保 {}、職災 {}、健保 {}、勞退 {}、扣繳 {}、健保眷屬計費 {}、不足月計費 {}、墊償基金 {} 規則",
             self.labor,
+            self.employment,
+            self.accident,
             self.health,
             self.pension,
             self.withholding,
             self.dependents,
-            self.partial_month
+            self.partial_month,
+            self.wage_arrears
         )
     }
 }
@@ -420,13 +431,18 @@ impl Versions {
 struct Computed {
     slip: NewPayslip,
     versions: Versions,
+    /// What this person adds to the arrears wage payment fund, which is
+    /// applied to the run's total rather than to anyone's payslip.
+    arrears: Option<(Money, MonthPart)>,
     /// Floor when monthly salary is below the statutory minimum wage.
     /// `None` means compliant.
     below_minimum: Option<Money>,
 }
 
 /// Compute one person's pay for the period. Premiums and withholding rates
-/// all come from the ruleset.
+/// all come from the ruleset; `accident_rate` is the company's occupational
+/// accident industry rate, `None` while it has not been entered.
+#[allow(clippy::too_many_arguments)]
 fn compute_one(
     e: &Employee,
     from: NaiveDate,
@@ -435,6 +451,7 @@ fn compute_one(
     overtime: Money,
     plain_hours: Money,
     leave: &BTreeMap<String, LeaveTotal>,
+    accident_rate: Option<Money>,
 ) -> Result<Computed, OpError> {
     let month_days = Decimal::from((to - from).num_days() + 1);
     let days = Decimal::from(paid_days(e, from, to));
@@ -498,22 +515,14 @@ fn compute_one(
     let insured_from = e.hired_on.max(from);
     let insured_to = e.left_on.map_or(to, |left| left.min(to));
     let cover = Coverage::of_month(from, to, insured_from, insured_to)?;
-    let p = premiums_on(
-        to,
-        &e.insured_as,
-        e.labor_insured_salary,
-        e.health_insured_salary,
-        e.pension_wage,
-        covered_dependants(e, to),
-        cover,
-    )?;
+    let p = premiums_on(to, &Enrolment::of(e, to), cover, accident_rate)?;
 
     // Withholding resolves on the payment date: the obligation arises then.
     let wht = laysi_regulation::resolve("withholding", pay_on)?;
     let (rate, _, _) = salary_withholding_rate(wht)?;
     let income_tax = to_dollars(gross * rate);
 
-    let deduction = p.labor.employee + p.health.employee + income_tax;
+    let deduction = p.employee_total() + income_tax;
     if deduction > gross {
         return Err(OpError::BadInput(format!(
             "{} {} 的代扣 {} 大於應發 {}，實發將為負數，請先確認投保級距與本期在職日數",
@@ -583,9 +592,13 @@ fn compute_one(
             health_insured_salary: e.health_insured_salary,
             pension_wage: e.pension_wage,
             labor_employee: p.labor.employee,
+            employment_employee: p.employment.employee,
             health_employee: p.health.employee,
             income_tax,
             labor_employer: p.labor.employer,
+            employment_employer: p.employment.employer,
+            accident_employer: p.accident.unwrap_or(Money::ZERO),
+            accident_rate,
             health_employer: p.health.employer,
             pension_employer: p.pension,
             deduction,
@@ -599,6 +612,8 @@ fn compute_one(
         },
         versions: Versions {
             labor: p.labor_rs.version.clone(),
+            employment: p.employment_rs.version.clone(),
+            accident: p.accident_rs.version.clone(),
             health: p.health_rs.version.clone(),
             pension: p.pension_rs.version.clone(),
             withholding: wht.version.clone(),
@@ -606,7 +621,11 @@ fn compute_one(
             partial_month: laysi_regulation::resolve("partial_month", to)?
                 .version
                 .clone(),
+            wage_arrears: laysi_regulation::resolve("wage_arrears", to)?
+                .version
+                .clone(),
         },
+        arrears: p.arrears,
         below_minimum,
     })
 }
@@ -640,17 +659,21 @@ fn run_json(r: &laysi_store::PayrollRun) -> Value {
         "deduction_total": r.deduction_total.to_string(),
         "net_total": r.net_total.to_string(),
         "employer_total": r.employer_total.to_string(),
+        "wage_arrears": r.wage_arrears.to_string(),
         "voucher_no": r.voucher_no,
         "voucher_status": r.voucher_status,
         // Which rule versions this period was computed under. The only place
         // that can answer that after a retroactive amendment.
         "rulesets": {
             "labor_insurance": r.labor_version,
+            "employment_insurance": r.employment_version,
+            "occupational_accident": r.accident_version,
             "health_insurance": r.health_version,
             "pension": r.pension_version,
             "withholding": r.withholding_version,
             "health_dependents": r.dependents_version,
             "partial_month": r.partial_month_version,
+            "wage_arrears": r.wage_arrears_version,
         },
         "note": r.note,
         "created_at": r.created_at,
@@ -682,8 +705,19 @@ fn period_json(runs: &[&laysi_store::PayrollRun]) -> Option<Value> {
         "deduction_total": runs.iter().map(|r| r.deduction_total).sum::<Money>().to_string(),
         "net_total": runs.iter().map(|r| r.net_total).sum::<Money>().to_string(),
         "employer_total": runs.iter().map(|r| r.employer_total).sum::<Money>().to_string(),
+        "wage_arrears": runs.iter().map(|r| r.wage_arrears).sum::<Money>().to_string(),
         "run_count": runs.len(),
     }))
+}
+
+/// What one payslip cost the company. The arrears wage payment fund is the
+/// run's and is not in it.
+pub(crate) fn slip_employer_total(s: &laysi_store::Payslip) -> Money {
+    s.labor_employer
+        + s.employment_employer
+        + s.accident_employer
+        + s.health_employer
+        + s.pension_employer
 }
 
 // Payroll summary
@@ -785,7 +819,7 @@ impl Operation for GetPayrollSummary {
                 "next_period": next_period,
                 "suggested_pay_on": ctx.today,
                 "employer_in_ledger": false,
-                "employer_note": "公司負擔的勞健保與勞退不在薪資傳票內。",
+                "employer_note": "公司負擔的保費與提繳不在薪資傳票內。",
             }),
             summary,
         ))
@@ -813,7 +847,7 @@ impl Operation for ListPayslips {
         false
     }
     fn summary(&self) -> &'static str {
-        "逐人薪資明細：本薪、加班、代扣三項與實發，以及公司負擔的勞健保與勞退。限負責人。以同一份規則重算一次，再與存下來的數字比對。"
+        "逐人薪資明細：本薪、加班、代扣四項與實發，以及公司負擔的勞保、就保、職災、健保與勞退。限負責人。以同一份規則重算一次，再與存下來的數字比對。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<PayrollPeriodInput>()
@@ -855,18 +889,29 @@ impl Operation for ListPayslips {
             };
             let p = premiums_on(
                 period_end,
-                &s.insured_as,
-                s.labor_insured_salary,
-                s.health_insured_salary,
-                s.pension_wage,
-                u32::try_from(s.health_dependents).unwrap_or(0),
+                &Enrolment {
+                    insured_as: &s.insured_as,
+                    employment_insured: s.employment_insured,
+                    labor_insured: s.labor_insured_salary,
+                    health_insured: s.health_insured_salary,
+                    pension_wage: s.pension_wage,
+                    covered_dependants: u32::try_from(s.health_dependents).unwrap_or(0),
+                },
                 cover,
+                s.accident_rate,
             )?;
+            // A run from before employment and occupational accident insurance
+            // were charged holds zero for both, which is what it charged.
+            let charged_extras = s.employment_version.is_some();
             let same = p.labor.employee == s.labor_employee
                 && p.labor.employer == s.labor_employer
                 && p.health.employee == s.health_employee
                 && p.health.employer == s.health_employer
-                && p.pension == s.pension_employer;
+                && p.pension == s.pension_employer
+                && (!charged_extras
+                    || (p.employment.employee == s.employment_employee
+                        && p.employment.employer == s.employment_employer
+                        && p.accident.unwrap_or(Money::ZERO) == s.accident_employer));
             all_match &= same;
 
             rows.push(json!({
@@ -882,16 +927,21 @@ impl Operation for ListPayslips {
                 "health_insured_salary": s.health_insured_salary.to_string(),
                 "pension_wage": s.pension_wage.to_string(),
                 "labor_employee": s.labor_employee.to_string(),
+                "employment_employee": s.employment_employee.to_string(),
                 "health_employee": s.health_employee.to_string(),
                 "health_dependents": s.health_dependents,
                 "income_tax": s.income_tax.to_string(),
                 "deduction": s.deduction.to_string(),
                 "net": s.net.to_string(),
                 "labor_employer": s.labor_employer.to_string(),
+                "employment_employer": s.employment_employer.to_string(),
+                // Null when it was not charged: before it was, or while the
+                // company had no industry rate.
+                "accident_employer": s.accident_rate.map(|_| s.accident_employer.to_string()),
+                "accident_rate_percent": s.accident_rate.map(percent),
                 "health_employer": s.health_employer.to_string(),
                 "pension_employer": s.pension_employer.to_string(),
-                "employer_total": (s.labor_employer + s.health_employer + s.pension_employer)
-                    .to_string(),
+                "employer_total": slip_employer_total(s).to_string(),
                 "paid_days": s.paid_days.to_string(),
                 "month_days": s.month_days.to_string(),
                 "prorated": s.paid_days < s.month_days,
@@ -1037,7 +1087,12 @@ impl Operation for RunPayroll {
             .transpose()?
             .map(|rs| rs.version.clone());
 
+        // Read once for the whole run, so every payslip of it is charged at
+        // the same rate even if the setting changes while it computes.
+        let industry_rate = accident_rate(ctx).await?;
+
         let mut slips: Vec<NewPayslip> = Vec::new();
+        let mut arrears: Vec<Option<(Money, MonthPart)>> = Vec::new();
         let mut warnings: Vec<Value> = Vec::new();
         let mut skipped: Vec<Value> = Vec::new();
         let mut versions: Option<Versions> = None;
@@ -1099,7 +1154,7 @@ impl Operation for RunPayroll {
 
             let spans = overtime_spans.get(&e.id).map(Vec::as_slice).unwrap_or(&[]);
             let plain = ordinary_hours(&days, &schedule, spans);
-            let c = compute_one(e, from, to, pay_on, overtime, plain, &leave)?;
+            let c = compute_one(e, from, to, pay_on, overtime, plain, &leave, industry_rate)?;
             if let Some(floor) = c.below_minimum {
                 warnings.push(json!({
                     "emp_no": e.emp_no,
@@ -1115,6 +1170,7 @@ impl Operation for RunPayroll {
             if versions.is_none() {
                 versions = Some(c.versions.clone());
             }
+            arrears.push(c.arrears);
             slips.push(c.slip);
         }
 
@@ -1147,14 +1203,40 @@ impl Operation for RunPayroll {
         };
 
         let labor_ee: Money = slips.iter().map(|s| s.labor_employee).sum();
+        let employment_ee: Money = slips.iter().map(|s| s.employment_employee).sum();
         let health_ee: Money = slips.iter().map(|s| s.health_employee).sum();
         let tax: Money = slips.iter().map(|s| s.income_tax).sum();
         let deduction_memo = format!(
-            "勞保 {} 健保 {} 代扣所得稅 {}",
+            "勞保 {} 就保 {} 健保 {} 代扣所得稅 {}",
             money(labor_ee),
+            money(employment_ee),
             money(health_ee),
             money(tax)
         );
+        // Applied once to the month's whole total, on the period end's rules
+        // like the premiums. A run paying people late adds them to the earlier
+        // runs' payslips instead of rounding its own share apart. Two runs of
+        // one period at once would pay the same people, which the payslip
+        // UNIQUE refuses, so the earlier runs read here are the ones the write
+        // lands beside.
+        let (earlier, recorded) = match supplementary {
+            false => (Vec::new(), Money::ZERO),
+            true => {
+                let mut earlier = Vec::new();
+                for s in ctx.store.payslips(&period).await? {
+                    earlier.push(slip_arrears(&s, from, to)?);
+                }
+                let recorded = ctx
+                    .store
+                    .period_payroll_runs(&period)
+                    .await?
+                    .iter()
+                    .map(|r| r.wage_arrears)
+                    .sum();
+                (earlier, recorded)
+            }
+        };
+        let wage_arrears = period_arrears_on(to, earlier, recorded, arrears)?;
 
         let note = i.note.clone().unwrap_or_else(|| v.sentence());
         // What this run priced, so the write can confirm nothing was approved
@@ -1184,6 +1266,10 @@ impl Operation for RunPayroll {
                 withholding_version: &v.withholding,
                 dependents_version: &v.dependents,
                 partial_month_version: &v.partial_month,
+                employment_version: &v.employment,
+                accident_version: &v.accident,
+                wage_arrears_version: &v.wage_arrears,
+                wage_arrears,
                 note: &note,
                 actor: &ctx.actor,
                 leave_span: (year_start, to),
@@ -1222,9 +1308,13 @@ impl Operation for RunPayroll {
                 "attendance_checks": attendance_checks,
                 "deduction_breakdown": {
                     "labor_employee": labor_ee.to_string(),
+                    "employment_employee": employment_ee.to_string(),
                     "health_employee": health_ee.to_string(),
                     "income_tax": tax.to_string(),
                 },
+                // Null while the company has no industry rate, so the screen
+                // can say occupational accident insurance was left out.
+                "accident_rate_percent": industry_rate.map(percent),
                 "withholding": {
                     "income_code": SALARY_INCOME_CODE,
                     "income_name": income_name,
@@ -1241,7 +1331,7 @@ impl Operation for RunPayroll {
                     "note": "加班費依核准的加班申請與加班日適用的加班規則計算。沒有核准紀錄的加班不計入。",
                 },
                 "employer_in_ledger": false,
-                "employer_note": "公司負擔的勞健保與勞退未納入本張傳票。",
+                "employer_note": "公司負擔的保費與提繳未納入本張傳票。",
             }),
             summary,
         )
@@ -1322,6 +1412,7 @@ mod tests {
             employment_type: "full_time".into(),
             pay_basis: BASIS_MONTHLY.into(),
             insured_as: INSURED_EMPLOYEE.into(),
+            employment_insured: true,
             birthday: None,
             hired_on: hired,
             left_on: left,
@@ -1340,21 +1431,20 @@ mod tests {
 
     /// A reference payslip's deductions must be reproducible from the rules.
     ///
-    /// Labour insurance 1,053, health insurance 822, withheld tax
-    /// 53,000 x 5% = 2,650, total 4,525, net 48,475.
+    /// Labour insurance 1,053, employment insurance 92, health insurance 822,
+    /// withheld tax 53,000 x 5% = 2,650, total 4,617, net 48,383.
     #[test]
     fn a_reference_payslip_is_reproducible_from_the_rulesets() {
+        let e = emp(d(2025, 3, 3), None);
         let p = premiums_on(
             d(2026, 6, 30),
-            INSURED_EMPLOYEE,
-            n("45800"),
-            n("53000"),
-            n("53000"),
-            0,
+            &Enrolment::of(&e, d(2026, 6, 30)),
             Coverage::WHOLE,
+            None,
         )
         .unwrap();
         assert_eq!(p.labor.employee, n("1053"));
+        assert_eq!(p.employment.employee, n("92"));
         assert_eq!(p.health.employee, n("822"));
 
         let wht = laysi_regulation::resolve("withholding", d(2026, 7, 5)).unwrap();
@@ -1363,14 +1453,68 @@ mod tests {
         let tax = to_dollars(n("53000") * rate);
         assert_eq!(tax, n("2650"), "53,000 × 扣繳率");
 
-        let deduction = p.labor.employee + p.health.employee + tax;
-        assert_eq!(deduction, n("4525"), "代扣合計");
-        assert_eq!(n("53000") - deduction, n("48475"), "實發");
+        let deduction = p.employee_total() + tax;
+        assert_eq!(deduction, n("4617"), "代扣合計");
+        assert_eq!(n("53000") - deduction, n("48383"), "實發");
 
-        // The three employer-side contributions, the other reference values.
+        // The employer-side contributions, the other reference values.
         assert_eq!(p.labor.employer, n("3687"));
+        assert_eq!(p.employment.employer, n("321"));
         assert_eq!(p.health.employer, n("2565"));
         assert_eq!(p.pension, n("3180"));
+
+        let slip = compute_one(
+            &e,
+            d(2026, 6, 1),
+            d(2026, 6, 30),
+            d(2026, 7, 5),
+            Money::ZERO,
+            Money::ZERO,
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap()
+        .slip;
+        assert_eq!(slip.deduction, n("4617"));
+        assert_eq!(slip.net, n("48383"));
+        assert_eq!(slip.accident_rate, None);
+        assert_eq!(slip.accident_employer, Money::ZERO, "沒有行業別費率就不計");
+    }
+
+    /// The industry rate the run read is charged and kept on the payslip,
+    /// which recomputes it from that rate rather than from the setting.
+    /// Employment insurance is withheld unless the roster says otherwise.
+    #[test]
+    fn a_payslip_charges_and_keeps_the_occupational_accident_rate() {
+        let mut e = emp(d(2025, 3, 3), None);
+        let pay = |e: &Employee, rate| {
+            compute_one(
+                e,
+                d(2026, 6, 1),
+                d(2026, 6, 30),
+                d(2026, 7, 5),
+                Money::ZERO,
+                Money::ZERO,
+                &BTreeMap::new(),
+                rate,
+            )
+            .unwrap()
+        };
+        let c = pay(&e, Some(n("0.0007")));
+        assert_eq!(c.slip.accident_rate, Some(n("0.0007")));
+        assert_eq!(c.slip.accident_employer, n("64"), "45,800 × 0.14% = 64.12");
+        assert_eq!(c.slip.employment_employer, n("321"));
+        assert_eq!(c.arrears, Some((n("45800"), MonthPart::WHOLE)));
+        assert_eq!(c.versions.employment, "2003.1");
+        assert_eq!(c.versions.accident, "2025.1");
+        assert_eq!(c.versions.wage_arrears, "2026.1");
+
+        e.employment_insured = false;
+        let c = pay(&e, Some(n("0.0007")));
+        assert_eq!(c.slip.employment_employee, Money::ZERO);
+        assert_eq!(c.slip.employment_employer, Money::ZERO);
+        assert_eq!(c.slip.deduction, n("1053") + n("822") + n("2650"));
+        assert_eq!(c.slip.accident_employer, n("64"), "不參加就保仍有職災");
     }
 
     /// The withholding rate comes from the rules too: change the rules and the
@@ -1733,6 +1877,7 @@ mod tests {
             Money::ZERO,
             Money::ZERO,
             &leave,
+            None,
         )
         .unwrap();
         assert_eq!(c.slip.base_salary, n("39290"), "42,000 − 1,355 − 1,355");
@@ -1785,6 +1930,7 @@ mod tests {
             Money::ZERO,
             Money::ZERO,
             &leave,
+            None,
         )
         .unwrap();
         assert_eq!(c.slip.note, "事假 3 日扣 3,000");
@@ -1820,6 +1966,7 @@ mod tests {
             Money::ZERO,
             Money::ZERO,
             &BTreeMap::new(),
+            None,
         )
         .unwrap();
         assert_eq!(c.slip.health_dependents, 2, "6/15 退保的那一位不計");
@@ -1827,8 +1974,8 @@ mod tests {
         assert_eq!(c.slip.health_employer, n("2565"), "公司負擔不隨眷口變動");
         assert_eq!(
             c.slip.deduction,
-            n("1053") + n("2466") + n("2650"),
-            "勞保、健保與扣繳"
+            n("1053") + n("92") + n("2466") + n("2650"),
+            "勞保、就保、健保與扣繳"
         );
     }
 
@@ -1858,6 +2005,7 @@ mod tests {
                 Money::ZERO,
                 Money::ZERO,
                 &BTreeMap::new(),
+                None,
             )
             .unwrap()
             .slip
@@ -1869,7 +2017,8 @@ mod tests {
         assert_eq!(slip.health_employee, Money::ZERO, "退保當月免繳");
         assert_eq!(slip.health_employer, Money::ZERO);
         assert_eq!(slip.health_dependents, 0, "眷屬跟著本人退保");
-        assert_eq!(slip.deduction, n("527") + slip.income_tax);
+        assert_eq!(slip.employment_employee, n("46"), "91.6 × 15/30");
+        assert_eq!(slip.deduction, n("527") + n("46") + slip.income_tax);
         assert_eq!((slip.insured_from, slip.insured_to), (from, d(2026, 6, 15)));
         assert_eq!(
             slip.note,
@@ -1899,6 +2048,7 @@ mod tests {
             Money::ZERO,
             Money::ZERO,
             &BTreeMap::new(),
+            None,
         )
         .unwrap()
         .slip;
@@ -1959,6 +2109,7 @@ mod tests {
             Money::ZERO,
             n("40.644722"),
             &leave,
+            None,
         )
         .unwrap();
         assert_eq!(

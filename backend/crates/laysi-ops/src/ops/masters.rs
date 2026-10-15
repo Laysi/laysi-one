@@ -346,6 +346,11 @@ pub struct EmployeeInput {
     /// full and has no pension contributed for them.
     #[serde(default = "default_insured_employee")]
     pub insured_as: String,
+    /// Whether the person is in employment insurance. Omit to leave it alone
+    /// on update; omitted on create means in it. Not read for an owner, who
+    /// never is.
+    #[serde(default)]
+    pub employment_insured: Option<bool>,
     /// Date of birth. Overwritten on every save; omit it to clear it.
     #[serde(default)]
     pub birthday: Option<NaiveDate>,
@@ -713,6 +718,7 @@ fn employee_write<'a>(
         employment_type: input.employment_type.as_str(),
         pay_basis: input.pay_basis.as_str(),
         insured_as: input.insured_as.as_str(),
+        employment_insured: input.employment_insured,
         birthday: input.birthday,
         hired_on: input.hired_on,
         left_on: input.left_on,
@@ -793,7 +799,7 @@ impl Operation for UpdateEmployee {
         Risk::NeedsConfirm
     }
     fn summary(&self) -> &'static str {
-        "更新員工主檔。本薪與三項投保級距沒帶就不變更，帶 0 表示尚未設定；身分證字號會驗檢查碼；狀態為待離職或已離職時必須填離職日。狀態改為已離職會在同一個交易停用該員工的登入帳號、結束登入工作階段並撤銷 MCP Token，不等離職日；唯一啟用中的系統管理員不能這樣關掉。"
+        "更新員工主檔。本薪與三項投保級距沒帶就不變更，帶 0 表示尚未設定；是否參加就業保險沒帶也不變更；身分證字號會驗檢查碼；狀態為待離職或已離職時必須填離職日。狀態改為已離職會在同一個交易停用該員工的登入帳號、結束登入工作階段並撤銷 MCP Token，不等離職日；唯一啟用中的系統管理員不能這樣關掉。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<EmployeeInput>()
@@ -1265,6 +1271,7 @@ mod tests {
             employment_type: "full_time".into(),
             pay_basis: BASIS_MONTHLY.into(),
             insured_as: INSURED_EMPLOYEE.into(),
+            employment_insured: None,
             birthday: None,
             hired_on: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
             left_on: None,

@@ -29,6 +29,7 @@
 //! build keeps it empty, which the migration coverage test enforces.
 
 use crate::ops::employees::{BASIS_MONTHLY, INSURED_EMPLOYEE};
+use crate::ops::insurance::{accident_rate_note, parse_accident_rate, ACCIDENT_RATE_SETTING};
 use crate::ops::payroll::{
     PAYROLL_TIMINGS, PAYROLL_TIMING_SETTING, PAY_NEXT_MONTH, PAY_SAME_MONTH,
 };
@@ -128,14 +129,25 @@ impl Operation for GetCompanySettings {
 
     async fn call(&self, ctx: &OpCtx, _input: Value) -> Result<OpOutcome, OpError> {
         let stored = ctx.store.company_settings().await?;
+        // The industry rate reads with the commuting rate the bill adds to it,
+        // which is a regulation and so not stored with the setting.
+        let accident_note = stored
+            .iter()
+            .find(|s| s.code == ACCIDENT_RATE_SETTING)
+            .map(|s| accident_rate_note(ctx.today, &s.value))
+            .transpose()?;
         let mut rows: Vec<Value> = stored
             .iter()
             .map(|s| {
+                let note = match (s.code.as_str(), &accident_note) {
+                    (ACCIDENT_RATE_SETTING, Some(derived)) => derived.clone(),
+                    _ => s.note.clone(),
+                };
                 json!({
                     "code": s.code,
                     "label": s.label,
                     "value": s.value,
-                    "note": s.note,
+                    "note": note,
                     "editable": s.editable,
                     "options": setting_options(&s.code),
                     "source": "setting",
@@ -414,6 +426,7 @@ fn validate_setting(code: &str, value: &str) -> Result<(), OpError> {
             OpError::BadInput(format!("「{value}」不是大於 0 的天數，永久保存就留空")),
         ),
         BRAND_LOGO_SETTING => validate_brand_logo(value),
+        ACCIDENT_RATE_SETTING => parse_accident_rate(value).map(|_| ()),
         webhook::NOTICE_WEBHOOK_SETTING => webhook::validate_url(value),
         BRAND_DISPLAY_SETTING if !BRAND_DISPLAYS.contains(&value) => {
             Err(OpError::BadInput(format!(
@@ -921,6 +934,7 @@ async fn link_employee(
             employment_type: "full_time",
             pay_basis: BASIS_MONTHLY,
             insured_as: INSURED_EMPLOYEE,
+            employment_insured: None,
             birthday: None,
             hired_on: ctx.today,
             left_on: None,
@@ -2325,6 +2339,29 @@ mod tests {
         }
         assert!(!CLEARABLE_SETTINGS.contains(&PAYROLL_TIMING_SETTING));
         assert_eq!(setting_options(PAYROLL_TIMING_SETTING), PAYROLL_TIMINGS);
+    }
+
+    /// The industry rate is a percentage as the bureau prints it, and the
+    /// screen reads it with the commuting rate the bill adds to it.
+    #[test]
+    fn the_accident_rate_is_a_percentage_read_with_the_commuting_rate() {
+        assert!(validate_setting(ACCIDENT_RATE_SETTING, "0.07").is_ok());
+        for bad in ["0", "0.07%", "零點零七", "100"] {
+            assert!(
+                validate_setting(ACCIDENT_RATE_SETTING, bad).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(!CLEARABLE_SETTINGS.contains(&ACCIDENT_RATE_SETTING));
+
+        let on = chrono::NaiveDate::from_ymd_opt(2026, 7, 25).unwrap();
+        assert_eq!(
+            accident_rate_note(on, "0.07").unwrap(),
+            "加上下班災害費率 0.07%，職災保險費率合計 0.14%。"
+        );
+        assert!(accident_rate_note(on, "")
+            .unwrap()
+            .contains("未填時薪資不計職災保險費"));
     }
 
     #[test]

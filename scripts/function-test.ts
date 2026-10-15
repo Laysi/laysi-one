@@ -111,12 +111,30 @@ async function login(username: string, password: string) {
   return body.user;
 }
 
+// The administrator's session is kept and swapped in rather than signed in
+// again: the login rate limit counts attempts per login name.
+let adminCookie = "";
+async function useAdmin<T>(fn: () => Promise<T>): Promise<T> {
+  const before = cookie;
+  if (adminCookie) cookie = adminCookie;
+  else {
+    await login("admin", ADMIN_PASSWORD);
+    adminCookie = cookie;
+  }
+  try {
+    return await fn();
+  } finally {
+    cookie = before;
+  }
+}
+
 // Settings are the administrator's; everything around them runs as the owner.
 async function asAdmin(settings: Record<string, string>) {
-  await login("admin", ADMIN_PASSWORD);
-  for (const [code, value] of Object.entries(settings)) {
-    await must("update_company_setting", { code, value });
-  }
+  await useAdmin(async () => {
+    for (const [code, value] of Object.entries(settings)) {
+      await must("update_company_setting", { code, value });
+    }
+  });
   await login("boss@test.local", BOSS_PASSWORD);
 }
 
@@ -539,8 +557,10 @@ async function main() {
       const labor = money(data.labor_employee ?? data.labor?.employee);
       const health = money(data.health_employee ?? data.health?.employee);
       const pension = money(data.pension_employer ?? data.pension?.employer);
+      const employment = money(data.employment.employee);
       expect(labor > 0 && health > 0 && pension > 0, JSON.stringify(data).slice(0, 200));
-      insured = labor + health;
+      expect(employment > 0 && money(data.employment.employer) > 0, JSON.stringify(data.employment));
+      insured = labor + employment + health;
       return `勞保自付 ${data.labor_employee ?? data.labor?.employee}、健保自付 ${data.health_employee ?? data.health?.employee}、勞退提繳 ${data.pension_employer ?? data.pension?.employer}`;
     });
 
@@ -564,15 +584,65 @@ async function main() {
       expectEq(money(run.gross_total), 10000000, "應發合計");
       expectEq(money(run.net_total), money(run.gross_total) - money(run.deduction_total), "實發 = 應發 − 代扣");
       const parts = data.deduction_breakdown;
-      expect(money(parts.labor_employee) > 0 && money(parts.health_employee) > 0, JSON.stringify(parts));
+      expect(
+        money(parts.labor_employee) > 0 && money(parts.employment_employee) > 0 && money(parts.health_employee) > 0,
+        JSON.stringify(parts),
+      );
       expectEq(
-        money(parts.labor_employee) + money(parts.health_employee) + money(parts.income_tax),
+        money(parts.labor_employee) + money(parts.employment_employee) + money(parts.health_employee) +
+          money(parts.income_tax),
         money(run.deduction_total),
         "代扣明細合計",
       );
+      expectEq(data.accident_rate_percent, null, "沒有行業別費率時，薪資作業要說沒計職災");
+      expect(run.rulesets.employment_insurance && run.rulesets.wage_arrears, "薪資作業沒有記下就保與墊償的版本");
+      expect(money(run.wage_arrears) > 0, `墊償基金是 ${run.wage_arrears}`);
       expectEq(run.voucher_status, "pending", "薪資傳票狀態");
       expectEq(data.employer_in_ledger, false, "公司負擔的保費還沒有接進總帳，回報值要照實");
       return `${run.headcount} 人，應發 ${run.gross_total}，代扣 ${run.deduction_total}，實發 ${run.net_total}`;
+    });
+
+    await check("H16", "職災依公司設定的行業別費率計算，墊償基金依全公司投保薪資合計", async () => {
+      const regs = await must("list_regulations", { as_of: TODAY });
+      const payloadOf = (domain: string) =>
+        regs.domains
+          .find((d: any) => d.domain === domain)
+          .versions.find((v: any) => v.in_force).payload;
+      const commuting = Number(payloadOf("occupational_accident").commuting_rate);
+      const arrearsRate = Number(payloadOf("wage_arrears").rate);
+
+      const unset = await must("compute_insurance", { insured_salary: "45800", as_of: TODAY });
+      expectEq(unset.accident.employer, null, "沒有行業別費率時的職災");
+      const before = await must("get_insurance_summary", { as_of: TODAY });
+      expectEq(before.accident_employer, null, "勞健保頁的職災合計");
+      expect(before.accident_rate_note, "勞健保頁沒有說職災還沒計入");
+
+      await useAdmin(async () => {
+        const bad = await op("update_company_setting", { code: "accident_industry_rate", value: "abc" });
+        expect(!bad.ok, "職災費率收了一個不是數字的值");
+        await must("update_company_setting", { code: "accident_industry_rate", value: "0.07" });
+      });
+
+      const quote = await must("compute_insurance", { insured_salary: "80000", as_of: TODAY });
+      const ceiling = money(quote.accident.max_insured_salary) / 100;
+      expect(ceiling > money(quote.labor.max_insured_salary) / 100, "職災上限沒有高於勞保上限");
+      expectEq(money(quote.accident.charged_on), ceiling * 100, "職災按自己的上限計費");
+      expectEq(
+        money(quote.accident.employer),
+        Math.round(ceiling * (0.0007 + commuting)) * 100,
+        "職災 = 計費基礎 × (行業別 + 上下班)",
+      );
+
+      const after = await must("get_insurance_summary", { as_of: TODAY });
+      expect(after.accident_employer !== null && money(after.accident_employer) > 0, "勞健保頁沒有職災合計");
+      expectEq(after.accident_rate_note, null, "設好費率之後仍說職災沒計入");
+      const charged = after.rows.filter((r: any) => r.insured_as === "employee" && r.labor_days !== 0);
+      expect(charged.every((r: any) => r.labor_days === null), "本月有人不足月，墊償基金要另外算");
+      const base = charged.reduce((sum: number, r: any) => sum + money(r.labor_charged_on), 0) / 100;
+      expectEq(money(after.wage_arrears), Math.round(base * arrearsRate) * 100, "墊償基金");
+      const rows = after.rows.reduce((sum: number, r: any) => sum + money(r.employer_total), 0);
+      expectEq(money(after.employer_total), rows + money(after.wage_arrears), "公司負擔 = 逐人合計 + 墊償基金");
+      return `職災 ${quote.accident.employer}（${quote.accident.rate_percent}%） · 墊償 ${after.wage_arrears}`;
     });
 
     await check("H6", "薪資產生的傳票借貸相等，借薪資支出、貸代扣款與存款", async () => {
@@ -838,6 +908,9 @@ async function main() {
         expectEq(money(slip.health_employee), money(row(empNo).health_employee), `${label}的健保自付`);
         expectEq(money(slip.labor_employee), money(row(empNo).labor_employee), `${label}的勞保自付`);
         expectEq(money(slip.pension_employer), money(row(empNo).pension_employer), `${label}的勞退提繳`);
+        expectEq(money(slip.employment_employee), money(row(empNo).employment_employee), `${label}的就保自付`);
+        expect(slip.accident_employer !== null, `${label}的薪資單沒有計職災`);
+        expectEq(money(slip.accident_employer), money(row(empNo).accident_employer), `${label}的職災`);
         expectEq(slip.recompute_matches, true, `${label}的薪資單重算`);
       }
       return `${monthEnd} · 月底加保計 1 口 · 離職當月健保 0、勞保按 1 日計，與薪資單相符`;
@@ -1084,7 +1157,12 @@ async function main() {
         money(payloadOf("labor_insurance").max_insured_salary),
         "上限取自勞保投保薪資上限",
       );
-      return `${suggestion.floor} ～ ${suggestion.labor_ceiling}`;
+      expectEq(
+        money(suggestion.accident_ceiling),
+        money(payloadOf("occupational_accident").max_insured_salary),
+        "帶入的上限取自職災投保薪資上限",
+      );
+      return `${suggestion.floor} ～ ${suggestion.accident_ceiling}`;
     });
 
     await check("P3", "人資核發的是一般職員帳號，同一個人不會有第二組", async () => {

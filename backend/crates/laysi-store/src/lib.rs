@@ -5883,8 +5883,9 @@ impl Store {
                 (emp_no, name, dept_id, title, employment_type, pay_basis, insured_as,
                  birthday, hired_on, left_on, status, base_salary, labor_insured_salary,
                  health_insured_salary, pension_wage, id_no,
-                 note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                 note, created_by, employment_insured)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                     COALESCE($19, true))
              RETURNING id",
         )
         .bind(&emp_no)
@@ -5905,6 +5906,7 @@ impl Store {
         .bind(req.id_no)
         .bind(req.note)
         .bind(req.actor)
+        .bind(req.employment_insured)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| {
@@ -5923,7 +5925,8 @@ impl Store {
     /// Update an employee record. Every column is overwritten except the four
     /// amounts, which are left alone when the caller sends `None`: the roster
     /// never returns them, so a caller editing a job title has nothing to send
-    /// back and would otherwise zero out the salary it never saw.
+    /// back and would otherwise zero out the salary it never saw. Whether the
+    /// person is in employment insurance is left alone the same way.
     ///
     /// Neither creating nor updating an employee creates a login;
     /// `user_account` stays with `laysi-admin`, and the two tables are
@@ -5960,7 +5963,8 @@ impl Store {
                     labor_insured_salary = COALESCE($13::numeric, labor_insured_salary),
                     health_insured_salary = COALESCE($14::numeric, health_insured_salary),
                     pension_wage = COALESCE($15::numeric, pension_wage),
-                    id_no = $16, note = $17
+                    id_no = $16, note = $17,
+                    employment_insured = COALESCE($18, employment_insured)
               WHERE emp_no = $1",
         )
         .bind(req.emp_no)
@@ -5980,6 +5984,7 @@ impl Store {
         .bind(req.pension_wage)
         .bind(req.id_no)
         .bind(req.note)
+        .bind(req.employment_insured)
         .execute(&mut *tx)
         .await?;
 
@@ -6002,7 +6007,7 @@ impl Store {
     pub async fn employees(&self, include_left: bool, q: Option<&str>) -> Result<Vec<Employee>> {
         let mut staff: Vec<Employee> = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.employment_type, e.pay_basis, e.insured_as,
+                    e.title, e.employment_type, e.pay_basis, e.insured_as, e.employment_insured,
                     e.birthday, e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.note,
@@ -6107,7 +6112,7 @@ impl Store {
     pub async fn employee(&self, emp_no: &str) -> Result<Employee> {
         let mut found = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.employment_type, e.pay_basis, e.insured_as,
+                    e.title, e.employment_type, e.pay_basis, e.insured_as, e.employment_insured,
                     e.birthday, e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.note,
@@ -6133,7 +6138,7 @@ impl Store {
     pub async fn employee_by_id(&self, id: i32) -> Result<Option<Employee>> {
         let mut found = sqlx::query(
             "SELECT e.id, e.emp_no, e.name, e.dept_id, d.code AS dept_code, d.label AS dept_label,
-                    e.title, e.employment_type, e.pay_basis, e.insured_as,
+                    e.title, e.employment_type, e.pay_basis, e.insured_as, e.employment_insured,
                     e.birthday, e.hired_on, e.left_on, e.status, e.base_salary,
                     e.labor_insured_salary, e.health_insured_salary, e.pension_wage,
                     e.id_no, e.note,
@@ -7070,21 +7075,30 @@ impl Store {
     /// A period holds more than one run once somebody is paid late, so the
     /// order within a period is fixed as well, and a caller that means one
     /// particular run has to say which by id.
-    async fn payroll_run_rows(&self, id: Option<i32>, limit: i64) -> Result<Vec<PayrollRun>> {
+    async fn payroll_run_rows(
+        &self,
+        id: Option<i32>,
+        period: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<PayrollRun>> {
         Ok(sqlx::query(
             "SELECT p.period, p.pay_on, p.headcount, p.gross_total, p.deduction_total,
                     p.net_total, p.employer_total, p.voucher_no, v.status AS voucher_status,
                     p.labor_version, p.health_version, p.pension_version, p.withholding_version,
                     p.dependents_version, p.partial_month_version,
+                    p.wage_arrears, p.employment_version, p.accident_version,
+                    p.wage_arrears_version,
                     p.note, p.created_at, p.created_by
                FROM payroll_run p
                LEFT JOIN voucher v ON v.no = p.voucher_no
-              WHERE $1::int IS NULL OR p.id = $1
+              WHERE ($1::int IS NULL OR p.id = $1)
+                AND ($3::text IS NULL OR p.period = $3)
               ORDER BY p.period DESC, p.id DESC
               LIMIT $2",
         )
         .bind(id)
         .bind(limit)
+        .bind(period)
         .fetch_all(&self.pool)
         .await?
         .iter()
@@ -7093,7 +7107,12 @@ impl Store {
     }
 
     pub async fn payroll_runs(&self, limit: i64) -> Result<Vec<PayrollRun>> {
-        self.payroll_run_rows(None, limit).await
+        self.payroll_run_rows(None, None, limit).await
+    }
+
+    /// Every run of one period, newest first.
+    pub async fn period_payroll_runs(&self, period: &str) -> Result<Vec<PayrollRun>> {
+        self.payroll_run_rows(None, Some(period), i64::MAX).await
     }
 
     /// Employee ids already holding a payslip for this period, across every
@@ -7142,11 +7161,14 @@ impl Store {
             "SELECT p.period, p.pay_on,
                     p.labor_version, p.health_version, p.pension_version,
                     p.withholding_version, p.dependents_version, p.partial_month_version,
-                    s.employee_id, e.emp_no, e.name, e.title, e.insured_as, d.label AS dept_label,
+                    p.employment_version, p.accident_version,
+                    s.employee_id, e.emp_no, e.name, e.title, e.insured_as,
+                    e.employment_insured, d.label AS dept_label,
                     s.base_salary, s.overtime, s.allowance, s.gross,
                     s.labor_insured_salary, s.health_insured_salary, s.pension_wage,
-                    s.labor_employee, s.health_employee, s.income_tax,
-                    s.labor_employer, s.health_employer, s.pension_employer,
+                    s.labor_employee, s.employment_employee, s.health_employee, s.income_tax,
+                    s.labor_employer, s.employment_employer, s.accident_employer,
+                    s.accident_rate, s.health_employer, s.pension_employer,
                     s.deduction, s.net, s.paid_days, s.month_days, s.note,
                     s.health_dependents, s.insured_from, s.insured_to
                FROM payslip s
@@ -7242,8 +7264,15 @@ impl Store {
         let employer: Money = req
             .slips
             .iter()
-            .map(|s| s.labor_employer + s.health_employer + s.pension_employer)
-            .sum();
+            .map(|s| {
+                s.labor_employer
+                    + s.employment_employer
+                    + s.accident_employer
+                    + s.health_employer
+                    + s.pension_employer
+            })
+            .sum::<Money>()
+            + req.wage_arrears;
 
         // One salary expense line per department. Employees with no department
         // collect into a single `None` line rather than being apportioned onto
@@ -7316,8 +7345,10 @@ impl Store {
                (period, pay_on, headcount, gross_total, deduction_total, net_total,
                 employer_total, voucher_no, labor_version, health_version,
                 pension_version, withholding_version, dependents_version,
-                partial_month_version, note, created_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id",
+                partial_month_version, note, created_by, wage_arrears,
+                employment_version, accident_version, wage_arrears_version)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                     $17,$18,$19,$20) RETURNING id",
         )
         .bind(req.period)
         .bind(req.pay_on)
@@ -7335,6 +7366,10 @@ impl Store {
         .bind(req.partial_month_version)
         .bind(req.note)
         .bind(req.actor)
+        .bind(req.wage_arrears)
+        .bind(req.employment_version)
+        .bind(req.accident_version)
+        .bind(req.wage_arrears_version)
         .fetch_one(&mut *tx)
         .await?
         .get("id");
@@ -7347,9 +7382,10 @@ impl Store {
                     labor_employee, health_employee, income_tax,
                     labor_employer, health_employer, pension_employer,
                     deduction, net, paid_days, month_days, note, health_dependents,
-                    insured_from, insured_to)
+                    insured_from, insured_to, employment_employee, employment_employer,
+                    accident_employer, accident_rate)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-                         $22,$23)",
+                         $22,$23,$24,$25,$26,$27)",
             )
             .bind(run_id)
             .bind(s.employee_id)
@@ -7374,6 +7410,10 @@ impl Store {
             .bind(s.health_dependents)
             .bind(s.insured_from)
             .bind(s.insured_to)
+            .bind(s.employment_employee)
+            .bind(s.employment_employer)
+            .bind(s.accident_employer)
+            .bind(s.accident_rate)
             .execute(&mut *tx)
             .await?;
 
@@ -7403,7 +7443,7 @@ impl Store {
         }
 
         tx.commit().await?;
-        self.payroll_run_rows(Some(run_id), 1)
+        self.payroll_run_rows(Some(run_id), None, 1)
             .await?
             .into_iter()
             .next()
@@ -9021,6 +9061,9 @@ pub struct Employee {
     pub pay_basis: String,
     /// `employee` or `owner`. Which set of insurance shares applies.
     pub insured_as: String,
+    /// In employment insurance. Only read for someone insured as an
+    /// employee: an owner is never in it.
+    pub employment_insured: bool,
     /// Date of birth. Filed with labour insurance and on the withholding
     /// statement; `None` while it has not been collected.
     pub birthday: Option<NaiveDate>,
@@ -9104,6 +9147,9 @@ pub struct WriteEmployee<'a> {
     pub employment_type: &'a str,
     pub pay_basis: &'a str,
     pub insured_as: &'a str,
+    /// `None` leaves it alone on update and means in employment insurance on
+    /// create, which is where an employee starts.
+    pub employment_insured: Option<bool>,
     /// Overwritten like every other column; `None` clears it.
     pub birthday: Option<NaiveDate>,
     pub hired_on: NaiveDate,
@@ -9373,6 +9419,14 @@ pub struct PayrollRun {
     /// `None` on a run computed before these two were recorded.
     pub dependents_version: Option<String>,
     pub partial_month_version: Option<String>,
+    /// The arrears wage payment fund for this run's payslips, applied to
+    /// their total and rounded once. Included in `employer_total`.
+    pub wage_arrears: Money,
+    /// `None` on a run computed before employment insurance, occupational
+    /// accident insurance and the fund were charged; all three or none.
+    pub employment_version: Option<String>,
+    pub accident_version: Option<String>,
+    pub wage_arrears_version: Option<String>,
     pub note: String,
     pub created_at: DateTime<Utc>,
     pub created_by: String,
@@ -9389,6 +9443,10 @@ pub struct Payslip {
     /// `None` on a run computed before these two were recorded.
     pub dependents_version: Option<String>,
     pub partial_month_version: Option<String>,
+    /// `None` on a run computed before employment and occupational accident
+    /// insurance were charged, whose payslips hold zero for both.
+    pub employment_version: Option<String>,
+    pub accident_version: Option<String>,
     pub employee_id: i32,
     pub emp_no: String,
     pub name: String,
@@ -9398,6 +9456,8 @@ pub struct Payslip {
     /// rules, and a changed insurance identity shows up there the same way a
     /// retroactive rate change does.
     pub insured_as: String,
+    /// From the roster as it stands now, for the same reason.
+    pub employment_insured: bool,
     pub dept_label: Option<String>,
     pub base_salary: Money,
     pub overtime: Money,
@@ -9407,9 +9467,16 @@ pub struct Payslip {
     pub health_insured_salary: Money,
     pub pension_wage: Money,
     pub labor_employee: Money,
+    pub employment_employee: Money,
     pub health_employee: Money,
     pub income_tax: Money,
     pub labor_employer: Money,
+    pub employment_employer: Money,
+    pub accident_employer: Money,
+    /// The industry rate occupational accident insurance was charged at, as
+    /// a fraction; `None` when it was not charged. Stored like the brackets:
+    /// the rate is the company's and changes every year.
+    pub accident_rate: Option<Money>,
     pub health_employer: Money,
     pub pension_employer: Money,
     pub deduction: Money,
@@ -9441,9 +9508,15 @@ pub struct NewPayslip {
     pub health_insured_salary: Money,
     pub pension_wage: Money,
     pub labor_employee: Money,
+    pub employment_employee: Money,
     pub health_employee: Money,
     pub income_tax: Money,
     pub labor_employer: Money,
+    pub employment_employer: Money,
+    pub accident_employer: Money,
+    /// Industry rate occupational accident insurance was charged at, as a
+    /// fraction; `None` when the company has not entered one.
+    pub accident_rate: Option<Money>,
     pub health_employer: Money,
     pub pension_employer: Money,
     pub deduction: Money,
@@ -9475,6 +9548,13 @@ pub struct RecordPayroll<'a> {
     pub withholding_version: &'a str,
     pub dependents_version: &'a str,
     pub partial_month_version: &'a str,
+    pub employment_version: &'a str,
+    pub accident_version: &'a str,
+    pub wage_arrears_version: &'a str,
+    /// What this run records of the period's arrears wage payment fund,
+    /// computed by the caller from the ruleset: the whole period's fund less
+    /// what the period's earlier runs recorded.
+    pub wage_arrears: Money,
     pub note: &'a str,
     pub actor: &'a str,
     /// What this run read as approved: leave touching `leave_span` and
@@ -10365,6 +10445,7 @@ fn row_to_employee(r: &PgRow) -> Employee {
         employment_type: r.get("employment_type"),
         pay_basis: r.get("pay_basis"),
         insured_as: r.get("insured_as"),
+        employment_insured: r.get("employment_insured"),
         birthday: r.get("birthday"),
         hired_on: r.get("hired_on"),
         left_on: r.get("left_on"),
@@ -10732,6 +10813,10 @@ fn row_to_payroll_run(r: &PgRow) -> PayrollRun {
         withholding_version: r.get("withholding_version"),
         dependents_version: r.get("dependents_version"),
         partial_month_version: r.get("partial_month_version"),
+        wage_arrears: r.get("wage_arrears"),
+        employment_version: r.get("employment_version"),
+        accident_version: r.get("accident_version"),
+        wage_arrears_version: r.get("wage_arrears_version"),
         note: r.get("note"),
         created_at: r.get("created_at"),
         created_by: r.get("created_by"),
@@ -10748,11 +10833,14 @@ fn row_to_payslip(r: &PgRow) -> Payslip {
         withholding_version: r.get("withholding_version"),
         dependents_version: r.get("dependents_version"),
         partial_month_version: r.get("partial_month_version"),
+        employment_version: r.get("employment_version"),
+        accident_version: r.get("accident_version"),
         employee_id: r.get("employee_id"),
         emp_no: r.get("emp_no"),
         name: r.get("name"),
         title: r.get("title"),
         insured_as: r.get("insured_as"),
+        employment_insured: r.get("employment_insured"),
         dept_label: r.get("dept_label"),
         base_salary: r.get("base_salary"),
         overtime: r.get("overtime"),
@@ -10762,9 +10850,13 @@ fn row_to_payslip(r: &PgRow) -> Payslip {
         health_insured_salary: r.get("health_insured_salary"),
         pension_wage: r.get("pension_wage"),
         labor_employee: r.get("labor_employee"),
+        employment_employee: r.get("employment_employee"),
         health_employee: r.get("health_employee"),
         income_tax: r.get("income_tax"),
         labor_employer: r.get("labor_employer"),
+        employment_employer: r.get("employment_employer"),
+        accident_employer: r.get("accident_employer"),
+        accident_rate: r.get("accident_rate"),
         health_employer: r.get("health_employer"),
         pension_employer: r.get("pension_employer"),
         deduction: r.get("deduction"),
@@ -11939,6 +12031,7 @@ mod tests {
                 employment_type: "full_time",
                 pay_basis: "monthly",
                 insured_as: "employee",
+                employment_insured: None,
                 birthday: None,
                 hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                 left_on: None,
@@ -12058,6 +12151,7 @@ mod tests {
                 employment_type: "full_time",
                 pay_basis: "monthly",
                 insured_as: "employee",
+                employment_insured: None,
                 birthday: None,
                 hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                 left_on: None,
@@ -12164,6 +12258,7 @@ mod tests {
                 employment_type: "full_time",
                 pay_basis: "monthly",
                 insured_as: "employee",
+                employment_insured: None,
                 birthday: None,
                 hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                 left_on: None,
@@ -13082,6 +13177,7 @@ mod tests {
                 employment_type: "full_time",
                 pay_basis: "monthly",
                 insured_as: "employee",
+                employment_insured: None,
                 birthday: None,
                 hired_on,
                 left_on: None,
