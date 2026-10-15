@@ -135,7 +135,7 @@ source_note = "勞工保險條例；2026 年適用之投保薪資分級表"
 
 [payload]
 max_insured_salary = "45800"
-premium_rate = "0.11"      # 普通事故保險費率
+premium_rate = "0.115"     # 普通事故保險費率
 employer_share = "0.70"
 employee_share = "0.20"
 government_share = "0.10"
@@ -146,7 +146,7 @@ government_share = "0.10"
 | domain | payload 欄位 |
 |---|---|
 | `labor_insurance` | `max_insured_salary` `premium_rate` `employer_share` `employee_share` `government_share` |
-| `health_insurance` | `rate=0.0517` `employer_share=0.60` `employee_share=0.30` `avg_dependents=1.61` |
+| `health_insurance` | `rate=0.0517` `employer_share=0.60` `employee_share=0.30` `avg_dependents=1.56` |
 | `pension` | `employer_rate=0.06` |
 | `vat` | `rate=0.05` `period_months=2` |
 | `minimum_wage` | `monthly=29500` `hourly=196` |
@@ -159,13 +159,17 @@ government_share = "0.10"
 | `health_dependents` | `max_counted=3`（員工健保自付額計入的眷口數上限，整數）。依健保法第 18 條第 2 項，自 2013-01-01 起 |
 | `partial_month` | `labor_days_per_month=30` `pension_days_per_month=30`（到職與離職當月按日計時一個月算幾日，28～31 的整數）。依勞保條例施行細則第 28-1 條、勞退條例施行細則第 22 條，自 2005-07-01 起 |
 
-驗證基準（**必須寫成單元測試**，數值取自原型的 `ins` / `pay` 區塊）：
+驗證基準（**必須寫成單元測試**，數值取自勞保局與健保署 2026 年的保險費分攤表）：
 
-- 勞保級距 45,800、非工會身分 → 公司負擔 `45800 × 0.11 × 0.70 = 3527`（四捨五入）
-- 健保級距 53,000 → 公司負擔 `53000 × 0.0517 × 0.60 × 1.61 = 2647`
+- 勞保級距 45,800、非工會身分 → 公司負擔 `45800 × 0.115 × 0.70 = 3687`（四捨五入）
+- 健保級距 53,000 → 公司負擔 `53000 × 0.0517 × 0.60 × 1.56 = 2565`
 - 健保級距 53,000 → 員工自付 `53000 × 0.0517 × 0.30 = 822`（本人一口；每位在保眷屬再加一口，最多計三口，兩名眷屬為 `822 × 3 = 2466`）
-- 勞保級距 45,800 → 員工自付 `45800 × 0.11 × 0.20 = 1008`
+- 勞保級距 45,800 → 員工自付 `45800 × 0.115 × 0.20 = 1053`
 - 提繳工資 53,000 → 公司勞退 `53000 × 0.06 = 3180`
+
+原型的 `ins` / `pay` 區塊印的是 3527／2647／1008：勞保用的是 2023–2024 年的 11%，健保用的是
+平均眷口數 0.61。勞保普通事故費率自 2025-01-01 起為 11.5%（加上就業保險 1% 為 12.5%），
+健保平均眷口數自 2024-01-01 起為 0.56 人。原型的數字不要照著改回去。
 
 ```rust
 pub struct Ruleset { pub domain: String, pub version: String,
@@ -3245,6 +3249,30 @@ offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），�
 - **`file` 一旦發布就不能改**。它是 `reg_update` 的鍵；換一個名字等於要每個安裝再套用
   一次，包括刻意把那一版刪掉的那些。它帶著 `.sql` 尾綴，那是更新走 `include_str!` 那
   幾版留下的檔名，留著才不會對已經收過的安裝再送一次。
+
+**已發布的版本寫錯了，更正是一版生效日較晚的新版本**。改那一版的 TOML 只影響新安裝：
+既有安裝已經把它的 `file` 記在 `reg_update`，不會再收一次，收了也是 `DO NOTHING`。
+同一天再發一版也不行——`resolve()` 對相同 `effective_from` 的兩版沒有確定的勝負。
+所以兩件事一起做：改正原本那一版（新安裝從一開始就對），再發一版生效日較晚的更正版。
+2026.1 的勞保普通事故費率（11% → 11.5%）與健保平均眷口數（1.61 → 1.56）就是這樣
+更正的：`backend/regulation/2026-10/` 的 2026.2 版，自 2026-10-01 生效，payload 與
+改正後的 2026.1 相同，`the_october_correction_repeats_the_corrected_2026_figures`
+釘住這件事，所以新安裝到了 10 月金額不會跳動。
+
+**生效日是發布當下還沒結束的那一期首日**：2026.2 在 10 月中發布，10 月的薪資多半還沒算。
+收到更新之前就算過 10 月的安裝，那一期的薪資單會依新規則重算而標「不相符」——還沒過帳
+就作廢重算，已過帳的差額在下一期調整。生效日再往前，碰到的就是已經結束、多半已過帳的期間。
+
+**不改寫既有版本**：`list_payslips` 依期末日現查規則重算每一張薪資單，與存下的金額
+不同就標「不相符」。回溯改寫 2026.1，一到九月每一張薪資單都會標不相符，而已過帳的期間
+作廢不了，那個標記永遠消不掉。生效日之前的差額在下一期調整，與 `void_payroll_run`
+拒絕已過帳期間是同一個原則。
+
+**更正版的檔名也要等於 domain**，所以放在另一個目錄：發布端的鍵是
+`{effective_from}_{檔名}.sql`，`seed_regulations()` 的鍵是 `{effective_from}_{domain}.sql`，
+兩者不一致時新安裝刪掉的版本會在下一次更新回來。新目錄要加進 `laysi-regulation` 的
+`SOURCES`；`every_rule_file_is_listed_once_and_named_after_its_domain` 比對目錄與清單，
+漏了就紅。
 
 `manifest.json` 由 `scripts/regulation-manifest.ts` 從 `backend/regulation/**/*.toml`
 產出，`.github/workflows/regulation-feed.yml` 在那些檔案有變動時推到發布用的公開
