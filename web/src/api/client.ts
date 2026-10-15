@@ -340,6 +340,7 @@ export const licenseState = z.object({
   running_version: z.string(),
   released_version: z.string().nullable(),
   updater_present: z.boolean(),
+  fallback_boot: z.boolean(),
 });
 export type LicenseState = z.infer<typeof licenseState>;
 

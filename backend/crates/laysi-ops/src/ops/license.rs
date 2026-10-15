@@ -570,6 +570,7 @@ fn licence_json(
         "running_version": build_version(),
         "released_version": update::installable(state).map(|v| v.to_string()),
         "updater_present": dirs.updater_present(),
+        "fallback_boot": dirs.fallback_boot(),
     });
     if let Some(p) = &licence.payload {
         out["license_no"] = json!(p.license_no);

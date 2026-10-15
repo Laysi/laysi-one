@@ -3502,7 +3502,7 @@ release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯�
 | `backup/` | 0700 | 切換前的 `pg_dump -Fc`（0600），成功或回退完成即刪 |
 | `incoming/` | 0700 | 從新版 api 映像取出的檔案 |
 | `requests/` | 0755 | 掛進 api（`:U,z`），api 寫旗標 |
-| `results/` | 0755 | 掛進 api 與 mcp（`:ro,z`，不加 `U`），更新程式寫結果與切換標記 |
+| `results/` | 0755 | 掛進 api 與 mcp（`:ro,z`，不加 `U`），更新程式寫結果、切換標記與備用開機標記 |
 
 只有最後兩個目錄掛進容器。請求目錄只掛進 `api`，所以從 MCP 寫不了旗標；結果目錄以唯讀
 掛進 `api` 與 `mcp`，兩者都要讀得到切換標記。日誌、資料庫備份、`.env` 與 compose 檔都不在
@@ -3533,6 +3533,15 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   取得鎖的執行（開機與收尾 unit 都是）在發現沒有進行中的更新時刪掉；在那之前它留著，
   寧可多擋一段。名稱含 `.`，不可能是請求編號，清理舊結果時不會碰到它。
   拒絕寫入接在 `dispatch` 第 0a 步（`op.writes()`），見〈產品畫面的更新卡〉。
+- 備用開機標記 `FALLBACK_BOOT_FILE`（`fallback-boot.marker`）：開機或收尾 unit 失敗後，
+  fallback unit 以 `boot --fallback` 執行前一版更新程式；前一版取得鎖之後先寫入標記
+  （暫存檔、rename，0644，內容 `at <時間>`），再照常收尾並啟動 stack。現行更新程式下一次
+  開機或收尾成功時刪掉它。寫不進去、刪不掉都只記日誌，不影響啟動。api 只讀：
+  `update::fallback_boot_in()` 在它是一般檔案時為真，任何錯誤（含目錄不存在）都是假，因為
+  它只決定畫面多不多一句提示；`get_license` 以 `fallback_boot` 回給畫面。名稱含 `.`，清理
+  舊結果時不會碰到。比這個參數舊的更新程式只看第一個參數，照常開機但不留標記；出貨的第一版
+  就帶著它，所以只有演練機與開發機會遇到。標記追的是現行更新程式有沒有起來，不是 stack
+  能不能用：停在 `rollback-failed` 而只起 postgres 的開機也算成功，照樣刪掉。
 - 狀態：進行中 `accepted`→`preparing`→`switching`→（`rolling-back`）；結束
   `succeeded`、`succeeded-updater-kept`（新版已在執行，但新版更新程式自我檢查不通過，
   `reason` 說原因）、`failed-unchanged`（停機前就失敗，什麼都沒變）、`rolled-back`、
@@ -3595,10 +3604,11 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 `ops/license.rs` 的 `released_manifest()` 用 `release::verify_with` 驗過才存，驗不過存空字串；
 每次成功的檢查整份換掉，所以撤回放行也一併生效。存的是簽章全文、逐位元組不動，因為請求原樣
 帶它，更新程式再驗一次。資料列只是一份副本：讀版本與寫請求每次都重新驗章，手改資料庫
-換不到任何版本。`get_license` 因此多回三個欄位：`running_version`、`released_version`（驗過
-章且 `decide()` 為 `Install` 才有，否則 `null`）與 `updater_present`（請求目錄存在才為真，
+換不到任何版本。`get_license` 因此多回四個欄位：`running_version`、`released_version`（驗過
+章且 `decide()` 為 `Install` 才有，否則 `null`）、`updater_present`（請求目錄存在才為真，
 沒有更新程式的安裝不畫按鈕，也不畫「更新期間」與「更新失敗時」兩列——那兩句講的是更新程式
-的行為，由維運人員更新的安裝兩句都不成立）。畫面只知道有沒有放行給這台機器，沒有放行版本時不說「最新」。
+的行為，由維運人員更新的安裝兩句都不成立），以及 `fallback_boot`（備用開機標記在不在，見
+〈旗標與結果〉）。畫面只知道有沒有放行給這台機器，沒有放行版本時不說「最新」。
 
 **兩個操作，同屬 `manage_license`**（migration `0025_release_manifest.sql` 整列改寫那條
 permission，並種兩列 `mcp_tool_grant`，檔案接在 `laysi-ops` 測試的 `SCHEMA` 後面）：
@@ -3636,6 +3646,12 @@ permission，並種兩列 `mcp_tool_grant`，檔案接在 `laysi-ops` 測試的 
 | 沒有執行 | 任一種 `refused-*`，每一種各有一句；或「已接收」在 60 秒內從未出現 |
 | 無法確認 | 「已接收」出現過或 api 曾經消失，卻在 45 分鐘內沒有最終結果，而最後一次輪詢有回應 |
 | 沒有回應 | 同上，但最後一次輪詢 `/v1/meta` 與 `get_update_result` 都沒有回應 |
+
+**前一版更新程式接手啟動時**：`fallback_boot` 為真，卡片在事實列下方多一句
+`FALLBACK_BOOT_MESSAGE`（`web/src/update.ts` 的 `updaterNotice`），與上表的狀態並存，有沒有
+放行版本都畫。系統照常可用，只有主機的 systemd 紀錄看得到這件事，而機器每次開機都靠前一版，
+直到有人按「更新」才會發現——那時現行更新程式仍起不來，請求回 `failed-unchanged`。所以按鈕
+照畫，提示請人洽經銷商檢修。現行更新程式下一次啟動成功，標記刪掉，提示跟著消失。
 
 **「沒有執行」只留給拒絕，以及「已接收」從未出現**。已接收之後逾時，更新可能已經執行，說
 沒有執行會讓人重按；那一格說無法確認結果、請重新整理本頁查看目前版本。輪詢同時問
@@ -3725,7 +3741,7 @@ systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一
   收不到更新請求。端對端測試只重啟開機 unit、不經過 user manager 開機，看不到這件事。
 - `laysi-updater-boot.service`：開機收尾並啟動 stack，`ExecStop=` 在關機時依序停下 web／
   mcp、其餘、postgres。`OnFailure=` 啟動 `laysi-updater-fallback.service`，以
-  `bin/laysi-updater.previous` 再做一次。
+  `bin/laysi-updater.previous boot --fallback` 再做一次，並留下備用開機標記。
 - `laysi-updater.service` 失敗時（例如程序被殺），`OnFailure=` 的
   `laysi-updater-recover.service` 立刻收尾，不必等下一次開機；它失敗同樣交給前一版。
 - 每一次執行（旗標、開機、收尾）都先取 `state/lock` 的 `flock`。旗標那次拿不到就回

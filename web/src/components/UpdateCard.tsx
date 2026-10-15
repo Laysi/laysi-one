@@ -16,6 +16,7 @@ import {
   POLL_MS,
   saveRun,
   startRun,
+  updaterNotice,
   within,
   type Phase,
   type UpdateRun,
@@ -119,6 +120,7 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
 
   const running = phase?.kind === 'progress';
   const released = licence.released_version;
+  const notice = updaterNotice(licence);
   const ended =
     phase?.kind === 'succeeded' || phase?.kind === 'unconfirmed' || phase?.kind === 'unreachable';
 
@@ -151,6 +153,8 @@ export function UpdateCard({ licence, canUpdate, onFinished }: Props) {
           </>
         )}
       </div>
+
+      {notice && <p className="state-note state-note--error">{notice}</p>}
 
       {!released && !phase && <p className="state-note">目前沒有可安裝的版本。</p>}
 

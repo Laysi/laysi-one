@@ -21,8 +21,8 @@ use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use laysi_license_token::release::{self, Decision, ReleaseVersion, VerifyingKey};
 use laysi_license_token::update::{
-    switching_in, RequestId, UpdateRequest, UpdateResult, UpdateStatus, CONTAINER_REQUEST_DIR,
-    CONTAINER_RESULT_DIR, MAX_RESULT_BYTES, REQUEST_FILE,
+    fallback_boot_in, switching_in, RequestId, UpdateRequest, UpdateResult, UpdateStatus,
+    CONTAINER_REQUEST_DIR, CONTAINER_RESULT_DIR, MAX_RESULT_BYTES, REQUEST_FILE,
 };
 use laysi_store::LicenseState;
 use schemars::JsonSchema;
@@ -67,6 +67,12 @@ impl UpdateDirs {
     /// there would write nowhere.
     pub fn updater_present(&self) -> bool {
         self.requests.is_dir()
+    }
+
+    /// Whether the previous updater started the stack last, because the
+    /// current one failed. See [`fallback_boot_in`].
+    pub fn fallback_boot(&self) -> bool {
+        fallback_boot_in(&self.results)
     }
 }
 
@@ -631,6 +637,20 @@ mod tests {
             results: dir.join("results"),
         };
         assert!(!nowhere.updater_present());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fallback_boot_is_read_from_the_results_directory() {
+        let dir = scratch("fallback");
+        let dirs = UpdateDirs {
+            requests: dir.join("requests"),
+            results: dir.clone(),
+        };
+        assert!(!dirs.fallback_boot());
+        let marker = dir.join(laysi_license_token::update::FALLBACK_BOOT_FILE);
+        std::fs::write(marker, "at 2026-10-15T06:00:00Z\n").unwrap();
+        assert!(dirs.fallback_boot());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
