@@ -526,6 +526,21 @@ struct ListedImage {
     size: u64,
 }
 
+fn parse_images(json: &str) -> HostResult<Vec<LocalImage>> {
+    let listed: Vec<ListedImage> =
+        serde_json::from_str(json).map_err(|e| format!("podman images output: {e}"))?;
+    Ok(listed
+        .into_iter()
+        .map(|i| LocalImage {
+            id: i.id,
+            names: i.names.unwrap_or_default(),
+            repo_digests: i.repo_digests.unwrap_or_default(),
+            digest: i.digest,
+            size: i.size,
+        })
+        .collect())
+}
+
 fn parse_containers(json: &str) -> HostResult<Vec<Container>> {
     let inspected: Vec<Inspected> =
         serde_json::from_str(json).map_err(|e| format!("podman inspect output: {e}"))?;
@@ -742,23 +757,12 @@ impl Host for PodmanHost {
     fn images(&mut self) -> HostResult<Vec<LocalImage>> {
         let mut cmd = self.podman();
         cmd.args(["images", "--all", "--format", "json"]);
-        let listed: Vec<ListedImage> = serde_json::from_str(&run(cmd, None)?)
-            .map_err(|e| format!("podman images output: {e}"))?;
-        Ok(listed
-            .into_iter()
-            .map(|i| LocalImage {
-                id: i.id,
-                names: i.names.unwrap_or_default(),
-                repo_digests: i.repo_digests.unwrap_or_default(),
-                digest: i.digest,
-                size: i.size,
-            })
-            .collect())
+        parse_images(&run(cmd, None)?)
     }
 
-    fn remove_image(&mut self, id: &str) -> HostResult<()> {
+    fn remove_image(&mut self, image: &LocalImage) -> HostResult<()> {
         let mut cmd = self.podman();
-        cmd.args(["rmi", id]);
+        cmd.arg("rmi").args(image.removal_targets());
         run(cmd, None).map(drop)
     }
 
@@ -1004,5 +1008,27 @@ mod tests {
             ["sha256:cc"],
             "another image's digests are not this container's"
         );
+    }
+
+    /// podman 4.9.3 answers `rmi <id>` of an image with two names "unable
+    /// to delete image … by ID with more than one tag". A platform manifest
+    /// digest is a repo digest but not a name.
+    #[test]
+    fn an_image_pulled_under_two_digests_is_removed_by_both_names() {
+        let json = r#"[
+          {"Id":"bf84137d58a4","Names":["r/backup@sha256:58","r/backup@sha256:cd"],
+           "RepoDigests":["r/backup@sha256:58","r/backup@sha256:5c","r/backup@sha256:cd"],
+           "Digest":"sha256:cd","Size":10},
+          {"Id":"7cf3a1e3f07f","Names":["r/api@sha256:10"],
+           "RepoDigests":["r/api@sha256:10","r/api@sha256:77"],"Digest":"sha256:10","Size":20},
+          {"Id":"0123456789ab","Names":null,"RepoDigests":[],"Digest":"","Size":5}
+        ]"#;
+        let images = parse_images(json).unwrap();
+        assert_eq!(
+            images[0].removal_targets(),
+            ["r/backup@sha256:58", "r/backup@sha256:cd"]
+        );
+        assert_eq!(images[1].removal_targets(), ["r/api@sha256:10"]);
+        assert_eq!(images[2].removal_targets(), ["0123456789ab"]);
     }
 }

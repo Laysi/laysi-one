@@ -1562,6 +1562,30 @@ fn a_rollback_keeps_the_old_image_the_new_release_named_by_another_digest() {
 }
 
 #[test]
+fn an_image_pulled_under_two_digests_goes_once_no_release_names_it() {
+    let rig = Rig::new(v1(), &[v2()]);
+    // A backup image from before v1, pulled under v0.0.9's digest and then
+    // again under v0.0.8's: podman refuses to remove it by ID.
+    let (ancient, older) = (Spec::good("v0.0.9", "m0"), Spec::good("v0.0.8", "m0"));
+    {
+        let mut w = rig.world.borrow_mut();
+        older.publish(&mut w);
+        w.local.insert(ancient.own(Image::Backup));
+        w.local.insert(older.own(Image::Backup));
+        w.same_image
+            .insert(older.own(Image::Backup), ancient.own(Image::Backup));
+    }
+    let id = rig.request("req-renamed-3", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    let w = rig.world.borrow();
+    assert!(!w.local.contains(&ancient.own(Image::Backup)));
+    assert!(!w.local.contains(&older.own(Image::Backup)));
+    assert!(w.local.contains(&v1().own(Image::Backup)), "v1 is kept");
+}
+
+#[test]
 fn a_restore_that_fails_while_recovering_starts_postgres_alone() {
     let mut broken = v2();
     broken.api = Behaviour::NeverHealthy;

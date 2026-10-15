@@ -648,16 +648,15 @@ impl Host for FakeHost {
             .filter(|digest| w.first_name(digest) == **digest)
             .map(|digest| {
                 let spec = w.registry.get(digest);
+                let pulled_by: Vec<String> = w
+                    .names_of(digest)
+                    .iter()
+                    .filter_map(|name| w.registry.get(name).map(|s| format!("{}@{name}", s.repo)))
+                    .collect();
                 LocalImage {
                     id: format!("id-{digest}"),
-                    repo_digests: w
-                        .names_of(digest)
-                        .iter()
-                        .filter_map(|name| {
-                            w.registry.get(name).map(|s| format!("{}@{name}", s.repo))
-                        })
-                        .collect(),
-                    names: Vec::new(),
+                    repo_digests: pulled_by.clone(),
+                    names: pulled_by,
                     digest: digest.clone(),
                     size: spec.map(|s| s.size).unwrap_or(0),
                 }
@@ -665,11 +664,32 @@ impl Host for FakeHost {
             .collect())
     }
 
-    fn remove_image(&mut self, id: &str) -> HostResult<()> {
+    /// As podman: an ID with more than one name is refused, and an image in
+    /// use stays. Given by name, every name goes at once, the only way the
+    /// updater removes by name.
+    fn remove_image(&mut self, image: &LocalImage) -> HostResult<()> {
         self.tick("rmi");
-        let digest = id.trim_start_matches("id-").to_string();
+        let first = image.id.trim_start_matches("id-").to_string();
         let mut w = self.world.borrow_mut();
-        let names = w.names_of(&digest);
+        let names = w.names_of(&first);
+        let targets = image.removal_targets();
+        if targets == [image.id.as_str()] {
+            if names.len() > 1 {
+                return Err(format!(
+                    "Error: unable to delete image {:?} by ID with more than one tag: please force removal",
+                    image.id
+                ));
+            }
+        } else {
+            let given: Vec<&str> = targets
+                .iter()
+                .filter_map(|t| t.split_once('@').map(|(_, d)| d))
+                .collect();
+            assert!(
+                names.iter().all(|n| given.contains(&n.as_str())),
+                "rmi {targets:?} leaves some of {names:?}"
+            );
+        }
         if w.containers.values().any(|c| names.contains(&c.digest)) {
             return Err("image is in use by a container".into());
         }

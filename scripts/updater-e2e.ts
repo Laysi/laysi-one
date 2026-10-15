@@ -1043,15 +1043,29 @@ exec ${realPodman} "$@"
   check(byService().get("backup")?.digest === v12.digests.backup, "podman reports the backup image by the digest it was first pulled by");
   assertSettledOn("v1.11.1");
 
+  // Once no release names it, that image goes with the clean-up. podman
+  // refuses to remove an image with two names by its ID.
+  const vRenamedNext = buildRelease({ version: "v1.11.2", rustfs: newRustfs }, known);
+  known.push(vRenamedNext.migration);
+  r = await update("e2e-after-unchanged", vRenamedNext.manifest);
+  check(r.status === "succeeded", "the release after it is installed");
+  assertSettledOn("v1.11.2");
+  check(hasImage(sameBackup), "the previous release's backup image is kept");
+  const vRenamedGone = buildRelease({ version: "v1.11.3", api: "exit", rustfs: newRustfs }, known);
+  r = await update("e2e-renamed-removed", vRenamedGone.manifest);
+  check(r.status === "rolled-back" && r.running === "v1.11.2", "the release after that is rolled back");
+  assertSettledOn("v1.11.2");
+  check(!hasImage(v12.digests.backup) && !hasImage(sameBackup), "the backup image pulled under two digests is removed once no release names it");
+
   // --- many runs in a row ---------------------------------------------------
   for (let n = 0; n < 10; n++) {
-    r = await update(`e2e-repeat-${String(n).padStart(4, "0")}`, unchanged.manifest);
+    r = await update(`e2e-repeat-${String(n).padStart(4, "0")}`, vRenamedNext.manifest);
     if (r.status !== "refused-same-version") fail(`repeat ${n}: ${r.status}`);
   }
   // Six requests faster than the service runs: the default start limit would
   // have stopped the path unit here.
   for (let n = 0; n < 6; n++) {
-    writeRequest(`e2e-burst-${String(n).padStart(4, "0")}`, unchanged.manifest);
+    writeRequest(`e2e-burst-${String(n).padStart(4, "0")}`, vRenamedNext.manifest);
     await sleep(150);
   }
   await settledRun();

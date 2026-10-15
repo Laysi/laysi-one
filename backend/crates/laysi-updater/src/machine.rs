@@ -1711,7 +1711,7 @@ impl<'h, H: Host> Machine<'h, H> {
             if !ours {
                 continue;
             }
-            if let Err(e) = self.host.remove_image(&image.id) {
+            if let Err(e) = self.host.remove_image(&image) {
                 self.log(format!("removing image {}: {e}", image.id));
             }
         }
