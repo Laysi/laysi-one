@@ -567,6 +567,128 @@ fn a_failed_restore_keeps_the_dump_and_blocks_further_updates() {
     }
 }
 
+/// A rig left in `RollbackFailed` by two failed restores, the dump kept and
+/// the database gone, with v0.3.0 published for the update after.
+fn failed_restore(id: &str) -> (Rig, RequestId) {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken, Spec::good("v0.3.0", "m3")]);
+    rig.world.borrow_mut().fail_restore = true;
+    let id = rig.request(id, &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    assert!(rig.world.borrow().db.is_none());
+    (rig, id)
+}
+
+#[test]
+fn a_failed_rollback_with_its_dump_kept_is_retried_by_hand() {
+    let (rig, id) = failed_restore("req-byhand-1");
+    // Whatever made the restore fail is dealt with, then the command, and
+    // the recovery unit it starts.
+    rig.world.borrow_mut().fail_restore = false;
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    let journal = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(journal.phase, Phase::Restoring);
+    rig.machine(|m| m.boot()).unwrap();
+
+    rig.assert_settled(&id);
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack);
+    assert_eq!(result.running.unwrap().to_string(), "v0.1.0");
+    assert!(result.rollback_reason.unwrap().contains("人工指令重新還原"));
+    assert_eq!(rig.world.borrow().restores, 3);
+
+    // The next update goes ahead. v0.2.0 never stayed, so its migration is
+    // not in the database, which assert_settled would expect.
+    let next = rig.request("req-byhand-2", &rig.manifest("v0.3.0"));
+    rig.run().unwrap();
+    let result = rig.result(&next);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert_eq!(rig.installed(), "v0.3.0");
+    let w = rig.world.borrow();
+    let db = w.db.as_ref().unwrap();
+    assert_eq!(db.migrations.iter().collect::<Vec<_>>(), ["m1", "m3"]);
+    assert!(db.rows.contains(&"written-before-the-update".to_string()));
+    drop(w);
+    assert!(rig.backups().is_empty());
+    assert!(rig.machine(|m| m.load_journal()).unwrap().is_none());
+}
+
+#[test]
+fn a_rollback_retried_by_hand_that_fails_again_keeps_the_dump() {
+    let (rig, id) = failed_restore("req-byhand-3");
+    rig.machine(|m| m.retry_rollback()).unwrap();
+    rig.machine(|m| m.boot()).unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed, "{result:?}");
+    assert!(result.rollback_reason.unwrap().contains("人工指令重新還原"));
+    assert_eq!(rig.backups(), vec!["req-byhand-3.dump".to_string()]);
+    assert_eq!(rig.world.borrow().restores, 4, "the restore and its retry");
+    assert!(rig.running("postgres"));
+    for service in ["api", "mcp", "web", "backup", "rustfs"] {
+        assert!(!rig.running(service), "{service} started");
+    }
+    assert!(!rig.switching());
+    // And it can be tried again. This time the first restore fails and its
+    // retry succeeds, and the result still says the rollback was retried by
+    // hand.
+    rig.world.borrow_mut().fail_restore = false;
+    rig.world.borrow_mut().fail_next_restores = 1;
+    rig.machine(|m| m.retry_rollback()).unwrap();
+    rig.machine(|m| m.boot()).unwrap();
+    rig.assert_settled(&id);
+    let reason = rig.result(&id).rollback_reason.unwrap();
+    assert!(reason.starts_with("第一次"), "{reason}");
+    assert!(reason.contains("重試後成功"), "{reason}");
+    assert!(reason.contains("人工指令重新還原"), "{reason}");
+}
+
+#[test]
+fn retry_rollback_refuses_all_but_a_failed_rollback_with_its_dump() {
+    let phase = |rig: &Rig| rig.machine(|m| m.load_journal()).unwrap().map(|j| j.phase);
+
+    // No update at all.
+    let rig = Rig::new(v1(), &[]);
+    assert!(rig.machine(|m| m.retry_rollback()).is_err());
+    assert_eq!(phase(&rig), None);
+
+    // The restore succeeded and the old release did not start: no dump.
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken]);
+    rig.world
+        .borrow_mut()
+        .registry
+        .get_mut(&v1().own(Image::Web))
+        .unwrap()
+        .behaviour = Behaviour::ExitsAtStart;
+    let id = rig.request("req-byhand-4", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
+    assert!(refused.contains("沒有留下資料庫備份"), "{refused}");
+    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
+
+    // Another run holds the lock.
+    let (rig, _) = failed_restore("req-byhand-5");
+    let held = fsx::Lock::acquire(&rig.layout.lock(), false)
+        .unwrap()
+        .unwrap();
+    assert!(rig.machine(|m| m.retry_rollback()).is_err());
+    drop(held);
+    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
+
+    // The stack files name another release.
+    let env = EnvFile::default().for_release(&v2().release(), &rig.layout.root.to_string_lossy());
+    std::fs::write(&rig.layout.stack_files()[2], env.render()).unwrap();
+    let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
+    assert!(refused.contains("v0.1.0"), "{refused}");
+    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
+    assert_eq!(rig.backups(), vec!["req-byhand-5.dump".to_string()]);
+}
+
 #[test]
 fn too_little_disk_stops_before_anything_changes() {
     let rig = Rig::new(v1(), &[v2()]);

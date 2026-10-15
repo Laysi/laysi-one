@@ -270,7 +270,7 @@ fn check_tools(host: &PodmanHost) -> Result<(), String> {
 
 /// An ssh session without a login has no runtime directory set, and both
 /// rootless podman and `systemctl --user` need it.
-fn runtime_dir() {
+pub fn runtime_dir() {
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         let uid = unsafe { libc::getuid() };
         let dir = format!("/run/user/{uid}");

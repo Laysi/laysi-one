@@ -359,7 +359,8 @@ impl fmt::Display for UpdateStatus {
 /// `succeeded-updater-kept` it says why the new updater was not installed.
 /// After `rolled-back`, `rollback-reason` is present when the first restore
 /// of the database failed and the one retry succeeded, and says why the
-/// first one failed.
+/// first one failed; after a `rollback-failed` that `retry-rollback` brought
+/// back, it says so and why the restores failed before that, newest first.
 ///
 /// A reader skips keys it does not know, so a later updater can add one.
 #[derive(Debug, Clone, PartialEq, Eq)]
