@@ -3670,6 +3670,8 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
 1. `laysi-updater status`：日誌是 `rollback-failed`，`backup` 列出 `<請求編號>.dump`。
 2. 從 `state/updater.log` 與結果檔（`results/<請求編號>`）的 `rollback-reason` 找出還原為
    什麼失敗，先排除。磁碟滿就清出空間；備份本身讀不了時停下來，這個指令救不回來。
+   斷電之後 `updater.log` 的尾端可能是一段 NUL、最後幾行沒有落盤（`grep` 要加 `-a`），
+   這時原因只在結果檔。
 3. `laysi-updater retry-rollback`。日誌停在 `rollback-failed`、備份還在、主機記錄的版本
    與 stack 檔都是更新前那一版，三者都成立才把日誌改回 `restoring`，再
    `systemctl --user start laysi-updater-recover.service`，由收尾 unit 照一般的回退做完：
