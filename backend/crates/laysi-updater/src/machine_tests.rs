@@ -38,6 +38,8 @@ struct Spec {
     secrets: &'static str,
     adds_secret: Option<&'static str>,
     rustfs: &'static str,
+    /// The repository the rustfs image is pulled from.
+    rustfs_repo: &'static str,
     postgres: &'static str,
     updater: &'static [u8],
 }
@@ -52,6 +54,7 @@ impl Spec {
             secrets: "alpine-1",
             adds_secret: None,
             rustfs: "rustfs-1",
+            rustfs_repo: "docker.io/rustfs/rustfs",
             postgres: "postgres-1",
             updater: b"updater ok",
         }
@@ -72,13 +75,14 @@ impl Spec {
         format!(
             "service secrets docker.io/library/alpine@{}\n\
              service postgres docker.io/library/postgres@{}\n\
-             service rustfs docker.io/rustfs/rustfs@{}\n\
+             service rustfs {}@{}\n\
              service api ${{LAYSI_REGISTRY}}/laysi-one-api@${{LAYSI_API_DIGEST}}\n\
              service mcp ${{LAYSI_REGISTRY}}/laysi-one-api@${{LAYSI_API_DIGEST}}\n\
              service backup ${{LAYSI_REGISTRY}}/laysi-one-backup@${{LAYSI_BACKUP_DIGEST}}\n\
              service web ${{LAYSI_REGISTRY}}/laysi-one-web@${{LAYSI_WEB_DIGEST}}\n",
             digest(self.secrets),
             digest(self.postgres),
+            self.rustfs_repo,
             digest(self.rustfs)
         )
     }
@@ -131,7 +135,7 @@ impl Spec {
         world
             .registry
             .entry(digest(self.rustfs))
-            .or_insert_with(|| image("docker.io/rustfs/rustfs", "", Behaviour::Healthy));
+            .or_insert_with(|| image(self.rustfs_repo, "", Behaviour::Healthy));
     }
 }
 
@@ -567,6 +571,128 @@ fn a_failed_restore_keeps_the_dump_and_blocks_further_updates() {
     }
 }
 
+/// A rig left in `RollbackFailed` by two failed restores, the dump kept and
+/// the database gone, with v0.3.0 published for the update after.
+fn failed_restore(id: &str) -> (Rig, RequestId) {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken, Spec::good("v0.3.0", "m3")]);
+    rig.world.borrow_mut().fail_restore = true;
+    let id = rig.request(id, &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    assert!(rig.world.borrow().db.is_none());
+    (rig, id)
+}
+
+#[test]
+fn a_failed_rollback_with_its_dump_kept_is_retried_by_hand() {
+    let (rig, id) = failed_restore("req-byhand-1");
+    // Whatever made the restore fail is dealt with, then the command, and
+    // the recovery unit it starts.
+    rig.world.borrow_mut().fail_restore = false;
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    let journal = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(journal.phase, Phase::Restoring);
+    rig.machine(|m| m.boot()).unwrap();
+
+    rig.assert_settled(&id);
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack);
+    assert_eq!(result.running.unwrap().to_string(), "v0.1.0");
+    assert!(result.rollback_reason.unwrap().contains("人工指令重新還原"));
+    assert_eq!(rig.world.borrow().restores, 3);
+
+    // The next update goes ahead. v0.2.0 never stayed, so its migration is
+    // not in the database, which assert_settled would expect.
+    let next = rig.request("req-byhand-2", &rig.manifest("v0.3.0"));
+    rig.run().unwrap();
+    let result = rig.result(&next);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert_eq!(rig.installed(), "v0.3.0");
+    let w = rig.world.borrow();
+    let db = w.db.as_ref().unwrap();
+    assert_eq!(db.migrations.iter().collect::<Vec<_>>(), ["m1", "m3"]);
+    assert!(db.rows.contains(&"written-before-the-update".to_string()));
+    drop(w);
+    assert!(rig.backups().is_empty());
+    assert!(rig.machine(|m| m.load_journal()).unwrap().is_none());
+}
+
+#[test]
+fn a_rollback_retried_by_hand_that_fails_again_keeps_the_dump() {
+    let (rig, id) = failed_restore("req-byhand-3");
+    rig.machine(|m| m.retry_rollback()).unwrap();
+    rig.machine(|m| m.boot()).unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed, "{result:?}");
+    assert!(result.rollback_reason.unwrap().contains("人工指令重新還原"));
+    assert_eq!(rig.backups(), vec!["req-byhand-3.dump".to_string()]);
+    assert_eq!(rig.world.borrow().restores, 4, "the restore and its retry");
+    assert!(rig.running("postgres"));
+    for service in ["api", "mcp", "web", "backup", "rustfs"] {
+        assert!(!rig.running(service), "{service} started");
+    }
+    assert!(!rig.switching());
+    // And it can be tried again. This time the first restore fails and its
+    // retry succeeds, and the result still says the rollback was retried by
+    // hand.
+    rig.world.borrow_mut().fail_restore = false;
+    rig.world.borrow_mut().fail_next_restores = 1;
+    rig.machine(|m| m.retry_rollback()).unwrap();
+    rig.machine(|m| m.boot()).unwrap();
+    rig.assert_settled(&id);
+    let reason = rig.result(&id).rollback_reason.unwrap();
+    assert!(reason.starts_with("第一次"), "{reason}");
+    assert!(reason.contains("重試後成功"), "{reason}");
+    assert!(reason.contains("人工指令重新還原"), "{reason}");
+}
+
+#[test]
+fn retry_rollback_refuses_all_but_a_failed_rollback_with_its_dump() {
+    let phase = |rig: &Rig| rig.machine(|m| m.load_journal()).unwrap().map(|j| j.phase);
+
+    // No update at all.
+    let rig = Rig::new(v1(), &[]);
+    assert!(rig.machine(|m| m.retry_rollback()).is_err());
+    assert_eq!(phase(&rig), None);
+
+    // The restore succeeded and the old release did not start: no dump.
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = Rig::new(v1(), &[broken]);
+    rig.world
+        .borrow_mut()
+        .registry
+        .get_mut(&v1().own(Image::Web))
+        .unwrap()
+        .behaviour = Behaviour::ExitsAtStart;
+    let id = rig.request("req-byhand-4", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
+    assert!(refused.contains("沒有留下資料庫備份"), "{refused}");
+    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
+
+    // Another run holds the lock.
+    let (rig, _) = failed_restore("req-byhand-5");
+    let held = fsx::Lock::acquire(&rig.layout.lock(), false)
+        .unwrap()
+        .unwrap();
+    assert!(rig.machine(|m| m.retry_rollback()).is_err());
+    drop(held);
+    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
+
+    // The stack files name another release.
+    let env = EnvFile::default().for_release(&v2().release(), &rig.layout.root.to_string_lossy());
+    std::fs::write(&rig.layout.stack_files()[2], env.render()).unwrap();
+    let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
+    assert!(refused.contains("v0.1.0"), "{refused}");
+    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
+    assert_eq!(rig.backups(), vec!["req-byhand-5.dump".to_string()]);
+}
+
 #[test]
 fn too_little_disk_stops_before_anything_changes() {
     let rig = Rig::new(v1(), &[v2()]);
@@ -799,6 +925,73 @@ fn ten_updates_in_a_row_keep_two_releases_of_images() {
             .collect();
         assert!(releases.len() <= 2, "{releases:?}");
     }
+}
+
+/// Every image the compose files of `spec` name, Laysi's own and the
+/// third-party ones.
+fn images_of(spec: &Spec) -> std::collections::BTreeSet<String> {
+    Image::ALL
+        .into_iter()
+        .map(|image| spec.own(image))
+        .chain([spec.secrets, spec.postgres, spec.rustfs].map(digest))
+        .collect()
+}
+
+/// Installs `releases` one after another from `installed`, and after each
+/// success expects exactly the images of the running and the previous
+/// release on the host: the previous one's, third-party ones included, so a
+/// rollback can still start it.
+fn update_through(installed: Spec, releases: &[Spec]) -> Rig {
+    let rig = Rig::new(installed.clone(), releases);
+    let mut previous = installed;
+    for (n, spec) in releases.iter().enumerate() {
+        let id = rig.request(&format!("req-images-{n:04}"), &rig.manifest(spec.version));
+        rig.run().unwrap();
+        assert_eq!(
+            rig.result(&id).status,
+            UpdateStatus::Succeeded,
+            "{}",
+            spec.version
+        );
+        rig.assert_settled(&id);
+        let left = rig.world.borrow().local.clone();
+        let wanted: std::collections::BTreeSet<String> = images_of(&previous)
+            .union(&images_of(spec))
+            .cloned()
+            .collect();
+        assert_eq!(left, wanted, "images after {}", spec.version);
+        previous = spec.clone();
+    }
+    rig
+}
+
+#[test]
+fn third_party_images_older_than_the_previous_release_are_removed() {
+    let mut second = v2();
+    second.secrets = "alpine-2";
+    second.postgres = "postgres-2";
+    second.rustfs = "rustfs-2";
+    let mut third = Spec::good("v0.3.0", "m3");
+    third.secrets = "alpine-3";
+    third.postgres = "postgres-3";
+    third.rustfs = "rustfs-3";
+    let rig = update_through(v1(), &[second, third]);
+    let w = rig.world.borrow();
+    for gone in ["alpine-1", "postgres-1", "rustfs-1"] {
+        assert!(!w.local.contains(&digest(gone)), "{gone} was kept");
+    }
+}
+
+#[test]
+fn a_third_party_image_whose_repository_changed_is_removed_two_releases_later() {
+    let mut second = v2();
+    second.rustfs = "rustfs-2";
+    second.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    let mut third = Spec::good("v0.3.0", "m3");
+    third.rustfs = "rustfs-2";
+    third.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    let rig = update_through(v1(), &[second, third]);
+    assert!(!rig.world.borrow().local.contains(&digest("rustfs-1")));
 }
 
 #[test]
@@ -1212,6 +1405,97 @@ fn a_tagged_reference_to_an_own_image_is_still_checked_against_the_release() {
     };
     let verdict = judge(&[container], &[service], Some(&release), REGISTRY, None);
     assert!(verdict.unwrap_err().contains("v0.1.0"));
+}
+
+#[test]
+fn a_release_whose_compose_file_names_an_own_image_off_the_manifest_is_refused_before_anything_stops(
+) {
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    // An image in Laysi's web repository that the registry hands out and
+    // the signed manifest does not name.
+    let unsigned = digest("web-unsigned");
+    {
+        let mut w = rig.world.borrow_mut();
+        let image = w.registry[&next.own(Image::Web)].clone();
+        w.registry.insert(unsigned.clone(), image);
+        let compose = next.compose().replace(
+            "service web ${LAYSI_REGISTRY}/laysi-one-web@${LAYSI_WEB_DIGEST}",
+            &format!("service web ${{LAYSI_REGISTRY}}/laysi-one-web@{unsigned}"),
+        );
+        assert_ne!(compose, next.compose());
+        w.registry
+            .get_mut(&next.own(Image::Api))
+            .unwrap()
+            .files
+            .insert(
+                format!("{IMAGE_SHARE}/{}", COMPOSE_FILES[0]),
+                compose.into_bytes(),
+            );
+    }
+    let before = rig.world.borrow().containers.clone();
+    let id = rig.request("req-unsigned-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.request_id, id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert_eq!(
+        result.reason.as_deref(),
+        Some("新版 compose 檔的 web 不是版本清單上的 web 映像")
+    );
+    assert!(result.downtime_from.is_none());
+    assert_eq!(rig.installed(), "v0.1.0");
+    let w = rig.world.borrow();
+    assert_eq!(w.dumps, 0);
+    assert!(
+        !w.local.contains(&unsigned),
+        "the unsigned image was pulled"
+    );
+    assert!(w.marked.is_empty(), "stopped or started: {:?}", w.marked);
+    for (service, c) in &w.containers {
+        assert_eq!(c.created, before[service].created, "{service}");
+        assert_eq!(c.running, before[service].running, "{service}");
+    }
+    drop(w);
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_container_running_another_image_than_its_digest_names_is_rolled_back_before_web_and_mcp_start()
+{
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    let substitute = digest("api-substitute");
+    {
+        let mut w = rig.world.borrow_mut();
+        let image = w.registry[&next.own(Image::Api)].clone();
+        w.registry.insert(substitute.clone(), image);
+        w.runs_instead = Some((next.own(Image::Api), substitute));
+    }
+    let id = rig.request("req-substitute-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    let reason = result.reason.unwrap();
+    assert!(
+        reason.contains("api") && reason.contains("不符"),
+        "{reason}"
+    );
+    // web and mcp started once each: on the old release, after the restore.
+    let w = rig.world.borrow();
+    for entry in ["web", "mcp"] {
+        let starts = w
+            .marked
+            .iter()
+            .filter(|(what, _)| *what == format!("start {entry}"))
+            .count();
+        assert_eq!(starts, 1, "{entry}: {:?}", w.marked);
+    }
+    assert_eq!(w.restores, 1);
+    drop(w);
+    rig.assert_settled(&id);
 }
 
 #[test]

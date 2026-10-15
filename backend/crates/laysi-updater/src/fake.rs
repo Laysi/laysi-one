@@ -120,6 +120,9 @@ pub struct World {
     pub private_repo: Option<String>,
     /// An image whose containers ignore `podman stop`.
     pub unstoppable: Option<String>,
+    /// A container created from the first digest runs the second: the
+    /// image in local storage is not the one the reference names.
+    pub runs_instead: Option<(String, String)>,
     pub restores: usize,
     pub dumps: usize,
     pub pulls: usize,
@@ -153,6 +156,7 @@ impl World {
             local_at_restore: Vec::new(),
             private_repo: None,
             unstoppable: None,
+            runs_instead: None,
             restores: 0,
             dumps: 0,
             pulls: 0,
@@ -384,8 +388,13 @@ impl Host for FakeHost {
                 if ENTRIES.contains(&service.as_str()) {
                     w.note_marker(format!("start {service}"));
                 }
-                let spec = w.registry.get(&digest).cloned().ok_or("image not found")?;
-                w.local.insert(digest.clone());
+                let actual = match &w.runs_instead {
+                    Some((named, actual)) if *named == digest => actual.clone(),
+                    _ => digest.clone(),
+                };
+                let spec = w.registry.get(&actual).cloned().ok_or("image not found")?;
+                w.local.insert(digest);
+                let digest = actual;
                 let now = w.clock;
                 let fresh = recreate
                     || w.containers

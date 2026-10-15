@@ -341,6 +341,11 @@ function byService(): Map<string, Ctr> {
   return map;
 }
 
+/** Whether local storage holds an image pulled by this digest. */
+function hasImage(digest: string): boolean {
+  return JSON.parse(podman("images", "--format", "json")).some((i: any) => (i.RepoDigests ?? []).some((d: string) => d.endsWith(`@${digest}`)));
+}
+
 function psql(sql: string): string {
   return podman("exec", `${PROJECT}-postgres`, "psql", "-U", "laysi", "-d", "laysi", "-Atc", sql);
 }
@@ -598,6 +603,45 @@ async function main() {
   psql("create table if not exists e2e_rows (note text)");
   psql("insert into e2e_rows values ('written before any update')");
 
+  // --- never updated, and the current updater cannot run --------------------
+  // Until an update replaces the updater, the copy install leaves as the
+  // previous one is the only other updater the machine has.
+  const bin = join(ROOT, "bin");
+  const shipped = readFileSync(join(bin, "laysi-updater"));
+  check(sha256(shipped) === sha256(readFileSync(installer)), "install puts itself in place as the current updater");
+  check(sha256(readFileSync(join(bin, "laysi-updater.previous"))) === sha256(shipped), "and as the previous one");
+  const breakages: [string, Buffer][] = [
+    ["exits non-zero", Buffer.from("#!/bin/sh\nexit 1\n")],
+    ["is truncated", shipped.subarray(0, 4096)],
+  ];
+  for (const [what, broken] of breakages) {
+    writeFileSync(join(bin, "laysi-updater"), broken);
+    const before = unitState("laysi-updater-fallback.service", "InvocationID");
+    powerCutAndBoot();
+    await waitFor(`the fallback unit to run after the current updater that ${what}`, 900, () =>
+      unitState("laysi-updater-fallback.service", "InvocationID") !== before &&
+      !["activating", "active"].includes(unitState("laysi-updater-fallback.service")));
+    check(unitState("laysi-updater-boot.service", "Result") !== "success", `the current updater that ${what} failed at boot`);
+    check(unitState("laysi-updater-fallback.service", "Result") === "success", "the previous updater started the stack instead");
+    assertSettledOn("v1.0.0");
+  }
+  // A request it cannot read: the previous updater's ExecStopPost answers it
+  // and clears it, or the path unit would start the run again and again.
+  const freshFallback = unitState("laysi-updater-fallback.service", "InvocationID");
+  const fresh = await update("e2e-fresh-broken-run", v1.manifest, 300);
+  check(fresh.status === "failed-unchanged" && (fresh.reason ?? "").includes("開始更新前"), "a request the current updater cannot run is answered as not started");
+  const runOnce = unitState("laysi-updater.service", "InvocationID");
+  await sleep(5000);
+  check(unitState("laysi-updater.service", "InvocationID") === runOnce && requestsLeft().length === 0, "and the run is not started again");
+  check(unitState("laysi-updater.path") === "active", "the path unit is still watching");
+  await waitFor("the fallback unit to run after the failed recovery", 300, () =>
+    unitState("laysi-updater-fallback.service", "InvocationID") !== freshFallback &&
+    !["activating", "active"].includes(unitState("laysi-updater-fallback.service")));
+  check(installed() === "v1.0.0", "and nothing was installed");
+  writeFileSync(join(bin, "laysi-updater"), shipped);
+  systemctl("reset-failed", ...UNITS);
+  assertSettledOn("v1.0.0");
+
   // --- the api's and mcp's side of the directories ---------------------------
   const api = `${PROJECT}-api`;
   const mcp = `${PROJECT}-mcp`;
@@ -704,6 +748,51 @@ exec ${realPodman} "$@"
   const retryImages = JSON.parse(podman("images", "--format", "json")).filter((i: any) => (i.RepoDigests ?? []).some((d: string) => Object.values(vRetry.digests).some((x) => d.endsWith(x))));
   check(retryImages.length === 0, "the new release's images are gone");
 
+  // --- the restore fails twice: rollback-failed, then retry-rollback --------
+  // Every restore fails while the file is there, the way a full disk would
+  // until someone frees it.
+  const failRestores = join(workDir, "fail-restores");
+  const podmanFailingRestores = join(workDir, "podman-failing-restores");
+  writeFileSync(
+    podmanFailingRestores,
+    `#!/bin/sh
+case "$*" in
+*"pg_restore --create"*)
+  if [ -e ${failRestores} ]; then
+    cat > /dev/null
+    echo 'pg_restore: error: could not write to file: No space left on device' >&2
+    exit 1
+  fi ;;
+esac
+exec ${realPodman} "$@"
+`,
+  );
+  chmodSync(podmanFailingRestores, 0o755);
+  writeFileSync(failRestores, "");
+  writeFileSync(toolEnv, `${envBeforeRetry}LAYSI_PODMAN=${podmanFailingRestores}\n`);
+  const vStuck = buildRelease({ version: "v1.2.2", api: "exit" }, known);
+  r = await update("e2e-rollback-stuck", vStuck.manifest);
+  check(r.status === "rollback-failed", "a rollback whose restore fails twice ends in rollback-failed");
+  check(journalPhase() === "rollback-failed" && backups().length === 1, "the journal stays and the dump is kept");
+  powerCutAndBoot();
+  await settledRun();
+  const up = [...byService().values()].filter((c) => c.running).map((c) => c.service);
+  check(up.length === 1 && up[0] === "postgres", "a boot starts postgres alone");
+  check(sh(["podman", "exec", `${PROJECT}-postgres`, "psql", "-U", "laysi", "-d", "laysi", "-Atc", "select 1"], { ok: false }).code !== 0, "the database is gone");
+  // The disk is freed; the updater runs the podman it was installed with.
+  rmSync(failRestores);
+  writeFileSync(toolEnv, envBeforeRetry);
+  const retried = sh([join(ROOT, "bin/laysi-updater"), "retry-rollback"]);
+  log(retried.out.trim());
+  r = readResult("e2e-rollback-stuck")!;
+  check(r.status === "rolled-back" && r.running === "v1.0.0", "retry-rollback restores the dump and rolls back to the release before the update");
+  check(/人工指令重新還原/.test(r["rollback-reason"] ?? ""), "rollback-reason says the restore was retried by hand");
+  assertSettledOn("v1.0.0");
+  check(!migrations().includes(vStuck.migration), "the new release's migration is not in the restored database");
+  check(psql("select count(*) from e2e_rows") === "1", "the data written before step 4 is back");
+  check(backups().length === 0, "the dump is deleted once restored");
+  // The next update, a good release, follows right below.
+
   // --- a good release, with a new secret and a new updater ------------------
   const secretsBefore = podman("exec", api, "sh", "-c", "sha256sum /secrets/pg_password /secrets/setup_token /secrets/database_url");
   const updaterBefore = sha256(readFileSync(join(ROOT, "bin/laysi-updater")));
@@ -728,10 +817,13 @@ exec ${realPodman} "$@"
   );
 
   // --- a release that only changes rustfs -----------------------------------
+  // Squashed, so the pinned rustfs is not its parent image: podman does not
+  // remove an image that another one is built on, and the clean-up below has
+  // to be able to remove the pinned one.
   const rustfsDir = mkdtempSync(join(workDir, "rustfs-"));
   writeFileSync(join(rustfsDir, "Containerfile"), `FROM ${RUSTFS}\nLABEL e2e.rustfs=2\n`);
   podman("pull", "-q", RUSTFS);
-  podman("build", "-q", "--pull=never", "-t", `localhost:${REGISTRY_PORT}/rustfs/rustfs:e2e`, rustfsDir);
+  podman("build", "-q", "--pull=never", "--squash-all", "-t", `localhost:${REGISTRY_PORT}/rustfs/rustfs:e2e`, rustfsDir);
   const rustfsFile = join(rustfsDir, "digest");
   podman("push", "-q", "--tls-verify=false", "--digestfile", rustfsFile, `localhost:${REGISTRY_PORT}/rustfs/rustfs:e2e`);
   podman("rmi", `localhost:${REGISTRY_PORT}/rustfs/rustfs:e2e`);
@@ -742,6 +834,8 @@ exec ${realPodman} "$@"
   check(r.status === "succeeded", "a release that only changes rustfs is installed");
   downtime(r, "v1.4.0");
   assertSettledOn("v1.4.0");
+  const [pinnedRustfs, movedRustfs] = [RUSTFS, newRustfs].map((ref) => ref.split("@")[1]);
+  check(hasImage(pinnedRustfs) && hasImage(movedRustfs), "the previous release's rustfs is kept beside the new one");
 
   // --- a new updater that fails its self-check ------------------------------
   const updaterNow = sha256(readFileSync(join(ROOT, "bin/laysi-updater")));
@@ -751,6 +845,9 @@ exec ${realPodman} "$@"
   check(r.status === "succeeded-updater-kept" && (r.reason ?? "").includes("自我檢查"), "a new updater that fails its self-check is not installed, and the result says why");
   check(sha256(readFileSync(join(ROOT, "bin/laysi-updater"))) === updaterNow, "the running updater stays");
   assertSettledOn("v1.5.0");
+  // v1.3.0 ran the pinned rustfs from another repository; neither v1.4.0 nor
+  // v1.5.0 names it.
+  check(!hasImage(pinnedRustfs) && hasImage(movedRustfs), "a third-party image two releases old is removed, the current one kept");
 
   // --- the current updater fails at boot: the previous one starts the stack -
   const current = join(ROOT, "bin/laysi-updater");

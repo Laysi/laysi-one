@@ -95,8 +95,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
         fsx::ensure_dir(&dir, mode).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    fsx::copy_atomic(&me, &layout.current_updater(), 0o755, MAX_UPDATER_BYTES)
-        .map_err(|e| format!("installing the updater: {e}"))?;
+    put_updaters(&me, &layout)?;
     fsx::write_atomic(&layout.tool_env(), tools.as_bytes(), 0o600).map_err(|e| e.to_string())?;
 
     let mut env = EnvFile::default();
@@ -166,6 +165,20 @@ pub fn install(args: &[String]) -> Result<(), String> {
         )
     })?;
     println!("installed {} in {}", release.version, layout.root.display());
+    Ok(())
+}
+
+/// This updater as both the current and the previous one. Only an update
+/// that replaces the updater writes `.previous` otherwise, and until then a
+/// current updater that cannot run would leave the fallback unit nothing to
+/// start the stack with, and a request nothing to answer and clear it: the
+/// path unit then starts the run again until systemd's trigger limit stops
+/// it watching.
+fn put_updaters(me: &Path, layout: &Layout) -> Result<(), String> {
+    for to in [layout.current_updater(), layout.previous_updater()] {
+        fsx::copy_atomic(me, &to, 0o755, MAX_UPDATER_BYTES)
+            .map_err(|e| format!("installing the updater: {e}"))?;
+    }
     Ok(())
 }
 
@@ -270,7 +283,7 @@ fn check_tools(host: &PodmanHost) -> Result<(), String> {
 
 /// An ssh session without a login has no runtime directory set, and both
 /// rootless podman and `systemctl --user` need it.
-fn runtime_dir() {
+pub fn runtime_dir() {
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         let uid = unsafe { libc::getuid() };
         let dir = format!("/run/user/{uid}");
@@ -328,6 +341,35 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn install_leaves_a_previous_updater_beside_the_current_one() {
+        let root =
+            std::env::temp_dir().join(format!("laysi-updater-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = Layout::new(&root);
+        for (dir, mode) in layout.directories() {
+            fsx::ensure_dir(&dir, mode).unwrap();
+        }
+        let me = root.join("laysi-updater");
+        std::fs::write(&me, b"\x7fELF this updater").unwrap();
+
+        put_updaters(&me, &layout).unwrap();
+
+        let mut entries: Vec<String> = std::fs::read_dir(layout.bin_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["laysi-updater", "laysi-updater.previous"]);
+        for path in [layout.current_updater(), layout.previous_updater()] {
+            assert_eq!(std::fs::read(&path).unwrap(), b"\x7fELF this updater");
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{}", path.display());
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     /// The end-to-end test runs the version a machine is installed with.
     #[test]

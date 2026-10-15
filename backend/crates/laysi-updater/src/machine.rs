@@ -473,6 +473,67 @@ impl<'h, H: Host> Machine<'h, H> {
         started
     }
 
+    /// `retry-rollback`: a rollback that ended in `RollbackFailed` with its
+    /// dump kept goes back to restoring it, and the next run that holds the
+    /// lock, a boot or the recovery unit, takes it from there like any
+    /// rollback a run left behind: the restore and its one retry, then the
+    /// old release started and judged. Whoever runs this has dealt with what
+    /// made the restore fail, a full disk say; a restore that fails again
+    /// ends in `RollbackFailed` as before, with the dump kept.
+    ///
+    /// The rollback put the old stack files and installed release back
+    /// before it restored, and the restore runs the postgres those files
+    /// name; anything else is refused and left as it is.
+    pub fn retry_rollback(&mut self) -> Result<RequestId, String> {
+        let lock = Lock::acquire(&self.layout.lock(), false)
+            .map_err(|e| format!("opening the lock: {e}"))?;
+        let Some(_lock) = lock else {
+            return Err("另一次更新或開機收尾正在進行，結束後再執行".into());
+        };
+        let mut j = match self.load_journal()? {
+            None => return Err("沒有停在回退失敗的更新".into()),
+            Some(j) if j.phase != Phase::RollbackFailed => {
+                return Err(format!(
+                    "更新停在 {}，不是回退失敗；下一次開機會接著收尾",
+                    j.phase
+                ));
+            }
+            Some(j) => j,
+        };
+        let dump = self.backup_path(&j);
+        if !(j.restore_db && dump.is_file()) {
+            return Err(format!(
+                "這次回退沒有留下資料庫備份 {}：資料庫不需要還原，是舊版沒有啟動，原因見 {}",
+                dump.display(),
+                self.layout.log().display()
+            ));
+        }
+        let installed = self.load_installed()?;
+        let named = self
+            .env_of(&self.stack_files())
+            .get(envfile::RELEASE)
+            .map(str::to_string);
+        let from = j.from.version.to_string();
+        if installed.version != j.from.version || named.as_deref() != Some(from.as_str()) {
+            return Err(format!(
+                "主機記錄的版本或 stack 檔不是更新前的 {from}，這個指令救不回來"
+            ));
+        }
+        // Newest first, as `fail_rollback` writes it.
+        j.rollback_reason = Some(match j.rollback_reason.take() {
+            Some(earlier) => format!("以人工指令重新還原，先前：{earlier}"),
+            None => "以人工指令重新還原".into(),
+        });
+        j.restore_retry = None;
+        j.phase = Phase::Restoring;
+        self.log(format!(
+            "request {}: retrying the rollback by hand",
+            j.request
+        ));
+        self.save(&j)?;
+        Ok(j.request)
+    }
+
     /// A journal left in its final phase still owes its request a final
     /// result when the run that wrote it died before reporting; the request
     /// is then not taken for a new one.
@@ -747,6 +808,7 @@ impl<'h, H: Host> Machine<'h, H> {
                     if let Err(Abandoned { status, reason }) = self.prepare(&j) {
                         return self.abandon(j, status, reason);
                     }
+                    j.superseded_repos = self.superseded_repos();
                     j.phase = Phase::Prepared;
                     self.save(&j)?;
                 }
@@ -868,7 +930,7 @@ impl<'h, H: Host> Machine<'h, H> {
                     self.save(&j)?;
                 }
                 Phase::Finishing => {
-                    self.prune_images(&j, &[&j.from, &j.to], &[]);
+                    self.prune_images(&j, &[&j.from, &j.to], &j.superseded_repos);
                     self.remove_backup(&j)?;
                     self.empty_incoming();
                     let status = if j.updater_note.is_some() {
@@ -952,7 +1014,12 @@ impl<'h, H: Host> Machine<'h, H> {
                     match (self.restore(&j), retry) {
                         (Ok(()), retry) => {
                             if let Some(first) = retry {
-                                j.rollback_reason = Some(format!("第一次{first}，重試後成功"));
+                                let retried = format!("第一次{first}，重試後成功");
+                                // Only a rollback retried by hand has one.
+                                j.rollback_reason = Some(match j.rollback_reason.take() {
+                                    Some(earlier) => format!("{retried}；{earlier}"),
+                                    None => retried,
+                                });
                             }
                             j.phase = Phase::Restored;
                             self.save(&j)?;
@@ -1076,6 +1143,30 @@ impl<'h, H: Host> Machine<'h, H> {
     fn empty_incoming(&mut self) {
         if let Err(e) = fsx::empty_own_dir(&self.layout.incoming_dir()) {
             self.log(format!("could not empty incoming/: {e}"));
+        }
+    }
+
+    /// The repositories the stack files kept from the switch before this
+    /// one name, which step 6 is about to replace. None on a host that has
+    /// not switched since it was installed, or whose files cannot be read:
+    /// the clean-up then removes less, never more.
+    fn superseded_repos(&mut self) -> Vec<String> {
+        let files = self.stack_files().map(|file| Layout::previous_of(&file));
+        if !files.iter().all(|file| file.exists()) {
+            return Vec::new();
+        }
+        match self.host.compose_config(&files) {
+            Ok(services) => services
+                .iter()
+                .filter_map(|s| split_reference(&s.image).map(|(repo, _)| repo.to_string()))
+                .filter(|repo| !repo.contains(char::is_whitespace))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            Err(e) => {
+                self.log(format!("reading the previous stack files: {e}"));
+                Vec::new()
+            }
         }
     }
 

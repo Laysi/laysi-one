@@ -3495,7 +3495,7 @@ release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯�
 | 路徑 | 權限 | 內容 |
 |---|---|---|
 | `<root>/` | 0700 | |
-| `bin/laysi-updater`、`bin/laysi-updater.previous` | 0755 | 現行與前一版的更新程式 |
+| `bin/laysi-updater`、`bin/laysi-updater.previous` | 0755 | 現行與前一版的更新程式；還沒換過更新程式的機器上，兩份是 `install` 放上的同一個檔案 |
 | `stack/` | 0700 | 兩份 compose 檔與 `.env`（0600），旁邊各一份 `.previous` |
 | `state/installed` | 0600 | 已安裝的版本與三個 digest：取自驗過的清單，不從容器讀 |
 | `state/journal`、`state/lock`、`state/updater.log`、`state/updater.env` | 0600 | 日誌、鎖、紀錄、工具路徑 |
@@ -3577,7 +3577,9 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
    寫第一次失敗的原因；重試也失敗就是 `rollback-failed`，備份留著。回退不通過就停在舊版、
    不再重試。
 10. 成功：新版更新程式先在本機跑 `self-check`（讀得了這次的日誌、寫得出 unit），通過才
-    換上，前一版留在 `.previous`；接著刪掉現行與前一版以外的映像與資料庫備份。
+    換上，前一版留在 `.previous`；接著刪掉現行與前一版以外的映像與資料庫備份。第三方映像
+    換了來源（例如換一個 registry）時，兩版之前那個來源的映像也一起刪：第 3 步結束時先讀
+    `.previous` 那份 compose 檔（第 6 步會覆寫它），把用到的來源記進日誌。
 
 **換回舊映像不構成回退**：sqlx 遇到資料庫裡有執行檔不認得的 migration 會回
 `VersionMissing` 拒絕啟動，所以回退一定連同資料庫。**入口開放之後才判定失敗時，回退照樣
@@ -3690,7 +3692,7 @@ CI 端對端測試，從第 4 步停止服務量到最終結果，成功路徑 1
 | `rolling-back` | 重做回退 |
 | `restoring` | 重新還原資料庫；`restore-retry` 已寫下時是續做那一次重試，不會再開始第二次 |
 | `restored` | 起舊版並判斷 |
-| `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres |
+| `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres，直到有人執行 `retry-rollback`（見「回退失敗之後」） |
 
 **斷電會留下讀不了的容器**：斷電前一刻建立的容器，它那一層的 `link` 與 `lower` 檔已經
 建立卻是空的；`podman ps` 列得出它，任何 inspect 都失敗在 `getting graph driver info`，
@@ -3711,14 +3713,18 @@ CI 端對端測試，從第 4 步停止服務量到最終結果，成功路徑 1
 systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一起換：
 
 - `laysi-updater.path` 監看 `requests/request`，觸發 `laysi-updater.service`（oneshot）。
-  `ExecStopPost=` 在每一次結束時清空請求目錄，失敗也一樣——檔案還在，path unit 會在
-  service 結束時再觸發、一秒五次之後轉為 `failed` 而不再監看。執行期間寫入的旗標因此被丟棄
-  並回 `refused-busy`，不排隊也不合併；`StartLimitIntervalSec=0`。
+  `ExecStopPost=` 在每一次結束時清空請求目錄，失敗也一樣，所以執行期間寫入的旗標被丟棄
+  並回 `refused-busy`，不排隊也不合併；`StartLimitIntervalSec=0`。檔案留著的話，path unit
+  會在 service 結束時再觸發：#64 在虛擬機量到，執行檔起不來時一輪約 10 毫秒，兩秒內滿
+  200 次就撞上 systemd 預設的觸發上限，path unit 轉為 `failed`（`trigger-limit-hit`）不再
+  監看，要重開機才回來；一輪失敗得慢就碰不到上限，一直重跑。
   例外是執行本身失敗、而且沒有進行中的更新（沒有日誌）：沒有結果的旗標改回
   `failed-unchanged`（更新程式在開始更新前中斷）。現行更新程式根本起不來時，旗標從來沒有
   被讀過，回 busy 會讓畫面請人稍後再試一個每次都失敗的更新程式。執行成敗取 systemd 交給
   `ExecStopPost=` 的 `SERVICE_RESULT`。這時回答旗標的是前一版的 `discard-requests`，所以
-  前一版也帶著這條規則才生效。
+  前一版也帶著這條規則才生效。也因此 `install` 把自己同時放成現行與前一版：`.previous`
+  原本只由換掉更新程式的那次更新寫出，在那之前現行版起不來時，開機沒有程式接手，旗標也
+  沒有程式回答、清掉。
   它排在開機 unit 之後才開始監看，並設 `DefaultDependencies=no`：path unit 預設排在
   `paths.target` 之前，而開機 unit 是 service、排在 `basic.target`（也就在 `paths.target`）
   之後，兩者相加是循環，systemd 每次開機都刪掉 path unit 的啟動工作，重開過的機器就再也
@@ -3746,10 +3752,37 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
 預設相依（`DefaultDependencies=no`），這個 scope 也照做：帶著預設相依的 scope 會在關機時
 與開機 unit 同時停下，conmon 在 `ExecStop=` 依序停 stack、postgres 還沒停好之前就被殺掉。
 
+### 回退失敗之後
+
+停在 `rollback-failed` 而備份留著的機器只啟動 postgres，系統的資料庫已經不在：還原前先
+刪掉它，還原失敗時再刪掉還原了一半的那一份。api 沒有執行，畫面打不開，客戶自己救不回來。
+
+**由原廠救回**：客戶聯絡經銷商、經銷商轉原廠，原廠取得主機上 stack 使用者的 shell（本機
+主控台或 ssh，由客戶提供）之後執行，更新程式在 `~/.local/share/laysi-one/bin/`：
+
+1. `laysi-updater status`：日誌是 `rollback-failed`，`backup` 列出 `<請求編號>.dump`。
+2. 從 `state/updater.log` 與結果檔（`results/<請求編號>`）的 `rollback-reason` 找出還原為
+   什麼失敗，先排除。磁碟滿就清出空間；備份本身讀不了時停下來，這個指令救不回來。
+   斷電之後 `updater.log` 的尾端可能是一段 NUL、最後幾行沒有落盤（`grep` 要加 `-a`），
+   這時原因只在結果檔。
+3. `laysi-updater retry-rollback`。日誌停在 `rollback-failed`、備份還在、主機記錄的版本
+   與 stack 檔都是更新前那一版，三者都成立才把日誌改回 `restoring`，再
+   `systemctl --user start laysi-updater-recover.service`，由收尾 unit 照一般的回退做完：
+   還原與那一次重試、起舊版並判斷。工作在 unit 裡做，ssh 斷線不影響；指令等到收尾結束，
+   印出回到的版本。
+4. 成功時結果改成 `rolled-back`，`rollback-reason` 記下「以人工指令重新還原」與先前失敗的
+   原因，新的在前；畫面
+   回來之後再按一次更新，照常執行。仍然失敗就回到 `rollback-failed`、備份留著，排除原因後
+   可以再執行一次。
+
+**備份在還原成功的那一刻刪掉**，與一般回退相同：資料已經回到資料庫，之後舊版起不來也
+用不到它。沒有留下備份的 `rollback-failed`（還原成功、是舊版沒有啟動）不走這條路，指令
+會拒絕：那種機器每次開機照常啟動 stack，原因在 `state/updater.log`。
+
 ### 出貨與 compose
 
 `install` 是唯一的出貨步驟：以 stack 使用者執行，收一份簽章版本清單，先驗章並檢查主機，
-才建好目錄、放上更新程式、從那一版的 api 映像取 compose 檔並檢查、寫 `.env` 與 unit、確認
+才建好目錄、放上更新程式（現行與 `.previous` 同一份）、從那一版的 api 映像取 compose 檔並檢查、寫 `.env` 與 unit、確認
 lingering（沒有就 `loginctl enable-linger`，失敗請 root 執行一次），最後寫第一份
 `state/installed` 並啟動開機 unit——它先跑完 `secrets` 才啟動其餘服務。寫下
 `state/installed` 之前失敗可以直接重跑；寫下之後就算安裝完成，由開機 unit 負責啟動。
@@ -3780,7 +3813,9 @@ postgres 對 `secrets` 的依賴、釘住容器名稱、api 掛兩個共用目�
 **換 rustfs 或 postgres 的 digest 要先過 `scripts/third-party-image-check.ts`**（`ci.yml`
 的 `third-party-images`）：RustFS 的物件不在回退範圍內，所以新舊兩版要讀得了同一份資料，
 舊→新→舊；postgres 另外比對兩版的 ICU，不同時那次變更要帶一份執行 `REINDEX` 與
-`ALTER DATABASE … REFRESH COLLATION VERSION` 的 migration，否則不通過。
+`ALTER DATABASE … REFRESH COLLATION VERSION` 的 migration，否則不通過。那個 job 只在
+digest 變動的 PR 上真的執行，所以 ICU 的判斷（`icuVerdict`）另由
+`scripts/third-party-image-check-test.ts` 在每一次 push 與 PR 檢查。
 
 ### 資料庫還原之後的 RustFS
 
