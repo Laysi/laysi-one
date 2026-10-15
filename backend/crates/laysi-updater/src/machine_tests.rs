@@ -1286,6 +1286,97 @@ fn a_tagged_reference_to_an_own_image_is_still_checked_against_the_release() {
 }
 
 #[test]
+fn a_release_whose_compose_file_names_an_own_image_off_the_manifest_is_refused_before_anything_stops(
+) {
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    // An image in Laysi's web repository that the registry hands out and
+    // the signed manifest does not name.
+    let unsigned = digest("web-unsigned");
+    {
+        let mut w = rig.world.borrow_mut();
+        let image = w.registry[&next.own(Image::Web)].clone();
+        w.registry.insert(unsigned.clone(), image);
+        let compose = next.compose().replace(
+            "service web ${LAYSI_REGISTRY}/laysi-one-web@${LAYSI_WEB_DIGEST}",
+            &format!("service web ${{LAYSI_REGISTRY}}/laysi-one-web@{unsigned}"),
+        );
+        assert_ne!(compose, next.compose());
+        w.registry
+            .get_mut(&next.own(Image::Api))
+            .unwrap()
+            .files
+            .insert(
+                format!("{IMAGE_SHARE}/{}", COMPOSE_FILES[0]),
+                compose.into_bytes(),
+            );
+    }
+    let before = rig.world.borrow().containers.clone();
+    let id = rig.request("req-unsigned-001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.request_id, id);
+    assert_eq!(result.status, UpdateStatus::FailedUnchanged, "{result:?}");
+    assert_eq!(
+        result.reason.as_deref(),
+        Some("新版 compose 檔的 web 不是版本清單上的 web 映像")
+    );
+    assert!(result.downtime_from.is_none());
+    assert_eq!(rig.installed(), "v0.1.0");
+    let w = rig.world.borrow();
+    assert_eq!(w.dumps, 0);
+    assert!(
+        !w.local.contains(&unsigned),
+        "the unsigned image was pulled"
+    );
+    assert!(w.marked.is_empty(), "stopped or started: {:?}", w.marked);
+    for (service, c) in &w.containers {
+        assert_eq!(c.created, before[service].created, "{service}");
+        assert_eq!(c.running, before[service].running, "{service}");
+    }
+    drop(w);
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_container_running_another_image_than_its_digest_names_is_rolled_back_before_web_and_mcp_start()
+{
+    let next = v2();
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    let substitute = digest("api-substitute");
+    {
+        let mut w = rig.world.borrow_mut();
+        let image = w.registry[&next.own(Image::Api)].clone();
+        w.registry.insert(substitute.clone(), image);
+        w.runs_instead = Some((next.own(Image::Api), substitute));
+    }
+    let id = rig.request("req-substitute-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    let reason = result.reason.unwrap();
+    assert!(
+        reason.contains("api") && reason.contains("不符"),
+        "{reason}"
+    );
+    // web and mcp started once each: on the old release, after the restore.
+    let w = rig.world.borrow();
+    for entry in ["web", "mcp"] {
+        let starts = w
+            .marked
+            .iter()
+            .filter(|(what, _)| *what == format!("start {entry}"))
+            .count();
+        assert_eq!(starts, 1, "{entry}: {:?}", w.marked);
+    }
+    assert_eq!(w.restores, 1);
+    drop(w);
+    rig.assert_settled(&id);
+}
+
+#[test]
 fn a_restore_that_fails_while_recovering_starts_postgres_alone() {
     let mut broken = v2();
     broken.api = Behaviour::NeverHealthy;
