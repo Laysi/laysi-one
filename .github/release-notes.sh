@@ -24,7 +24,14 @@ tag=${1:?usage: release-notes.sh <tag>}
 version=${tag#v}
 repo=${GITHUB_REPOSITORY:-Laysi/laysi-one}
 download="https://github.com/$repo/releases/download/$tag/docker-compose.prod.yml"
-previous=$(git tag --list 'v*' --sort=-v:refname | grep -A1 -x "$tag" | tail -n1)
+previous=$(sh "$(dirname "$0")/previous-tag.sh" "$tag")
+
+# The demo runs the newest final release, never a release candidate, so a
+# candidate's page says what it is for in that line instead.
+case $tag in
+*-*) intro='本版是發布候選版，用於上線前驗證，正式環境請安裝正式版。' ;;
+*) intro='線上試用：<https://demo.laysi.one>（每天凌晨重建，資料為示範用）' ;;
+esac
 
 # Commit subjects, not merged pull requests: this repository commits to main.
 #
@@ -33,7 +40,7 @@ previous=$(git tag --list 'v*' --sort=-v:refname | grep -A1 -x "$tag" | tail -n1
 # this page runs it -- but its history arrived here in one merge, so without
 # this the first release after that merge lists every commit it ever had.
 range=$tag
-[ -n "$previous" ] && [ "$previous" != "$tag" ] && range="$previous..$tag"
+[ -n "$previous" ] && range="$previous..$tag"
 #
 # `ci:` and `chore:` are dropped by type. Nothing a customer runs changes when
 # a workflow does, and a changelog that lists them buries the lines that do.
@@ -47,9 +54,9 @@ if [ -n "${CHANGES_FILE:-}" ] && [ -s "${CHANGES_FILE:-}" ]; then
 fi
 
 cat <<EOF
-Laysi One $version。台灣中小企業的財務與人事系統。
+Laysi One ${version}。台灣中小企業的財務與人事系統。
 
-線上試用：<https://demo.laysi.one>（每天凌晨重建，資料為示範用）
+$intro
 
 ## 安裝
 

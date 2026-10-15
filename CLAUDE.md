@@ -1128,9 +1128,12 @@ grant，AI 看得到一個叫不動的工具；少一條 permission，deny-by-de
 ## 示範站
 
 `demo.laysi.one` 與 `one.laysi.io` 同一台主機、同一份映像、同一份
-`docker-compose.prod.yml`，只多一層 `docker-compose.demo.yml`。**推 `v*` 標籤就部署
-示範站**（`release.yml` 呼叫 `deploy.yml` 並帶 `target: demo`），正式站維持手動——
+`docker-compose.prod.yml`，只多一層 `docker-compose.demo.yml`。**推正式版的 `v*` 標籤就
+部署示範站**（`release.yml` 呼叫 `deploy.yml` 並帶 `target: demo`），正式站維持手動——
 客戶的安裝什麼時候升級由持有它的人決定，而示範站沒有持有人也沒有東西可失去。
+**發布候選版（`v0.2.0-rc.1`，帶 `-` 的標籤）照樣建置與簽章，但不推 `latest`、release 標成
+prerelease、不部署示範站**，三處由 `scripts/release-workflow-test.ts` 把關，理由在
+`docs/architecture.md`。
 
 **每晚整份重建**（`deploy/reset-demo.sh`，systemd timer 台北時間 04:00）。共用的評估
 安裝沒有第二條路可以維持可用：第一個過帳、簽核或改公司名稱的訪客就改變了第二個訪客
