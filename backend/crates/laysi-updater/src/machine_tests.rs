@@ -1293,7 +1293,8 @@ fn a_container_not_created_from_the_compose_file_does_not_pass() {
         has_healthcheck: true,
         health: Some("healthy".into()),
         image_name: image.into(),
-        image_digest: digest.into(),
+        image_id: "img".into(),
+        image_digests: vec![digest.into()],
         created: at,
     };
     let (old, new) = (digest("rustfs-1"), digest("rustfs-2"));
@@ -1310,6 +1311,13 @@ fn a_container_not_created_from_the_compose_file_does_not_pass() {
     // Created from the right reference, running something else.
     let other = container(&format!("docker.io/rustfs/rustfs@{new}"), &old);
     assert!(judge(&[other], services, None, REGISTRY, None).is_err());
+    // The image it runs was pulled first by another digest: local storage
+    // reports that one and knows the image by both.
+    let renamed = Container {
+        image_digests: vec![old.clone(), new.clone()],
+        ..container(&format!("docker.io/rustfs/rustfs@{new}"), &old)
+    };
+    assert_eq!(judge(&[renamed], services, None, REGISTRY, None), Ok(()));
     // A tag in the compose file never passes.
     let tagged = Service {
         name: "rustfs".into(),
@@ -1400,7 +1408,8 @@ fn a_tagged_reference_to_an_own_image_is_still_checked_against_the_release() {
         has_healthcheck: false,
         health: None,
         image_name: tagged,
-        image_digest: other,
+        image_id: "img".into(),
+        image_digests: vec![other],
         created: chrono::Utc::now(),
     };
     let verdict = judge(&[container], &[service], Some(&release), REGISTRY, None);
@@ -1495,6 +1504,60 @@ fn a_container_running_another_image_than_its_digest_names_is_rolled_back_before
     }
     assert_eq!(w.restores, 1);
     drop(w);
+    rig.assert_settled(&id);
+}
+
+/// A rig on v1 offering `next`, whose backup image is v1's pushed again
+/// under the digest the manifest of `next` names.
+fn backup_renamed(next: Spec) -> Rig {
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    rig.world
+        .borrow_mut()
+        .same_image
+        .insert(next.own(Image::Backup), v1().own(Image::Backup));
+    rig
+}
+
+#[test]
+fn an_unchanged_image_under_a_new_digest_passes_as_the_release_that_names_it() {
+    let rig = backup_renamed(v2());
+    let id = rig.request("req-renamed-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert_eq!(rig.installed(), "v0.2.0");
+    use crate::host::Host;
+    let backup = FakeHost {
+        world: rig.world.clone(),
+    }
+    .containers()
+    .unwrap()
+    .into_iter()
+    .find(|c| c.service == "backup")
+    .unwrap();
+    assert_eq!(
+        backup.image_digests,
+        [v1().own(Image::Backup), v2().own(Image::Backup)],
+        "local storage reports the digest the image was first pulled by"
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_rollback_keeps_the_old_image_the_new_release_named_by_another_digest() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = backup_renamed(broken);
+    let id = rig.request("req-renamed-2", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    assert!(
+        rig.world.borrow().local.contains(&v1().own(Image::Backup)),
+        "v1 runs it again"
+    );
     rig.assert_settled(&id);
 }
 

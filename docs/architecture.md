@@ -3565,8 +3565,10 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
    `--force-recreate` 其餘常駐服務，web 與 mcp 除外。一律帶 `--no-deps`：podman-compose
    把 `depends_on` 譯成 `--requires`，有它就刪不掉、換不掉被依賴的容器。
 8. 等候成功：每個服務的最新容器在執行、是切換之後建立的、建立時的 digest 等於 compose
-   檔指定的那個也正在執行它（多平台映像以 index digest 拉取時 podman 回報的就是 index
-   digest）、自家映像等於清單、有 healthcheck 的是 healthy；反覆重啟的容器立刻算失敗。
+   檔指定的那個、正在執行的映像在本機也以那個 digest 登記、自家映像等於清單、有
+   healthcheck 的是 healthy；反覆重啟的容器立刻算失敗。比對的是映像的每一個 digest：
+   podman 只回報映像第一次被拉取時的那一個（多平台映像是 index digest），一份沒有變動的
+   映像以新的 index digest 再發布，拉下來只是同一份映像多一個名字。
    逾時 20 分鐘，涵蓋 migration。通過之後才起 web 與 mcp，以同樣條件確認（逾時 3 分鐘）。
 9. 失敗：先放回前一版的檔案，確認 postgres 以外都停了，以**舊版的 postgres 映像**重建
    容器，`DROP DATABASE … WITH (FORCE)` 後 `pg_restore --create`（保留 ICU zh-TW 定序），

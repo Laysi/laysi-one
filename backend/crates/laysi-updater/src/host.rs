@@ -35,9 +35,14 @@ pub struct Container {
     pub health: Option<String>,
     /// The reference it was created from, e.g. `ghcr.io/laysi/laysi-one-api@sha256:…`.
     pub image_name: String,
-    /// The digest of the image it runs. For an image pulled by its index
-    /// digest this is the index digest.
-    pub image_digest: String,
+    /// The ID of the image it runs.
+    pub image_id: String,
+    /// Every digest local storage knows the image it runs by, the one podman
+    /// reports for the container first. That one is the digest the image
+    /// was first pulled by, the index digest for a multi-platform image: an
+    /// image pulled again under another digest, such as a rebuild that
+    /// changed nothing pushed under a new index, only gains a name.
+    pub image_digests: Vec<String>,
     pub created: DateTime<Utc>,
 }
 
@@ -60,6 +65,19 @@ pub struct LocalImage {
     pub names: Vec<String>,
     pub digest: String,
     pub size: u64,
+}
+
+impl LocalImage {
+    /// Its digest and the digest of each of its repo digests.
+    pub fn digests(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.digest.as_str())
+            .chain(
+                self.repo_digests
+                    .iter()
+                    .filter_map(|r| r.split_once('@').map(|(_, d)| d)),
+            )
+            .filter(|d| !d.is_empty())
+    }
 }
 
 pub trait Host {
