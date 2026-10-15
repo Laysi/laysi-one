@@ -135,7 +135,7 @@ source_note = "勞工保險條例；2026 年適用之投保薪資分級表"
 
 [payload]
 max_insured_salary = "45800"
-premium_rate = "0.11"      # 普通事故保險費率
+premium_rate = "0.115"     # 普通事故保險費率
 employer_share = "0.70"
 employee_share = "0.20"
 government_share = "0.10"
@@ -146,7 +146,7 @@ government_share = "0.10"
 | domain | payload 欄位 |
 |---|---|
 | `labor_insurance` | `max_insured_salary` `premium_rate` `employer_share` `employee_share` `government_share` |
-| `health_insurance` | `rate=0.0517` `employer_share=0.60` `employee_share=0.30` `avg_dependents=1.61` |
+| `health_insurance` | `rate=0.0517` `employer_share=0.60` `employee_share=0.30` `avg_dependents=1.56` |
 | `pension` | `employer_rate=0.06` |
 | `vat` | `rate=0.05` `period_months=2` |
 | `minimum_wage` | `monthly=29500` `hourly=196` |
@@ -159,13 +159,17 @@ government_share = "0.10"
 | `health_dependents` | `max_counted=3`（員工健保自付額計入的眷口數上限，整數）。依健保法第 18 條第 2 項，自 2013-01-01 起 |
 | `partial_month` | `labor_days_per_month=30` `pension_days_per_month=30`（到職與離職當月按日計時一個月算幾日，28～31 的整數）。依勞保條例施行細則第 28-1 條、勞退條例施行細則第 22 條，自 2005-07-01 起 |
 
-驗證基準（**必須寫成單元測試**，數值取自原型的 `ins` / `pay` 區塊）：
+驗證基準（**必須寫成單元測試**，數值取自勞保局與健保署 2026 年的保險費分攤表）：
 
-- 勞保級距 45,800、非工會身分 → 公司負擔 `45800 × 0.11 × 0.70 = 3527`（四捨五入）
-- 健保級距 53,000 → 公司負擔 `53000 × 0.0517 × 0.60 × 1.61 = 2647`
+- 勞保級距 45,800、非工會身分 → 公司負擔 `45800 × 0.115 × 0.70 = 3687`（四捨五入）
+- 健保級距 53,000 → 公司負擔 `53000 × 0.0517 × 0.60 × 1.56 = 2565`
 - 健保級距 53,000 → 員工自付 `53000 × 0.0517 × 0.30 = 822`（本人一口；每位在保眷屬再加一口，最多計三口，兩名眷屬為 `822 × 3 = 2466`）
-- 勞保級距 45,800 → 員工自付 `45800 × 0.11 × 0.20 = 1008`
+- 勞保級距 45,800 → 員工自付 `45800 × 0.115 × 0.20 = 1053`
 - 提繳工資 53,000 → 公司勞退 `53000 × 0.06 = 3180`
+
+原型的 `ins` / `pay` 區塊印的是 3527／2647／1008：勞保用的是 2023–2024 年的 11%，健保用的是
+平均眷口數 0.61。勞保普通事故費率自 2025-01-01 起為 11.5%（加上就業保險 1% 為 12.5%），
+健保平均眷口數自 2024-01-01 起為 0.56 人。原型的數字不要照著改回去。
 
 ```rust
 pub struct Ruleset { pub domain: String, pub version: String,
@@ -3246,6 +3250,30 @@ offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），�
   一次，包括刻意把那一版刪掉的那些。它帶著 `.sql` 尾綴，那是更新走 `include_str!` 那
   幾版留下的檔名，留著才不會對已經收過的安裝再送一次。
 
+**已發布的版本寫錯了，更正是一版生效日較晚的新版本**。改那一版的 TOML 只影響新安裝：
+既有安裝已經把它的 `file` 記在 `reg_update`，不會再收一次，收了也是 `DO NOTHING`。
+同一天再發一版也不行——`resolve()` 對相同 `effective_from` 的兩版沒有確定的勝負。
+所以兩件事一起做：改正原本那一版（新安裝從一開始就對），再發一版生效日較晚的更正版。
+2026.1 的勞保普通事故費率（11% → 11.5%）與健保平均眷口數（1.61 → 1.56）就是這樣
+更正的：`backend/regulation/2026-10/` 的 2026.2 版，自 2026-10-01 生效，payload 與
+改正後的 2026.1 相同，`the_october_correction_repeats_the_corrected_2026_figures`
+釘住這件事，所以新安裝到了 10 月金額不會跳動。
+
+**生效日是發布當下還沒結束的那一期首日**：2026.2 在 10 月中發布，10 月的薪資多半還沒算。
+收到更新之前就算過 10 月的安裝，那一期的薪資單會依新規則重算而標「不相符」——還沒過帳
+就作廢重算，已過帳的差額在下一期調整。生效日再往前，碰到的就是已經結束、多半已過帳的期間。
+
+**不改寫既有版本**：`list_payslips` 依期末日現查規則重算每一張薪資單，與存下的金額
+不同就標「不相符」。回溯改寫 2026.1，一到九月每一張薪資單都會標不相符，而已過帳的期間
+作廢不了，那個標記永遠消不掉。生效日之前的差額在下一期調整，與 `void_payroll_run`
+拒絕已過帳期間是同一個原則。
+
+**更正版的檔名也要等於 domain**，所以放在另一個目錄：發布端的鍵是
+`{effective_from}_{檔名}.sql`，`seed_regulations()` 的鍵是 `{effective_from}_{domain}.sql`，
+兩者不一致時新安裝刪掉的版本會在下一次更新回來。新目錄要加進 `laysi-regulation` 的
+`SOURCES`；`every_rule_file_is_listed_once_and_named_after_its_domain` 比對目錄與清單，
+漏了就紅。
+
 `manifest.json` 由 `scripts/regulation-manifest.ts` 從 `backend/regulation/**/*.toml`
 產出，`.github/workflows/regulation-feed.yml` 在那些檔案有變動時推到發布用的公開
 儲存庫。**只有 TOML 一份來源**：它是人編輯的地方，也是 `laysi-regulation` 測試與
@@ -3382,6 +3410,91 @@ BLAKE3，認得出是不是同一台機器，認不出那是誰。
 
 **`function-test.ts` 因此需要一組授權**：`LAYSI_ACTIVATION_KEY` 搭配 `LICENSE_SERVER_URL`。
 它本來就需要容器起著，而初始化在建帳號之前啟用，是產品行為而不是測試環境的例外。
+
+## 發布版本清單
+
+每一個 `v*` 標籤由 `release.yml` 簽一份 `release-manifest.txt`，與
+`docker-compose.prod.yml` 一起附在 GitHub release 上：版本號，加上 api、web、backup
+三份映像的 index digest。`mcp` 與 `api` 跑同一份映像。主機端的更新程式（#61）只裝它驗過
+的清單上列出的 digest，用的 compose 檔也取自那份驗過 digest 的 api 映像（放進映像是 #61 的
+範圍），所以釘住 api 的 digest 就同時釘住它。release 上另外附的 `docker-compose.prod.yml`
+不在簽章範圍內，那一份給手動安裝的人用，更新程式不讀它。ghcr.io 上的 tag 改得動，digest
+改不動，版本字串也說不出哪三份映像屬於同一版。
+
+**另一把金鑰，不是授權金鑰**。授權私鑰在授權伺服器上，同一把金鑰若也決定每一台機器跑
+哪一份映像，那台伺服器被攻破就等於在每一台售出的機器上取得程式執行能力。版本清單的私鑰
+是 GitHub secret `RELEASE_MANIFEST_SIGNING_KEY`，只進 `release.yml` 的兩個 job——建映像前
+比對公鑰的 `signing-key` 與簽章的 `manifest`，兩者都只有唯讀的 `GITHUB_TOKEN`，除了 checkout、
+釘住 commit 的 Bun 與 artifact 之外什麼都不跑——不進授權伺服器也不進任何映像。授權伺服器只負責轉送清單（#62），共用 crate 裡沒有任何簽章
+程式，所以它改不動也產生不出一份清單。已知並接受的風險：GitHub 同時握有推映像的權限與這把
+私鑰。
+
+### 格式：簽的是位元組，不是 JSON
+
+```text
+laysi-release-manifest 1
+version v0.1.13
+image api sha256:<64 個小寫十六進位字元>
+image web sha256:<…>
+image backup sha256:<…>
+signature <金鑰識別碼，16 個小寫十六進位字元> <Ed25519 簽章，128 個小寫十六進位字元>
+```
+
+前五行（各含換行）是本文，每一行 `signature` 都簽本文的原始位元組，任何語言的簽章端與
+Rust 驗證端不必約定正規化形式。純文字也讓授權伺服器只能整段轉送：放進 JSON 字串裡
+不會被重新序列化。授權檔簽的是 base64url 文字，而每一份清單本文都以含空格的標頭行開頭，
+所以兩種簽章就算同一把金鑰也無法互相冒充。
+
+驗證定義在 `laysi-license-token` 的 `release` 模組，產品、授權伺服器與更新程式共用：
+
+- 格式嚴格，不修補：每行以 `\n` 結尾（含最後一行）、不得有空行或 `\r`、三份映像依
+  api、web、backup 順序各一行、digest 只收小寫十六進位。被改寫過的位元組一律拒絕。
+- 上限 `MAX_MANIFEST_BYTES`（4096 位元組），讀檔或讀回應時就要先擋。
+- 金鑰識別碼是原始 32 位元組公鑰 SHA-256 的前 8 位元組，由公鑰推導而不是自訂字串，所以
+  不會有人把同一個名字發給兩把金鑰。截成 64 位元仍然可能碰撞，機率可以忽略但不是零：
+  `the_compiled_in_keys_parse_and_are_distinct` 擋下識別碼重複的 `TRUSTED_KEYS`，真的碰上
+  就換一把新金鑰。識別碼只用來挑出要比對的信任公鑰，驗章一律用完整公鑰；挑錯一把的結果是
+  簽章驗不過而拒絕，不會讓清單通過。
+- 認不得的識別碼略過；信任的識別碼，其簽章一定要有效；至少要有一個信任的簽章；同一個
+  識別碼出現兩次拒絕。換金鑰時新舊兩把一起簽，跳過中間版本的安裝也接得上。
+- 更新程式的決定：清單版本高於已安裝版本才安裝；相同不動；較低只記下原因，所以重放舊
+  清單沒有任何效果。已安裝的版本讀不出來是拒絕，不當成「比較舊」。版本是 `v` 加語意化
+  版本（`v1.0.0-rc.2` < `v1.0.0-rc.10` < `v1.0.0`），不收前導零與 `+` 建置資訊——兩者都
+  會讓兩個字串指同一版。
+
+**信任的公鑰是 `release::TRUSTED_KEYS`**，不放在 `ops/license.rs`：更新程式只依賴
+`laysi-license-token`，授權伺服器收清單時也要驗，三方要同一份清單。`ops/license.rs` 的
+測試確保它與 `PUBLIC_KEY_HEX` 不同。
+
+**這個 crate 不能帶進需要 C 編譯器的依賴**：更新程式是 musl 靜態執行檔，只用 `rust-lld`
+交叉編譯。所以驗章只多了 `ed25519-dalek`（金鑰識別碼的 `sha2` 本來就在它的依賴樹裡），
+沒有 `ring`、`blake3` 或任何帶 `cc` 的 crate；`ci.yml` 對兩個 musl target 檢查依賴樹。
+
+### `release.yml` 的順序
+
+1. `signing-key`：建映像之前，由 secret 推出公鑰，與 `TRUSTED_KEYS` 比對，不在清單裡就
+   讓發布失敗——不然 ghcr.io 上會留下沒有任何安裝接受的映像。比照 `license-deploy.yml`
+   比對 `PUBLIC_KEY_HEX` 的那一步。同一個 job 也擋下已經附過清單的版本。
+2. `images`：每份映像把這次推上去的 index digest 寫成 artifact（matrix job 的 output
+   互相覆蓋，不能用）。
+3. `manifest`：獨立的 job 簽章，執行器上除了 checkout、Bun 與 artifact 之外什麼都不跑；
+   `release` job 會把 `AI_API_KEY` 交給第三方 action，兩者不同機。
+4. `release`：先用 Rust 驗證端與這個標籤編進去的公鑰驗過清單、比對版本等於標籤，才附上。
+5. `demo`：在 `release` 之後。清單沒簽成或驗不過的標籤，任何安裝都裝不了，示範站也不跑。
+
+**一個版本只建一次**。映像建置不是逐位元組可重現的，整套重跑會在同一個標籤下推出新的
+digest；已經照第一份清單更新的安裝認為自己是最新版，跑的卻是別人不再跑的那一份。所以
+`signing-key` 看到 release 上已經有 `release-manifest.txt` 就讓整個發布失敗，`release` 也只
+在新舊清單本文相同時才以 `--clobber` 換掉它（同樣的 digest 簽出同樣的位元組，只重跑後段
+的 job 等於換成自己）。要改就打一個新標籤。兩處都問 `.github/published-manifest.sh`：只有
+release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯誤都讓發布失敗，不當成沒有。
+
+簽章腳本是 `scripts/release-manifest.ts`（`sign`／`public-key`／`keygen`）。私鑰只從環境
+變數讀，編碼與 `LICENSE_SIGNING_KEY` 相同（32 位元組 seed 的十六進位）；多把以空白分隔就
+各簽一行。`keygen` 在記憶體裡產生金鑰，私鑰經 stdin 直接交給 `gh secret set`，只印公鑰與
+識別碼；secret 已經存在就拒絕，因為 GitHub 讀不回 secret，覆寫等於丟掉每一台安裝信任的那
+把金鑰。`scripts/release-manifest-test.ts` 以隨機金鑰跑一次腳本再交給 Rust 驗證，並確認
+`testdata/release-manifest.txt` 與腳本的輸出逐位元組相同（Ed25519 簽章是確定性的）。
 
 ## 異地備份
 

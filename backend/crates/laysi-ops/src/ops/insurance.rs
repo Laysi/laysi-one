@@ -832,18 +832,18 @@ mod tests {
             Coverage::WHOLE,
         )
         .unwrap();
-        assert_eq!(p.labor.employer, n("3527"), "公司負擔勞保");
-        assert_eq!(p.labor.employee, n("1008"), "員工自付勞保");
+        assert_eq!(p.labor.employer, n("3687"), "公司負擔勞保");
+        assert_eq!(p.labor.employee, n("1053"), "員工自付勞保");
         assert_eq!(
             p.health.employer,
-            n("2647"),
-            "公司負擔健保（含平均眷口 1.61）"
+            n("2565"),
+            "公司負擔健保（含平均眷口 0.56）"
         );
         assert_eq!(p.health.employee, n("822"), "員工自付健保");
         assert_eq!(p.pension, n("3180"), "公司提繳勞退");
 
-        assert_eq!(p.employer_total(), n("9354"), "3527 + 2647 + 3180");
-        assert_eq!(p.employee_total(), n("1830"), "1008 + 822");
+        assert_eq!(p.employer_total(), n("9432"), "3687 + 2565 + 3180");
+        assert_eq!(p.employee_total(), n("1875"), "1053 + 822");
     }
 
     /// An owner is not an employee of their own company: they bear the whole
@@ -876,7 +876,7 @@ mod tests {
         assert_eq!(boss.health.employer, Money::ZERO, "健保沒有公司負擔那一份");
         assert_eq!(boss.health.employee, n("2740"), "健保全額自付");
         assert_eq!(boss.pension, Money::ZERO, "勞退不提繳");
-        assert_eq!(boss.employer_total(), n("3527"), "公司只剩勞保那一筆");
+        assert_eq!(boss.employer_total(), n("3687"), "公司只剩勞保那一筆");
         assert!(boss.owner_rs.is_some(), "要說得出依哪一版算的");
         assert!(staff.owner_rs.is_none());
     }
@@ -934,7 +934,7 @@ mod tests {
     fn a_different_ruleset_gives_the_same_employee_a_different_premium() {
         let base = laysi_regulation::resolve("labor_insurance", d(2026, 7, 26)).unwrap();
         let before = laysi_regulation::labor_insurance(base, n("45800"), MonthPart::WHOLE).unwrap();
-        assert_eq!(before.employer, n("3527"));
+        assert_eq!(before.employer, n("3687"));
 
         // Simulate 2027: rate raised to 12%, ceiling raised to 48,200.
         let mut next = base.clone();
@@ -953,7 +953,7 @@ mod tests {
             laysi_regulation::labor_insurance(base, n("45800"), MonthPart::WHOLE)
                 .unwrap()
                 .employer,
-            n("3527")
+            n("3687")
         );
 
         // Health insurance and pension behave the same way: change the payload,
@@ -963,9 +963,9 @@ mod tests {
         hnext.payload["rate"] = json!("0.055");
         let deps = laysi_regulation::resolve("health_dependents", d(2026, 7, 26)).unwrap();
         let h = laysi_regulation::health_insurance(&hnext, deps, n("53000"), 0).unwrap();
-        // 53,000 × 0.055 × 0.60 × 1.61 = 2,815.89 → 2,816
-        assert_eq!(h.employer, n("2816"));
-        assert_ne!(h.employer, n("2647"));
+        // 53,000 × 0.055 × 0.60 × 1.56 = 2,728.44 → 2,728
+        assert_eq!(h.employer, n("2728"));
+        assert_ne!(h.employer, n("2565"));
 
         let pbase = laysi_regulation::resolve("pension", d(2026, 7, 26)).unwrap();
         let mut pnext = pbase.clone();
@@ -980,6 +980,7 @@ mod tests {
     #[test]
     fn the_percent_label_is_derived_from_the_rate() {
         assert_eq!(percent(n("0.11")), "11");
+        assert_eq!(percent(n("0.115")), "11.5");
         assert_eq!(percent(n("0.0517")), "5.17");
         assert_eq!(percent(n("0.06")), "6");
         assert_eq!(percent(n("0.70")), "70");

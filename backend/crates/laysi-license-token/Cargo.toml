@@ -8,8 +8,16 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 publish = false
-description = "Laysi One 授權檔的簽章內容：產品與授權伺服器共用的唯一定義"
+description = "Laysi One 授權檔的簽章內容與發布版本清單：產品、授權伺服器與主機端更新程式共用的唯一定義"
 
+# The host-side updater depends on this crate and is cross-compiled to a static
+# musl binary with rust-lld alone, so nothing in this tree may need a C
+# compiler: no ring, no blake3, nothing with a `cc` build dependency, and not
+# ed25519-dalek's `asm` feature. CI checks the tree.
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+# Verifies release manifests. Already in both workspaces' trees.
+ed25519-dalek = "2"
+# Key ids. The same 0.10 line ed25519-dalek already brings in.
+sha2 = "0.10"

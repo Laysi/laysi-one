@@ -42,6 +42,12 @@ pub fn ops() -> Vec<Box<dyn Operation>> {
 /// wrong one here means no licence verifies anywhere, which is a release
 /// decision rather than a setting. Rotating it is a new release; the private
 /// half never leaves the licence server.
+///
+/// Release manifests verify against other keys,
+/// `laysi_license_token::release::TRUSTED_KEYS`, compiled in through the crate
+/// this build shares with the licence server and the host-side updater. A key
+/// whose private half sits on the licence server must not also choose which
+/// images an installation runs.
 const PUBLIC_KEY_HEX: &str = "4498e05a6c8c4b4019379e52bc8432b325497f7912b1f9044f576d0ddfb0e4dd";
 
 /// Where a check goes. A constant for the same reason the regulation feed's
@@ -677,6 +683,20 @@ mod tests {
     fn the_compiled_in_public_key_parses() {
         assert!(product_key().is_some(), "編進來的公鑰必須解得開");
         assert_eq!(PUBLIC_KEY_HEX.len(), 64);
+    }
+
+    /// Breaking into the licence server yields the licence key. If that key
+    /// also signed release manifests, it would choose what every installation
+    /// runs.
+    #[test]
+    fn release_manifests_do_not_verify_with_the_licence_key() {
+        use laysi_license_token::release::TRUSTED_KEYS;
+        assert!(
+            !TRUSTED_KEYS
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case(PUBLIC_KEY_HEX)),
+            "版本清單的公鑰不得與授權公鑰相同"
+        );
     }
 
     #[test]
