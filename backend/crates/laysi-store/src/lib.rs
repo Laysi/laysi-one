@@ -11485,9 +11485,9 @@ mod tests {
         );
     }
 
-    /// The two regulation tests below share one `reg_ruleset` and one
-    /// process-wide installed ruleset, so running them at the same time has one
-    /// counting rows the other is still writing.
+    /// The regulation tests below share one `reg_ruleset` or one process-wide
+    /// installed ruleset, so running them at the same time has one counting
+    /// rows the other is still writing.
     static REGULATION_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// A published amendment applies once and never again, so a version the
@@ -11617,7 +11617,7 @@ mod tests {
                 NaiveDate::from_ymd_opt(2026, 7, 25).unwrap()
             )
             .is_err(),
-            "刪掉唯一一版之後應該算不出來，而不是回退到出廠值"
+            "刪掉涵蓋該日的唯一一版之後應該算不出來，而不是回退到出廠值"
         );
 
         // Put the factory row back. `seed_regulations` does not write a
@@ -11723,6 +11723,111 @@ mod tests {
             seen.expect("拋棄式資料庫上的補種應成功"),
             domains(factory),
             "表裡已有一部分時，其餘的領域也要補齊"
+        );
+    }
+
+    /// An installation that applied 2026.1 before its labour insurance rate
+    /// and health insurance multiplier were corrected keeps those rows: an
+    /// update is applied once and never rewritten. The correction is a later
+    /// version under a name of its own, so the next refresh delivers it and
+    /// payroll changes from its effective date, while the periods before it
+    /// still recompute to what they were paid.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-store
+    /// a_correction_reaches_an_install_holding_the_first_version -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可建立資料庫的 PostgreSQL"]
+    async fn a_correction_reaches_an_install_holding_the_first_version() {
+        use chrono::NaiveDate;
+        use laysi_regulation::{resolve, MonthPart};
+
+        let _serial = REGULATION_TESTS.lock().await;
+        let factory = laysi_regulation::seed();
+        // The name the feed publishes a rule file under, and the seed claims.
+        let key =
+            |rs: &laysi_regulation::Ruleset| format!("{}_{}.sql", rs.effective_from, rs.domain);
+        let first = |domain: &str, field: &str, value: &str| {
+            let mut rs = factory
+                .iter()
+                .find(|r| r.domain == domain && r.version == "2026.1")
+                .expect("出廠版本應有 2026.1")
+                .clone();
+            rs.payload[field] = value.into();
+            rs
+        };
+        let shipped = [
+            first("labor_insurance", "premium_rate", "0.11"),
+            first("health_insurance", "avg_dependents", "1.61"),
+        ];
+
+        let install = EmptyInstall::new().await;
+        let outcome = async {
+            let store = install.store().await?;
+            store.migrate().await?;
+            // What the earlier image seeded, claimed under the feed's name.
+            for rs in &shipped {
+                store.apply_regulation_update(&key(rs), rs).await?;
+            }
+            store.seed_regulations().await?;
+            let upgraded = store.regulations().await?;
+            // What refresh_regulations does with each entry of the manifest.
+            let mut applied = Vec::new();
+            for rs in &factory {
+                if store.apply_regulation_update(&key(rs), rs).await? {
+                    applied.push(format!("{}/{}", rs.domain, rs.version));
+                }
+            }
+            Ok::<_, StoreError>((upgraded, applied, store.regulations().await?))
+        }
+        .await;
+        install.remove().await;
+        let (upgraded, mut applied, refreshed) = outcome.expect("拋棄式資料庫上的更新應成功");
+
+        // Premiums at the 45,800 labour and 53,000 health brackets, under the
+        // rows the install holds after the refresh.
+        laysi_regulation::install(refreshed);
+        let premiums = |y, m, d| {
+            let on = NaiveDate::from_ymd_opt(y, m, d).unwrap();
+            let labor = laysi_regulation::labor_insurance(
+                resolve("labor_insurance", on).unwrap(),
+                "45800".parse().unwrap(),
+                MonthPart::WHOLE,
+            )
+            .unwrap();
+            let health = laysi_regulation::health_insurance(
+                resolve("health_insurance", on).unwrap(),
+                resolve("health_dependents", on).unwrap(),
+                "53000".parse().unwrap(),
+                0,
+            )
+            .unwrap();
+            (labor.employee, labor.employer, health.employer)
+        };
+        let september = premiums(2026, 9, 30);
+        let october = premiums(2026, 10, 31);
+        laysi_regulation::install(factory);
+
+        assert!(
+            !upgraded.iter().any(|r| r.version == "2026.2"),
+            "升級映像不會改動已有版本的領域"
+        );
+        applied.sort();
+        assert_eq!(
+            applied,
+            ["health_insurance/2026.2", "labor_insurance/2026.2"],
+            "檢查法規更新只帶來兩份更正版"
+        );
+        let n = |v: &str| v.parse::<rust_decimal::Decimal>().unwrap();
+        assert_eq!(
+            september,
+            (n("1008"), n("3527"), n("2647")),
+            "生效日之前的期間維持原本的金額"
+        );
+        assert_eq!(
+            october,
+            (n("1053"), n("3687"), n("2565")),
+            "生效日起以更正後的費率與平均眷口數計算"
         );
     }
 

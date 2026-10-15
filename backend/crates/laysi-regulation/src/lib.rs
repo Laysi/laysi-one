@@ -38,8 +38,9 @@ use std::sync::{OnceLock, RwLock};
 pub type Money = Decimal;
 
 /// The factory set, embedded at compile time. It fills an empty `reg_ruleset`
-/// and is the answer before the server has installed anything. Register a new
-/// domain here; a newly published year is added as a version on the screen.
+/// and is the answer before the server has installed anything. Every file
+/// under `backend/regulation/` is listed here, because the feed publishes each
+/// one and the seed claims what it writes under the same name.
 const SOURCES: &[(&str, &str)] = &[
     (
         "2026/labor_insurance.toml",
@@ -84,6 +85,14 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "2026/leave_pay.toml",
         include_str!("../../../regulation/2026/leave_pay.toml"),
+    ),
+    (
+        "2026-10/labor_insurance.toml",
+        include_str!("../../../regulation/2026-10/labor_insurance.toml"),
+    ),
+    (
+        "2026-10/health_insurance.toml",
+        include_str!("../../../regulation/2026-10/health_insurance.toml"),
     ),
     (
         "2013/health_dependents.toml",
@@ -977,21 +986,79 @@ mod tests {
         assert_eq!(overtime_monthly_max_hours(rs).unwrap(), dec!(46));
     }
 
+    /// The bureau's 2026 premium table. The prototype screen shows 3,527 and
+    /// 1,008, which are the 11% rate of 2023 and 2024.
     #[test]
-    fn labor_insurance_matches_the_prototype() {
-        let rs = resolve("labor_insurance", d(2026, 7, 25)).unwrap();
-        let c = labor_insurance(rs, dec!(45800), MonthPart::WHOLE).unwrap();
-        assert_eq!(c.employer, dec!(3527), "公司負擔勞保");
-        assert_eq!(c.employee, dec!(1008), "員工自付勞保");
+    fn labor_insurance_matches_the_bureau_table() {
+        for as_of in [d(2026, 7, 25), d(2026, 10, 31)] {
+            let rs = resolve("labor_insurance", as_of).unwrap();
+            let c = labor_insurance(rs, dec!(45800), MonthPart::WHOLE).unwrap();
+            assert_eq!(c.employer, dec!(3687), "公司負擔勞保（{as_of}）");
+            assert_eq!(c.employee, dec!(1053), "員工自付勞保（{as_of}）");
+        }
     }
 
+    /// The insurer's 2026 premium table. The prototype screen shows 2,647,
+    /// which is an average of 0.61 dependants.
     #[test]
-    fn health_insurance_matches_the_prototype() {
-        let rs = resolve("health_insurance", d(2026, 7, 25)).unwrap();
-        let deps = resolve("health_dependents", d(2026, 7, 25)).unwrap();
-        let c = health_insurance(rs, deps, dec!(53000), 0).unwrap();
-        assert_eq!(c.employer, dec!(2647), "公司負擔健保（含平均眷口 1.61）");
-        assert_eq!(c.employee, dec!(822), "員工自付健保");
+    fn health_insurance_matches_the_insurer_table() {
+        for as_of in [d(2026, 7, 25), d(2026, 10, 31)] {
+            let rs = resolve("health_insurance", as_of).unwrap();
+            let deps = resolve("health_dependents", as_of).unwrap();
+            let c = health_insurance(rs, deps, dec!(53000), 0).unwrap();
+            assert_eq!(c.employer, dec!(2565), "公司負擔健保（{as_of}）");
+            assert_eq!(c.employee, dec!(822), "員工自付健保（{as_of}）");
+        }
+    }
+
+    /// The feed keys an update by effective date and file name, the factory
+    /// seed by effective date and domain. A file named otherwise is seeded
+    /// under one name and published under another, so a version deleted on a
+    /// fresh install comes back with the next refresh; a file left out of
+    /// `SOURCES` reaches a fresh install only through the feed.
+    #[test]
+    fn every_rule_file_is_listed_once_and_named_after_its_domain() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../regulation");
+        let mut on_disk = Vec::new();
+        for dir in std::fs::read_dir(&root).unwrap() {
+            let dir = dir.unwrap();
+            for file in std::fs::read_dir(dir.path()).unwrap() {
+                let name = file.unwrap().file_name().into_string().unwrap();
+                if name.ends_with(".toml") {
+                    on_disk.push(format!("{}/{name}", dir.file_name().to_string_lossy()));
+                }
+            }
+        }
+        on_disk.sort();
+        let mut listed: Vec<String> = SOURCES.iter().map(|(f, _)| f.to_string()).collect();
+        listed.sort();
+        assert_eq!(
+            listed, on_disk,
+            "SOURCES 應恰好列出 backend/regulation 的每一個規則檔"
+        );
+
+        for (file, text) in SOURCES {
+            let raw: RawRuleset = toml::from_str(text).unwrap();
+            assert_eq!(
+                file.rsplit('/').next().unwrap(),
+                format!("{}.toml", raw.domain),
+                "{file} 的檔名應等於 domain"
+            );
+        }
+    }
+
+    /// The October versions only carry the 2026.1 figures to installations
+    /// that applied 2026.1 before it was corrected. A fresh install holds both,
+    /// and its payroll must not move on the first of October.
+    #[test]
+    fn the_october_correction_repeats_the_corrected_2026_figures() {
+        for domain in ["labor_insurance", "health_insurance"] {
+            let first = resolve(domain, d(2026, 9, 30)).unwrap();
+            let correction = resolve(domain, d(2026, 10, 1)).unwrap();
+            assert_eq!(first.version, "2026.1");
+            assert_eq!(correction.version, "2026.2");
+            assert_eq!(correction.payload, first.payload, "{domain}");
+        }
     }
 
     #[test]
@@ -1068,8 +1135,12 @@ mod tests {
         };
         let labor = resolve("labor_insurance", on).unwrap();
         let c = labor_insurance(labor, dec!(45800), part("labor_days_per_month")).unwrap();
-        assert_eq!(c.employee, dec!(504), "1,007.6 × 15/30 = 503.8");
-        assert_eq!(c.employer, dec!(1763), "3,526.6 × 15/30 = 1,763.3");
+        assert_eq!(c.employee, dec!(527), "1,053.4 × 15/30 = 526.7");
+        assert_eq!(
+            c.employer,
+            dec!(1843),
+            "3,686.9 × 15/30 = 1,843.45，先取整會是 1,844"
+        );
         let pension_rs = resolve("pension", on).unwrap();
         assert_eq!(
             pension(pension_rs, dec!(53000), part("pension_days_per_month")).unwrap(),
@@ -1247,7 +1318,7 @@ mod tests {
                 one.employee * Decimal::from(heads),
                 "眷口 {covered} 應計 {heads} 口"
             );
-            assert_eq!(c.employer, dec!(2647), "公司負擔仍依平均眷口數");
+            assert_eq!(c.employer, dec!(2565), "公司負擔仍依平均眷口數");
             assert_eq!(c.government, one.government * Decimal::from(heads));
         }
     }
@@ -1363,12 +1434,12 @@ mod tests {
 
         // Figures computed under the old rules do not move because a new rule
         // appeared.
-        assert_eq!(before.employer, dec!(3527));
+        assert_eq!(before.employer, dec!(3687));
         assert_eq!(
             labor_insurance(base, dec!(45800), MonthPart::WHOLE)
                 .unwrap()
                 .employer,
-            dec!(3527)
+            dec!(3687)
         );
         // New rule: 45800 x 0.12 x 0.70 = 3847.2, rounded to 3847.
         assert_eq!(after.employer, dec!(3847));
