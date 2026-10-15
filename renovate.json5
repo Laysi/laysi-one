@@ -70,11 +70,12 @@
       enabled: false,
     },
     {
-      description: "Pin and bump GitHub Actions together as one group",
+      description: "Pin and bump GitHub Actions together as one group. An action ref is a single version, not a range: under the global rangeStrategy pin, a ref like v2 resolves only when a v2.0.0 tag exists, and the action is skipped otherwise (oven-sh/setup-bun has none)",
       matchManagers: ["github-actions"],
       matchDepTypes: ["action"],
       groupName: "github actions",
       pinDigests: true,
+      rangeStrategy: "replace",
     },
     {
       description: "dtolnay/rust-toolchain is read by the custom manager below as the Rust version, not as an action: its ref is a branch named after the toolchain, not a release tag",
