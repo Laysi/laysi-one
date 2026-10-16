@@ -9,16 +9,18 @@
 //! The design vocabulary is the product's: lines and rules rather than filled
 //! blocks, figures in a tabular face. Screen text is Traditional Chinese.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use chrono::{NaiveDate, Utc};
+use laysi_license_token::release::{ReleaseVersion, MAX_MANIFEST_BYTES};
 use serde::Deserialize;
 use sqlx::Row;
 use std::collections::HashMap;
 
 use crate::db::{self, Actor};
+use crate::release;
 use crate::statement;
 use crate::token;
 use crate::{auth, Shared};
@@ -110,6 +112,13 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
             } else {
                 ""
             };
+            // Releasing a version is Laysi's decision, gated with the partner
+            // list: partners sell licences, not releases.
+            let releases = if a.is_vendor {
+                r#"<a href="/releases">版本</a>"#
+            } else {
+                ""
+            };
             let members = if a.is_admin {
                 r#"<a href="/members">成員</a>"#
             } else {
@@ -121,7 +130,7 @@ fn page(title: &str, actor: Option<&Actor>, body: &str) -> Html<String> {
                 a.name.clone()
             };
             format!(
-                r#"<nav><a href="/licenses">授權</a>{billing}{partners}{members}</nav>
+                r#"<nav><a href="/licenses">授權</a>{billing}{partners}{releases}{members}</nav>
                    <span class="tag">{}（{}）· {}</span>
                    <a href="/password">變更密碼</a>
                    <form method="post" action="/logout"><button class="plain">登出</button></form>"#,
@@ -382,13 +391,18 @@ pub async fn licenses(
                     r.denials
                 ));
             }
+            let versions = if a.is_vendor {
+                version_cells(&r.version, r.release_version.as_deref())
+            } else {
+                String::new()
+            };
             format!(
                 r#"<tr><td><a href="/licenses/{no}">{no}</a></td>
                 <td>{licensee}<br><span class="fp">{tax}</span></td>
                 <td class="wide">{partner}</td>
                 <td><div class="cell"><span class="tag {tone}">{label}</span>{flag}</div></td>
                 <td class="num">{expires}</td>
-                <td class="wide">{bound}</td></tr>"#,
+                <td class="wide">{bound}</td>{versions}</tr>"#,
                 no = esc(&r.license_no),
                 licensee = esc(&r.licensee),
                 tax = esc(&r.licensee_tax_id),
@@ -398,12 +412,17 @@ pub async fn licenses(
         })
         .collect();
 
+    let version_heads = if a.is_vendor {
+        r#"<th class="wide">已安裝版本</th><th class="wide">已放行版本</th>"#
+    } else {
+        ""
+    };
     let table = if rows.is_empty() {
         r#"<p class="empty">請用上方表單開立第一組授權。</p>"#.to_string()
     } else {
         format!(
             r#"<table><thead><tr><th>授權編號</th><th>被授權單位</th><th class="wide">經銷商</th>
-            <th>狀態</th><th>到期日</th><th class="wide">安裝</th></tr></thead>
+            <th>狀態</th><th>到期日</th><th class="wide">安裝</th>{version_heads}</tr></thead>
             <tbody>{body}</tbody></table>"#
         )
     };
@@ -519,6 +538,7 @@ pub async fn detail(
     State(s): State<Shared>,
     headers: HeaderMap,
     Path(no): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let a = signed_in!(s, headers);
     let found = match db::license(&s.pool, &a, &no).await {
@@ -591,13 +611,19 @@ pub async fn detail(
         )
     };
 
+    // The vendor reads the installed version in the version block, beside
+    // the one released; everyone else reads it here.
+    let reported = if a.is_vendor {
+        String::new()
+    } else {
+        format!(" · 版本 {}", esc(&r.version))
+    };
     let bound_block = match &r.fingerprint {
         Some(fp) => format!(
-            r#"<tr><td>綁定主機</td><td class="fp">{}<br>綁定於 {} · 最後回報 {} · 版本 {}</td></tr>"#,
+            r#"<tr><td>綁定主機</td><td class="fp">{}<br>綁定於 {} · 最後回報 {}{reported}</td></tr>"#,
             esc(fp),
             instant(r.bound_at),
             instant(r.last_seen_at),
-            esc(&r.version)
         ),
         None => r#"<tr><td>綁定主機</td><td>尚未啟用；客戶第一次輸入金鑰時綁定，更換主機後請在本頁解除綁定。</td></tr>"#.to_string(),
     };
@@ -624,6 +650,14 @@ pub async fn detail(
             ),
         )
     };
+    let version_block = if a.is_vendor {
+        match db::manifests(&s.pool).await {
+            Ok(manifests) => release_block(&s, &r, &path, &manifests),
+            Err(error) => return fail(error),
+        }
+    } else {
+        String::new()
+    };
     let toggle = if r.status == "suspended" || r.status == "revoked" {
         r#"<button name="status" value="active" class="plain">恢復使用</button>"#
     } else {
@@ -635,6 +669,7 @@ pub async fn detail(
         Some(&a),
         &format!(
             r#"<h1>{no_esc}</h1><p class="lede">{licensee}</p>
+            {refusal}
             <table><tbody>
               <tr><td style="width:120px">狀態</td><td><span class="tag {tone}">{label}</span></td></tr>
               <tr><td>統一編號</td><td class="num">{tax}</td></tr>
@@ -648,6 +683,7 @@ pub async fn detail(
               {unbind}{rekey}
               <form method="post" action="/licenses/{path}/status" style="margin:0">{toggle}</form>
             </div>
+            {version_block}
 
             <h2>續約</h2>
             <form class="card" method="post" action="/licenses/{path}/renew">
@@ -673,6 +709,7 @@ pub async fn detail(
             note = esc(&r.note),
             years = years_select(),
             renew_from = date(r.expires_on.max(today)),
+            refusal = note_card(&q),
         ),
     )
     .into_response()
@@ -837,6 +874,336 @@ pub async fn set_status(
         Err(error) => fail(error.into()),
     }
 }
+// Releases (vendor only)
+
+/// The largest request the manifest upload accepts: the file's own limit plus
+/// room for the multipart framing around it.
+pub const UPLOAD_BODY_LIMIT: usize = MAX_MANIFEST_BYTES + 12 * 1024;
+
+/// The installed and released versions as two cells of the licence list. The
+/// released one is drawn as a tag in the accent once the installation reports
+/// it or anything later, so a rollout reads down the column.
+fn version_cells(installed: &str, released: Option<&str>) -> String {
+    let installed_cell = if installed.trim().is_empty() {
+        "—".to_string()
+    } else {
+        esc(installed)
+    };
+    let released_cell = match released {
+        None => "—".to_string(),
+        Some(version) => release_tag(installed, version),
+    };
+    format!(
+        r#"<td class="num wide">{installed_cell}</td><td class="num wide">{released_cell}</td>"#
+    )
+}
+
+/// A released version as a tag, in the accent once the installation reports
+/// it or anything later.
+fn release_tag(installed: &str, released: &str) -> String {
+    let tone = if reached(installed, released) {
+        "tag on"
+    } else {
+        "tag"
+    };
+    format!(r#"<span class="{tone}">{}</span>"#, esc(released))
+}
+
+/// Whether the installation already runs `released` or something later.
+fn reached(installed: &str, released: &str) -> bool {
+    match (
+        ReleaseVersion::parse(installed.trim()),
+        ReleaseVersion::parse(released),
+    ) {
+        (Ok(installed), Ok(released)) => installed >= released,
+        _ => false,
+    }
+}
+
+/// The version block of a licence's page: installed beside released, and the
+/// controls that set and clear the release.
+///
+/// The picker offers only what the release form would accept -- a manifest
+/// that still verifies, and not older than what the machine last reported --
+/// so no option on it is refused after it is chosen.
+fn release_block(
+    s: &Shared,
+    r: &db::LicenseRow,
+    path: &str,
+    manifests: &[db::ManifestRow],
+) -> String {
+    let released = r.release_version.as_deref();
+    let released_cell = match released {
+        None => r#"<span class="tag">未放行</span>"#.to_string(),
+        Some(version) => {
+            let still_trusted = manifests
+                .iter()
+                .find(|m| m.version == version)
+                .is_some_and(|m| release::trusted(&m.manifest, &s.release_keys).is_some());
+            if still_trusted {
+                release_tag(&r.version, version)
+            } else {
+                format!(
+                    r#"<span class="tag off">{} · 簽章不受信任</span>"#,
+                    esc(version)
+                )
+            }
+        }
+    };
+    let installed = if r.version.trim().is_empty() {
+        "—".to_string()
+    } else {
+        esc(&r.version)
+    };
+    let options: String = manifests
+        .iter()
+        .filter_map(|m| {
+            let verified = release::trusted(&m.manifest, &s.release_keys)?;
+            if release::downgrade(&r.license_no, &r.version, verified.version()).is_some() {
+                return None;
+            }
+            let on = if released == Some(m.version.as_str()) {
+                " selected"
+            } else {
+                ""
+            };
+            Some(format!(
+                r#"<option value="{v}"{on}>{v}</option>"#,
+                v = esc(&m.version)
+            ))
+        })
+        .collect();
+    let set = if options.is_empty() {
+        r#"<a href="/releases">上傳版本清單</a>"#.to_string()
+    } else {
+        format!(
+            r#"<form method="post" action="/licenses/{path}/release" class="inline">
+              <select name="version">{options}</select><button>放行</button></form>"#
+        )
+    };
+    let clear = if released.is_some() {
+        format!(
+            r#"<form method="post" action="/licenses/{path}/release" class="inline">
+              <input type="hidden" name="version" value=""><button class="plain">取消放行</button></form>"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<h2>版本</h2>
+        <table><tbody>
+          <tr><td style="width:120px">已安裝版本</td><td class="num">{installed}</td></tr>
+          <tr><td>已放行版本</td><td class="num">{released_cell}</td></tr>
+        </tbody></table>
+        <div class="actions">{set}{clear}</div>"#
+    )
+}
+
+#[derive(Deserialize)]
+pub struct ReleaseForm {
+    /// Empty clears the release.
+    #[serde(default)]
+    version: String,
+}
+
+/// Offer one stored release to one licence, or clear it. The release is a
+/// value on that licence's row, so no other installation's answer moves.
+pub async fn set_release(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(no): Path<String>,
+    Form(form): Form<ReleaseForm>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    if !a.is_vendor {
+        return Redirect::to("/licenses").into_response();
+    }
+    let back = format!("/licenses/{}", urlencode(&no));
+    let r = match db::license(&s.pool, &a, &no).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Redirect::to("/licenses").into_response(),
+        Err(error) => return fail(error),
+    };
+    let wanted = form.version.trim();
+    let version = if wanted.is_empty() {
+        None
+    } else {
+        let stored = match db::manifest(&s.pool, wanted).await {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                return refuse(
+                    &back,
+                    &format!("查無 {wanted} 的版本清單，請先在「版本」頁上傳。"),
+                )
+            }
+            Err(error) => return fail(error),
+        };
+        let Some(manifest) = release::trusted(&stored, &s.release_keys) else {
+            return refuse(
+                &back,
+                &format!("{wanted} 的版本清單沒有本伺服器信任的簽章，請放行較新的版本。"),
+            );
+        };
+        if let Some(message) = release::downgrade(&no, &r.version, manifest.version()) {
+            return refuse(&back, &message);
+        }
+        Some(wanted)
+    };
+    match db::set_release(&s.pool, &no, version).await {
+        Ok(_) => {
+            tracing::info!(
+                actor = %a.email,
+                license = %no,
+                release = version.unwrap_or("none"),
+                "licence release set"
+            );
+            Redirect::to(&back).into_response()
+        }
+        Err(error) => fail(error),
+    }
+}
+
+pub async fn releases(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let a = signed_in!(s, headers);
+    if !a.is_vendor {
+        return Redirect::to("/licenses").into_response();
+    }
+    let rows = match db::manifests(&s.pool).await {
+        Ok(rows) => rows,
+        Err(error) => return fail(error),
+    };
+    let body: String = rows
+        .iter()
+        .map(|m| {
+            let verified = release::trusted(&m.manifest, &s.release_keys);
+            // The first twelve hex digits of each image: enough to match a
+            // digest on the registry by eye.
+            let images = verified.as_ref().map_or("—".to_string(), |v| {
+                v.digests()
+                    .map(|(image, digest)| {
+                        let full = digest.to_string();
+                        let hex = full.strip_prefix("sha256:").unwrap_or(&full);
+                        format!("{image} {}", hex.get(..12).unwrap_or(hex))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            });
+            let (tone, label) = if verified.is_some() {
+                ("on", "有效")
+            } else {
+                ("off", "不受信任")
+            };
+            format!(
+                r#"<tr><td class="num">{version}</td>
+                <td class="fp wide">{images}</td>
+                <td class="num r">{licenses}</td>
+                <td class="num">{at}<br><span class="fp">{by}</span></td>
+                <td><span class="tag {tone}">{label}</span></td></tr>"#,
+                version = esc(&m.version),
+                licenses = m.licenses,
+                at = instant(Some(m.uploaded_at)),
+                by = esc(&m.uploaded_by),
+            )
+        })
+        .collect();
+    let table = if rows.is_empty() {
+        r#"<p class="empty">請用上方表單上傳第一份版本清單。</p>"#.to_string()
+    } else {
+        format!(
+            r#"<table><thead><tr><th>版本</th><th class="wide">映像</th><th class="r">放行授權</th>
+            <th>上傳</th><th>簽章</th></tr></thead><tbody>{body}</tbody></table>"#
+        )
+    };
+    let done = q.get("done").map_or(String::new(), |message| {
+        format!(r#"<div class="key">{}</div>"#, esc(message))
+    });
+    page(
+        "版本",
+        Some(&a),
+        &format!(
+            r#"<h1>版本</h1>
+            <p class="lede">在授權詳情放行，客戶的系統管理員決定何時安裝。</p>
+            {done}{note}
+            <form class="card" method="post" action="/releases" enctype="multipart/form-data">
+              <div class="grid">
+                <label>版本清單<input type="file" name="manifest" accept=".txt,text/plain" required></label>
+              </div>
+              <div class="actions"><button>上傳</button></div>
+            </form>
+            {table}"#,
+            note = note_card(&q),
+        ),
+    )
+    .into_response()
+}
+
+/// Read the `manifest` file out of the upload, stopping at the manifest limit
+/// rather than buffering whatever was sent.
+async fn manifest_upload(mut form: Multipart) -> Result<Vec<u8>, String> {
+    let unreadable = |error: axum::extract::multipart::MultipartError| {
+        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            release::too_large()
+        } else {
+            "無法讀取上傳的檔案，請重新選擇 release-manifest.txt 上傳。".to_string()
+        }
+    };
+    while let Some(mut field) = form.next_field().await.map_err(unreadable)? {
+        if field.name() != Some("manifest") {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = field.chunk().await.map_err(unreadable)? {
+            if bytes.len() + chunk.len() > MAX_MANIFEST_BYTES {
+                return Err(release::too_large());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok(bytes);
+    }
+    Err("請選擇 release-manifest.txt 再上傳。".to_string())
+}
+
+pub async fn upload_manifest(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    form: Multipart,
+) -> Response {
+    let a = signed_in!(s, headers);
+    if !a.is_vendor {
+        return Redirect::to("/licenses").into_response();
+    }
+    let accepted = match manifest_upload(form).await {
+        Ok(bytes) => release::accept(&bytes, &s.release_keys),
+        Err(message) => Err(message),
+    };
+    let accepted = match accepted {
+        Ok(accepted) => accepted,
+        Err(message) => return refuse("/releases", &message),
+    };
+    let version = accepted.version.to_string();
+    match db::store_manifest(&s.pool, &version, &accepted.text, a.user_id).await {
+        Ok(release::Stored::Conflict) => refuse(
+            "/releases",
+            &format!("{version} 已上傳過內容不同的版本清單，請確認檔案取自 {version} 的 GitHub release。"),
+        ),
+        Ok(stored) => {
+            if stored == release::Stored::New {
+                tracing::info!(actor = %a.email, release = %version, "release manifest uploaded");
+            }
+            Redirect::to(&format!(
+                "/releases?done={}",
+                urlencode(&format!("已上傳 {version}。"))
+            ))
+            .into_response()
+        }
+        Err(error) => fail(error),
+    }
+}
+
 // Billing
 
 /// A figure with thousands separators. The statement exists to be read as
@@ -2092,6 +2459,27 @@ mod tests {
             }
         }
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn the_list_shows_installed_and_released_side_by_side() {
+        // Nothing reported, nothing released.
+        assert_eq!(
+            version_cells("", None),
+            r#"<td class="num wide">—</td><td class="num wide">—</td>"#
+        );
+        // Released and not yet installed: a plain tag.
+        assert_eq!(
+            version_cells("v0.1.12", Some("v0.1.13")),
+            r#"<td class="num wide">v0.1.12</td><td class="num wide"><span class="tag">v0.1.13</span></td>"#
+        );
+        // Installed, or overtaken: the tag in the accent.
+        for installed in ["v0.1.13", "v0.1.14"] {
+            assert!(version_cells(installed, Some("v0.1.13")).contains(r#"class="tag on""#));
+        }
+        // A report that is not a release version never counts as reached.
+        assert!(!version_cells("dev", Some("v0.1.13")).contains("tag on"));
+        assert!(version_cells("<b>", None).contains("&lt;b&gt;"));
     }
 
     #[test]

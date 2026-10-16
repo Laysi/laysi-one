@@ -98,6 +98,18 @@ pub struct FakeContainer {
 #[derive(Debug)]
 pub struct World {
     pub clock: DateTime<Utc>,
+    /// Seconds on the clock that never steps. `clock` moves with it except
+    /// where `clock_step` makes it jump.
+    pub monotonic: u64,
+    /// The wall clock jumps forward by this much at the next sleep, the way
+    /// a machine without a battery-backed clock is set by its first time
+    /// server.
+    pub clock_step: Option<Duration>,
+    /// Seconds a container with a passing healthcheck reports `starting`
+    /// after it starts, on `monotonic`.
+    pub warmup_secs: u64,
+    /// When each service's container last started, on `monotonic`.
+    started: BTreeMap<String, u64>,
     pub calls: usize,
     pub crash_at: Option<usize>,
     /// Cut the power at the first call with this label, e.g. a journal phase.
@@ -123,6 +135,11 @@ pub struct World {
     /// A container created from the first digest runs the second: the
     /// image in local storage is not the one the reference names.
     pub runs_instead: Option<(String, String)>,
+    /// Digests of an image another digest named first, the way a rebuild
+    /// that changed nothing comes back under a new index digest. Pulled while
+    /// that image is local, one becomes another name of it, and containers
+    /// created from it report the first digest.
+    pub same_image: BTreeMap<String, String>,
     pub restores: usize,
     pub dumps: usize,
     pub pulls: usize,
@@ -139,6 +156,10 @@ impl World {
     pub fn new() -> World {
         World {
             clock: Utc.with_ymd_and_hms(2026, 10, 12, 9, 0, 0).unwrap(),
+            monotonic: 0,
+            clock_step: None,
+            warmup_secs: 0,
+            started: BTreeMap::new(),
             calls: 0,
             crash_at: None,
             crash_on: None,
@@ -157,6 +178,7 @@ impl World {
             private_repo: None,
             unstoppable: None,
             runs_instead: None,
+            same_image: BTreeMap::new(),
             restores: 0,
             dumps: 0,
             pulls: 0,
@@ -179,13 +201,36 @@ impl World {
             c.running = false;
         }
         self.clock += Duration::seconds(60);
+        self.monotonic += 60;
         self.crash_at = None;
     }
 
     /// Only the updater died: containers keep running, time moves on.
     pub fn restart_updater(&mut self) {
         self.clock += Duration::seconds(60);
+        self.monotonic += 60;
         self.crash_at = None;
+    }
+
+    /// The digest local storage reports for the image a pulled digest
+    /// names: the first digest it was pulled by.
+    fn first_name(&self, digest: &str) -> String {
+        match self.same_image.get(digest) {
+            Some(first) if self.local.contains(first) => first.clone(),
+            _ => digest.to_string(),
+        }
+    }
+
+    /// Every pulled digest of the image `first` names, `first` itself first.
+    fn names_of(&self, first: &str) -> Vec<String> {
+        std::iter::once(first.to_string())
+            .chain(
+                self.local
+                    .iter()
+                    .filter(|d| d.as_str() != first && self.first_name(d) == first)
+                    .cloned(),
+            )
+            .collect()
     }
 
     pub fn spec_of(&self, service: &str) -> Option<&ImageSpec> {
@@ -201,7 +246,18 @@ impl World {
         let Some(spec) = self.registry.get(&c.digest) else {
             return false;
         };
-        c.running && matches!(spec.behaviour, Behaviour::Healthy | Behaviour::Plain)
+        c.running
+            && match spec.behaviour {
+                Behaviour::Healthy => !self.warming(service),
+                Behaviour::Plain => true,
+                _ => false,
+            }
+    }
+
+    fn warming(&self, service: &str) -> bool {
+        self.started
+            .get(service)
+            .is_some_and(|&at| self.monotonic < at + self.warmup_secs)
     }
 }
 
@@ -214,6 +270,7 @@ impl FakeHost {
         let mut w = self.world.borrow_mut();
         w.calls += 1;
         w.clock += Duration::seconds(1);
+        w.monotonic += 1;
         if w.crash_at == Some(w.calls) {
             panic!("power cut at call {} ({what})", w.calls);
         }
@@ -301,8 +358,17 @@ impl Host for FakeHost {
         self.world.borrow().clock
     }
 
+    fn monotonic(&mut self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.world.borrow().monotonic)
+    }
+
     fn sleep(&mut self, seconds: u64) {
-        self.world.borrow_mut().clock += Duration::seconds(seconds as i64);
+        let mut w = self.world.borrow_mut();
+        w.clock += Duration::seconds(seconds as i64);
+        w.monotonic += seconds;
+        if let Some(step) = w.clock_step.take() {
+            w.clock += step;
+        }
     }
 
     fn checkpoint(&mut self, label: &str) {
@@ -416,6 +482,8 @@ impl Host for FakeHost {
                     spec.behaviour,
                     Behaviour::Healthy | Behaviour::Plain | Behaviour::NeverHealthy
                 );
+                let now = w.monotonic;
+                w.started.insert(service.clone(), now);
                 let c = w.containers.get_mut(service).unwrap();
                 c.running = running;
                 c.exit_code = (!running).then_some(match spec.behaviour {
@@ -448,6 +516,7 @@ impl Host for FakeHost {
                 let behaviour = spec.map(|s| s.behaviour).unwrap_or(Behaviour::Plain);
                 let has_healthcheck =
                     matches!(behaviour, Behaviour::Healthy | Behaviour::NeverHealthy);
+                let first = w.first_name(&c.digest);
                 Container {
                     id: format!("id-{service}"),
                     name: format!("laysi-one-{service}"),
@@ -464,13 +533,18 @@ impl Host for FakeHost {
                     has_healthcheck,
                     health: has_healthcheck.then(|| {
                         if c.running && behaviour == Behaviour::Healthy {
-                            "healthy".to_string()
+                            if w.warming(service) {
+                                "starting".to_string()
+                            } else {
+                                "healthy".to_string()
+                            }
                         } else {
                             "unhealthy".to_string()
                         }
                     }),
                     image_name: c.reference.clone(),
-                    image_digest: c.digest.clone(),
+                    image_id: format!("id-{first}"),
+                    image_digests: w.names_of(&first),
                     created: c.created,
                 }
             })
@@ -616,14 +690,18 @@ impl Host for FakeHost {
         let w = self.world.borrow();
         Ok(w.local
             .iter()
+            .filter(|digest| w.first_name(digest) == **digest)
             .map(|digest| {
                 let spec = w.registry.get(digest);
+                let pulled_by: Vec<String> = w
+                    .names_of(digest)
+                    .iter()
+                    .filter_map(|name| w.registry.get(name).map(|s| format!("{}@{name}", s.repo)))
+                    .collect();
                 LocalImage {
                     id: format!("id-{digest}"),
-                    repo_digests: spec
-                        .map(|s| vec![format!("{}@{digest}", s.repo)])
-                        .unwrap_or_default(),
-                    names: Vec::new(),
+                    repo_digests: pulled_by.clone(),
+                    names: pulled_by,
                     digest: digest.clone(),
                     size: spec.map(|s| s.size).unwrap_or(0),
                 }
@@ -631,14 +709,38 @@ impl Host for FakeHost {
             .collect())
     }
 
-    fn remove_image(&mut self, id: &str) -> HostResult<()> {
+    /// As podman: an ID with more than one name is refused, and an image in
+    /// use stays. Given by name, every name goes at once, the only way the
+    /// updater removes by name.
+    fn remove_image(&mut self, image: &LocalImage) -> HostResult<()> {
         self.tick("rmi");
-        let digest = id.trim_start_matches("id-").to_string();
+        let first = image.id.trim_start_matches("id-").to_string();
         let mut w = self.world.borrow_mut();
-        if w.containers.values().any(|c| c.digest == digest) {
+        let names = w.names_of(&first);
+        let targets = image.removal_targets();
+        if targets == [image.id.as_str()] {
+            if names.len() > 1 {
+                return Err(format!(
+                    "Error: unable to delete image {:?} by ID with more than one tag: please force removal",
+                    image.id
+                ));
+            }
+        } else {
+            let given: Vec<&str> = targets
+                .iter()
+                .filter_map(|t| t.split_once('@').map(|(_, d)| d))
+                .collect();
+            assert!(
+                names.iter().all(|n| given.contains(&n.as_str())),
+                "rmi {targets:?} leaves some of {names:?}"
+            );
+        }
+        if w.containers.values().any(|c| names.contains(&c.digest)) {
             return Err("image is in use by a container".into());
         }
-        w.local.remove(&digest);
+        for name in names {
+            w.local.remove(&name);
+        }
         Ok(())
     }
 

@@ -74,6 +74,7 @@ gh workflow run license-deploy.yml -f version=license-v0.1.0
 ```bash
 bun scripts/dev.ts               # 開發用：podman 資料庫 + cargo watch（stop／reset）
 cargo test                       # 不需要資料庫
+LICENSE_TEST_DATABASE_URL=postgres://… cargo test   # 另跑放行的端對端測試，資料庫要是拋棄式的
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 docker compose up -d --build
@@ -233,3 +234,21 @@ docker compose exec app laysi-one-license public-key              # 編進產品
 `amazonses.com`，對不齊 SPF，**所以 DMARC 靠 DKIM 對齊過關**：識別建在網域本身而不是
 子網域，`d=` 才會剛好是 `laysi.one`，嚴格對齊才成立。改成子網域識別或關掉 DKIM，
 信會被收件方直接退回。
+
+### 8. 版本由原廠逐台放行
+
+原廠人員在「版本」頁（`/releases`）上傳 GitHub release 附的 `release-manifest.txt`，
+在授權詳情把某一版放行給那一張授權；兩者都與「經銷商」頁同一道門（`is_vendor`）。
+清單存在 `release_manifest`，一個版本一列、**逐位元組原樣保存**，上傳當下驗章，CRLF 一律
+拒絕不修補；同一版本位元組不同就拒絕，不覆蓋。放行是 `license.release_version` 一個欄位，
+NULL＝不放行，所以分批放行就是逐列設定，不需要另一張表。
+
+`check` 只在成功的回應帶 `release_manifest`，值是存下來的原文，送出前用 `TRUSTED_KEYS`
+再驗一次；沒有放行時那個欄位**不出現**，回應與之前相同。這台伺服器只轉送，產生不出清單
+——私鑰是 CI 的 secret，共用 crate 裡也沒有簽章程式。放行只是提供，不排程也不強制更新。
+比機器上次回報還舊的版本拒絕放行。細節在產品的 `docs/architecture.md`〈授權伺服器逐台放行〉。
+
+`LICENSE_TEST_DATABASE_URL` 有值時，`release::database` 的測試對著那個資料庫跑完上傳、
+放行與檢查。CI 的 `license-server` job 起一個 postgres 服務並設好它；`CI` 有值而它沒設時
+測試直接失敗，不略過：略過在 CI 上會記成通過。**不用 `TEST_DATABASE_URL`**：那個名字指的
+是產品的測試資料庫，而這支測試會把本伺服器的 schema 套進它拿到的任何資料庫。

@@ -14,6 +14,7 @@ open http://localhost:8090
 - `POST /v1/license/check` — 安裝端唯一會呼叫的端點。第一次呼叫即為啟用並綁定主機，
   之後每一次都是續期。
 - 經銷商後台 — 開立、續約、解除綁定、暫停、月結對帳。代理商看得到自己簽的經銷商。
+  原廠另有「版本」頁：上傳簽章的版本清單，在授權詳情逐台放行。
 
 ## 三個不變量
 
@@ -29,6 +30,7 @@ bun scripts/dev.ts                           # podman 起一個 5433 的資料�
 bun scripts/dev.ts stop                      # 停資料庫，資料留著
 bun scripts/dev.ts reset                     # 清空資料庫，下次啟動重建
 cargo test                                   # 不需要資料庫
+LICENSE_TEST_DATABASE_URL=postgres://… cargo test   # 加跑放行的端對端測試（拋棄式資料庫）
 ```
 
 第一次啟動會產生 `.dev/license_signing_key`（開發專用，與 `secrets/` 的正式金鑰無關），
