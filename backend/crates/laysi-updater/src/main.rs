@@ -4,6 +4,7 @@
 //! laysi-updater install --manifest <file> [--registry <registry>]
 //! laysi-updater run                 # a request arrived (laysi-updater.service)
 //! laysi-updater boot                # recover, then start the stack (boot unit)
+//! laysi-updater boot --fallback     # the same as the previous updater (fallback unit)
 //! laysi-updater discard-requests    # after every run (ExecStopPost)
 //! laysi-updater stop-stack          # at shutdown (ExecStop of the boot unit)
 //! laysi-updater self-check          # run on a new updater before it replaces this one
@@ -41,6 +42,9 @@ fn dispatch(args: &[String]) -> Result<(), String> {
     let command = args.first().map(String::as_str).unwrap_or("");
     match command {
         "run" => with_machine(|m| m.run_request()),
+        "boot" if args.get(1).is_some_and(|a| a == "--fallback") => {
+            with_machine(|m| m.fallback_boot())
+        }
         "boot" => with_machine(|m| m.boot()),
         "discard-requests" => with_machine(|m| m.discard_requests(run_failed())),
         "clear-requests-inside" => clear_requests_inside(args.get(1)),

@@ -18,12 +18,14 @@
 //! machine's fingerprint, and the licence server refuses a second machine.
 //! Which machine it is comes from [`laysi_store::license::fingerprint`].
 
+use crate::ops::update::{self, UpdateDirs};
 use crate::{parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
 use chrono::{DateTime, NaiveDate, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
+use laysi_license_token::release;
 use laysi_store::{LicenseState, Store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,7 +34,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Operations provided by this module.
 pub fn ops() -> Vec<Box<dyn Operation>> {
-    vec![Box::new(GetLicense), Box::new(ActivateLicense)]
+    ops_in(&UpdateDirs::container())
+}
+
+/// The same operations, looking for the updater in `dirs`. Both answer with
+/// whether a version can be installed, which depends on the directories.
+pub fn ops_in(dirs: &UpdateDirs) -> Vec<Box<dyn Operation>> {
+    vec![
+        Box::new(GetLicense { dirs: dirs.clone() }),
+        Box::new(ActivateLicense { dirs: dirs.clone() }),
+    ]
 }
 
 /// The licence server's public key, as 64 hex characters.
@@ -350,11 +361,17 @@ struct CheckRequest<'a> {
 struct CheckResponse {
     token: String,
     nonce: String,
+    /// The signed release manifest the licence server released to this
+    /// installation, verbatim, when it released one. Read as a loose value so
+    /// a field of some other shape counts as absent instead of failing a
+    /// check that otherwise renewed the licence.
+    #[serde(default)]
+    release_manifest: Option<Value>,
 }
 
 /// What this build calls itself, reported with every check so a partner can
 /// see which version a site is on without asking.
-fn build_version() -> &'static str {
+pub(crate) fn build_version() -> &'static str {
     match option_env!("LAYSI_BUILD") {
         Some(build) if !build.is_empty() => build,
         _ => concat!("v", env!("CARGO_PKG_VERSION")),
@@ -381,6 +398,9 @@ fn due(state: &LicenseState, now: DateTime<Utc>) -> bool {
 struct LicenceServer {
     url: String,
     key: VerifyingKey,
+    /// The keys a release manifest has to verify against. Not `key`: the
+    /// licence server's own key does not get to choose what runs here.
+    release_keys: Vec<VerifyingKey>,
 }
 
 /// What a check reports when the token that came back does not verify. The
@@ -394,6 +414,7 @@ impl LicenceServer {
         Ok(Self {
             url: license_url(),
             key,
+            release_keys: release::trusted_keys(),
         })
     }
 }
@@ -466,8 +487,30 @@ async fn exchange(
         let _ = lock.record_error(UNVERIFIABLE).await;
         return Err(OpError::BadInput(UNVERIFIABLE.into()));
     }
-    lock.save(&key, &answer.token, &answer.nonce).await?;
+    let manifest = released_manifest(&answer, &server.release_keys);
+    lock.save(&key, &answer.token, &answer.nonce, &manifest)
+        .await?;
     Ok(true)
+}
+
+/// The manifest to store out of a successful answer: the text it carried when
+/// that text verifies, and the empty string otherwise.
+///
+/// Empty means nothing is released, which is also what a manifest that does
+/// not verify amounts to. Storing it anyway would leave a row that looks like
+/// a release and is believed by nothing, and it would hide that the licence
+/// server sent something this build cannot read.
+fn released_manifest(answer: &CheckResponse, trusted: &[VerifyingKey]) -> String {
+    let Some(text) = answer.release_manifest.as_ref().and_then(Value::as_str) else {
+        return String::new();
+    };
+    match release::verify_with(text, trusted) {
+        Ok(_) => text.to_string(),
+        Err(error) => {
+            tracing::warn!(%error, "the release manifest from the licence server does not verify");
+            String::new()
+        }
+    }
 }
 
 /// Publish the licence after a check, whatever its outcome: a refusal can
@@ -508,7 +551,12 @@ pub async fn check_if_due(store: &Store) -> Option<Result<Licence, OpError>> {
 // Operations
 
 /// Everything the screens print about the licence, out of the signed payload.
-fn licence_json(licence: &Licence, state: &LicenseState, fingerprint: &str) -> Value {
+fn licence_json(
+    licence: &Licence,
+    state: &LicenseState,
+    fingerprint: &str,
+    dirs: &UpdateDirs,
+) -> Value {
     let mut out = json!({
         "standing": licence.label(),
         "writes_allowed": licence.standing.writes_allowed(),
@@ -519,6 +567,10 @@ fn licence_json(licence: &Licence, state: &LicenseState, fingerprint: &str) -> V
         "last_error": state.last_error,
         "has_activation_key": !state.activation_key.is_empty(),
         "grace_until": state.grace_until,
+        "running_version": build_version(),
+        "released_version": update::installable(state).map(|v| v.to_string()),
+        "updater_present": dirs.updater_present(),
+        "fallback_boot": dirs.fallback_boot(),
     });
     if let Some(p) = &licence.payload {
         out["license_no"] = json!(p.license_no);
@@ -532,7 +584,9 @@ fn licence_json(licence: &Licence, state: &LicenseState, fingerprint: &str) -> V
     out
 }
 
-struct GetLicense;
+struct GetLicense {
+    dirs: UpdateDirs,
+}
 
 #[async_trait]
 impl Operation for GetLicense {
@@ -548,7 +602,7 @@ impl Operation for GetLicense {
         false
     }
     fn summary(&self) -> &'static str {
-        "讀本安裝的授權：被授權單位、經銷商、到期日、主機識別碼與最後一次驗證的結果。"
+        "讀本安裝的授權：被授權單位、經銷商、到期日、主機識別碼、最後一次驗證的結果，以及執行中與可安裝的版本。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::Empty>()
@@ -568,7 +622,7 @@ impl Operation for GetLicense {
             None => format!("讀授權 · {}", licence.label()),
         };
         Ok(OpOutcome::new(
-            licence_json(&licence, &state, &fingerprint),
+            licence_json(&licence, &state, &fingerprint, &self.dirs),
             summary,
         ))
     }
@@ -582,7 +636,9 @@ pub struct ActivateLicenseInput {
     pub activation_key: Option<String>,
 }
 
-struct ActivateLicense;
+struct ActivateLicense {
+    dirs: UpdateDirs,
+}
 
 #[async_trait]
 impl Operation for ActivateLicense {
@@ -628,7 +684,7 @@ impl Operation for ActivateLicense {
             None => format!("驗證授權 · {}", licence.label()),
         };
         Ok(OpOutcome::new(
-            licence_json(&licence, &state, &fingerprint),
+            licence_json(&licence, &state, &fingerprint, &self.dirs),
             summary,
         ))
     }
@@ -674,6 +730,7 @@ mod tests {
             last_check_at: Some(Utc::now()),
             last_error: String::new(),
             grace_until: None,
+            release_manifest: String::new(),
         }
     }
 
@@ -859,6 +916,60 @@ mod tests {
         assert!(!due(&s, now), "沒有金鑰就沒有東西可送");
     }
 
+    fn answer_with(release_manifest: Option<Value>) -> CheckResponse {
+        CheckResponse {
+            token: String::new(),
+            nonce: String::new(),
+            release_manifest,
+        }
+    }
+
+    /// Only a manifest that verifies against the release keys is stored. What
+    /// does not verify, is not a string, or is not there is stored as nothing
+    /// released, never as the text it came with.
+    #[test]
+    fn only_a_manifest_that_verifies_is_stored() {
+        use update::test_support::{key, manifest};
+        let trusted = [key(7).verifying_key()];
+        let good = manifest("v0.2.0", &key(7));
+
+        assert_eq!(
+            released_manifest(&answer_with(Some(json!(good.clone()))), &trusted),
+            good
+        );
+        assert_eq!(released_manifest(&answer_with(None), &trusted), "");
+        assert_eq!(
+            released_manifest(&answer_with(Some(Value::Null)), &trusted),
+            ""
+        );
+        assert_eq!(
+            released_manifest(&answer_with(Some(json!({"version": "v0.2.0"}))), &trusted),
+            "",
+            "字串以外的形狀視為沒有放行"
+        );
+        assert_eq!(
+            released_manifest(
+                &answer_with(Some(json!(manifest("v0.2.0", &key(8))))),
+                &trusted
+            ),
+            "",
+            "不信任的金鑰簽的清單不存"
+        );
+        assert_eq!(
+            released_manifest(
+                &answer_with(Some(json!(good.replace("v0.2.0", "v9.9.9")))),
+                &trusted
+            ),
+            "",
+            "內容被改過的清單不存"
+        );
+        assert_eq!(
+            released_manifest(&answer_with(Some(json!(good))), &[]),
+            "",
+            "沒有可信的金鑰就什麼都不存"
+        );
+    }
+
     const KEY: &str = "LAYSI-TEST0-TEST0-TEST0-TEST0";
 
     /// A database of its own on the `TEST_DATABASE_URL` server.
@@ -918,12 +1029,21 @@ mod tests {
     /// is held back long enough that a check which did not wait for the row
     /// reads it before the first answer is saved.
     async fn stand_in() -> anyhow::Result<(LicenceServer, Arc<Mutex<Vec<String>>>)> {
+        stand_in_releasing(None).await
+    }
+
+    /// The same, answering with `released` as the release manifest when given.
+    /// `release_keys` trusts the key that `manifest` signs with.
+    async fn stand_in_releasing(
+        released: Option<Value>,
+    ) -> anyhow::Result<(LicenceServer, Arc<Mutex<Vec<String>>>)> {
         let signing = SigningKey::from_bytes(&[5u8; 32]);
         let received = Arc::new(Mutex::new(Vec::<String>::new()));
         let app = axum::Router::new().route(
             "/v1/license/check",
             axum::routing::post({
-                let (received, signing) = (received.clone(), signing.clone());
+                let (received, signing, released) =
+                    (received.clone(), signing.clone(), released.clone());
                 move |axum::Json(request): axum::Json<Value>| async move {
                     let n = {
                         let mut seen = received.lock().unwrap();
@@ -936,7 +1056,11 @@ mod tests {
                         &signing,
                         &payload(d(2026, 11, 1), d(2027, 9, 1), fingerprint),
                     );
-                    axum::Json(json!({ "token": token, "nonce": format!("n{n}") }))
+                    let mut answer = json!({ "token": token, "nonce": format!("n{n}") });
+                    if let Some(released) = released {
+                        answer["release_manifest"] = released;
+                    }
+                    axum::Json(answer)
                 }
             }),
         );
@@ -946,6 +1070,7 @@ mod tests {
         let server = LicenceServer {
             url,
             key: signing.verifying_key(),
+            release_keys: vec![update::test_support::key(7).verifying_key()],
         };
         Ok((server, received))
     }
@@ -1018,6 +1143,44 @@ mod tests {
             );
             let state = api.license_state().await?;
             anyhow::ensure!(state.nonce == "n1" && state.last_check_at.is_some());
+            Ok(())
+        }
+        .await;
+        scratch.remove().await;
+        outcome.unwrap();
+    }
+
+    /// A check stores the manifest it carried, replaces it with the next one,
+    /// and clears it when a later check carries none or one that does not
+    /// verify: the licence server withdrawing a release has to take it off the
+    /// screen.
+    ///
+    /// Run with:
+    /// `TEST_DATABASE_URL=postgres://... cargo test -p laysi-ops
+    /// a_check_stores_replaces_and_clears_the_release_manifest -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 TEST_DATABASE_URL 指向可建立資料庫的 PostgreSQL"]
+    async fn a_check_stores_replaces_and_clears_the_release_manifest() {
+        use update::test_support::{key, manifest};
+        let scratch = Scratch::new().await;
+        let outcome = async {
+            let store = scratch.process().await?;
+            store.migrate().await?;
+            let first = manifest("v0.2.0", &key(7));
+            let second = manifest("v0.3.0", &key(7));
+
+            for (sent, expected) in [
+                (Some(json!(first.clone())), first.clone()),
+                (Some(json!(second.clone())), second.clone()),
+                (None, String::new()),
+                (Some(json!(first.clone())), first.clone()),
+                (Some(json!(manifest("v0.9.0", &key(8)))), String::new()),
+            ] {
+                let (server, _) = stand_in_releasing(sent).await?;
+                anyhow::ensure!(exchange(&store, Some(KEY), &server).await?);
+                let stored = store.license_state().await?.release_manifest;
+                anyhow::ensure!(stored == expected, "存下的清單不符：{stored:?}");
+            }
             Ok(())
         }
         .await;

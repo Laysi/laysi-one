@@ -776,6 +776,7 @@ async fn list_ops(State(s): State<Shared>, headers: HeaderMap) -> Response {
                 "risk_label": op.risk().label_zh(),
                 "summary": op.summary(),
                 "enabled": grants.iter().find(|(n, _)| n == op.name()).map(|(_, e)| *e).unwrap_or(false),
+                "ui_only": op.ui_only().is_some(),
                 "input_schema": op.input_schema(),
             })
         })
@@ -804,7 +805,10 @@ fn status_for(error: &laysi_ops::OpError) -> StatusCode {
         laysi_ops::OpError::ToolDisabled { .. }
         | laysi_ops::OpError::NeedsBoss { .. }
         | laysi_ops::OpError::NeedsAdmin { .. }
-        | laysi_ops::OpError::NotPermitted { .. } => StatusCode::FORBIDDEN,
+        | laysi_ops::OpError::NotPermitted { .. }
+        | laysi_ops::OpError::Unlicensed { .. }
+        | laysi_ops::OpError::Updating { .. }
+        | laysi_ops::OpError::UiOnly { .. } => StatusCode::FORBIDDEN,
         laysi_ops::OpError::BadInput(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -884,6 +888,17 @@ mod tests {
             },
             OpError::ToolDisabled {
                 tool: "過帳".into(),
+            },
+            OpError::Unlicensed {
+                tool: "將傳票過帳".into(),
+                reason: "授權已到期。".into(),
+            },
+            OpError::Updating {
+                tool: "將傳票過帳".into(),
+            },
+            OpError::UiOnly {
+                tool: "更新系統".into(),
+                place: "安全與營運".into(),
             },
         ];
         for refusal in refusals {
