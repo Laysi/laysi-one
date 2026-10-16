@@ -120,6 +120,64 @@ impl PodmanHost {
         }
         cmd
     }
+
+    /// One container at a time when inspecting them together fails: one
+    /// removed between the two calls is skipped, and one an interrupted
+    /// podman or a power cut left unreadable is removed, as `unreadable`
+    /// decides. The removal goes to stderr, which the unit's journal keeps.
+    fn inspect_containers(&mut self) -> HostResult<Vec<Container>> {
+        let mut ps = self.podman();
+        ps.args([
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--format",
+            "{{.ID}} {{.State}}",
+        ])
+        .arg("--filter")
+        .arg(format!("label={PROJECT_LABEL}={PROJECT}"));
+        let listed: Vec<(String, String)> = run(ps, None)?
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let id = fields.next()?.to_string();
+                Some((id, fields.next().unwrap_or_default().to_string()))
+            })
+            .collect();
+        if listed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut inspect = self.podman();
+        inspect
+            .args(["container", "inspect"])
+            .args(listed.iter().map(|(id, _)| id));
+        if let Ok(json) = run(inspect, None) {
+            return parse_containers(&json);
+        }
+        let mut found = Vec::new();
+        for (id, state) in &listed {
+            let mut inspect = self.podman();
+            inspect.args(["container", "inspect", id]);
+            match run(inspect, None) {
+                Ok(json) => found.extend(parse_containers(&json)?),
+                Err(e) => match unreadable(state, &e) {
+                    Unreadable::Gone => {}
+                    Unreadable::Remove => {
+                        let mut rm = self.podman();
+                        rm.args(["rm", "--force", id]);
+                        run(rm, Some(Duration::from_secs(120)))
+                            .map_err(|rm| format!("{e}; removing it: {rm}"))?;
+                        eprintln!(
+                            "{} removed container {id} ({state}), which podman could not read: {e}",
+                            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        );
+                    }
+                    Unreadable::Fail => return Err(e),
+                },
+            }
+        }
+        Ok(found)
+    }
 }
 
 /// podman leaves conmon in the calling unit's cgroup when `INVOCATION_ID` says
@@ -413,6 +471,9 @@ struct Inspected {
     state: InspectedState,
     #[serde(default)]
     image_name: String,
+    /// The ID of the image it runs.
+    #[serde(default)]
+    image: String,
     #[serde(default)]
     image_digest: String,
     #[serde(default)]
@@ -465,6 +526,21 @@ struct ListedImage {
     size: u64,
 }
 
+fn parse_images(json: &str) -> HostResult<Vec<LocalImage>> {
+    let listed: Vec<ListedImage> =
+        serde_json::from_str(json).map_err(|e| format!("podman images output: {e}"))?;
+    Ok(listed
+        .into_iter()
+        .map(|i| LocalImage {
+            id: i.id,
+            names: i.names.unwrap_or_default(),
+            repo_digests: i.repo_digests.unwrap_or_default(),
+            digest: i.digest,
+            size: i.size,
+        })
+        .collect())
+}
+
 fn parse_containers(json: &str) -> HostResult<Vec<Container>> {
     let inspected: Vec<Inspected> =
         serde_json::from_str(json).map_err(|e| format!("podman inspect output: {e}"))?;
@@ -495,7 +571,11 @@ fn parse_containers(json: &str) -> HostResult<Vec<Container>> {
                 has_healthcheck,
                 health,
                 image_name: c.image_name,
-                image_digest: c.image_digest,
+                image_id: c.image,
+                image_digests: Some(c.image_digest)
+                    .filter(|d| !d.is_empty())
+                    .into_iter()
+                    .collect(),
                 created: DateTime::parse_from_rfc3339(&c.created)
                     .map(|t| t.with_timezone(&Utc))
                     .unwrap_or_default(),
@@ -504,9 +584,29 @@ fn parse_containers(json: &str) -> HostResult<Vec<Container>> {
         .collect())
 }
 
+/// Adds to each container the other digests local storage knows its image
+/// by, after the one podman reports.
+fn add_image_digests(containers: &mut [Container], images: &[LocalImage]) {
+    for c in containers {
+        let Some(image) = images.iter().find(|i| i.id == c.image_id) else {
+            continue;
+        };
+        for digest in image.digests() {
+            if !c.image_digests.iter().any(|d| d == digest) {
+                c.image_digests.push(digest.to_string());
+            }
+        }
+    }
+}
+
 impl Host for PodmanHost {
     fn now(&mut self) -> DateTime<Utc> {
         Utc::now()
+    }
+
+    fn monotonic(&mut self) -> Duration {
+        static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        ORIGIN.get_or_init(Instant::now).elapsed()
     }
 
     fn sleep(&mut self, seconds: u64) {
@@ -574,62 +674,20 @@ impl Host for PodmanHost {
         run_as(cmd, &name, Some(Duration::from_secs(30 * 60))).map(drop)
     }
 
-    /// One container at a time when inspecting them together fails: one
-    /// removed between the two calls is skipped, and one an interrupted
-    /// podman or a power cut left unreadable is removed, as `unreadable`
-    /// decides. The removal goes to stderr, which the unit's journal keeps.
+    /// With every digest each container's image is known by. Without the
+    /// image list each keeps the one podman reports for it.
     fn containers(&mut self) -> HostResult<Vec<Container>> {
-        let mut ps = self.podman();
-        ps.args([
-            "ps",
-            "--all",
-            "--no-trunc",
-            "--format",
-            "{{.ID}} {{.State}}",
-        ])
-        .arg("--filter")
-        .arg(format!("label={PROJECT_LABEL}={PROJECT}"));
-        let listed: Vec<(String, String)> = run(ps, None)?
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.split_whitespace();
-                let id = fields.next()?.to_string();
-                Some((id, fields.next().unwrap_or_default().to_string()))
-            })
-            .collect();
-        if listed.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut inspect = self.podman();
-        inspect
-            .args(["container", "inspect"])
-            .args(listed.iter().map(|(id, _)| id));
-        if let Ok(json) = run(inspect, None) {
-            return parse_containers(&json);
-        }
-        let mut found = Vec::new();
-        for (id, state) in &listed {
-            let mut inspect = self.podman();
-            inspect.args(["container", "inspect", id]);
-            match run(inspect, None) {
-                Ok(json) => found.extend(parse_containers(&json)?),
-                Err(e) => match unreadable(state, &e) {
-                    Unreadable::Gone => {}
-                    Unreadable::Remove => {
-                        let mut rm = self.podman();
-                        rm.args(["rm", "--force", id]);
-                        run(rm, Some(Duration::from_secs(120)))
-                            .map_err(|rm| format!("{e}; removing it: {rm}"))?;
-                        eprintln!(
-                            "{} removed container {id} ({state}), which podman could not read: {e}",
-                            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                        );
-                    }
-                    Unreadable::Fail => return Err(e),
-                },
+        let mut containers = self.inspect_containers()?;
+        if !containers.is_empty() {
+            match self.images() {
+                Ok(images) => add_image_digests(&mut containers, &images),
+                Err(e) => eprintln!(
+                    "{} listing images for the containers: {e}",
+                    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ),
             }
         }
-        Ok(found)
+        Ok(containers)
     }
 
     fn stop(&mut self, names: &[String]) -> HostResult<()> {
@@ -704,23 +762,12 @@ impl Host for PodmanHost {
     fn images(&mut self) -> HostResult<Vec<LocalImage>> {
         let mut cmd = self.podman();
         cmd.args(["images", "--all", "--format", "json"]);
-        let listed: Vec<ListedImage> = serde_json::from_str(&run(cmd, None)?)
-            .map_err(|e| format!("podman images output: {e}"))?;
-        Ok(listed
-            .into_iter()
-            .map(|i| LocalImage {
-                id: i.id,
-                names: i.names.unwrap_or_default(),
-                repo_digests: i.repo_digests.unwrap_or_default(),
-                digest: i.digest,
-                size: i.size,
-            })
-            .collect())
+        parse_images(&run(cmd, None)?)
     }
 
-    fn remove_image(&mut self, id: &str) -> HostResult<()> {
+    fn remove_image(&mut self, image: &LocalImage) -> HostResult<()> {
         let mut cmd = self.podman();
-        cmd.args(["rmi", id]);
+        cmd.arg("rmi").args(image.removal_targets());
         run(cmd, None).map(drop)
     }
 
@@ -897,7 +944,7 @@ mod tests {
         let json = r#"[
           {"Id":"aaa","Name":"laysi-one-api","Created":"2026-10-12T09:06:23.447972097Z",
            "State":{"Status":"running","Running":true,"ExitCode":0,"Health":{"Status":"healthy"}},
-           "ImageName":"ghcr.io/laysi/laysi-one-api@sha256:11","ImageDigest":"sha256:11",
+           "ImageName":"ghcr.io/laysi/laysi-one-api@sha256:11","Image":"img1","ImageDigest":"sha256:11",
            "Config":{"Labels":{"com.docker.compose.service":"api","io.podman.compose.project":"laysi-one"},
                      "Healthcheck":{"Test":["CMD","/usr/local/bin/laysi-server","--healthcheck"]}}},
           {"Id":"bbb","Name":"laysi-one-secrets","Created":"2026-10-12T09:06:20Z",
@@ -919,9 +966,74 @@ mod tests {
         assert!(api.running && api.has_healthcheck);
         assert_eq!(api.health.as_deref(), Some("healthy"));
         assert_eq!(api.exit_code, None);
+        assert_eq!(api.image_id, "img1");
+        assert_eq!(api.image_digests, ["sha256:11"]);
         let secrets = &containers[1];
         assert!(!secrets.running && !secrets.has_healthcheck);
         assert_eq!(secrets.exit_code, Some(0));
         assert_eq!(secrets.health, None);
+    }
+
+    #[test]
+    fn a_container_knows_every_digest_its_image_was_pulled_by() {
+        let json = r#"[
+          {"Id":"aaa","Name":"laysi-one-backup","Created":"2026-10-15T15:03:29Z",
+           "State":{"Status":"running","Running":true,"ExitCode":0},
+           "ImageName":"ghcr.io/laysi/laysi-one-backup@sha256:bb","Image":"img1","ImageDigest":"sha256:aa",
+           "Config":{"Labels":{"com.docker.compose.service":"backup"}}},
+          {"Id":"bbb","Name":"laysi-one-web","Created":"2026-10-15T15:03:29Z",
+           "State":{"Status":"running","Running":true,"ExitCode":0},
+           "ImageName":"ghcr.io/laysi/laysi-one-web@sha256:cc","Image":"img2","ImageDigest":"sha256:cc",
+           "Config":{"Labels":{"com.docker.compose.service":"web"}}}
+        ]"#;
+        let mut containers = parse_containers(json).unwrap();
+        let images = [
+            LocalImage {
+                id: "img1".into(),
+                repo_digests: vec![
+                    "ghcr.io/laysi/laysi-one-backup@sha256:aa".into(),
+                    "ghcr.io/laysi/laysi-one-backup@sha256:bb".into(),
+                ],
+                names: Vec::new(),
+                digest: "sha256:aa".into(),
+                size: 1,
+            },
+            LocalImage {
+                id: "img3".into(),
+                repo_digests: vec!["ghcr.io/laysi/laysi-one-web@sha256:dd".into()],
+                names: Vec::new(),
+                digest: "sha256:dd".into(),
+                size: 1,
+            },
+        ];
+        add_image_digests(&mut containers, &images);
+        assert_eq!(containers[0].image_digests, ["sha256:aa", "sha256:bb"]);
+        assert_eq!(
+            containers[1].image_digests,
+            ["sha256:cc"],
+            "another image's digests are not this container's"
+        );
+    }
+
+    /// podman 4.9.3 answers `rmi <id>` of an image with two names "unable
+    /// to delete image … by ID with more than one tag". A platform manifest
+    /// digest is a repo digest but not a name.
+    #[test]
+    fn an_image_pulled_under_two_digests_is_removed_by_both_names() {
+        let json = r#"[
+          {"Id":"bf84137d58a4","Names":["r/backup@sha256:58","r/backup@sha256:cd"],
+           "RepoDigests":["r/backup@sha256:58","r/backup@sha256:5c","r/backup@sha256:cd"],
+           "Digest":"sha256:cd","Size":10},
+          {"Id":"7cf3a1e3f07f","Names":["r/api@sha256:10"],
+           "RepoDigests":["r/api@sha256:10","r/api@sha256:77"],"Digest":"sha256:10","Size":20},
+          {"Id":"0123456789ab","Names":null,"RepoDigests":[],"Digest":"","Size":5}
+        ]"#;
+        let images = parse_images(json).unwrap();
+        assert_eq!(
+            images[0].removal_targets(),
+            ["r/backup@sha256:58", "r/backup@sha256:cd"]
+        );
+        assert_eq!(images[1].removal_targets(), ["r/api@sha256:10"]);
+        assert_eq!(images[2].removal_targets(), ["0123456789ab"]);
     }
 }

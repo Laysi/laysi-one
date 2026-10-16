@@ -9,9 +9,9 @@
 # nothing to the internet of its own.
 #
 # release.yml builds the images, publishes the release with its signed manifest
-# and then calls this with target=demo, so the demo runs the newest release
-# without anybody remembering to push it, while one.laysi.io stays a deliberate
-# act.
+# and then, for a final release, calls this with target=demo, so the demo runs
+# the newest release without anybody remembering to push it, while one.laysi.io
+# stays a deliberate act. A release candidate is not deployed here.
 #
 # The two installs share the images, docker-compose.prod.yml and this file.
 # They differ in a directory, an overlay and what happens to the data: the

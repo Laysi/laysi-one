@@ -323,6 +323,14 @@ pub enum OpError {
     #[error("{reason}系統目前為唯讀，「{tool}」無法執行；查詢、報表與匯出不受影響。")]
     Unlicensed { tool: String, reason: String },
 
+    #[error(
+        "系統正在更新，「{tool}」暫時無法執行，請於更新完成後再試；查詢、報表與匯出不受影響。"
+    )]
+    Updating { tool: String },
+
+    #[error("請系統管理員改到畫面上的「{place}」執行「{tool}」。")]
+    UiOnly { tool: String, place: String },
+
     /// The message stands alone. A 「參數不正確：」 prefix appears in front of
     /// sentences the user never typed a parameter for — an empty budget, a
     /// payroll run with nothing to run — where it names a cause that is not
@@ -350,6 +358,8 @@ impl OpError {
             OpError::NeedsAdmin { .. } => "needs_admin",
             OpError::NotPermitted { .. } => "not_permitted",
             OpError::Unlicensed { .. } => "unlicensed",
+            OpError::Updating { .. } => "updating",
+            OpError::UiOnly { .. } => "ui_only",
             OpError::BadInput(_) => "bad_input",
             OpError::Store(_) => "store_error",
             OpError::Storage(_) => "storage_error",
@@ -408,6 +418,15 @@ pub trait Operation: Send + Sync + 'static {
     /// fails if a new one forgets.
     fn writes(&self) -> bool {
         !matches!(self.risk(), Risk::ReadOnly)
+    }
+
+    /// The page this operation has to be run from, for the few that an AI
+    /// client must not run at all and that `mcp_tool_grant` cannot be allowed
+    /// to open: the answer is where a person does it instead, not a switch
+    /// to flip. `dispatch` refuses the MCP channel with that sentence before
+    /// it looks at the grant.
+    fn ui_only(&self) -> Option<&'static str> {
+        None
     }
 }
 
@@ -553,6 +572,9 @@ pub struct LimitInput {
 
 pub struct Registry {
     ops: Vec<Box<dyn Operation>>,
+    /// Where the host-side updater and this process meet. The registry asks
+    /// it whether an update is switching before every write.
+    update_dirs: ops::update::UpdateDirs,
 }
 
 impl Default for Registry {
@@ -638,7 +660,17 @@ pub fn op_label(summary: &str) -> &str {
 
 impl Registry {
     pub fn new() -> Self {
-        Self { ops: ops::all() }
+        Self::in_update_dirs(ops::update::UpdateDirs::container())
+    }
+
+    /// A registry whose update operations, and whose refusal of writes while
+    /// an update switches, look in `dirs` instead of the container paths.
+    /// Tests only: nothing else has a reason to move them.
+    pub fn in_update_dirs(dirs: ops::update::UpdateDirs) -> Self {
+        Self {
+            ops: ops::all_in(&dirs),
+            update_dirs: dirs,
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Operation> {
@@ -666,7 +698,20 @@ impl Registry {
             .get(name)
             .ok_or_else(|| OpError::UnknownTool(name.to_string()))?;
 
-        // 0. Licence floor: an installation whose licence has lapsed keeps
+        // 0a. Switching: while the host-side updater has the system down and
+        //     may restore the database, a write made now could be taken back
+        //     without anybody being told, so nothing writes and every read
+        //     carries on. Both channels, and no exemption: even re-checking
+        //     the licence is a write the rollback would undo. The updater
+        //     lifts it as soon as a final result is on disk. One `lstat`.
+        if op.writes() && self.update_dirs.switching() {
+            let label = op_label(op.summary()).to_string();
+            self.audit(ctx, op, &input, "被拒絕：系統正在更新", "blocked")
+                .await;
+            return Err(OpError::Updating { tool: label });
+        }
+
+        // 0b. Licence floor: an installation whose licence has lapsed keeps
         //    every read, so the books stay readable, printable and
         //    exportable, and refuses everything that writes. Read from a
         //    process atomic rather than a table, so the common case costs no
@@ -683,6 +728,20 @@ impl Registry {
                 tool: label,
                 reason,
             });
+        }
+
+        // 1a. Operations that only a person may run, from one page. The grant
+        //     is not consulted: it could be opened, and opening it would not
+        //     make the operation work from here.
+        if ctx.channel == Channel::Mcp {
+            if let Some(place) = op.ui_only() {
+                self.audit(ctx, op, &input, "被拒絕：只能在畫面上執行", "blocked")
+                    .await;
+                return Err(OpError::UiOnly {
+                    tool: op_label(op.summary()).to_string(),
+                    place: place.to_string(),
+                });
+            }
         }
 
         // 1. Tool grant: a disabled tool is invisible to AI, even for reading.
@@ -923,6 +982,7 @@ mod tests {
         let modules = [
             ops::ledger::ops(),
             ops::license::ops(),
+            ops::update::ops(),
             ops::receivables::ops(),
             ops::payables::ops(),
             ops::banking::ops(),
@@ -981,6 +1041,7 @@ mod tests {
         include_str!("../../../migrations/0017_upload_staging.sql"),
         include_str!("../../../migrations/0018_download_link.sql"),
         include_str!("../../../migrations/0023_withdraw_and_revoke_requests.sql"),
+        include_str!("../../../migrations/0025_release_manifest.sql"),
     );
 
     /// The rows of one multi-row INSERT, one string per row, without the
@@ -1192,6 +1253,202 @@ mod tests {
         }
     }
 
+    /// A store that is never connected: every query fails at once. Enough for
+    /// the refusals in step 0 and 1a, which are decided before anything is
+    /// read, and whose audit write is allowed to fail.
+    fn unconnected_store() -> laysi_store::Store {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .expect("連線字串應可解析");
+        laysi_store::Store::from_pool(pool)
+    }
+
+    fn ctx_as(channel: Channel, role: &str) -> OpCtx {
+        OpCtx {
+            store: unconnected_store(),
+            objects: None,
+            actor: "測試".into(),
+            actor_role: role.into(),
+            username: None,
+            employee_id: None,
+            user_id: None,
+            token_id: None,
+            public_base: None,
+            prompt: None,
+            channel,
+            client_ip: None,
+            today: NaiveDate::from_ymd_opt(2026, 10, 13).expect("有效日期"),
+            offset: business_offset(),
+        }
+    }
+
+    fn update_dirs(label: &str) -> (ops::update::UpdateDirs, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("laysi-switch-{label}-{}", uuid::Uuid::new_v4()));
+        let results = root.join("results");
+        std::fs::create_dir_all(&results).expect("應可建立暫存目錄");
+        let dirs = ops::update::UpdateDirs {
+            requests: root.join("requests"),
+            results,
+        };
+        (dirs, root)
+    }
+
+    /// While the host-side updater has the system down, every call that writes
+    /// is refused on both channels, whatever its risk tier and whoever asks,
+    /// and the refusal says the system is updating rather than that the
+    /// licence ended.
+    #[tokio::test]
+    async fn writes_are_refused_while_an_update_switches_on_both_channels() {
+        let (dirs, root) = update_dirs("refuse");
+        std::fs::write(dirs.results.join("switching.marker"), "x\n").unwrap();
+        let registry = Registry::in_update_dirs(dirs);
+
+        let writes: Vec<&dyn Operation> = registry.iter().filter(|op| op.writes()).collect();
+        assert!(writes.len() > 50, "測試前提：有大量會寫入的操作");
+        for channel in [Channel::Ui, Channel::Mcp] {
+            for op in &writes {
+                let error = registry
+                    .dispatch(&ctx_as(channel, ROLE_ADMIN), op.name(), json!({}))
+                    .await
+                    .expect_err(&format!("{} 應被擋下", op.name()));
+                assert!(
+                    matches!(error, OpError::Updating { .. }),
+                    "{} 在 {channel:?} 應回「正在更新」，實際為：{error}",
+                    op.name()
+                );
+                assert_eq!(error.code(), "updating");
+            }
+        }
+
+        // `activate_license` is exempt from the licence floor, not from this:
+        // a rollback would undo what it stored.
+        let error = registry
+            .dispatch(
+                &ctx_as(Channel::Ui, ROLE_ADMIN),
+                "activate_license",
+                json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OpError::Updating { .. }), "{error}");
+
+        let message = OpError::Updating {
+            tool: "將傳票過帳".into(),
+        }
+        .to_string();
+        assert!(message.contains("正在更新") && message.contains("更新完成後再試"));
+        assert!(!message.contains("授權"), "不該寫成授權到期：{message}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Reads carry on: nothing in step 0 stops them, so they get as far as the
+    /// permission lookup, which fails here only because no database is
+    /// connected. The screen's own polling is a read, and so is every report.
+    #[tokio::test]
+    async fn reads_are_not_stopped_by_an_update_that_switches() {
+        let (dirs, root) = update_dirs("reads");
+        std::fs::write(dirs.results.join("switching.marker"), "x\n").unwrap();
+        let registry = Registry::in_update_dirs(dirs);
+
+        for op in registry.iter().filter(|op| !op.writes()) {
+            let error = registry
+                .dispatch(&ctx_as(Channel::Ui, ROLE_ADMIN), op.name(), json!({}))
+                .await;
+            assert!(
+                !matches!(error, Err(OpError::Updating { .. })),
+                "{} 是讀取，更新中不該被擋",
+                op.name()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The marker goes away when the final result is written, and writing
+    /// resumes with it: nothing is remembered between calls.
+    #[tokio::test]
+    async fn writes_resume_when_the_marker_goes_and_when_there_is_no_directory() {
+        let (dirs, root) = update_dirs("resume");
+        let marker = dirs.results.join("switching.marker");
+        std::fs::write(&marker, "x\n").unwrap();
+        let registry = Registry::in_update_dirs(dirs.clone());
+        let ctx = ctx_as(Channel::Ui, ROLE_ADMIN);
+
+        let refused = registry.dispatch(&ctx, "create_account", json!({})).await;
+        assert!(matches!(refused, Err(OpError::Updating { .. })));
+
+        std::fs::remove_file(&marker).unwrap();
+        let after = registry.dispatch(&ctx, "create_account", json!({})).await;
+        assert!(
+            !matches!(after, Err(OpError::Updating { .. })),
+            "標記一移除就該恢復寫入"
+        );
+
+        // An installation without the host-side updater has no such directory.
+        std::fs::remove_dir_all(&root).unwrap();
+        let without = registry.dispatch(&ctx, "create_account", json!({})).await;
+        assert!(
+            !matches!(without, Err(OpError::Updating { .. })),
+            "讀不到結果目錄視為沒有在更新"
+        );
+    }
+
+    /// An AI client is told where a person does this, whether or not its
+    /// grant is open: the request directory is not mounted into the mcp
+    /// container, so opening the grant would only turn the refusal into an
+    /// error about a missing file.
+    #[tokio::test]
+    async fn an_ai_client_cannot_start_an_update_and_is_told_where_it_is_done() {
+        let registry = Registry::new();
+        let error = registry
+            .dispatch(
+                &ctx_as(Channel::Mcp, ROLE_ADMIN),
+                "get_update_ticket",
+                json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "ui_only");
+        assert!(error.to_string().contains("「安全與營運」"), "{error}");
+
+        let ui_only: Vec<&str> = registry
+            .iter()
+            .filter(|op| op.ui_only().is_some())
+            .map(|op| op.name())
+            .collect();
+        assert_eq!(ui_only, ["get_update_ticket"], "只有要求更新限畫面執行");
+    }
+
+    /// The update operations are read-looking writes: they must not be
+    /// stopped by a lapsed licence, and they are the only ones besides
+    /// `activate_license` that an expired installation can still run.
+    #[test]
+    fn the_update_operations_stay_reachable_for_a_lapsed_licence() {
+        let registry = Registry::new();
+        for name in ["get_update_ticket", "get_update_result"] {
+            let op = registry.get(name).expect(name);
+            assert!(!op.writes(), "{name} 不該被授權底線擋下");
+            assert_eq!(op.risk(), Risk::AdminOnly, "{name} 限系統管理員");
+        }
+    }
+
+    /// Both are seeded closed to AI.
+    #[test]
+    fn the_update_operations_are_seeded_closed_to_ai() {
+        for name in ["get_update_ticket", "get_update_result"] {
+            let row = inserted_rows("mcp_tool_grant")
+                .into_iter()
+                .rev()
+                .find(|row| row.starts_with(&format!("{name}'")))
+                .expect(name);
+            assert!(
+                row.contains("', false, 'admin_only'"),
+                "{name} 應預設關閉：{row}"
+            );
+        }
+    }
+
     /// Running the system and owning the business are different jobs, so the
     /// two floors hold different operations. Moving anything across this line
     /// either hands the installer everyone's salary or hands the owner the
@@ -1233,6 +1490,8 @@ mod tests {
                 "get_backup_setting",
                 "get_license",
                 "get_oidc_setting",
+                "get_update_result",
+                "get_update_ticket",
                 "issue_api_token",
                 "list_user_accounts",
                 "refresh_regulations",
