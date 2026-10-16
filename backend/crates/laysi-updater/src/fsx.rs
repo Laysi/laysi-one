@@ -406,11 +406,15 @@ unsafe fn errno() -> *mut libc::c_int {
 /// and the conmon processes it leaves behind never hold it.
 pub struct Lock {
     _file: File,
+    #[cfg(test)]
+    _open: fork_gate::Open,
 }
 
 impl Lock {
     /// `Ok(None)` when another run holds it and `wait` is false.
     pub fn acquire(path: &Path, wait: bool) -> io::Result<Option<Lock>> {
+        #[cfg(test)]
+        let open = fork_gate::lock_opened();
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -426,7 +430,11 @@ impl Lock {
         };
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
-                return Ok(Some(Lock { _file: file }));
+                return Ok(Some(Lock {
+                    _file: file,
+                    #[cfg(test)]
+                    _open: open,
+                }));
             }
             let e = io::Error::last_os_error();
             match e.raw_os_error() {
@@ -451,6 +459,89 @@ pub fn free_bytes(path: &Path) -> io::Result<u64> {
 pub fn same_device(a: &Path, b: &Path) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     Ok(fs::metadata(a)?.dev() == fs::metadata(b)?.dev())
+}
+
+/// A fork copies every open descriptor into the child until it execs, and a
+/// copy of a lock's descriptor holds the flock. In a test process, a test
+/// that spawns a command while a test on another thread holds a lock would
+/// make that thread's next acquire find the lock busy. A spawn waits until
+/// no lock's descriptor is open, and none opens while a spawn waits, except
+/// one taken by a thread that already holds one.
+#[cfg(test)]
+pub(crate) mod fork_gate {
+    use std::cell::Cell;
+    use std::marker::PhantomData;
+    use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+
+    struct Gate {
+        open: usize,
+        spawning: bool,
+    }
+
+    static GATE: Mutex<Gate> = Mutex::new(Gate {
+        open: 0,
+        spawning: false,
+    });
+    static CHANGED: Condvar = Condvar::new();
+
+    thread_local! {
+        static HELD: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn gate() -> MutexGuard<'static, Gate> {
+        GATE.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait(gate: MutexGuard<'static, Gate>) -> MutexGuard<'static, Gate> {
+        CHANGED.wait(gate).unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A lock's descriptor is open while this lives. It counts against the
+    /// thread that took it, so it is not `Send`: a lock moved to another
+    /// thread would be released against that thread's count.
+    pub struct Open(PhantomData<*const ()>);
+
+    pub fn lock_opened() -> Open {
+        let mut g = gate();
+        while g.spawning && HELD.get() == 0 {
+            g = wait(g);
+        }
+        g.open += 1;
+        HELD.set(HELD.get() + 1);
+        Open(PhantomData)
+    }
+
+    impl Drop for Open {
+        fn drop(&mut self) {
+            let mut g = gate();
+            g.open -= 1;
+            HELD.set(HELD.get() - 1);
+            CHANGED.notify_all();
+        }
+    }
+
+    /// No lock's descriptor is open while this lives.
+    pub struct Spawning;
+
+    pub fn spawning() -> Spawning {
+        assert_eq!(HELD.get(), 0, "a spawn while this thread holds a lock");
+        let mut g = gate();
+        while g.spawning {
+            g = wait(g);
+        }
+        g.spawning = true;
+        while g.open > 0 {
+            g = wait(g);
+        }
+        Spawning
+    }
+
+    impl Drop for Spawning {
+        fn drop(&mut self) {
+            gate().spawning = false;
+            CHANGED.notify_all();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -604,6 +695,31 @@ mod tests {
         assert!(Lock::acquire(&path, false).unwrap().is_none());
         drop(held);
         assert!(Lock::acquire(&path, false).unwrap().is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_spawn_waits_until_no_lock_is_open() {
+        let dir = tempdir("gate");
+        let held = Lock::acquire(&dir.join("lock"), false)
+            .unwrap()
+            .expect("nobody holds it");
+        let (spawned, waiting) = std::sync::mpsc::channel();
+        let spawner = std::thread::spawn(move || {
+            let _gate = fork_gate::spawning();
+            spawned.send(()).unwrap();
+        });
+        assert!(
+            waiting
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "a spawn went ahead while a lock was open"
+        );
+        drop(held);
+        waiting
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the spawn goes ahead once the lock is closed");
+        spawner.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 }

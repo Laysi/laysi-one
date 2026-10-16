@@ -329,7 +329,7 @@ workspace**：它多租戶、經銷商與代理商在那裡開立啟動金鑰，
   `bun scripts/function-test.ts && bun scripts/schema-live-test.ts`，後者對著真的伺服器
   逐一呼叫再解析，並且從呼叫端本身讀出操作與 schema 的對應，不另存一份清單。
   純資料的邊界檢查在 `scripts/schema-test.ts`；螢幕上的金額與日期格式在
-  `scripts/format-test.ts`、導覽與網址在 `scripts/nav-test.ts`，四支都在 CI 裡。
+  `scripts/format-test.ts`、導覽與網址在 `scripts/nav-test.ts`、更新卡的狀態機在 `scripts/update-test.ts`，五支都在 CI 裡。
   **`/v1/auth/me`／`/v1/meta`／`/v1/ops` 不是操作但同樣要驗**（`authEnvelope`／`meta`／
   `opList`，都在 `client.ts`），live 檢查以 `mismatchAgainst` 核對。`SessionUser` 這類
   形狀住 `client.ts` 不住 `auth.ts`。風險分級的執行期清單由產生器發成 `RISKS`，不手抄。
@@ -395,7 +395,7 @@ skill，本節只定政策；兩者衝突時以本節為準（內文格式用下
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
-RustFS 物件儲存，以及 **37 個畫面、143 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、145 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -1135,9 +1135,12 @@ grant，AI 看得到一個叫不動的工具；少一條 permission，deny-by-de
 ## 示範站
 
 `demo.laysi.one` 與 `one.laysi.io` 同一台主機、同一份映像、同一份
-`docker-compose.prod.yml`，只多一層 `docker-compose.demo.yml`。**推 `v*` 標籤就部署
-示範站**（`release.yml` 呼叫 `deploy.yml` 並帶 `target: demo`），正式站維持手動——
+`docker-compose.prod.yml`，只多一層 `docker-compose.demo.yml`。**推正式版的 `v*` 標籤就
+部署示範站**（`release.yml` 呼叫 `deploy.yml` 並帶 `target: demo`），正式站維持手動——
 客戶的安裝什麼時候升級由持有它的人決定，而示範站沒有持有人也沒有東西可失去。
+**發布候選版（`v0.2.0-rc.1`，帶 `-` 的標籤）照樣建置與簽章，但不推 `latest`、release 標成
+prerelease、不部署示範站**，三處由 `scripts/release-workflow-test.ts` 把關，理由在
+`docs/architecture.md`。
 
 **每晚整份重建**（`deploy/reset-demo.sh`，systemd timer 台北時間 04:00）。共用的評估
 安裝沒有第二條路可以維持可用：第一個過帳、簽核或改公司名稱的訪客就改變了第二個訪客
