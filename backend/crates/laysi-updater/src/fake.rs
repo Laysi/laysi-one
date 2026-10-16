@@ -98,6 +98,18 @@ pub struct FakeContainer {
 #[derive(Debug)]
 pub struct World {
     pub clock: DateTime<Utc>,
+    /// Seconds on the clock that never steps. `clock` moves with it except
+    /// where `clock_step` makes it jump.
+    pub monotonic: u64,
+    /// The wall clock jumps forward by this much at the next sleep, the way
+    /// a machine without a battery-backed clock is set by its first time
+    /// server.
+    pub clock_step: Option<Duration>,
+    /// Seconds a container with a passing healthcheck reports `starting`
+    /// after it starts, on `monotonic`.
+    pub warmup_secs: u64,
+    /// When each service's container last started, on `monotonic`.
+    started: BTreeMap<String, u64>,
     pub calls: usize,
     pub crash_at: Option<usize>,
     /// Cut the power at the first call with this label, e.g. a journal phase.
@@ -139,6 +151,10 @@ impl World {
     pub fn new() -> World {
         World {
             clock: Utc.with_ymd_and_hms(2026, 10, 12, 9, 0, 0).unwrap(),
+            monotonic: 0,
+            clock_step: None,
+            warmup_secs: 0,
+            started: BTreeMap::new(),
             calls: 0,
             crash_at: None,
             crash_on: None,
@@ -179,12 +195,14 @@ impl World {
             c.running = false;
         }
         self.clock += Duration::seconds(60);
+        self.monotonic += 60;
         self.crash_at = None;
     }
 
     /// Only the updater died: containers keep running, time moves on.
     pub fn restart_updater(&mut self) {
         self.clock += Duration::seconds(60);
+        self.monotonic += 60;
         self.crash_at = None;
     }
 
@@ -201,7 +219,18 @@ impl World {
         let Some(spec) = self.registry.get(&c.digest) else {
             return false;
         };
-        c.running && matches!(spec.behaviour, Behaviour::Healthy | Behaviour::Plain)
+        c.running
+            && match spec.behaviour {
+                Behaviour::Healthy => !self.warming(service),
+                Behaviour::Plain => true,
+                _ => false,
+            }
+    }
+
+    fn warming(&self, service: &str) -> bool {
+        self.started
+            .get(service)
+            .is_some_and(|&at| self.monotonic < at + self.warmup_secs)
     }
 }
 
@@ -214,6 +243,7 @@ impl FakeHost {
         let mut w = self.world.borrow_mut();
         w.calls += 1;
         w.clock += Duration::seconds(1);
+        w.monotonic += 1;
         if w.crash_at == Some(w.calls) {
             panic!("power cut at call {} ({what})", w.calls);
         }
@@ -301,8 +331,17 @@ impl Host for FakeHost {
         self.world.borrow().clock
     }
 
+    fn monotonic(&mut self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.world.borrow().monotonic)
+    }
+
     fn sleep(&mut self, seconds: u64) {
-        self.world.borrow_mut().clock += Duration::seconds(seconds as i64);
+        let mut w = self.world.borrow_mut();
+        w.clock += Duration::seconds(seconds as i64);
+        w.monotonic += seconds;
+        if let Some(step) = w.clock_step.take() {
+            w.clock += step;
+        }
     }
 
     fn checkpoint(&mut self, label: &str) {
@@ -416,6 +455,8 @@ impl Host for FakeHost {
                     spec.behaviour,
                     Behaviour::Healthy | Behaviour::Plain | Behaviour::NeverHealthy
                 );
+                let now = w.monotonic;
+                w.started.insert(service.clone(), now);
                 let c = w.containers.get_mut(service).unwrap();
                 c.running = running;
                 c.exit_code = (!running).then_some(match spec.behaviour {
@@ -464,7 +505,11 @@ impl Host for FakeHost {
                     has_healthcheck,
                     health: has_healthcheck.then(|| {
                         if c.running && behaviour == Behaviour::Healthy {
-                            "healthy".to_string()
+                            if w.warming(service) {
+                                "starting".to_string()
+                            } else {
+                                "healthy".to_string()
+                            }
                         } else {
                             "unhealthy".to_string()
                         }

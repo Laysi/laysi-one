@@ -1603,7 +1603,7 @@ impl<'h, H: Host> Machine<'h, H> {
         timeout_secs: u64,
     ) -> Result<(), String> {
         let registry = self.read_env(files)?.registry();
-        let deadline = self.host.now() + chrono::Duration::seconds(timeout_secs as i64);
+        let deadline = self.host.monotonic() + std::time::Duration::from_secs(timeout_secs);
         loop {
             let verdict = match self.host.containers() {
                 Ok(containers) => {
@@ -1621,7 +1621,7 @@ impl<'h, H: Host> Machine<'h, H> {
                 Ok(()) => return Ok(()),
                 Err(reason) => reason,
             };
-            if self.host.now() >= deadline {
+            if self.host.monotonic() >= deadline {
                 return Err(format!("{timeout_secs} 秒內沒有全部就緒：{reason}"));
             }
             self.host.sleep(self.config.poll_secs);
