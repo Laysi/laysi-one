@@ -604,6 +604,11 @@ impl Host for PodmanHost {
         Utc::now()
     }
 
+    fn monotonic(&mut self) -> Duration {
+        static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        ORIGIN.get_or_init(Instant::now).elapsed()
+    }
+
     fn sleep(&mut self, seconds: u64) {
         std::thread::sleep(Duration::from_secs(seconds));
     }

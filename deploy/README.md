@@ -4,7 +4,7 @@
 `docker-compose.prod.yml`，差別只有 `docker-compose.demo.yml` 這層覆蓋與資料的處置：
 正式站跨部署保留帳本，示範站每天凌晨四點（台北）整份丟掉重建。
 
-推一個 `v*` 標籤就會部署到示範站；正式站維持手動
+推一個正式版的 `v*` 標籤就會部署到示範站（`v0.2.0-rc.1` 這種發布候選版不部署）；正式站維持手動
 （`gh workflow run deploy.yml -f version=0.1.0`）。
 
 ## 主機上要先準備的兩件事

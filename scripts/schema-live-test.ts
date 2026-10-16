@@ -60,6 +60,17 @@ async function startServer() {
   throw new Error(`測試伺服器沒有起來。先執行 bun scripts/function-test.ts 建好 ${TEST_DB}。`);
 }
 
+// Operations that act on the host rather than answer a question. get_update_ticket
+// writes a request the host-side updater would act on, so it is never called
+// here, whatever this machine has mounted.
+const NEVER_CALLED = new Set(["get_update_ticket"]);
+
+// Operations that need an argument to answer at all. A request id nothing has
+// answered gets the "no result yet" shape, which is the one worth checking live.
+const INPUTS: Record<string, unknown> = {
+  get_update_result: { request_id: "live-check-0001" },
+};
+
 const server = await startServer();
 let failed = 0;
 
@@ -92,11 +103,15 @@ try {
     let checked = 0;
     let skipped = 0;
     for (const op of wiredOperations) {
+      if (NEVER_CALLED.has(op)) {
+        skipped += 1;
+        continue;
+      }
       const r = (await (
         await fetch(`${BASE}/v1/ops/${op}`, {
           method: "POST",
           headers: { "content-type": "application/json", cookie },
-          body: JSON.stringify({ input: {} }),
+          body: JSON.stringify({ input: INPUTS[op] ?? {} }),
         })
       ).json()) as { ok: boolean; data?: unknown };
       // A refusal is not a shape: the operation needs arguments this script

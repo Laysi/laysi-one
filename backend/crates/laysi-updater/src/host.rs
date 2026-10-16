@@ -95,6 +95,12 @@ impl LocalImage {
 
 pub trait Host {
     fn now(&mut self) -> DateTime<Utc>;
+    /// Time on a clock that never steps, from an arbitrary origin: for
+    /// deadlines. The wall clock of a machine without a battery-backed clock
+    /// steps forward, by as long as the machine was off, when it first
+    /// reaches a time server, and that is early in the boot that recovers an
+    /// update.
+    fn monotonic(&mut self) -> std::time::Duration;
     fn sleep(&mut self, seconds: u64);
     /// A point at which the fake host may cut the power. The real host does
     /// nothing here.

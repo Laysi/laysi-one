@@ -136,7 +136,7 @@ export function Dashboard({ onGo, reloadKey }: Props) {
                 </div>
                 <div className="ai-item__who">
                   {a.channel_label} · {a.who}
-                  {a.outcome === 'blocked' && ' · 已被權限擋下'}
+                  {a.outcome === 'blocked' && ' · 已擋下'}
                   {a.outcome === 'error' && ' · 未完成'}
                 </div>
               </div>
