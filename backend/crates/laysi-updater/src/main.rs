@@ -23,8 +23,8 @@ use laysi_updater::host::Host;
 use laysi_updater::journal::Phase;
 use laysi_updater::layout::Layout;
 use laysi_updater::machine::{Config, Machine, DATABASE, ENTRIES};
-use laysi_updater::podman::PodmanHost;
-use laysi_updater::{fsx, install, trusted_keys, units, TEST_KEYS};
+use laysi_updater::podman::{self, PodmanHost};
+use laysi_updater::{install, trusted_keys, units, TEST_KEYS};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -43,7 +43,8 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "run" => with_machine(|m| m.run_request()),
         "boot" => with_machine(|m| m.boot()),
         "discard-requests" => with_machine(|m| m.discard_requests(run_failed())),
-        "clear-requests-inside" => clear_requests_inside(args.get(1)),
+        "reclaim-requests-inside" => requests_inside(args.get(1), false),
+        "clear-requests-inside" => requests_inside(args.get(1), true),
         "stop-stack" => stop_stack(),
         "self-check" => self_check(),
         "write-units" => units::write(&Layout::from_env()?),
@@ -87,17 +88,15 @@ fn with_machine(
     outcome
 }
 
-/// Inside `podman unshare`, where the requests directory's entries, which
-/// belong to the api's uid, can be removed.
-fn clear_requests_inside(dir: Option<&String>) -> Result<(), String> {
+/// Inside `podman unshare`, where the requests directory can be given back to
+/// the stack user and its entries, which belong to the api's uid, removed.
+fn requests_inside(dir: Option<&String>, clear: bool) -> Result<(), String> {
     let dir = Path::new(dir.ok_or("which directory?")?);
     let expected = Layout::from_env()?.requests_dir();
     if dir != expected {
         return Err(format!("{} is not {}", dir.display(), expected.display()));
     }
-    fsx::clear_untrusted(dir)
-        .map(drop)
-        .map_err(|e| format!("emptying {}: {e}", dir.display()))
+    podman::requests_inside(dir, clear)
 }
 
 /// Stop the stack at shutdown, web and mcp first and postgres last, so the

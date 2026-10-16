@@ -3501,14 +3501,23 @@ release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯�
 | `state/journal`、`state/lock`、`state/updater.log`、`state/updater.env` | 0600 | 日誌、鎖、紀錄、工具路徑 |
 | `backup/` | 0700 | 切換前的 `pg_dump -Fc`（0600），成功或回退完成即刪 |
 | `incoming/` | 0700 | 從新版 api 映像取出的檔案 |
-| `requests/` | 0755 | 掛進 api（`:U,z`），api 寫旗標 |
+| `requests/` | 1777 | 掛進 api（`:z`，不加 `U`），api 寫旗標 |
 | `results/` | 0755 | 掛進 api 與 mcp（`:ro,z`，不加 `U`），更新程式寫結果與切換標記 |
 
 只有最後兩個目錄掛進容器。請求目錄只掛進 `api`，所以從 MCP 寫不了旗標；結果目錄以唯讀
 掛進 `api` 與 `mcp`，兩者都要讀得到切換標記。日誌、資料庫備份、`.env` 與 compose 檔都不在
-任何掛進容器的目錄裡。`:U` 把 `requests/` chown 給
-api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉裡面的東西，清空走
-`podman unshare`；不採「目錄設 1777」那條路，主機上不多一個人人可寫的目錄。
+任何掛進容器的目錄裡。
+
+**請求目錄由 stack 使用者擁有，不加 `U`**：`:U` 把它 chown 給 api 的 uid，api 成了擁有者，
+設成 0700 之後 path unit 就 stat 不到 `request`，重建容器、再掛一次 `:U` 也改不回來，而修正
+只能經由更新送達。權限 1777：api（uid 10001）不是擁有者，建得了、rename 得了、刪得了自己的
+檔案，也開得了目錄來 fsync（所以其他人要有讀取權限），改不了目錄的權限與擁有者；`<root>`
+是 0700，主機上除了 stack 使用者只有掛進它的 api 碰得到它，sticky bit 讓
+`fs.protected_symlinks` 這類共用目錄的保護套用上去。每次開機（取得鎖之後第一件事）與每次
+執行之後（`discard-requests`）都在 `podman unshare` 裡把目錄 chown 回 stack 使用者、拿掉
+POSIX ACL、設回 1777，所以 `:U` 時期留下的目錄會被修好：api 當擁有者時設得了 0700，也設得
+了一份讓之後每個旗標都讀不到的預設 ACL。裡面的檔案是 api 的 subuid 的，清空照樣走
+`podman unshare`。
 
 ### 旗標與結果（api 容器內看到的樣子）
 
@@ -3620,13 +3629,13 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 
 **開機時 stack 只由更新程式啟動**：compose 用 `unless-stopped`，而 rootless 的
 `podman-restart.service` 只啟動 `restart: always` 的容器；任何服務都不得設 `always`，
-否則它會在收尾之前被啟動。順序是先收尾日誌、再啟動 stack；日誌讀不懂或收尾失敗時什麼都
-不啟動、結束碼非零，交給前一版。
+否則它會在收尾之前被啟動。順序是先交回請求目錄、再收尾日誌、再啟動 stack；日誌讀不懂或
+收尾失敗時什麼都不啟動、結束碼非零，交給前一版。
 
 systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一起換：
 
 - `laysi-updater.path` 監看 `requests/request`，觸發 `laysi-updater.service`（oneshot）。
-  `ExecStopPost=` 在每一次結束時清空請求目錄，失敗也一樣，所以執行期間寫入的旗標被丟棄
+  `ExecStopPost=` 在每一次結束時交回並清空請求目錄，失敗也一樣，所以執行期間寫入的旗標被丟棄
   並回 `refused-busy`，不排隊也不合併；`StartLimitIntervalSec=0`。檔案留著的話，path unit
   會在 service 結束時再觸發：#64 在虛擬機量到，執行檔起不來時一輪約 10 毫秒，兩秒內滿
   200 次就撞上 systemd 預設的觸發上限，path unit 轉為 `failed`（`trigger-limit-hit`）不再

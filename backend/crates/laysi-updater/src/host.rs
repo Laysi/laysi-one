@@ -117,6 +117,11 @@ pub trait Host {
     fn self_check(&mut self, binary: &Path) -> HostResult<()>;
     /// Have `binary` write the systemd units, then reload the user manager.
     fn install_units(&mut self, binary: &Path) -> HostResult<()>;
-    /// Empty the requests directory, whose entries belong to the api's uid.
+    /// Give the requests directory back to the stack user with
+    /// [`REQUESTS_MODE`](crate::layout::REQUESTS_MODE), whatever the api did
+    /// to it.
+    fn reclaim_requests(&mut self, dir: &Path) -> HostResult<()>;
+    /// The same, then empty it of the entries the api created, which belong
+    /// to the api's uid.
     fn clear_requests(&mut self, dir: &Path) -> HostResult<()>;
 }

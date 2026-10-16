@@ -6,7 +6,7 @@
 //! fsynced: after a crash a reader finds the old file or the new one, never
 //! half of either.
 //!
-//! The requests directory belongs to the api container. A process in it can
+//! The api container writes into the requests directory. A process in it can
 //! put a symlink, a FIFO or a directory where the request should be, so the
 //! request is opened relative to a directory descriptor, without following
 //! symlinks and without blocking, and read only when it is a regular file.
@@ -33,28 +33,22 @@ fn check(ret: libc::c_int) -> io::Result<libc::c_int> {
 
 /// Create a directory, and its parents, when it is missing, with `mode`.
 ///
-/// An existing one has to be a directory and not a symlink to one. When it is
-/// this user's, it is given `mode`. One that belongs to another uid is the
-/// requests directory after podman chowned it for the api (`:U`); it is
-/// accepted as long as nobody but that owner can write to it.
+/// An existing one has to be this user's directory, not a symlink to one, and
+/// is given `mode`.
 pub fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => {
-            let current = meta.mode() & 0o7777;
-            if meta.uid() == unsafe { libc::geteuid() } {
-                if current != mode {
-                    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-                }
-                Ok(())
-            } else if current & 0o022 == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::other(format!(
-                    "{} belongs to another user and others can write to it",
+            if meta.uid() != unsafe { libc::geteuid() } {
+                return Err(io::Error::other(format!(
+                    "{} belongs to another user",
                     path.display()
-                )))
+                )));
             }
+            if meta.mode() & 0o7777 != mode {
+                fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            }
+            Ok(())
         }
         Ok(_) => Err(io::Error::other(format!(
             "{} exists and is not a directory",
@@ -70,6 +64,50 @@ pub fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Give a directory to this process's uid and gid with exactly `mode` and no
+/// POSIX ACL, without following a symlink to it.
+///
+/// Run on the requests directory inside `podman unshare`, where uid 0 is the
+/// stack user and the api's uid is mapped: whatever an api did to it while it
+/// owned it, the stack user owns it again and the api, no longer the owner,
+/// cannot change it back.
+pub fn reclaim_dir(dir: &Path, mode: u32) -> io::Result<()> {
+    let fd = open_dir_nofollow(dir)?;
+    let raw = fd.as_raw_fd();
+    check(unsafe { libc::fchown(raw, libc::geteuid(), libc::getegid()) })?;
+    remove_acls(raw)?;
+    check(unsafe { libc::fchmod(raw, mode as libc::mode_t) })?;
+    check(unsafe { libc::fsync(raw) }).map(drop)
+}
+
+/// Both ACLs a directory can carry: the one that grants and denies access to
+/// it, and the default one that every entry created in it inherits.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const ACL_XATTRS: [&CStr; 2] = [c"system.posix_acl_access", c"system.posix_acl_default"];
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn remove_acls(fd: RawFd) -> io::Result<()> {
+    for name in ACL_XATTRS {
+        if unsafe { libc::fremovexattr(fd, name.as_ptr()) } < 0 {
+            let e = io::Error::last_os_error();
+            // None set, or a filesystem without ACLs.
+            if !matches!(
+                e.raw_os_error(),
+                Some(libc::ENODATA) | Some(libc::EOPNOTSUPP)
+            ) {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The updater runs on Linux; elsewhere only the tests run.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn remove_acls(_fd: RawFd) -> io::Result<()> {
+    Ok(())
 }
 
 pub fn fsync_dir(dir: &Path) -> io::Result<()> {
@@ -492,6 +530,94 @@ mod tests {
         );
         symlink(&sub, dir.join("link")).unwrap();
         assert!(ensure_dir(&dir.join("link"), 0o700).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reclaimed_directory_is_this_users_with_exactly_the_mode() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempdir("reclaim");
+        let requests = dir.join("requests");
+        fs::create_dir(&requests).unwrap();
+        fs::write(requests.join("request"), "x").unwrap();
+        fs::set_permissions(&requests, fs::Permissions::from_mode(0o2700)).unwrap();
+        reclaim_dir(&requests, 0o1777).unwrap();
+        let meta = fs::metadata(&requests).unwrap();
+        assert_eq!(meta.mode() & 0o7777, 0o1777);
+        assert_eq!(meta.uid(), unsafe { libc::geteuid() });
+        assert_eq!(meta.gid(), unsafe { libc::getegid() });
+        // What is in it is left to the clearing.
+        assert_eq!(fs::read_to_string(requests.join("request")).unwrap(), "x");
+
+        // Neither a symlink to a directory nor what it points to.
+        let elsewhere = dir.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&elsewhere, dir.join("link")).unwrap();
+        assert!(reclaim_dir(&dir.join("link"), 0o1777).is_err());
+        assert_eq!(fs::metadata(&elsewhere).unwrap().mode() & 0o7777, 0o700);
+        assert!(reclaim_dir(&requests.join("request"), 0o1777).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An access ACL can deny the api the directory once it is no longer the
+    /// owner, and a default ACL is inherited by every request it writes and
+    /// can deny the stack user reading them.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn a_reclaimed_directory_has_no_acl() {
+        // ACL_USER_OBJ rwx, ACL_USER 0 ---, ACL_GROUP_OBJ r-x, ACL_MASK r-x,
+        // ACL_OTHER r-x, in the kernel's xattr layout.
+        let entry = |tag: u16, perm: u16, id: u32| {
+            let mut e = tag.to_le_bytes().to_vec();
+            e.extend(perm.to_le_bytes());
+            e.extend(id.to_le_bytes());
+            e
+        };
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for e in [
+            entry(0x01, 7, u32::MAX),
+            entry(0x02, 0, 0),
+            entry(0x04, 5, u32::MAX),
+            entry(0x10, 5, u32::MAX),
+            entry(0x20, 5, u32::MAX),
+        ] {
+            acl.extend(e);
+        }
+        let dir = tempdir("acl");
+        let requests = dir.join("requests");
+        fs::create_dir(&requests).unwrap();
+        let path = cstr(requests.as_os_str()).unwrap();
+        for name in ACL_XATTRS {
+            let set = unsafe {
+                libc::setxattr(
+                    path.as_ptr(),
+                    name.as_ptr(),
+                    acl.as_ptr().cast(),
+                    acl.len(),
+                    0,
+                )
+            };
+            if set < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EOPNOTSUPP) {
+                eprintln!("skipped: {} has no ACLs", dir.display());
+                fs::remove_dir_all(dir).unwrap();
+                return;
+            }
+            check(set).unwrap();
+        }
+
+        reclaim_dir(&requests, 0o1777).unwrap();
+
+        for name in ACL_XATTRS {
+            let got =
+                unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+            assert_eq!(got, -1, "{name:?} is still set");
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENODATA),
+                "{name:?}"
+            );
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 

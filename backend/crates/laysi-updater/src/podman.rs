@@ -21,7 +21,7 @@ use laysi_license_token::update::ToolVersions;
 
 use crate::fsx;
 use crate::host::{Container, Host, HostResult, LocalImage, Service, StackFiles};
-use crate::layout::PROJECT;
+use crate::layout::{PROJECT, REQUESTS_MODE};
 
 const PROJECT_LABEL: &str = "io.podman.compose.project";
 const SERVICE_LABEL: &str = "com.docker.compose.service";
@@ -739,15 +739,38 @@ impl Host for PodmanHost {
         run(reload, Some(Duration::from_secs(60))).map(drop)
     }
 
+    fn reclaim_requests(&mut self, dir: &Path) -> HostResult<()> {
+        self.unshare_self("reclaim-requests-inside", dir)
+    }
+
     fn clear_requests(&mut self, dir: &Path) -> HostResult<()> {
+        self.unshare_self("clear-requests-inside", dir)
+    }
+}
+
+impl PodmanHost {
+    /// This updater again, inside `podman unshare`, on the requests directory.
+    fn unshare_self(&self, subcommand: &str, dir: &Path) -> HostResult<()> {
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut cmd = self.podman();
-        cmd.arg("unshare")
-            .arg(me)
-            .arg("clear-requests-inside")
-            .arg(dir);
+        cmd.arg("unshare").arg(me).arg(subcommand).arg(dir);
         run(cmd, Some(Duration::from_secs(60))).map(drop)
     }
+}
+
+/// What `reclaim-requests-inside` and `clear-requests-inside` do inside
+/// `podman unshare`, where uid 0 is the stack user and the api's uid is
+/// mapped: the requests directory goes back to the stack user with
+/// [`REQUESTS_MODE`] and, when `clear`, is emptied.
+pub fn requests_inside(dir: &Path, clear: bool) -> HostResult<()> {
+    let reclaimed = fsx::reclaim_dir(dir, REQUESTS_MODE)
+        .map_err(|e| format!("reclaiming {}: {e}", dir.display()));
+    if clear {
+        // Emptied even when reclaiming failed: a request left in place starts
+        // the run again.
+        fsx::clear_untrusted(dir).map_err(|e| format!("emptying {}: {e}", dir.display()))?;
+    }
+    reclaimed
 }
 
 #[cfg(test)]

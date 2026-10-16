@@ -447,6 +447,10 @@ impl<'h, H: Host> Machine<'h, H> {
     pub fn boot(&mut self) -> Result<(), String> {
         let _lock = Lock::acquire(&self.layout.lock(), true)
             .map_err(|e| format!("opening the lock: {e}"))?;
+        // The path unit runs as the stack user and sees a request only in a
+        // directory the stack user can search. First, so that a boot that
+        // stops at the journal leaves it right as well.
+        self.reclaim_requests();
         // An update this updater cannot read or finish is left as it is:
         // started on top of it, the stack could run swapped files on a
         // database that was never restored. The boot fails instead, and the
@@ -589,8 +593,8 @@ impl<'h, H: Host> Machine<'h, H> {
     }
 
     /// After every run: a request that arrived while it ran is discarded and
-    /// told so, then the directory is emptied, or the path unit stops
-    /// watching it.
+    /// told so, then the directory is given back to the stack user and
+    /// emptied, or the path unit stops watching it.
     ///
     /// A request this run accepted but never wrote a journal for, because it
     /// died in between, is answered as failed here: nothing will pick it up
@@ -625,6 +629,15 @@ impl<'h, H: Host> Machine<'h, H> {
         }
         let dir = self.layout.requests_dir();
         self.host.clear_requests(&dir)
+    }
+
+    /// [`Host::reclaim_requests`]. A failure is logged and does not stop the
+    /// boot.
+    fn reclaim_requests(&mut self) {
+        let dir = self.layout.requests_dir();
+        if let Err(e) = self.host.reclaim_requests(&dir) {
+            self.log(format!("the requests directory: {e}"));
+        }
     }
 
     fn answer_not_started(&mut self, id: &RequestId) {

@@ -9,9 +9,13 @@
 //!
 //! ```text
 //! inside the api and mcp containers            on the host (stack user)
-//! /var/lib/laysi-update/requests  read-write   <root>/requests   (:U, api only)
+//! /var/lib/laysi-update/requests  read-write   <root>/requests   (1777, api only)
 //! /var/lib/laysi-update/results   read-only    <root>/results    (:ro, api and mcp)
 //! ```
+//!
+//! The requests directory belongs to the stack user. The api, another uid,
+//! can create, rename and remove its own files in it and open it to fsync
+//! it, and cannot change its mode or owner.
 //!
 //! Writing a request: write the encoded [`UpdateRequest`] to a temporary name
 //! in the requests directory (any name other than [`REQUEST_FILE`]), fsync it,

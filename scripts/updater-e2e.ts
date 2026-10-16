@@ -28,7 +28,7 @@
 // release can make it exit at start or never pass.
 
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -48,6 +48,9 @@ const BACKUPS = join(ROOT, "backup");
 // while it exists.
 const MARKER = join(RESULTS, "switching.marker");
 const CONTAINER_MARKER = "/var/lib/laysi-update/results/switching.marker";
+const CONTAINER_REQUESTS = "/var/lib/laysi-update/requests";
+// The uid the api runs as, in backend/Dockerfile and in the fake below.
+const API_UID = 10001;
 const UNITS = ["laysi-updater.path", "laysi-updater.service", "laysi-updater-boot.service", "laysi-updater-recover.service", "laysi-updater-fallback.service"];
 const FINAL = new Set([
   "succeeded",
@@ -355,8 +358,13 @@ function migrations(): string[] {
 }
 
 function requestsLeft(): string[] {
-  // The directory belongs to the api's uid; listing it is allowed.
   return readdirSync(REQUESTS);
+}
+
+/** The requests directory is the stack user's, with the mode the updater gives it. */
+function requestsReclaimed(): boolean {
+  const st = statSync(REQUESTS);
+  return st.uid === process.getuid!() && (st.mode & 0o7777) === 0o1777;
 }
 
 function backups(): string[] {
@@ -434,6 +442,7 @@ function assertSettledOn(version: string) {
   check(services.get("rustfs")?.digest === rustfs.split("@")[1], `rustfs runs the image ${version} names`);
   check(migrations().at(-1) === release.migration || migrations().includes(release.migration), `the database carries ${version}'s migration`);
   check(requestsLeft().length === 0, "the requests directory is empty");
+  check(requestsReclaimed(), "the stack user owns the requests directory, mode 1777");
   check(journalPhase() === undefined, "no journal is left");
   check(!switching(), "no switching marker is left");
   check(unitState("laysi-updater.path") === "active", "the path unit is still watching");
@@ -525,7 +534,7 @@ function buildBase() {
   const dir = mkdtempSync(join(workDir, "base-"));
   writeFileSync(
     join(dir, "Containerfile"),
-    `FROM ${ALPINE}\nRUN apk add --no-cache postgresql-client && adduser -D -u 10001 laysi\n`,
+    `FROM ${ALPINE}\nRUN apk add --no-cache postgresql-client acl && adduser -D -u ${API_UID} laysi\n`,
   );
   podman("pull", "-q", ALPINE);
   podman("build", "-q", "-t", "localhost/laysi-e2e-base", dir);
@@ -659,6 +668,36 @@ async function main() {
   await settledRun();
   check(requestsLeft().length === 0, "a directory in place of the request is cleared");
   check(readFileSync("/etc/passwd", "utf8").length > 0, "nothing outside the directory was touched");
+
+  // The api writes requests into the directory and cannot take it over.
+  check(sh(["podman", "exec", api, "chmod", "700", CONTAINER_REQUESTS], { ok: false }).code !== 0, "the api cannot change the requests directory's mode");
+  check(sh(["podman", "exec", api, "chown", "laysi", CONTAINER_REQUESTS], { ok: false }).code !== 0, "nor its owner");
+  check(sh(["podman", "exec", api, "setfacl", "-m", "u:0:---", CONTAINER_REQUESTS], { ok: false }).code !== 0, "nor give it an ACL");
+  check(requestsReclaimed(), "the requests directory is as it was");
+  let answered = await update("e2e-after-chmod", v1.manifest, 300);
+  check(answered.status === "refused-same-version", "a request after those attempts is answered");
+
+  // A machine installed while the directory was mounted with `U`: podman
+  // chowned it to the api's uid. The next run gives it back.
+  sh(["podman", "unshare", "chown", `${API_UID}:${API_UID}`, REQUESTS]);
+  sh(["podman", "unshare", "chmod", "755", REQUESTS]);
+  check(statSync(REQUESTS).uid !== process.getuid!(), "the requests directory belongs to the api's uid, as `U` left it");
+  answered = await update("e2e-left-by-u-0001", v1.manifest, 300);
+  check(answered.status === "refused-same-version", "a request into it is answered");
+  check(requestsReclaimed(), "and the run gave the directory back to the stack user, mode 1777");
+
+  // An api that owned it could leave a default ACL that hides every later
+  // request from the stack user, and make it 0700, which hides the request
+  // from the path unit. A boot gives it back.
+  sh(["podman", "unshare", "chown", `${API_UID}:${API_UID}`, REQUESTS]);
+  sh(["podman", "exec", api, "setfacl", "-d", "-m", "u:0:---", CONTAINER_REQUESTS]);
+  sh(["podman", "exec", api, "chmod", "700", CONTAINER_REQUESTS]);
+  check(sh(["test", "-x", REQUESTS], { ok: false }).code !== 0, "the stack user can no longer search the requests directory");
+  check(powerCutAndBoot().code === 0, "the boot unit starts the stack");
+  check(requestsReclaimed(), "the boot gave the requests directory back to the stack user, mode 1777");
+  assertSettledOn("v1.0.0");
+  answered = await update("e2e-after-boot-0001", v1.manifest, 300);
+  check(answered.status === "refused-same-version", "a request after the boot is answered");
 
   // --- refusals --------------------------------------------------------------
   let r = await update("e2e-same-version", v1.manifest);

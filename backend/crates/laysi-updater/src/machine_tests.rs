@@ -17,7 +17,7 @@ use crate::envfile::EnvFile;
 use crate::fake::{Behaviour, FakeContainer, FakeHost, ImageSpec, World};
 use crate::fsx;
 use crate::journal::{self, Phase, Release};
-use crate::layout::{Layout, COMPOSE_FILES, IMAGE_SHARE, IMAGE_UPDATER};
+use crate::layout::{Layout, COMPOSE_FILES, IMAGE_SHARE, IMAGE_UPDATER, REQUESTS_MODE};
 use crate::machine::{Config, Machine};
 
 const REGISTRY: &str = "ghcr.io/laysi";
@@ -831,6 +831,52 @@ fn a_request_that_is_not_a_regular_file_is_ignored_and_cleared() {
     rig.run().unwrap();
     assert_eq!(rig.requests_left(), 0);
     assert_eq!(rig.installed(), "v0.1.0");
+}
+
+fn requests_mode(rig: &Rig) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(rig.layout.requests_dir()).unwrap();
+    meta.permissions().mode() & 0o7777
+}
+
+fn set_requests_mode(rig: &Rig, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = rig.layout.requests_dir();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// An api that owned the requests directory could make it 0700, and the
+/// path unit would never see another request. Every boot sets it again, one
+/// that stops at an unreadable journal included.
+#[test]
+fn every_boot_gives_the_requests_directory_its_mode_again() {
+    let rig = Rig::new(v1(), &[]);
+    set_requests_mode(&rig, 0o700);
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(requests_mode(&rig), REQUESTS_MODE);
+
+    set_requests_mode(&rig, 0o700);
+    std::fs::write(
+        rig.layout.journal(),
+        "laysi-updater-journal 1\nphase dancing\n",
+    )
+    .unwrap();
+    rig.world.borrow_mut().reboot();
+    assert!(rig.machine(|m| m.boot()).is_err());
+    assert_eq!(requests_mode(&rig), REQUESTS_MODE);
+}
+
+#[test]
+fn every_run_gives_the_requests_directory_its_mode_again() {
+    let rig = Rig::new(v1(), &[]);
+    // What a machine installed while the directory was mounted with `U` has.
+    set_requests_mode(&rig, 0o755);
+    let id = rig.request("req-reclaim-001", &rig.manifest("v0.1.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RefusedSameVersion);
+    assert_eq!(requests_mode(&rig), REQUESTS_MODE);
+    assert_eq!(rig.requests_left(), 0);
 }
 
 #[test]

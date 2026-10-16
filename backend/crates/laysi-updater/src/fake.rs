@@ -662,10 +662,13 @@ impl Host for FakeHost {
         }
     }
 
+    fn reclaim_requests(&mut self, dir: &Path) -> HostResult<()> {
+        self.tick("reclaim requests");
+        crate::podman::requests_inside(dir, false)
+    }
+
     fn clear_requests(&mut self, dir: &Path) -> HostResult<()> {
         self.tick("clear requests");
-        crate::fsx::clear_untrusted(dir)
-            .map(drop)
-            .map_err(|e| e.to_string())
+        crate::podman::requests_inside(dir, true)
     }
 }
