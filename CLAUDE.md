@@ -1006,6 +1006,13 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 往後移、長度不變。`expected_end()` 因此吃「幾點到」，`overtime_seconds()` 收
 `(arrived, left)`。早到不縮短當天。留空＝不採彈性工時。
 
+**遲到只在工作日判定，已核准的休假把應到時刻往後推**：`late()` 收當天由
+`mark_days` 附上的休假，非工作日（含國定假日與天災停班，補行上班日照判）與整天休假
+回 `None`。休假在最晚上班時刻還沒結束時，應到時刻改為假的結束時刻，落在午休裡再推到
+午休結束，之後才加寬限、不再加彈性。**只認 `approved`**——`mark_days` 為缺勤附上的
+待簽核單在這裡不算。單日的回應（`punch_clock`／`correct_punch`）走 `punch_day()`，
+與月明細同一個答案。
+
 **`update_company_setting` 的空字串是清除，只對 `CLEARABLE_SETTINGS` 有效**
 （`work_start`／`work_end`／`late_grace_minutes`／`flex_window_minutes`）：`late()` 回
 `Option<bool>`，`None` 是「沒問」不是「沒遲到」，所以公司要說得出「還沒決定」，設過
