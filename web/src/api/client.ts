@@ -337,8 +337,29 @@ export const licenseState = z.object({
   partner_no: z.string().optional(),
   expires_on: z.string().optional(),
   not_after: z.string().optional(),
+  running_version: z.string(),
+  released_version: z.string().nullable(),
+  updater_present: z.boolean(),
+  fallback_boot: z.boolean(),
 });
 export type LicenseState = z.infer<typeof licenseState>;
+
+export const updateTicket = z.object({
+  request_id: z.string(),
+  offered_version: z.string(),
+});
+export type UpdateTicket = z.infer<typeof updateTicket>;
+
+export const updateResult = z.object({
+  request_id: z.string(),
+  found: z.boolean(),
+  status: z.string().nullable(),
+  outcome: z.enum(['in_progress', 'succeeded', 'restored', 'unrestored', 'refused']).nullable(),
+  running_version: z.string().nullable(),
+  offered_version: z.string().nullable(),
+  reason: z.string().nullable(),
+});
+export type UpdateResultView = z.infer<typeof updateResult>;
 
 export const meta = z.object({
   company: z.string(),
@@ -1452,6 +1473,7 @@ export const opInfo = z.object({
   risk_label: z.string(),
   summary: z.string(),
   enabled: z.boolean(),
+  ui_only: z.boolean(),
 });
 export type OpInfo = z.infer<typeof opInfo>;
 

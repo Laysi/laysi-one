@@ -194,9 +194,10 @@ pub struct Journal {
     /// rollback by hand and never deleted by the clean-up.
     pub keep: Vec<String>,
     /// Repositories the stack files of the release before `from` name,
-    /// read before step 6 replaces those files. The clean-up after a
-    /// success removes their images too: a third-party image whose
-    /// repository `from` and `to` no longer use is otherwise never removed.
+    /// read before step 6 replaces those files. The clean-ups after a
+    /// success and after a rollback remove their images too: a third-party
+    /// image whose repository `from` and `to` no longer use is otherwise
+    /// never removed.
     pub superseded_repos: Vec<String>,
     /// Rolling back has to put the previous stack files back.
     pub restore_files: bool,
