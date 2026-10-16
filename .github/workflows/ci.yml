@@ -179,7 +179,7 @@ jobs:
       - run: npm run build
         working-directory: web
 
-      # All four read web/src, so they run after the install above.
+      # All of them read web/src, so they run after the install above.
       - run: bun scripts/schema-test.ts
 
       - run: bun scripts/markdown-test.ts
@@ -187,6 +187,8 @@ jobs:
       - run: bun scripts/format-test.ts
 
       - run: bun scripts/nav-test.ts
+
+      - run: bun scripts/update-test.ts
 
       # The release page is the whole distribution, so it has to be written
       # even when the model behind the notes is down.
