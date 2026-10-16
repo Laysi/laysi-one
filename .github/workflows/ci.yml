@@ -197,13 +197,29 @@ jobs:
       - run: bun scripts/regulation-manifest.ts /dev/null
 
   # Its own workspace, so its own job: the licence server shares only the
-  # token payload with the product and needs neither a database nor a
-  # browser toolchain to check.
+  # token payload with the product and needs no browser toolchain to check.
   license-server:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: license-server
+
+    services:
+      # For the tests gated on LICENSE_TEST_DATABASE_URL. They apply schema.sql
+      # themselves through db::connect, so an empty database is all they need,
+      # and with CI set they fail rather than skip when the URL is missing.
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: license
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: license_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U license"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     steps:
       - uses: actions/checkout@v7
@@ -221,3 +237,5 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
       - run: cargo test
+        env:
+          LICENSE_TEST_DATABASE_URL: postgres://license:ci@localhost:5432/license_ci

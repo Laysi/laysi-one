@@ -135,7 +135,7 @@ source_note = "勞工保險條例；2026 年適用之投保薪資分級表"
 
 [payload]
 max_insured_salary = "45800"
-premium_rate = "0.11"      # 普通事故保險費率
+premium_rate = "0.115"     # 普通事故保險費率
 employer_share = "0.70"
 employee_share = "0.20"
 government_share = "0.10"
@@ -146,7 +146,7 @@ government_share = "0.10"
 | domain | payload 欄位 |
 |---|---|
 | `labor_insurance` | `max_insured_salary` `premium_rate` `employer_share` `employee_share` `government_share` |
-| `health_insurance` | `rate=0.0517` `employer_share=0.60` `employee_share=0.30` `avg_dependents=1.61` |
+| `health_insurance` | `rate=0.0517` `employer_share=0.60` `employee_share=0.30` `avg_dependents=1.56` |
 | `pension` | `employer_rate=0.06` |
 | `vat` | `rate=0.05` `period_months=2` |
 | `minimum_wage` | `monthly=29500` `hourly=196` |
@@ -159,13 +159,17 @@ government_share = "0.10"
 | `health_dependents` | `max_counted=3`（員工健保自付額計入的眷口數上限，整數）。依健保法第 18 條第 2 項，自 2013-01-01 起 |
 | `partial_month` | `labor_days_per_month=30` `pension_days_per_month=30`（到職與離職當月按日計時一個月算幾日，28～31 的整數）。依勞保條例施行細則第 28-1 條、勞退條例施行細則第 22 條，自 2005-07-01 起 |
 
-驗證基準（**必須寫成單元測試**，數值取自原型的 `ins` / `pay` 區塊）：
+驗證基準（**必須寫成單元測試**，數值取自勞保局與健保署 2026 年的保險費分攤表）：
 
-- 勞保級距 45,800、非工會身分 → 公司負擔 `45800 × 0.11 × 0.70 = 3527`（四捨五入）
-- 健保級距 53,000 → 公司負擔 `53000 × 0.0517 × 0.60 × 1.61 = 2647`
+- 勞保級距 45,800、非工會身分 → 公司負擔 `45800 × 0.115 × 0.70 = 3687`（四捨五入）
+- 健保級距 53,000 → 公司負擔 `53000 × 0.0517 × 0.60 × 1.56 = 2565`
 - 健保級距 53,000 → 員工自付 `53000 × 0.0517 × 0.30 = 822`（本人一口；每位在保眷屬再加一口，最多計三口，兩名眷屬為 `822 × 3 = 2466`）
-- 勞保級距 45,800 → 員工自付 `45800 × 0.11 × 0.20 = 1008`
+- 勞保級距 45,800 → 員工自付 `45800 × 0.115 × 0.20 = 1053`
 - 提繳工資 53,000 → 公司勞退 `53000 × 0.06 = 3180`
+
+原型的 `ins` / `pay` 區塊印的是 3527／2647／1008：勞保用的是 2023–2024 年的 11%，健保用的是
+平均眷口數 0.61。勞保普通事故費率自 2025-01-01 起為 11.5%（加上就業保險 1% 為 12.5%），
+健保平均眷口數自 2024-01-01 起為 0.56 人。原型的數字不要照著改回去。
 
 ```rust
 pub struct Ruleset { pub domain: String, pub version: String,
@@ -3248,6 +3252,30 @@ offset 會被字串插進 DDL（bind 參數帶不了識別字與字面量），�
   一次，包括刻意把那一版刪掉的那些。它帶著 `.sql` 尾綴，那是更新走 `include_str!` 那
   幾版留下的檔名，留著才不會對已經收過的安裝再送一次。
 
+**已發布的版本寫錯了，更正是一版生效日較晚的新版本**。改那一版的 TOML 只影響新安裝：
+既有安裝已經把它的 `file` 記在 `reg_update`，不會再收一次，收了也是 `DO NOTHING`。
+同一天再發一版也不行——`resolve()` 對相同 `effective_from` 的兩版沒有確定的勝負。
+所以兩件事一起做：改正原本那一版（新安裝從一開始就對），再發一版生效日較晚的更正版。
+2026.1 的勞保普通事故費率（11% → 11.5%）與健保平均眷口數（1.61 → 1.56）就是這樣
+更正的：`backend/regulation/2026-10/` 的 2026.2 版，自 2026-10-01 生效，payload 與
+改正後的 2026.1 相同，`the_october_correction_repeats_the_corrected_2026_figures`
+釘住這件事，所以新安裝到了 10 月金額不會跳動。
+
+**生效日是發布當下還沒結束的那一期首日**：2026.2 在 10 月中發布，10 月的薪資多半還沒算。
+收到更新之前就算過 10 月的安裝，那一期的薪資單會依新規則重算而標「不相符」——還沒過帳
+就作廢重算，已過帳的差額在下一期調整。生效日再往前，碰到的就是已經結束、多半已過帳的期間。
+
+**不改寫既有版本**：`list_payslips` 依期末日現查規則重算每一張薪資單，與存下的金額
+不同就標「不相符」。回溯改寫 2026.1，一到九月每一張薪資單都會標不相符，而已過帳的期間
+作廢不了，那個標記永遠消不掉。生效日之前的差額在下一期調整，與 `void_payroll_run`
+拒絕已過帳期間是同一個原則。
+
+**更正版的檔名也要等於 domain**，所以放在另一個目錄：發布端的鍵是
+`{effective_from}_{檔名}.sql`，`seed_regulations()` 的鍵是 `{effective_from}_{domain}.sql`，
+兩者不一致時新安裝刪掉的版本會在下一次更新回來。新目錄要加進 `laysi-regulation` 的
+`SOURCES`；`every_rule_file_is_listed_once_and_named_after_its_domain` 比對目錄與清單，
+漏了就紅。
+
 `manifest.json` 由 `scripts/regulation-manifest.ts` 從 `backend/regulation/**/*.toml`
 產出，`.github/workflows/regulation-feed.yml` 在那些檔案有變動時推到發布用的公開
 儲存庫。**只有 TOML 一份來源**：它是人編輯的地方，也是 `laysi-regulation` 測試與
@@ -3469,6 +3497,43 @@ release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯�
 識別碼；secret 已經存在就拒絕，因為 GitHub 讀不回 secret，覆寫等於丟掉每一台安裝信任的那
 把金鑰。`scripts/release-manifest-test.ts` 以隨機金鑰跑一次腳本再交給 Rust 驗證，並確認
 `testdata/release-manifest.txt` 與腳本的輸出逐位元組相同（Ed25519 簽章是確定性的）。
+
+### 授權伺服器逐台放行
+
+雷希人員把 release 上的 `release-manifest.txt` 上傳到授權伺服器的「版本」頁（`/releases`），
+與「經銷商」頁同一道門：只有原廠帳號（`is_vendor`）進得去，經銷商不發布版本。上傳當下就用
+`release::verify` 驗章；超過 `MAX_MANIFEST_BYTES`、換行被改成 CRLF、簽章不符或不是信任的
+金鑰都拒絕並說出原因與修法，畫面上不出現金鑰識別碼。**不修補換行**：簽章蓋的是原始位元組，
+修好的那一份等於另一份檔案。存在 `release_manifest`，一個版本一列、原樣保存；同一個版本再傳
+一次相同位元組不動，位元組不同就拒絕——與 `release.yml`「一個版本只建一次」是同一條規則。
+上傳整個請求有上限，檔案邊讀邊數，超過就停，不先整份讀進記憶體。
+
+**放行是 `license.release_version` 一個欄位**，與 `fingerprint`、`version` 同一層，
+NULL＝不放行，外鍵指向 `release_manifest`。一張授權綁一台主機，所以「只放行給一位客戶」
+就是改一列上的一個值，分批放行不需要任何額外機制；這也是 git tag 不自己發布版本的原因——
+一個 tag 是一次建置，不是一項建議。設定與取消在授權詳情的「版本」區塊，同樣只有原廠帳號
+看得到；授權清單對原廠多兩欄，並列已安裝版本（機器最後一次回報的 `license.version`）與
+已放行版本，裝上了或更新過頭的那一格以強調色標出。**比機器上次回報還舊的版本拒絕放行**：
+更新程式本來就不降版，放了也不會有任何效果，畫面上說清楚比靜靜沒有效果好；選單只列得出
+放得了的版本，回報讀不出版本號（從未回報、工作樹建出來的）時不擋。
+
+`POST /v1/license/check` 的成功回應多一個 `release_manifest`，值是存下來的原文：
+
+```json
+{ "token": "…", "nonce": "…", "release_manifest": "laysi-release-manifest 1\nversion v0.1.13\n…" }
+```
+
+沒有放行時**整個欄位不出現**（`skip_serializing_if`），回應與加這個欄位之前相同；拒絕（403）
+的回應一律不帶。清單另有自己的簽章，所以放在授權檔旁邊而不是放進 payload。送出前用這一版
+授權伺服器編進來的 `TRUSTED_KEYS` 再驗一次，驗不過就不送並寫 log——從 `TRUSTED_KEYS` 拿掉
+一把金鑰，就是雷希不再為它簽過的東西背書，而同樣拿掉它的安裝本來也會拒收；授權詳情把那一版
+標成簽章不受信任。授權伺服器只轉送：它產生不出一份清單，因為共用 crate 裡沒有簽章程式，
+私鑰也不在那台機器上。
+
+產品端的 `CheckResponse`（`ops/license.rs`）是一般的 `Deserialize`，沒有
+`deny_unknown_fields`，不認得的欄位直接略過，所以現有的安裝收到這個欄位照常運作。接收、
+保存與更新畫面是 #63。**放行只是提供，不是排程**：裝不裝、什麼時候裝由客戶的系統管理員
+決定，授權伺服器上沒有任何東西會排定或強制一次更新。
 
 ## 主機端更新程式
 
