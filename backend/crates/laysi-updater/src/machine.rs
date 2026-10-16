@@ -1714,11 +1714,13 @@ impl<'h, H: Host> Machine<'h, H> {
     /// `also_repos`, that neither a container, the releases in `releases`,
     /// the references in `j.keep` nor the stack files use.
     ///
-    /// The stack files name what the next boot starts. The containers and
-    /// `j.keep` normally name the same images, but a retried restore has
-    /// removed the containers first, and `j.keep` is empty when podman
-    /// could not list them at step 4. Stack files that cannot be read, or
-    /// that name an image without a digest, leave every image as it is.
+    /// The stack files name what the next boot starts, and a container is no
+    /// proof of that: after a power cut podman removes the containers it
+    /// cannot read, so at the recovery's clean-up none may use the images
+    /// the files name, a retried restore has removed the containers first,
+    /// and `j.keep` is empty when podman could not list them at step 4.
+    /// Stack files that cannot be read, or that name an image without a
+    /// digest, leave every image as it is.
     fn prune_images(&mut self, j: &Journal, releases: &[&Release], also_repos: &[String]) {
         let files = self.stack_files();
         let registry = match self.read_env(&files) {
