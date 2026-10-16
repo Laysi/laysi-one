@@ -36,6 +36,16 @@ on:
       version:
         type: string
         default: latest
+    # Declared one by one so a caller passes exactly these and nothing else.
+    # SMTP_URL may be empty: that turns mail off rather than failing the
+    # deploy, as the step that writes it explains.
+    secrets:
+      DEPLOY_SSH_KEY:
+        required: true
+      LICENSE_SIGNING_KEY:
+        required: true
+      SMTP_URL:
+        required: false
 
 permissions:
   contents: read
