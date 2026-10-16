@@ -14,7 +14,11 @@
 //!   does not start.
 //! - When either fails, `OnFailure=` runs the same thing again, the boot unit
 //!   with the previous updater: an updater that cannot boot must not leave a
-//!   machine nobody can log in to without its stack.
+//!   machine nobody can log in to without its stack. `--fallback` has it
+//!   leave the marker that tells the screen the current updater failed. An
+//!   updater older than the flag ignores it and leaves no marker; only drill
+//!   and development machines have one, since the first updater shipped
+//!   already has the flag.
 
 use std::path::{Path, PathBuf};
 
@@ -171,7 +175,7 @@ pub fn render(layout: &Layout) -> Result<Vec<(&'static str, String)>, String> {
                  [Service]\n\
                  Type=oneshot\n\
                  {environment}\
-                 ExecStart={previous} boot\n\
+                 ExecStart={previous} boot --fallback\n\
                  TimeoutStartSec=infinity\n"
             ),
         ),
@@ -196,7 +200,7 @@ mod tests {
         ));
         assert!(get(BOOT_UNIT).contains("OnFailure=laysi-updater-fallback.service\n"));
         assert!(get(FALLBACK_UNIT).contains(
-            "ExecStart=/home/stack/.local/share/laysi-one/bin/laysi-updater.previous boot\n"
+            "ExecStart=/home/stack/.local/share/laysi-one/bin/laysi-updater.previous boot --fallback\n"
         ));
         for (_, text) in &units {
             assert!(!text.contains("restart"), "nothing restarts on its own");
