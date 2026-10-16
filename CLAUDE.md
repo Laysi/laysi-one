@@ -138,8 +138,9 @@ payload：同一份 TOML 對新安裝是出廠預設值，對既有安裝是更�
 （例如 `leave_pay`），不必等管理員按「檢查法規更新」才算得出薪資。寫入同時以 feed 的同一個
 名稱記進 `reg_update`，feed 不會再送一次，之後刪掉也不會回來。
 
-`laysi-regulation` 的測試把原型畫面上的實際數字（3527／2647／822／1008／3180）
-當基準；對不上就是計算子錯了。
+`laysi-regulation` 的測試以勞保局與健保署 2026 年分攤表的數字（3687／2565／822／1053／3180）
+當基準；對不上就是計算子錯了。原型畫面上的 3527／2647／1008 是 2023–2024 年的勞保費率與
+舊的平均眷口數算出來的，不要照著改回去。
 
 **存進去之前先算一次**：`save_regulation` 用該領域自己的計算子跑 `probe()`，
 少一個欄位的 payload 在存檔當下就被擋下，而不是等到發薪那天。畫面上只有字串葉節點
@@ -328,7 +329,7 @@ workspace**：它多租戶、經銷商與代理商在那裡開立啟動金鑰，
   `bun scripts/function-test.ts && bun scripts/schema-live-test.ts`，後者對著真的伺服器
   逐一呼叫再解析，並且從呼叫端本身讀出操作與 schema 的對應，不另存一份清單。
   純資料的邊界檢查在 `scripts/schema-test.ts`；螢幕上的金額與日期格式在
-  `scripts/format-test.ts`、導覽與網址在 `scripts/nav-test.ts`，四支都在 CI 裡。
+  `scripts/format-test.ts`、導覽與網址在 `scripts/nav-test.ts`、更新卡的狀態機在 `scripts/update-test.ts`，五支都在 CI 裡。
   **`/v1/auth/me`／`/v1/meta`／`/v1/ops` 不是操作但同樣要驗**（`authEnvelope`／`meta`／
   `opList`，都在 `client.ts`），live 檢查以 `mismatchAgainst` 核對。`SessionUser` 這類
   形狀住 `client.ts` 不住 `auth.ts`。風險分級的執行期清單由產生器發成 `RISKS`，不手抄。
@@ -394,7 +395,7 @@ skill，本節只定政策；兩者衝突時以本節為準（內文格式用下
 ## 目前進度
 
 已完成：資料庫不變量、法規引擎、操作註冊表、REST + MCP、
-RustFS 物件儲存，以及 **37 個畫面、143 個操作**，分成三個分頁
+RustFS 物件儲存，以及 **37 個畫面、145 個操作**，分成三個分頁
 （`FINANCE_NAV`／`HR_NAV`／`ME_NAV`）加上左下角帳號列的系統按鈕（`SYSTEM_NAV`）：
 
 - **財務 12 畫面**：總覽／傳票總帳／記帳抽屜、應收／應付／銀行、稅務／固定資產、
@@ -1005,6 +1006,13 @@ ON CONFLICT (id) DO NOTHING` 再建帳號，所以併發只會成功一次，事
 往後移、長度不變。`expected_end()` 因此吃「幾點到」，`overtime_seconds()` 收
 `(arrived, left)`。早到不縮短當天。留空＝不採彈性工時。
 
+**遲到只在工作日判定，已核准的休假把應到時刻往後推**：`late()` 收當天由
+`mark_days` 附上的休假，非工作日（含國定假日與天災停班，補行上班日照判）與整天休假
+回 `None`。休假在最晚上班時刻還沒結束時，應到時刻改為假的結束時刻，落在午休裡再推到
+午休結束，之後才加寬限、不再加彈性。**只認 `approved`**——`mark_days` 為缺勤附上的
+待簽核單在這裡不算。單日的回應（`punch_clock`／`correct_punch`）走 `punch_day()`，
+與月明細同一個答案。
+
 **`update_company_setting` 的空字串是清除，只對 `CLEARABLE_SETTINGS` 有效**
 （`work_start`／`work_end`／`late_grace_minutes`／`flex_window_minutes`）：`late()` 回
 `Option<bool>`，`None` 是「沒問」不是「沒遲到」，所以公司要說得出「還沒決定」，設過
@@ -1127,9 +1135,12 @@ grant，AI 看得到一個叫不動的工具；少一條 permission，deny-by-de
 ## 示範站
 
 `demo.laysi.one` 與 `one.laysi.io` 同一台主機、同一份映像、同一份
-`docker-compose.prod.yml`，只多一層 `docker-compose.demo.yml`。**推 `v*` 標籤就部署
-示範站**（`release.yml` 呼叫 `deploy.yml` 並帶 `target: demo`），正式站維持手動——
+`docker-compose.prod.yml`，只多一層 `docker-compose.demo.yml`。**推正式版的 `v*` 標籤就
+部署示範站**（`release.yml` 呼叫 `deploy.yml` 並帶 `target: demo`），正式站維持手動——
 客戶的安裝什麼時候升級由持有它的人決定，而示範站沒有持有人也沒有東西可失去。
+**發布候選版（`v0.2.0-rc.1`，帶 `-` 的標籤）照樣建置與簽章，但不推 `latest`、release 標成
+prerelease、不部署示範站**，三處由 `scripts/release-workflow-test.ts` 把關，理由在
+`docs/architecture.md`。
 
 **每晚整份重建**（`deploy/reset-demo.sh`，systemd timer 台北時間 04:00）。共用的評估
 安裝沒有第二條路可以維持可用：第一個過帳、簽核或改公司名稱的訪客就改變了第二個訪客

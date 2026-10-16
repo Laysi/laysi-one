@@ -14,7 +14,7 @@ source_note = "勞工保險條例第 13 條、第 15 條；2026 年適用之勞�
 max_insured_salary = "45800"
 # Ordinary risk premium rate, excluding employment and occupational accident
 # insurance.
-premium_rate = "0.11"
+premium_rate = "0.115"
 # Three-way split, summing to 1.
 employer_share = "0.70"
 employee_share = "0.20"

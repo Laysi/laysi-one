@@ -1340,8 +1340,8 @@ mod tests {
 
     /// A reference payslip's deductions must be reproducible from the rules.
     ///
-    /// Labour insurance 1,008, health insurance 822, withheld tax
-    /// 53,000 x 5% = 2,650, total 4,480, net 48,520.
+    /// Labour insurance 1,053, health insurance 822, withheld tax
+    /// 53,000 x 5% = 2,650, total 4,525, net 48,475.
     #[test]
     fn a_reference_payslip_is_reproducible_from_the_rulesets() {
         let p = premiums_on(
@@ -1354,7 +1354,7 @@ mod tests {
             Coverage::WHOLE,
         )
         .unwrap();
-        assert_eq!(p.labor.employee, n("1008"));
+        assert_eq!(p.labor.employee, n("1053"));
         assert_eq!(p.health.employee, n("822"));
 
         let wht = laysi_regulation::resolve("withholding", d(2026, 7, 5)).unwrap();
@@ -1364,12 +1364,12 @@ mod tests {
         assert_eq!(tax, n("2650"), "53,000 × 扣繳率");
 
         let deduction = p.labor.employee + p.health.employee + tax;
-        assert_eq!(deduction, n("4480"), "代扣合計");
-        assert_eq!(n("53000") - deduction, n("48520"), "實發");
+        assert_eq!(deduction, n("4525"), "代扣合計");
+        assert_eq!(n("53000") - deduction, n("48475"), "實發");
 
         // The three employer-side contributions, the other reference values.
-        assert_eq!(p.labor.employer, n("3527"));
-        assert_eq!(p.health.employer, n("2647"));
+        assert_eq!(p.labor.employer, n("3687"));
+        assert_eq!(p.health.employer, n("2565"));
         assert_eq!(p.pension, n("3180"));
     }
 
@@ -1824,10 +1824,10 @@ mod tests {
         .unwrap();
         assert_eq!(c.slip.health_dependents, 2, "6/15 退保的那一位不計");
         assert_eq!(c.slip.health_employee, n("2466"), "822 × 3");
-        assert_eq!(c.slip.health_employer, n("2647"), "公司負擔不隨眷口變動");
+        assert_eq!(c.slip.health_employer, n("2565"), "公司負擔不隨眷口變動");
         assert_eq!(
             c.slip.deduction,
-            n("1008") + n("2466") + n("2650"),
+            n("1053") + n("2466") + n("2650"),
             "勞保、健保與扣繳"
         );
     }
@@ -1863,13 +1863,13 @@ mod tests {
             .slip
         };
         let slip = pay(&e);
-        assert_eq!(slip.labor_employee, n("504"), "1,007.6 × 15/30");
-        assert_eq!(slip.labor_employer, n("1763"), "3,526.6 × 15/30");
+        assert_eq!(slip.labor_employee, n("527"), "1,053.4 × 15/30");
+        assert_eq!(slip.labor_employer, n("1843"), "3,686.9 × 15/30");
         assert_eq!(slip.pension_employer, n("1590"), "3,180 × 15/30");
         assert_eq!(slip.health_employee, Money::ZERO, "退保當月免繳");
         assert_eq!(slip.health_employer, Money::ZERO);
         assert_eq!(slip.health_dependents, 0, "眷屬跟著本人退保");
-        assert_eq!(slip.deduction, n("504") + slip.income_tax);
+        assert_eq!(slip.deduction, n("527") + slip.income_tax);
         assert_eq!((slip.insured_from, slip.insured_to), (from, d(2026, 6, 15)));
         assert_eq!(
             slip.note,
@@ -1879,7 +1879,7 @@ mod tests {
         // Leaving on the last day is insured on it: a whole month.
         e.left_on = Some(to);
         let slip = pay(&e);
-        assert_eq!(slip.labor_employee, n("1008"));
+        assert_eq!(slip.labor_employee, n("1053"));
         assert_eq!(slip.health_employee, n("1644"), "本人與眷屬各 822");
         assert_eq!(slip.note, "");
     }
@@ -1902,11 +1902,11 @@ mod tests {
         )
         .unwrap()
         .slip;
-        assert_eq!(slip.labor_employee, n("369"), "1,007.6 × 11/30");
-        assert_eq!(slip.labor_employer, n("1293"), "3,526.6 × 11/30");
+        assert_eq!(slip.labor_employee, n("386"), "1,053.4 × 11/30");
+        assert_eq!(slip.labor_employer, n("1352"), "3,686.9 × 11/30");
         assert_eq!(slip.pension_employer, n("1166"), "3,180 × 11/30");
         assert_eq!(slip.health_employee, n("822"), "投保當月繳全月");
-        assert_eq!(slip.health_employer, n("2647"));
+        assert_eq!(slip.health_employer, n("2565"));
         assert_eq!(
             slip.note,
             "在職 11／30 日，按曆日比例計薪；勞保與勞退按 11 日計"

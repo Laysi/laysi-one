@@ -16,6 +16,7 @@ rate = "0.0517"
 employer_share = "0.60"
 employee_share = "0.30"
 government_share = "0.10"
-# Average dependants: the employer share uses this multiplier, while the
-# employee pays for their actual dependants, up to three.
-avg_dependents = "1.61"
+# One plus the average number of dependants (0.56 since 2024-01-01): the
+# employer share uses this multiplier, while the employee pays for their actual
+# dependants, up to three.
+avg_dependents = "1.56"

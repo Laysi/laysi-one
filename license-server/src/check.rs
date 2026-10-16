@@ -20,6 +20,7 @@ use serde_json::json;
 use sqlx::Row;
 use std::net::SocketAddr;
 
+use crate::release;
 use crate::token::{self, LicensePayload};
 use crate::Shared;
 
@@ -44,6 +45,13 @@ pub struct CheckRequest {
 pub struct CheckResponse {
     pub token: String,
     pub nonce: String,
+    /// The signed release manifest Laysi has offered this licence, as the
+    /// text that was uploaded. Left out entirely when nothing is offered, so
+    /// that answer is the one installations got before the field existed.
+    /// Signed by the release key rather than this server's, so it travels
+    /// beside the token rather than inside it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_manifest: Option<String>,
 }
 
 /// A refusal, in the words the installation will print.
@@ -91,7 +99,7 @@ pub async fn check(
     }
 }
 
-async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Response> {
+pub(crate) async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Response> {
     // Shape first. A fingerprint that is not 64 hex characters is a client
     // that has not been written yet, not a licence problem.
     if req.fingerprint.len() != 64 || !req.fingerprint.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -104,8 +112,9 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
     let row = sqlx::query(
         "SELECT l.id, l.license_no, l.licensee, l.licensee_tax_id, l.expires_on, l.status,
                 l.fingerprint, l.install_id, l.nonce, p.name AS partner_name, p.partner_no,
-                p.status AS partner_status
+                p.status AS partner_status, m.manifest AS release_manifest
            FROM license l JOIN partner p ON p.id = l.partner_id
+           LEFT JOIN release_manifest m ON m.version = l.release_version
           WHERE l.key_hash = $1
           FOR UPDATE OF l",
     )
@@ -242,17 +251,23 @@ async fn run(s: &Shared, req: &CheckRequest, ip: &str) -> anyhow::Result<Respons
         expires_on,
     };
     let signed = token::mint(&s.signing_key, &payload)?;
+    // Only on an answer that renews the lease: a refused installation has
+    // nothing it may run, let alone a new release of it.
+    let release_manifest =
+        release::forward(&license_no, row.get("release_manifest"), &s.release_keys);
     tx.commit().await?;
 
     tracing::info!(
         license = %license_no,
         first_time,
         continuity_broken,
+        release = release_manifest.is_some(),
         "licence check answered"
     );
     Ok(Json(CheckResponse {
         token: signed,
         nonce,
+        release_manifest,
     })
     .into_response())
 }
@@ -318,6 +333,43 @@ mod tests {
         assert!(!is_reinstall(Some("n1"), Some(old), new));
         // The same database with its nonce lost is a restore, not a reinstall.
         assert!(!is_reinstall(Some(""), Some(old), old));
+    }
+
+    fn keys(answer: &CheckResponse) -> Vec<String> {
+        let value = serde_json::to_value(answer).unwrap();
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn an_answer_with_nothing_released_is_the_answer_installations_always_got() {
+        let answer = CheckResponse {
+            token: "t".into(),
+            nonce: "n".into(),
+            release_manifest: None,
+        };
+        assert_eq!(keys(&answer), ["nonce", "token"]);
+        assert_eq!(
+            serde_json::to_string(&answer).unwrap(),
+            r#"{"token":"t","nonce":"n"}"#
+        );
+    }
+
+    #[test]
+    fn a_released_manifest_travels_as_the_text_that_was_uploaded() {
+        let text = crate::release::tests::manifest("v0.1.13", &crate::release::tests::key(7));
+        let answer = CheckResponse {
+            token: "t".into(),
+            nonce: "n".into(),
+            release_manifest: Some(text.clone()),
+        };
+        assert_eq!(keys(&answer), ["nonce", "release_manifest", "token"]);
+        // Escaped in JSON, and the same bytes once the installation reads the
+        // string back out: newlines and all, nothing normalised.
+        let wire = serde_json::to_string(&answer).unwrap();
+        let read: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(read["release_manifest"].as_str(), Some(text.as_str()));
     }
 
     #[test]

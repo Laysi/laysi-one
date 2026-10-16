@@ -16,6 +16,7 @@
 //! compose stack, exactly as the product does it.
 
 use anyhow::{Context, Result};
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use chrono::{FixedOffset, NaiveDate, Utc};
@@ -30,6 +31,7 @@ mod console;
 mod db;
 mod mail;
 mod ratelimit;
+mod release;
 mod statement;
 mod token;
 
@@ -49,6 +51,10 @@ pub struct State {
     /// passwords on screen instead of mailing them.
     pub mailer: Option<mail::Mailer>,
     pub login_rate_limiter: ratelimit::RateLimiter,
+    /// The release keys this build trusts, from `TRUSTED_KEYS` in the crate
+    /// shared with the product. A field rather than a call at each use so a
+    /// test can trust a key of its own.
+    pub release_keys: Vec<laysi_license_token::release::VerifyingKey>,
 }
 
 impl State {
@@ -139,6 +145,7 @@ async fn main() -> Result<()> {
         signing_key: signing_key()?,
         mailer,
         login_rate_limiter: ratelimit::RateLimiter::new(auth::LOGIN_ATTEMPTS_PER_MINUTE),
+        release_keys: laysi_license_token::release::trusted_keys(),
     });
     // Built now rather than on the first unknown address, which would
     // otherwise answer slower than every one after it.
@@ -167,6 +174,16 @@ async fn main() -> Result<()> {
         .route("/licenses/{no}/unbind", post(console::unbind))
         .route("/licenses/{no}/rekey", post(console::rekey))
         .route("/licenses/{no}/status", post(console::set_status))
+        .route("/licenses/{no}/release", post(console::set_release))
+        // The whole request is capped, not only the file: the console reads
+        // the upload in chunks and stops at the manifest limit, and this keeps
+        // anything far larger from being buffered on the way there.
+        .route(
+            "/releases",
+            get(console::releases)
+                .post(console::upload_manifest)
+                .layer(DefaultBodyLimit::max(console::UPLOAD_BODY_LIMIT)),
+        )
         .route("/billing", get(console::billing))
         .route("/billing/webhook", post(console::set_statement_webhook))
         .route(
