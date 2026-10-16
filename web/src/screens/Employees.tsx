@@ -10,6 +10,7 @@ import {
   issuedEmployeeLogin,
   updatedEmployee,
   maskId,
+  money,
   OpFailed,
   readAsBase64,
   trimDecimal,
@@ -79,6 +80,7 @@ interface FormState {
   employment_type: string;
   pay_basis: string;
   insured_as: string;
+  employment_insured: boolean;
   birthday: string;
   hired_on: string;
   left_on: string;
@@ -101,6 +103,7 @@ const EMPTY_FORM: FormState = {
   employment_type: 'full_time',
   pay_basis: 'monthly',
   insured_as: 'employee',
+  employment_insured: true,
   birthday: '',
   hired_on: '',
   left_on: '',
@@ -201,6 +204,7 @@ export function Employees({
       employment_type: e.employment_type,
       pay_basis: e.pay_basis,
       insured_as: e.insured_as,
+      employment_insured: e.employment_insured,
       birthday: e.birthday ?? '',
       hired_on: e.hired_on,
       left_on: e.left_on ?? '',
@@ -248,10 +252,20 @@ export function Employees({
     if (!bounds || basis !== 'monthly' || !Number.isFinite(wage) || wage <= 0) return null;
     const floored = Math.max(wage, Number(bounds.floor));
     return {
-      labor_insured_salary: String(Math.min(floored, Number(bounds.labor_ceiling))),
+      labor_insured_salary: String(Math.min(floored, Number(bounds.accident_ceiling))),
       health_insured_salary: String(floored),
       pension_wage: String(floored),
     };
+  }
+
+  function laborOverCeiling(value: string): boolean {
+    const bounds = data?.insured_suggestion;
+    return !!bounds && Number(value) > Number(bounds.labor_ceiling);
+  }
+
+  function accidentChargedOn(value: string): string {
+    const bounds = data?.insured_suggestion;
+    return String(Math.min(Number(value), Number(bounds?.accident_ceiling ?? value)));
   }
 
   function setBaseSalary(value: string) {
@@ -401,6 +415,9 @@ export function Employees({
         employment_type: form.employment_type,
         pay_basis: form.pay_basis,
         insured_as: form.insured_as,
+        ...(drawer === 'edit' && current?.employment_insured === form.employment_insured
+          ? {}
+          : { employment_insured: form.employment_insured }),
         birthday: form.birthday || null,
         hired_on: form.hired_on,
         left_on: form.left_on || null,
@@ -888,6 +905,20 @@ export function Employees({
                   </select>
                 </label>
 
+                {form.insured_as === 'employee' && (
+                  <label className="field">
+                    就業保險
+                    <select
+                      className="input"
+                      value={form.employment_insured ? 'yes' : 'no'}
+                      onChange={(e) => setField('employment_insured', e.target.value === 'yes')}
+                    >
+                      <option value="yes">參加</option>
+                      <option value="no">不參加</option>
+                    </select>
+                  </label>
+                )}
+
                 <label className="field">
                   生日
                   <DateField
@@ -974,6 +1005,12 @@ export function Employees({
                     placeholder={drawer === 'edit' ? '尚未設定' : '38200'}
                     onChange={(e) => setField('labor_insured_salary', e.target.value)}
                   />
+                  {data && laborOverCeiling(form.labor_insured_salary) && (
+                    <span className="field__hint num">
+                      勞保與就保按 {money(data.insured_suggestion.labor_ceiling)} 計費，職災按{' '}
+                      {money(accidentChargedOn(form.labor_insured_salary))} 計費
+                    </span>
+                  )}
                 </label>
                 <label className="field">
                   健保投保薪資

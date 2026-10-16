@@ -501,7 +501,8 @@ BLAKE3 比對，但**一律收員工編號、不收自由的文件編號**，並
 交出去：它收 `role_code`。
 
 **投保級距是建議值，不是分級表**：抽屜填本薪時帶入三個投保欄位，帶的是
-`minimum_wage.monthly` 與 `labor_insurance.max_insured_salary` 夾出來的本薪，由
+`minimum_wage.monthly` 與 `occupational_accident.max_insured_salary` 夾出來的本薪（勞保投保
+薪資欄是申報值，職災按它計到職災上限），由
 `list_employees` 的 `insured_suggestion` 給畫面，**前端不得自帶**。**不搬整份分級表
 進來**：那是三份逐年更動的表格，抄錯要到申報那天才出現，所以畫面照實說尚未對照分級表。
 時薪制不帶入（換算月投保薪資要約定工時，系統沒有記錄它）；帶入只覆寫空的、或還停在
@@ -683,12 +684,26 @@ migration 的 CHECK。畫面上存過的眷屬不畫 ×：退保填退保日，�
 （不在 `health_insurance`，理由同 `owner_insurance`），逐口先取整再加總；雇主負擔仍乘
 平均眷口數。口數存進 `payslip.health_dependents`，`list_payslips` 用存下的口數重算。
 
-**到職與離職當月三項保費各算各的**：勞保與勞退按日計，每月以 30 日計（`partial_month`
+**到職與離職當月各項保費各算各的**：勞保（含就保與職災）與勞退按日計，每月以 30 日計（`partial_month`
 domain，30 不進 Rust），在取整之前乘；健保看月底——月中到職收整月、月中離職整月不收，
 眷屬跟著本人。加退保日由 `hired_on`／`left_on` 推導，`Coverage::of_month` 算一次交給
 `premiums_on`。薪資單存下投保期間（`insured_from`／`insured_to`，舊單為 NULL＝整月），
 `list_payslips` 用存下的期間重算，事後更正離職日不會讓舊薪資單對不上。`payroll_run` 另記
 `health_dependents` 與 `partial_month` 的版本（`dependents_version`／`partial_month_version`）。
+
+**就保、職災與墊償基金各是一個 domain，與普通事故各自取整**（`employment_insurance`／
+`occupational_accident`／`wage_arrears`）：把就保併進普通事故的費率再乘，會在部分級距與勞保局
+的表差一元。就保看 `employee.employment_insured`（受僱者預設參加，名冊可設不參加），負責人
+不參加。**職災的行業別災害費率是公司設定 `accident_industry_rate`，不進規則庫**——那是勞保局
+對每個投保單位各自核定的數字（50 人以上另有實績費率）；上下班費率與職災上限才在規則庫。
+沒填照常計薪、職災不計：`payslip.accident_rate` 是 NULL，回應的 `accident_employer` 是 null
+而不是 0，畫面說請系統管理員去填；填了就把當時的費率存進薪資單，`list_payslips` 用它重算。
+名冊的勞保投保薪資是一個申報值兩個上限：普通事故、就保與墊償以 `labor_insurance` 的上限計，
+職災以 `occupational_accident` 的上限計。**墊償基金不分攤到個人**：受僱者的投保薪資全公司
+加總（不足月按日折算）乘費率只取整一次，存在 `payroll_run.wage_arrears` 並計入公司負擔，
+不在薪資單上；同一期補算時記整期金額減去先前各次已記的部分，各次相加等於一次算完。
+`payroll_run` 記三者的版本（`employment_version`／`accident_version`／
+`wage_arrears_version`，同有同無）。
 
 **`employee.id_no` 完整保存**，寫入時驗一個英文字母加九碼數字的檢查碼。
 勞保申報與扣繳憑單都要完整字號，擋著只會讓人資另外開一份 Excel。**遮罩是顯示層

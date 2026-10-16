@@ -1,0 +1,28 @@
+# Occupational accident insurance
+#
+# Borne by the employer in full, for an employee and for an owner who actually
+# works alike (art. 19 subpara. 1 of the Labour Occupational Accident Insurance
+# and Protection Act). The premium is the insured salary times the industry rate
+# plus the commuting rate (art. 16), charged by the day in a month of enrolment
+# or withdrawal like labour insurance, and rounded once.
+#
+# Only the commuting rate is here. The industry rate is the one the bureau
+# assigns to this company, and for an employer of fifty or more it is
+# experience rated every year, so it is a fact about the company kept in its
+# settings, as the filed brackets are kept on the roster, rather than a table
+# here.
+#
+# The ceiling is this insurance's own. The company files one salary and the
+# bureau grades it twice: labour and employment insurance up to the labour
+# ceiling, this insurance up to the one below.
+
+domain = "occupational_accident"
+version = "2025.1"
+effective_from = "2025-01-01"
+source_note = "勞工職業災害保險及保護法第 16 條、第 17 條、第 19 條；勞工職業災害保險適用行業別及費率表（2025 年 1 月 1 日施行）；勞工職業災害保險投保薪資分級表"
+
+[payload]
+# Insured salary ceiling. Salaries above it are charged at the ceiling.
+max_insured_salary = "72800"
+# One rate for every industry, added to the company's industry rate.
+commuting_rate = "0.0007"

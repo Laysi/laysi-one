@@ -1,7 +1,7 @@
 //! HR compliance checks and annual withholding statements.
 //!
 //! [`GetHrCompliance`] splits every item into `checked` and `passed`. Minimum
-//! wage, the labour insurance ceiling and leave entitlement have usable rules,
+//! wage, the insured salary ceilings and leave entitlement have usable rules,
 //! so they are checked per employee with the ruleset attached. The full
 //! insured-salary brackets and overtime multipliers do not, so they return
 //! `checked = false` with a `not_checked_reason`.
@@ -34,7 +34,7 @@ use crate::ops::attendance::{
     annual_balances, punch_days, summarise, OvertimeLimits, WorkSchedule,
 };
 use crate::ops::employees::{pay_basis_label, BASIS_HOURLY, INSURED_EMPLOYEE, INSURED_OWNER};
-use crate::ops::insurance::{missing_brackets, premiums_on, ruleset_json, Coverage};
+use crate::ops::insurance::{missing_brackets, premiums_on, ruleset_json, Coverage, Enrolment};
 use crate::ops::payroll::SALARY_INCOME_CODE;
 use crate::ops::tax::{code_rule, withhold};
 use crate::{money, parse, schema_of, OpCtx, OpError, OpOutcome, Operation, Risk};
@@ -136,7 +136,7 @@ impl Operation for GetHrCompliance {
     }
 
     fn summary(&self) -> &'static str {
-        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、勞保計費上限、延長工時上限（已核准的加班申請與打卡推算各一項）與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。"
+        "讀人資法遵檢核表：逐人檢查最低工資、投保級距有沒有填、投保薪資計費上限、延長工時上限（已核准的加班申請與打卡推算各一項）與特休餘額。規則不足而未檢查的項目明確標示，不視為通過。"
     }
 
     fn input_schema(&self) -> Value {
@@ -160,12 +160,16 @@ impl Operation for GetHrCompliance {
         let annual_rs = laysi_regulation::resolve("annual_leave", as_of)?;
         let premium_rules = premiums_on(
             as_of,
-            INSURED_EMPLOYEE,
-            Money::ZERO,
-            Money::ZERO,
-            Money::ZERO,
-            0,
+            &Enrolment {
+                insured_as: INSURED_EMPLOYEE,
+                employment_insured: true,
+                labor_insured: Money::ZERO,
+                health_insured: Money::ZERO,
+                pension_wage: Money::ZERO,
+                covered_dependants: 0,
+            },
             Coverage::WHOLE,
+            None,
         )?;
 
         let mut minimum_failures = Vec::new();
@@ -197,30 +201,33 @@ impl Operation for GetHrCompliance {
         let unfiled_failures = unfiled_bracket_failures(&staff);
         let unfiled_failure_count = unfiled_failures.len();
 
-        // Only the labour ceiling is read here, and neither dependants nor
-        // the days of the month move it, so neither is taken.
+        // The labour bracket is the one salary filed, graded up to the labour
+        // ceiling for labour insurance and up to the occupational accident
+        // ceiling for that insurance, so only a figure above the second is
+        // above every schedule. Only the ceilings are read here, and neither
+        // dependants nor the days of the month move them.
         let mut labor_cap_failures = Vec::new();
         for employee in &staff {
             let premiums = premiums_on(
                 as_of,
-                &employee.insured_as,
-                employee.labor_insured_salary,
-                employee.health_insured_salary,
-                employee.pension_wage,
-                0,
+                &Enrolment {
+                    covered_dependants: 0,
+                    ..Enrolment::of(employee, as_of)
+                },
                 Coverage::WHOLE,
+                None,
             )?;
-            if premiums.labor_capped {
+            if employee.labor_insured_salary > premiums.accident_base {
                 labor_cap_failures.push(json!({
                     "emp_no": employee.emp_no,
                     "name": employee.name,
                     "reported": employee.labor_insured_salary.to_string(),
-                    "charged_on": premiums.labor_base.to_string(),
-                    "difference": (employee.labor_insured_salary - premiums.labor_base).to_string(),
+                    "charged_on": premiums.accident_base.to_string(),
+                    "difference": (employee.labor_insured_salary - premiums.accident_base).to_string(),
                     "message": format!(
-                        "申報勞保投保薪資 {}，規則計費只採 {}，請確認申報級距",
+                        "申報投保薪資 {}，高於職災保險上限 {}，請確認申報級距",
                         money(employee.labor_insured_salary),
-                        money(premiums.labor_base)
+                        money(premiums.accident_base)
                     ),
                 }));
             }
@@ -408,10 +415,13 @@ impl Operation for GetHrCompliance {
                 "scope_note": "本薪為 0 的員工不列入。",
             }),
             json!({
-                "name": "勞保申報值與計費上限",
+                "name": "投保薪資申報值與計費上限",
                 "checked": true,
                 "passed": labor_cap_failures.is_empty(),
-                "rulesets": [ruleset_json(premium_rules.labor_rs)],
+                "rulesets": [
+                    ruleset_json(premium_rules.labor_rs),
+                    ruleset_json(premium_rules.accident_rs),
+                ],
                 "failures": labor_cap_failures,
                 "screen": SCREEN_EMPLOYEES,
             }),
@@ -466,11 +476,12 @@ impl Operation for GetHrCompliance {
                 "完整勞健保投保級距與勞退提繳工資級距",
                 vec![
                     ruleset_json(premium_rules.labor_rs),
+                    ruleset_json(premium_rules.accident_rs),
                     ruleset_json(premium_rules.health_rs),
                     ruleset_json(premium_rules.pension_rs),
                 ],
                 None,
-                "規則庫只收錄費率、分攤方式與勞保計費上限，沒有投保薪資分級表，級距請自行核對。",
+                "規則庫只收錄費率、分攤方式與勞保、職災的計費上限，沒有投保薪資分級表，級距請自行核對。",
             ),
             unchecked_check(
                 "國定假日與例假出勤工資",

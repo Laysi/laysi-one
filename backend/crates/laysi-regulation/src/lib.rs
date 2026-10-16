@@ -102,6 +102,18 @@ const SOURCES: &[(&str, &str)] = &[
         "2005/partial_month.toml",
         include_str!("../../../regulation/2005/partial_month.toml"),
     ),
+    (
+        "2003/employment_insurance.toml",
+        include_str!("../../../regulation/2003/employment_insurance.toml"),
+    ),
+    (
+        "2025/occupational_accident.toml",
+        include_str!("../../../regulation/2025/occupational_accident.toml"),
+    ),
+    (
+        "2026/wage_arrears.toml",
+        include_str!("../../../regulation/2026/wage_arrears.toml"),
+    ),
 ];
 
 /// Regulation domains the system knows. A rule file's `domain` must be one
@@ -120,6 +132,9 @@ pub const DOMAINS: &[&str] = &[
     "leave_pay",
     "health_dependents",
     "partial_month",
+    "employment_insurance",
+    "occupational_accident",
+    "wage_arrears",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -334,6 +349,13 @@ pub struct Contribution {
 }
 
 impl Contribution {
+    /// Nothing charged to anyone.
+    pub const ZERO: Contribution = Contribution {
+        employer: Money::ZERO,
+        employee: Money::ZERO,
+        government: Money::ZERO,
+    };
+
     pub fn total(&self) -> Money {
         self.employer + self.employee + self.government
     }
@@ -435,6 +457,70 @@ pub fn labor_insurance(
         employee: to_dollars(part.of(premium * rs.decimal("employee_share")?)),
         government: to_dollars(part.of(premium * rs.decimal("government_share")?)),
     })
+}
+
+/// Employment insurance premium for `part` of a month.
+///
+/// `charged_on` is the labour insurance salary after the labour ceiling: the
+/// bracket and the ceiling are labour insurance's, and only the rate and the
+/// split are this ruleset's. Each share is rounded on its own and apart from
+/// the ordinary risk premium, as the bureau bills them: adding the two rates
+/// first differs by a dollar on some brackets.
+pub fn employment_insurance(
+    rs: &Ruleset,
+    charged_on: Money,
+    part: MonthPart,
+) -> Result<Contribution, RegulationError> {
+    rs.expect_domain("employment_insurance")?;
+    let premium = charged_on * rs.decimal("rate")?;
+    Ok(Contribution {
+        employer: to_dollars(part.of(premium * rs.decimal("employer_share")?)),
+        employee: to_dollars(part.of(premium * rs.decimal("employee_share")?)),
+        government: to_dollars(part.of(premium * rs.decimal("government_share")?)),
+    })
+}
+
+/// Occupational accident insurance premium for `part` of a month, borne by
+/// the employer in full.
+///
+/// `industry_rate` is the rate the bureau assigned to the company, as a
+/// fraction. The commuting rate is added to it and the premium rounded once,
+/// since the bill states the two as one rate. Salary above this insurance's
+/// own ceiling is charged at the ceiling.
+pub fn occupational_accident(
+    rs: &Ruleset,
+    industry_rate: Money,
+    insured_salary: Money,
+    part: MonthPart,
+) -> Result<Money, RegulationError> {
+    rs.expect_domain("occupational_accident")?;
+    let cap = rs.decimal("max_insured_salary")?;
+    let rate = industry_rate + rs.decimal("commuting_rate")?;
+    Ok(to_dollars(part.of(insured_salary.min(cap) * rate)))
+}
+
+/// The arrears wage payment fund for one month, on the labour insurance
+/// salary of everyone it is contributed for, each after the labour ceiling.
+///
+/// The bureau's arithmetic: a whole month adds the salary, a part of a month
+/// adds the salary for its days rounded to four places, and the rate is
+/// applied once to the total. Rounding each person's contribution instead
+/// differs from the bill by up to half a dollar a person.
+pub fn wage_arrears(
+    rs: &Ruleset,
+    salaries: impl IntoIterator<Item = (Money, MonthPart)>,
+) -> Result<Money, RegulationError> {
+    rs.expect_domain("wage_arrears")?;
+    let total: Money = salaries
+        .into_iter()
+        .map(|(salary, part)| match part.0 {
+            None => salary,
+            Some(_) => part
+                .of(salary)
+                .round_dp_with_strategy(4, RoundingStrategy::MidpointAwayFromZero),
+        })
+        .sum();
+    Ok(to_dollars(total * rs.decimal("rate")?))
 }
 
 /// How many of a person's covered dependants are charged: all of them, up to
@@ -996,6 +1082,163 @@ mod tests {
             assert_eq!(c.employer, dec!(3687), "公司負擔勞保（{as_of}）");
             assert_eq!(c.employee, dec!(1053), "員工自付勞保（{as_of}）");
         }
+    }
+
+    /// The bureau's 2026 tables bill the ordinary risk premium and employment
+    /// insurance apart, each share rounded on its own. Adding the two rates
+    /// first gives 2,581 for the employer at 29,500 and 1,003 for the employee
+    /// at 40,100, a dollar off the combined table's 2,582 and 1,002.
+    #[test]
+    fn employment_insurance_is_rounded_apart_from_the_ordinary_premium() {
+        let as_of = d(2026, 7, 25);
+        let labor = resolve("labor_insurance", as_of).unwrap();
+        let employment = resolve("employment_insurance", as_of).unwrap();
+        for (bracket, ordinary, extra, both) in [
+            (
+                dec!(29500),
+                (dec!(679), dec!(2375)),
+                (dec!(59), dec!(207)),
+                (dec!(738), dec!(2582)),
+            ),
+            (
+                dec!(40100),
+                (dec!(922), dec!(3228)),
+                (dec!(80), dec!(281)),
+                (dec!(1002), dec!(3509)),
+            ),
+            (
+                dec!(45800),
+                (dec!(1053), dec!(3687)),
+                (dec!(92), dec!(321)),
+                (dec!(1145), dec!(4008)),
+            ),
+        ] {
+            let l = labor_insurance(labor, bracket, MonthPart::WHOLE).unwrap();
+            let e = employment_insurance(employment, bracket, MonthPart::WHOLE).unwrap();
+            assert_eq!((l.employee, l.employer), ordinary, "普通事故 {bracket}");
+            assert_eq!((e.employee, e.employer), extra, "就業保險 {bracket}");
+            assert_eq!(
+                (l.employee + e.employee, l.employer + e.employer),
+                both,
+                "合計表 {bracket}"
+            );
+        }
+
+        let rate = labor.decimal("premium_rate").unwrap() + employment.decimal("rate").unwrap();
+        let combined = |bracket: Money, share: &str| {
+            to_dollars(bracket * rate * labor.decimal(share).unwrap())
+        };
+        assert_eq!(combined(dec!(29500), "employer_share"), dec!(2581));
+        assert_eq!(combined(dec!(40100), "employee_share"), dec!(1003));
+    }
+
+    /// The days of a month of enrolment or withdrawal, from the bureau's
+    /// employment insurance table: 15 days at 45,800 is 46 and 160, 11 days
+    /// is 34 and 118.
+    #[test]
+    fn employment_insurance_charges_part_of_a_month_by_the_day() {
+        let rs = resolve("employment_insurance", d(2026, 10, 31)).unwrap();
+        let days = resolve("partial_month", d(2026, 10, 31)).unwrap();
+        let oct = (d(2026, 10, 1), d(2026, 10, 31));
+        let part = |from, to| month_part(days, "labor_days_per_month", oct.0, oct.1, from, to);
+        let fifteen = part(oct.0, d(2026, 10, 15)).unwrap();
+        let eleven = part(d(2026, 10, 20), oct.1).unwrap();
+        assert_eq!((fifteen.days(), eleven.days()), (Some(15), Some(11)));
+
+        let c = employment_insurance(rs, dec!(45800), fifteen).unwrap();
+        assert_eq!((c.employee, c.employer), (dec!(46), dec!(160)));
+        let c = employment_insurance(rs, dec!(45800), eleven).unwrap();
+        assert_eq!((c.employee, c.employer), (dec!(34), dec!(118)));
+    }
+
+    /// The rate and the split come from the payload and nowhere else.
+    #[test]
+    fn employment_insurance_follows_its_ruleset() {
+        let rs = resolve("employment_insurance", d(2026, 7, 25)).unwrap();
+        let mut doubled = rs.clone();
+        doubled.payload["rate"] = "0.02".into();
+        let c = employment_insurance(&doubled, dec!(45800), MonthPart::WHOLE).unwrap();
+        assert_eq!((c.employee, c.employer), (dec!(183), dec!(641)));
+        assert!(employment_insurance(
+            resolve("labor_insurance", d(2026, 7, 25)).unwrap(),
+            dec!(45800),
+            MonthPart::WHOLE
+        )
+        .is_err());
+    }
+
+    /// One rate on one salary, rounded once: an industry rate of 0.07% and the
+    /// commuting rate make the 0.14% a bill prints, and 72,800 at 0.14% is
+    /// 101.92. Salary above the ceiling is charged at the ceiling.
+    #[test]
+    fn occupational_accident_adds_the_commuting_rate_and_caps_the_salary() {
+        let rs = resolve("occupational_accident", d(2026, 7, 25)).unwrap();
+        let industry = dec!(0.0007);
+        let whole = |salary| occupational_accident(rs, industry, salary, MonthPart::WHOLE);
+        assert_eq!(whole(dec!(29500)).unwrap(), dec!(41));
+        assert_eq!(whole(dec!(45800)).unwrap(), dec!(64));
+        assert_eq!(whole(dec!(72800)).unwrap(), dec!(102));
+        assert_eq!(whole(dec!(100000)).unwrap(), dec!(102), "按上限計");
+        assert_eq!(whole(Money::ZERO).unwrap(), Money::ZERO);
+
+        let days = resolve("partial_month", d(2026, 10, 31)).unwrap();
+        let oct = (d(2026, 10, 1), d(2026, 10, 31));
+        let fifteen = month_part(
+            days,
+            "labor_days_per_month",
+            oct.0,
+            oct.1,
+            oct.0,
+            d(2026, 10, 15),
+        )
+        .unwrap();
+        assert_eq!(
+            occupational_accident(rs, industry, dec!(72800), fifteen).unwrap(),
+            dec!(51),
+            "101.92 × 15 / 30"
+        );
+
+        let mut changed = rs.clone();
+        changed.payload["commuting_rate"] = "0.0008".into();
+        assert_eq!(
+            occupational_accident(&changed, industry, dec!(72800), MonthPart::WHOLE).unwrap(),
+            dec!(109)
+        );
+    }
+
+    /// The bureau applies the rate to the month's total: four people at
+    /// 45,800 contribute 46, where four rounded shares would be 44. A part of
+    /// a month counts the salary for its days, to four places, as the bureau's
+    /// worksheet does.
+    #[test]
+    fn wage_arrears_applies_the_rate_once_to_the_total() {
+        let rs = resolve("wage_arrears", d(2026, 7, 25)).unwrap();
+        let whole = |salary| (salary, MonthPart::WHOLE);
+        assert_eq!(wage_arrears(rs, [whole(dec!(45800)); 4]).unwrap(), dec!(46));
+        assert_eq!(wage_arrears(rs, [whole(dec!(45800))]).unwrap(), dec!(11));
+        assert_eq!(wage_arrears(rs, []).unwrap(), Money::ZERO);
+
+        let days = resolve("partial_month", d(2026, 10, 31)).unwrap();
+        let oct = (d(2026, 10, 1), d(2026, 10, 31));
+        let part =
+            |from, to| month_part(days, "labor_days_per_month", oct.0, oct.1, from, to).unwrap();
+        // 386,940 + 14,703.3333 + 19,100 + 24,000 + 30,300 = 475,043.3333,
+        // the worksheet's own example less its multi-entry row.
+        let month = [
+            whole(dec!(386940)),
+            (dec!(40100), part(d(2026, 10, 16), d(2026, 10, 26))),
+            (dec!(38200), part(d(2026, 10, 16), oct.1)),
+            (dec!(24000), part(oct.0, d(2026, 10, 30))),
+            whole(dec!(30300)),
+        ];
+        assert_eq!(wage_arrears(rs, month).unwrap(), dec!(119), "118.76");
+
+        let mut changed = rs.clone();
+        changed.payload["rate"] = "0.0005".into();
+        assert_eq!(
+            wage_arrears(&changed, [whole(dec!(45800)); 4]).unwrap(),
+            dec!(92)
+        );
     }
 
     /// The insurer's 2026 premium table. The prototype screen shows 2,647,

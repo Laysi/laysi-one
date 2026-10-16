@@ -68,11 +68,27 @@ export function Insurance({ onToast, reloadKey }: Props) {
 
       {data && (
         <>
-          <div className="stat-grid stat-grid--five">
+          <div className="stat-grid stat-grid--four">
             <div className="card stat-card">
               <div className="stat-card__kicker">勞保</div>
               <div className="stat-card__value num">{money(data.labor_employer)}</div>
               <div className="stat-card__note num">員工自付 {money(data.labor_employee)}</div>
+            </div>
+            <div className="card stat-card">
+              <div className="stat-card__kicker">就保</div>
+              <div className="stat-card__value num">{money(data.employment_employer)}</div>
+              <div className="stat-card__note num">員工自付 {money(data.employment_employee)}</div>
+            </div>
+            <div className="card stat-card">
+              <div className="stat-card__kicker">職災</div>
+              <div className="stat-card__value num">
+                {data.accident_employer === null ? '—' : money(data.accident_employer)}
+              </div>
+              <div className="stat-card__note num">
+                {data.accident_rate
+                  ? `費率 ${data.accident_rate.total_percent}% · 全額由公司負擔`
+                  : '尚未設定費率'}
+              </div>
             </div>
             <div className="card stat-card">
               <div className="stat-card__kicker">健保</div>
@@ -83,6 +99,11 @@ export function Insurance({ onToast, reloadKey }: Props) {
               <div className="stat-card__kicker">勞退</div>
               <div className="stat-card__value num">{money(data.pension_employer)}</div>
               <div className="stat-card__note num">全額由雇主提繳，員工不負擔</div>
+            </div>
+            <div className="card stat-card">
+              <div className="stat-card__kicker">墊償基金</div>
+              <div className="stat-card__value num">{money(data.wage_arrears)}</div>
+              <div className="stat-card__note num">全公司合計，不分攤到個人</div>
             </div>
             <div className="card stat-card stat-card--total">
               <div className="stat-card__kicker">公司負擔合計</div>
@@ -97,13 +118,15 @@ export function Insurance({ onToast, reloadKey }: Props) {
             <div className="card stat-card">
               <div className="stat-card__kicker">員工自付合計</div>
               <div className="stat-card__value num">{money(data.employee_total)}</div>
-              <div className="stat-card__note num">自薪資扣除的兩項</div>
+              <div className="stat-card__note num">勞保、就保與健保</div>
             </div>
           </div>
 
           {data.missing_bracket_note && (
             <p className="recon recon--off">{data.missing_bracket_note}</p>
           )}
+
+          {data.accident_rate_note && <p className="recon recon--off">{data.accident_rate_note}</p>}
 
           {!data.posted_to_ledger && <p className="recon recon--off">{data.posting_note}</p>}
 
@@ -133,6 +156,8 @@ export function Insurance({ onToast, reloadKey }: Props) {
                   <th>員工</th>
                   <th className="align-right">勞保級距</th>
                   <th className="align-right">勞保</th>
+                  <th className="align-right">就保</th>
+                  <th className="align-right">職災</th>
                   <th className="align-right">健保級距</th>
                   <th className="align-right">健保</th>
                   <th className="align-right">勞退</th>
@@ -180,6 +205,36 @@ export function Insurance({ onToast, reloadKey }: Props) {
                             自付 {money(r.labor_employee)}
                             {!!r.labor_days && ` · 按 ${r.labor_days} 日計`}
                           </span>
+                        </>
+                      )}
+                    </td>
+                    <td className="num align-right">
+                      {r.labor_bracket_missing ? (
+                        <span className="cell-muted">—</span>
+                      ) : !r.employment_insured ? (
+                        <span className="cell-muted">不參加</span>
+                      ) : (
+                        <>
+                          {money(r.employment_employer)}
+                          <span className="cell-hint cell-hint--block num">
+                            自付 {money(r.employment_employee)}
+                          </span>
+                        </>
+                      )}
+                    </td>
+                    <td className="num align-right">
+                      {r.labor_bracket_missing ? (
+                        <span className="cell-muted">—</span>
+                      ) : r.accident_employer === null ? (
+                        <span className="cell-muted">未計</span>
+                      ) : (
+                        <>
+                          {money(r.accident_employer)}
+                          {r.accident_charged_on !== r.labor_charged_on && (
+                            <span className="cell-hint cell-hint--block num">
+                              按 {money(r.accident_charged_on)} 計費
+                            </span>
+                          )}
                         </>
                       )}
                     </td>
@@ -308,6 +363,43 @@ export function Insurance({ onToast, reloadKey }: Props) {
                     {money(quote.labor.employee)} · {money(quote.labor.government)}
                   </span>
                 </div>
+                {quote.employment.insured ? (
+                  <>
+                    <div className="doc-row">
+                      <span>
+                        就保（率 <span className="num">{quote.employment.rate_percent}%</span>）
+                      </span>
+                      <span className="num">{money(quote.employment.employer)}</span>
+                    </div>
+                    <div className="doc-row doc-row--sub">
+                      <span>員工自付 · 政府補助</span>
+                      <span className="num">
+                        {money(quote.employment.employee)} · {money(quote.employment.government)}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="doc-row">
+                    <span>就保</span>
+                    <span className="cell-muted">不參加</span>
+                  </div>
+                )}
+                <div className="doc-row">
+                  {quote.accident.employer === null ? (
+                    <>
+                      <span>職災</span>
+                      <span className="cell-muted">尚未設定費率</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>
+                        職災（率 <span className="num">{quote.accident.rate_percent}%</span>，計費基礎{' '}
+                        <span className="num">{money(quote.accident.charged_on)}</span>）
+                      </span>
+                      <span className="num">{money(quote.accident.employer)}</span>
+                    </>
+                  )}
+                </div>
                 <div className="doc-row">
                   <span>
                     健保（率 {quote.health.rate_percent}%
@@ -342,9 +434,12 @@ export function Insurance({ onToast, reloadKey }: Props) {
           <RulesetNote
             items={[
               { label: '勞保', version: data.rulesets.labor.version },
+              { label: '就保', version: data.rulesets.employment.version },
+              { label: '職災', version: data.rulesets.accident.version },
               { label: '健保', version: data.rulesets.health.version },
               { label: '健保眷屬計費', version: data.rulesets.dependents.version },
               { label: '勞退', version: data.rulesets.pension.version },
+              { label: '墊償基金', version: data.rulesets.wage_arrears.version },
               ...(data.rulesets.owner
                 ? [{ label: '負責人投保', version: data.rulesets.owner.version }]
                 : []),

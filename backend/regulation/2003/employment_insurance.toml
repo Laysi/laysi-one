@@ -1,0 +1,29 @@
+# Employment insurance
+#
+# Charged on the labour insurance salary after the labour ceiling: art. 40 of
+# the Employment Insurance Act applies the Labour Insurance Act to the insured
+# salary and to how the premium is shared, so the bracket and the ceiling are
+# the ones in `labor_insurance` and are not repeated here. The rate is art. 8,
+# 1% since the Act took effect.
+#
+# A domain of its own rather than a field in `labor_insurance`: the bureau bills
+# and rounds the two premiums separately, and a field there means a second
+# version effective the same day, which `resolve()` cannot choose between.
+# Effective from the day the Act took effect, so a period recomputed under any
+# labour insurance version still finds it.
+#
+# Not everyone in labour insurance is in this one. An owner is not (art. 5
+# covers employees), and neither are some foreign nationals or people already
+# drawing an old-age benefit; the roster says who is.
+
+domain = "employment_insurance"
+version = "2003.1"
+effective_from = "2003-01-01"
+source_note = "就業保險法第 5 條、第 8 條、第 40 條；勞工保險條例第 15 條"
+
+[payload]
+rate = "0.01"
+# Three-way split, summing to 1.
+employer_share = "0.70"
+employee_share = "0.20"
+government_share = "0.10"

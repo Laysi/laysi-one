@@ -55,6 +55,9 @@ fn domain_label(domain: &str) -> &'static str {
         "leave_pay" => "請假工資",
         "health_dependents" => "健保眷屬計費",
         "partial_month" => "不足月計費",
+        "employment_insurance" => "就業保險",
+        "occupational_accident" => "職業災害保險",
+        "wage_arrears" => "積欠工資墊償基金",
         other => {
             debug_assert!(false, "法規領域 {other} 沒有顯示名稱");
             "其他"
@@ -74,6 +77,7 @@ const FIELDS: &[(&str, &str)] = &[
     ("max_insured_salary", "投保薪資上限"),
     ("premium_rate", "普通事故保險費率"),
     ("rate", "費率"),
+    ("commuting_rate", "上下班災害費率"),
     ("avg_dependents", "平均眷口數"),
     ("max_counted", "計費眷口數上限"),
     ("labor_days_per_month", "勞保：每月計費日數"),
@@ -306,6 +310,15 @@ fn probe(rs: &Ruleset) -> Result<(), OpError> {
         }
         "pension" => {
             laysi_regulation::pension(rs, one, MonthPart::WHOLE)?;
+        }
+        "employment_insurance" => {
+            laysi_regulation::employment_insurance(rs, one, MonthPart::WHOLE)?;
+        }
+        "occupational_accident" => {
+            laysi_regulation::occupational_accident(rs, Money::ZERO, one, MonthPart::WHOLE)?;
+        }
+        "wage_arrears" => {
+            laysi_regulation::wage_arrears(rs, [(one, MonthPart::WHOLE)])?;
         }
         "vat" => {
             laysi_regulation::vat(rs, one)?;
@@ -664,6 +677,17 @@ mod tests {
         let mut dep = factory("depreciation");
         dep.payload["useful_lives"]["vehicle"] = "0".into();
         assert!(probe(&dep).is_err());
+
+        for (domain, key) in [
+            ("employment_insurance", "employee_share"),
+            ("occupational_accident", "commuting_rate"),
+            ("occupational_accident", "max_insured_salary"),
+            ("wage_arrears", "rate"),
+        ] {
+            let mut rs = factory(domain);
+            rs.payload.as_object_mut().unwrap().remove(key);
+            assert!(probe(&rs).is_err(), "{domain} 少了 {key}");
+        }
     }
 
     /// Identifiers must not reach the screen: every leaf of every shipped

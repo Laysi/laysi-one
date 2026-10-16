@@ -146,6 +146,9 @@ government_share = "0.10"
 | domain | payload 欄位 |
 |---|---|
 | `labor_insurance` | `max_insured_salary` `premium_rate` `employer_share` `employee_share` `government_share` |
+| `employment_insurance` | `rate=0.01` `employer_share=0.70` `employee_share=0.20` `government_share=0.10`。依就業保險法第 40 條，自 2003-01-01 起；上限讀 `labor_insurance.max_insured_salary` |
+| `occupational_accident` | `max_insured_salary=72800` `commuting_rate=0.0007`（上下班災害費率）。行業別災害費率不在這裡，在公司設定 `accident_industry_rate` |
+| `wage_arrears` | `rate=0.00025`（積欠工資墊償基金提繳費率，乘全公司勞保投保薪資合計） |
 | `health_insurance` | `rate=0.0517` `employer_share=0.60` `employee_share=0.30` `avg_dependents=1.56` |
 | `pension` | `employer_rate=0.06` |
 | `vat` | `rate=0.05` `period_months=2` |
@@ -166,6 +169,12 @@ government_share = "0.10"
 - 健保級距 53,000 → 員工自付 `53000 × 0.0517 × 0.30 = 822`（本人一口；每位在保眷屬再加一口，最多計三口，兩名眷屬為 `822 × 3 = 2466`）
 - 勞保級距 45,800 → 員工自付 `45800 × 0.115 × 0.20 = 1053`
 - 提繳工資 53,000 → 公司勞退 `53000 × 0.06 = 3180`
+- 勞保級距 45,800 → 就保公司負擔 `45800 × 0.01 × 0.70 = 321`、員工自付 `45800 × 0.01 × 0.20 = 92`
+- 普通事故與就保**各自取整**：29,500 的公司負擔是 `2375 + 207 = 2582`，40,100 的員工自付是
+  `922 + 80 = 1002`；先把兩個費率加成 12.5% 再取整會得到 2581 與 1003，與勞保局的表不符
+- 就保按日計：45,800、15 日 → 員工自付 46、公司負擔 160（11 日是 34／118）
+- 職災：45,800、行業別 0.07% → `45800 × (0.0007 + 0.0007) = 64`；申報 80,000 以 72,800 計
+- 墊償基金：兩位 45,800 → `91600 × 0.00025 = 22.9`，全公司合計只取整一次，得 23
 
 原型的 `ins` / `pay` 區塊印的是 3527／2647／1008：勞保用的是 2023–2024 年的 11%，健保用的是
 平均眷口數 0.61。勞保普通事故費率自 2025-01-01 起為 11.5%（加上就業保險 1% 為 12.5%），
@@ -187,6 +196,15 @@ pub fn health_insurance(rs: &Ruleset, dependants_rs: &Ruleset, insured_salary: M
                         covered_dependants: u32) -> Result<Contribution, RegulationError>;
 pub fn dependants_charged(rs: &Ruleset, covered: u32) -> Result<u32, RegulationError>;
 pub fn pension(rs: &Ruleset, contribution_wage: Money) -> Result<Money, RegulationError>;
+/// 上限讀 labor_insurance，日數讀 partial_month；與普通事故各自取整。
+pub fn employment_insurance(rs: &Ruleset, charged_on: Money, part: MonthPart)
+    -> Result<Contribution, RegulationError>;
+/// industry_rate 是公司設定的行業別費率（小數）；回傳的金額全額由公司負擔。
+pub fn occupational_accident(rs: &Ruleset, industry_rate: Money, insured_salary: Money,
+                             part: MonthPart) -> Result<Money, RegulationError>;
+/// 每人（以勞保上限夾過的投保薪資, 投保日數）；按日折算到小數第 4 位後加總，最後取整一次。
+pub fn wage_arrears(rs: &Ruleset, salaries: impl IntoIterator<Item = (Money, MonthPart)>)
+    -> Result<Money, RegulationError>;
 pub fn vat(rs: &Ruleset, net_amount: Money) -> Result<Money, RegulationError>;
 
 /// 負責人身分：費率仍取自 health_insurance，只有分擔比率取自 owner_insurance。
@@ -245,14 +263,61 @@ pub fn overtime_pay(rs: &Ruleset, hourly_wage: Money, day_type: &str, hours: Mon
 回應的 `as_of` 是那個月底，畫面印的「適用」日期也是它，同一頁的試算
 也以那一天呼叫 `compute_insurance`。
 
+### 就保、職災與墊償基金
+
+勞保局的繳款單把普通事故、就保與職災分開列，另有按月計的積欠工資墊償基金。三者各是一個
+domain，**與普通事故各自取整**——勞保局的分攤表就是這樣算的，把就保的 1% 併進 11.5% 再乘，
+會在 29,500 與 40,100 這類級距差一元。
+
+- **就保**：受僱者預設參加，`employee.employment_insured` 可設為不參加（例如年滿 65 歲或
+  已領勞保老年給付的人；勞保仍照收）。名冊的編輯抽屜只對受僱者畫這個下拉，沒帶就不變更。
+  **負責人一律不參加**，不讀這一欄。到職與離職當月與普通事故同樣按日計。
+- **職災**：費率等於行業別災害費率加上下班災害費率，全額由公司負擔，**負責人也一樣**
+  （勞工職業災害保險及保護法第 19 條）。行業別費率是勞保局核定給這個投保單位的數字——各行業
+  不同，50 人以上另有實績費率——所以它不是規則庫裡的一個數字，而是
+  `company_setting.accident_industry_rate`（百分比字串，例如 `0.07`；不可清空，只收大於 0、
+  小於 100）。上下班費率與上限在 `occupational_accident`，「基礎設定」那一列的說明念出
+  「加上下班災害費率 X%，職災保險費率合計 Y%」。**費率沒填時照常計薪**：職災不計，薪資單的
+  `accident_rate` 是 NULL，勞健保頁、薪資作業與試算說職災尚未計入、請系統管理員去填；回應的
+  `accident_employer` 是 null 而不是 0——沒算過與算出 0 是兩件事。
+- **同一個申報值兩個上限**：名冊的「勞保投保薪資」就是向勞保局申報的月薪資。普通事故、就保
+  與墊償以 `labor_insurance.max_insured_salary`（45,800）夾住，職災以
+  `occupational_accident.max_insured_salary`（72,800）夾住——勞保局對同一個申報值分別歸級。
+  名冊帶入建議值的上限因此是職災上限，抽屜在值高於勞保上限時印出兩邊各按多少計費；法遵檢核的
+  上限項改看職災上限：高於 45,800 是正常的高薪，高於 72,800 才是申報值有誤。
+- **墊償基金**：受僱者的勞保投保薪資（以勞保上限夾過，不足月按日數 ÷ 30 折算到小數第 4 位）
+  全公司加總後乘 `wage_arrears.rate`，只取整一次；逐人取整會與帳單差到每人半元。負責人不計。
+  **它不分攤到個人**，所以不在薪資單上：存在 `payroll_run.wage_arrears` 並計入那一次的
+  `employer_total`，勞健保頁與薪資作業的期別各列一個合計。**同一期的補算不各自取整**：
+  補算把本次的人加進先前各次的薪資單（投保薪資與投保期間都存在薪資單上，負責人看名冊現值）
+  重算整期，記下整期金額減去先前各次已記的部分（`period_arrears_on`），各次相加等於一次算完；
+  減出負數（費率在兩次之間調降）記 0。兩次計算同時跑會付同一批人，薪資單的 UNIQUE 擋下其中
+  一次，所以讀到的先前各次就是寫入時並排的那幾次。功能上線前的薪資作業記的是 0，那幾張
+  薪資單的工資仍屬於當月合計，所以照樣計入：升級當月補算的那一次記下整期的墊償。
+  試算（`compute_insurance`）只算一個人，不含墊償。
+
+**薪資單存下計算當時的職災費率**（`payslip.accident_rate`，小數，NULL＝沒計）：
+`list_payslips` 用存下的費率重算，事後改設定不會讓舊薪資單對不上，與眷口數、投保期間同一條
+理由。就保參不參加不存：不參加的人兩個金額都是 0，重算時讀名冊現值，事後改過這一欄的舊薪資單
+會標成不符，那正是要重新確認的那幾張。`payslip` 另有 `employment_employee`／
+`employment_employer`／`accident_employer`，代扣合計的 CHECK 把就保自付算進去；這幾欄出現
+之前的薪資單是 0 而 `payroll_run.employment_version` 是 NULL，重算時不比對這兩項。
+
+**沒有處理的情況**：只參加職災、不參加勞保的人（例如 65 歲以上再就業）仍以勞保投保薪資留白
+表示，職災跟著不計；負責人的職災照申報值計費，勞保局「以最高級距申報，舉證者從其所得」的要求
+由人資在名冊上自己填；本期被計薪跳過的人（時薪制沒有完整打卡、底薪尚未設定）沒有薪資單，各項
+保費與墊償基金都不在那一次薪資作業裡——勞健保頁照名冊列出他們，之後補算發薪時墊償由整期
+合計補上。
+
 ### 到職與離職當月：勞保與勞退按日計，健保看月底
 
-三項保費在到職、離職那個月各算各的，`Coverage` 把三件事一起帶進 `premiums_on`：
+幾項保費在到職、離職那個月各算各的，`Coverage` 把三件事一起帶進 `premiums_on`：
 
 - **勞保**：加保當日起算到退保當日，每月以 `partial_month.labor_days_per_month`（30）日計
   （勞保條例施行細則第 28-1 條）。10/10 到職是 `30 − 10 + 1 = 21` 日，31 日到職與 30 日到職
   同樣 1 日，2/28 到職 3 日；10/15 離職 15 日，做到月底（含 2 月底）是整月。同月到職又離職
   是兩端相減加一。
+- **就保與職災**：跟著勞保，同一個日數。墊償基金把不足月的人按同一個日數折算進合計。
 - **勞退**：同一套算法，日數讀 `pension_days_per_month`（勞退條例施行細則第 22 條）。
 - **健保**：投保當月繳全月、退保當月免繳（健保法第 30 條第 2 項），等於月底在保的那個單位收
   整月。月中到職收整月，月中離職整月不收，眷屬跟著不計；做到月底最後一天算月底在保。
@@ -274,10 +339,12 @@ pub fn overtime_pay(rs: &Ruleset, hourly_wage: Money, day_type: &str, hours: Mon
 反過來，**本月才離職的人，狀態改成已離職了也照列**：薪資單照收那幾天的勞保與勞退，勞健保頁
 少了這一列，兩邊的合計就不相符；離職日在月初之前的才不列。
 
-**薪資作業記下全部六個版本**：`payroll_run` 原本記勞保、健保、勞退、扣繳四個，
-`dependents_version` 與 `partial_month_version` 補上眷口數上限與日數兩條規則——金額由哪一版
-算出要查得到，回溯修正時才知道哪幾期要重算。兩欄出現之前的薪資作業是 NULL。薪資作業畫面與
-員工的「我的薪資單」都列出這兩個版本，NULL 就不列。
+**薪資作業記下每一條規則的版本**：`payroll_run` 原本記勞保、健保、勞退、扣繳四個，
+`dependents_version` 與 `partial_month_version` 補上眷口數上限與日數兩條規則，
+`employment_version`／`accident_version`／`wage_arrears_version` 補上就保、職災與墊償基金
+（三欄同有同無，由 CHECK 擋）——金額由哪一版算出要查得到，回溯修正時才知道哪幾期要重算。
+這些欄位出現之前的薪資作業是 NULL。薪資作業畫面與員工的「我的薪資單」都列出這些版本，
+NULL 就不列（墊償基金不在個人薪資單上，「我的薪資單」不列它）。
 
 **薪資單存下計入的口數**（`payslip.health_dependents`，已套用上限、不含本人）：
 `list_payslips` 拿存下的級距重算保費再比對，而眷屬名單之後還會改——事後補登一位加保日
@@ -1459,6 +1526,10 @@ ai_audit_log(id bigserial PK, at timestamptz, actor text, actor_role text,
 公司地址與電話（`company_address`／`company_phone`）與公司名稱同一族：**不在
 `CLEARABLE_SETTINGS` 裡**，空字串的意思是還沒填，不是這家公司沒有地址。
 
+職災保險行業別災害費率（`accident_industry_rate`）也是這一族：種下來是空字串＝還沒填，
+薪資照算而職災不計；填過之後清不回空字串，換費率就填新的數字。它是勞保局核定給這家公司
+的數字而不是法規數值，所以在 `company_setting`，理由見「就保、職災與墊償基金」。
+
 **留空是答案，不是缺欄位。** `CLEARABLE_SETTINGS`（`work_start`、`work_end`、
 `late_grace_minutes`、`flex_window_minutes`）收得下空字串，其餘仍回「設定值為必填」。
 理由在 `attendance::late()` 回的是 `Option<bool>`：`None` 代表沒有人說過幾點上班，
@@ -1627,8 +1698,8 @@ MCP 這一項開著（`needs_confirm`）：草稿本來就是 AI 寫的，讓它
 |---|---|---|
 | `create_account` | NeedsConfirm | `report_group` 與 `cash_flow_section` 都必填；損益科目明確送 `null`。`normal_side` 依 kind 採慣例值，但可覆寫 |
 | `update_account` | NeedsConfirm | 完整更新或以 `is_active = false` 停用；不提供刪除，既有分錄仍保留 |
-| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 與 `dependents` 一次收整份清單；`pay_basis`（`monthly`／`hourly`）與 `insured_as`（`employee`／`owner`）不帶時取前者；`birthday` 必須早於到職日；不建立登入帳號（另有 `create_employee_login`） |
-| `update_employee` | NeedsConfirm | 除四個金額外完整更新（`birthday` 也是，不帶＝清空）；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 與 `dependents` 不帶＝不動、給清單＝整份取代；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
+| `create_employee` | NeedsConfirm | `id_no` 驗檢查碼後完整保存；三個投保級距照申報事實保存；`bank_accounts` 與 `dependents` 一次收整份清單；`pay_basis`（`monthly`／`hourly`）與 `insured_as`（`employee`／`owner`）不帶時取前者；`employment_insured` 不帶時為參加（負責人不讀）；`birthday` 必須早於到職日；不建立登入帳號（另有 `create_employee_login`） |
+| `update_employee` | NeedsConfirm | 除四個金額外完整更新（`birthday` 也是，不帶＝清空）；`base_salary` 與三個投保級距是三態（不帶＝不動、`0`＝清為尚未設定、給數字＝更新）；`bank_accounts` 與 `dependents` 不帶＝不動、給清單＝整份取代；`employment_insured` 不帶＝不動；`leaving`／`left` 必須有 `left_on`；不修改登入帳號 |
 | `create_bank_account` | NeedsConfirm | `gl_code` 必須指向啟用中的可入帳資產科目 |
 | `create_dimension_value` | NeedsConfirm | 只在既有 `dimension` 下新增項目；不建立分類。`code` 留空時取 `label` |
 | `update_dimension_value` | NeedsConfirm | 依 `(dimension_code, code)` 改名或切換 `active`；兩個欄位都不帶就回「沒有變更」。改名只在 `code` 仍等於舊 `label` 時一起改寫 `code`——CSV 匯入以 `code` 比對且會把可用的代碼列給使用者看，另外指定過的 `code` 是別人的鍵，不動 |
@@ -1857,7 +1928,7 @@ column，因此不可能與上面的區間不一致。
 | name | risk | input | output 重點 |
 |---|---|---|---|
 | `get_hr_dashboard` | ReadOnly | `{}` | 在職人數、待辦（休假單、加班單、補登申請）、應計期別尚未計算薪資的提醒與人資／財務銜接狀態 |
-| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度與所在特休年度的起訖、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`relations` 供眷屬的關係下拉、`has_login` 決定畫不畫核發帳號、`insured_suggestion` 供抽屜帶入級距；**不含系統角色**；MCP 通道另行遮蔽（見下） |
+| `list_employees` | ReadOnly | `{ q?, include_left? }` | 名冊、生日、特休額度與所在特休年度的起訖、約定的底薪與三個投保級距，另回 `departments` 供編輯抽屜的部門下拉、`relations` 供眷屬的關係下拉、`has_login` 決定畫不畫核發帳號、`employment_insured` 是就保參不參加、`insured_suggestion` 供抽屜帶入級距與勞保／職災兩個上限；**不含系統角色**；MCP 通道另行遮蔽（見下） |
 | `list_employee_documents` | ReadOnly | `{ emp_no }` | 該員工的附件清單與可用類型；內容要另外取回 |
 | `upload_employee_document` | NeedsConfirm | `{ emp_no, file_name, content_base64, name?, kind?, doc_no?, note? }` | `{ document, new_version }`；`doc_no` 只收這位員工自己的附件 |
 | `get_employee_document` | ReadOnly | `{ emp_no, doc_no, version?, include_content? }` | 重算雜湊比對；不屬於這位員工的編號回查無此附件 |
@@ -1869,11 +1940,11 @@ column，因此不可能與上面的區間不一致。
 | `decide_overtime_request` | NeedsConfirm | `{ request_no, approve, note? }` | `{ request, action }`；申請人在加班日所在期別已有薪資單時不能核准，駁回不受影響 |
 | `revoke_overtime_request` | NeedsConfirm | `{ request_no, reason }` | `{ request }`；只收已核准的單，理由必填；申請人在加班日所在期別已有薪資單時拒絕 |
 | `get_payroll_summary` | ReadOnly | `{ period? }` | 薪資彙總與總帳對帳；不含個人金額；`next_period` 是尚未計算的應計期別，算過就是 `null` |
-| `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳；重算用薪資單存下的 `health_dependents` 與投保期間（`insured_from`／`insured_to`），不用現在的眷屬名單與離職日 |
-| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；`period` 不帶時為應計期別；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents`；到職與離職當月勞保、勞退按日計，月中離職健保不收，投保期間存進 `payslip.insured_from`／`insured_to` |
+| `list_payslips` | BossOnly | `{ period? }` | 逐人薪資與保費重算對帳；重算用薪資單存下的 `health_dependents`、投保期間（`insured_from`／`insured_to`）與職災費率（`accident_rate`），不用現在的眷屬名單、離職日與公司設定；逐列另回就保自付與公司負擔、`accident_employer`（沒計職災時為 null） |
+| `run_payroll` | HighRisk | `{ period?, pay_on?, bank_account_id?, note? }` | 薪資單與待過帳傳票；`period` 不帶時為應計期別；已核准的休假依 `leave_pay` 扣減或計入本薪，`attendance_checks` 逐人列出曠職、未打下班、待簽核休假與時薪員工的國定假日（不改金額）；健保自付額依期末日在保的眷屬逐口加計，口數存進 `payslip.health_dependents`；到職與離職當月勞保、就保、職災與勞退按日計，月中離職健保不收，投保期間存進 `payslip.insured_from`／`insured_to`；代扣含就保自付；職災依 `accident_industry_rate` 計並把費率存進 `payslip.accident_rate`，沒設定時照常計薪、回應的 `accident_rate_percent` 為 null；墊償基金依全公司合計寫進 `payroll_run.wage_arrears`，同一期補算時記整期金額減去先前各次已記的部分 |
 | `void_payroll_run` | HighRisk | `{ period, reason }` | 作廢整期：`{ period, headcount, voucher_nos }` |
-| `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與三項費額；費率、`health_dependents`（計入的眷口）與 `health_dependents_covered`（在保的眷屬）一律以 `as_of` 所在月份的月底計，回應的 `as_of` 是那一天；`labor_days`／`pension_days`（整月為 null）與 `health_charged` 是該月按日計的結果；`dependents_cap` 供試算的眷屬下拉 |
-| `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, dependents?, as_of? }` | 單一級距試算與三份 ruleset；`dependents` 是在保眷屬人數，回 `health.dependents_charged`；`insured_as = "owner"` 另回 `owner_ruleset` |
+| `get_insurance_summary` | ReadOnly | `{ as_of? }` | 逐人投保級距與各項費額（勞保、就保、職災、健保、勞退），另回全公司的 `wage_arrears`；`accident_employer` 在公司沒設行業別費率時為 null，並附 `accident_rate_note`；費率、`health_dependents`（計入的眷口）與 `health_dependents_covered`（在保的眷屬）一律以 `as_of` 所在月份的月底計，回應的 `as_of` 是那一天；`labor_days`／`pension_days`（整月為 null）與 `health_charged` 是該月按日計的結果；`dependents_cap` 供試算的眷屬下拉 |
+| `compute_insurance` | ReadOnly | `{ insured_salary, health_insured_salary?, pension_wage?, insured_as?, dependents?, as_of? }` | 單一級距試算與各項的 ruleset（含 `employment`、`accident`，不含墊償基金）；`dependents` 是在保眷屬人數，回 `health.dependents_charged`；`insured_as = "owner"` 另回 `owner_ruleset` |
 | `get_hr_compliance` | ReadOnly | `{ as_of? }` | `checks[]`；逐項帶 `checked`、`passed`、ruleset 與差異 |
 | `list_withholding_statements` | BossOnly | `{ year? }` | 逐給付對象年度所得；`table` 稅額缺值保持 `null` |
 
@@ -2022,11 +2093,11 @@ Token 雖然都要求帳號啟用中，但那只在帳號停用期間成立—�
 是 `AdminOnly`，人資問不到。
 
 **投保級距是建議值，不是分級表**：抽屜在填入本薪時把三個投保欄位一起帶上，帶的是
-`minimum_wage.monthly` 與 `labor_insurance.max_insured_salary` 夾出來的本薪——那是規則庫
-現在僅有的兩個界線。**沒有把整份投保薪資分級表搬進來**：那是三份逐年更動的表格
+`minimum_wage.monthly` 與 `occupational_accident.max_insured_salary` 夾出來的本薪——那是規則庫
+現在僅有的兩個界線（勞保投保薪資欄是申報值，職災按它計費到職災上限）。**沒有把整份投保薪資分級表搬進來**：那是三份逐年更動的表格
 （勞保投保薪資、健保投保金額、勞退月提繳工資），抄一份進來就是抄一份沒人看得出錯在哪
 的數字，而抄錯的代價要到申報那天才出現。所以 `list_employees` 回的是
-`insured_suggestion`（`floor`／`labor_ceiling` 加一句說明），畫面照實說「尚未對照分級表，
+`insured_suggestion`（`floor`／`labor_ceiling`／`accident_ceiling` 加一句說明），畫面照實說「尚未對照分級表，
 請依申報值調整」。**時薪制不帶入**：時薪換算成月投保薪資要知道約定工時，而系統沒有記錄
 它。帶入只覆寫空的欄位、或還停在上一次建議值的欄位，人資改過的數字不會被下一次輸入蓋掉。
 

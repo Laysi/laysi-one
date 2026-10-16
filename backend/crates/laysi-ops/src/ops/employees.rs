@@ -435,6 +435,7 @@ impl Operation for ListEmployees {
         let staff = ctx.store.employees(i.include_left, i.q.as_deref()).await?;
         let rs = laysi_regulation::resolve("annual_leave", ctx.today)?;
         let labor = laysi_regulation::resolve("labor_insurance", ctx.today)?;
+        let accident = laysi_regulation::resolve("occupational_accident", ctx.today)?;
         let wage = laysi_regulation::resolve("minimum_wage", ctx.today)?;
         let asks: Vec<(&laysi_store::Employee, NaiveDate)> =
             staff.iter().map(|e| (e, ctx.today)).collect();
@@ -481,6 +482,8 @@ impl Operation for ListEmployees {
                 "pay_basis_label": pay_basis_label(&e.pay_basis),
                 "insured_as": e.insured_as,
                 "insured_as_label": insured_as_label(&e.insured_as),
+                // Not read for an owner, who is never in it.
+                "employment_insured": e.employment_insured,
                 "birthday": e.birthday,
                 "hired_on": e.hired_on,
                 "left_on": e.left_on,
@@ -555,13 +558,17 @@ impl Operation for ListEmployees {
                 "avg_service_label": service_label(avg_months),
                 "annual_leave_ruleset": crate::ops::insurance::ruleset_json(rs),
                 // What the drawer fills the three filed brackets with once a
-                // monthly salary is typed. The two bounds are the only ones the
+                // monthly salary is typed. The bounds are the only ones the
                 // rules carry, so the suggestion is a starting point HR edits,
                 // not the grade table itself; an hourly rate gets none, because
-                // the month it maps to is not on file.
+                // the month it maps to is not on file. The labour bracket is
+                // the one salary filed for labour, employment and occupational
+                // accident insurance alike, so it stops at the highest ceiling
+                // of the three, and each insurance caps it at its own.
                 "insured_suggestion": {
                     "floor": wage.decimal("monthly")?.to_string(),
                     "labor_ceiling": labor.decimal("max_insured_salary")?.to_string(),
+                    "accident_ceiling": accident.decimal("max_insured_salary")?.to_string(),
                     "note": "帶入的數字尚未對照投保薪資分級表，請依申報值調整。",
                 },
                 // A blank column reads as "no data" more easily than a sentence

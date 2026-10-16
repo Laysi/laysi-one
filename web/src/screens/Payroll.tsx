@@ -174,7 +174,7 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                 <div className="card stat-card">
                   <div className="stat-card__kicker">代扣</div>
                   <div className="stat-card__value num">{money(run0.deduction_total)}</div>
-                  <div className="stat-card__note num">勞保、健保自付與代扣所得稅</div>
+                  <div className="stat-card__note num">勞保、就保、健保自付與代扣所得稅</div>
                 </div>
                 <div className="card stat-card">
                   <div className="stat-card__kicker">實發</div>
@@ -184,7 +184,11 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                 <div className="card stat-card stat-card--total">
                   <div className="stat-card__kicker">公司另負擔</div>
                   <div className="stat-card__value num">{money(run0.employer_total)}</div>
-                  <div className="stat-card__note num">勞健保與勞退</div>
+                  <div className="stat-card__note num">
+                    勞健保與勞退
+                    {summary.period_runs.some((r) => r.rulesets.wage_arrears) &&
+                      ` · 墊償基金 ${money(run0.wage_arrears)}`}
+                  </div>
                 </div>
               </div>
 
@@ -237,8 +241,11 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                     <div className="fact">
                       <span className="fact__key">適用規則版本</span>
                       <span className="fact__value num">
-                        勞保 {r.rulesets.labor_insurance}　健保 {r.rulesets.health_insurance}　勞退{' '}
-                        {r.rulesets.pension}　扣繳 {r.rulesets.withholding}
+                        勞保 {r.rulesets.labor_insurance}
+                        {r.rulesets.employment_insurance && `　就保 ${r.rulesets.employment_insurance}`}
+                        {r.rulesets.occupational_accident && `　職災 ${r.rulesets.occupational_accident}`}
+                        {`　健保 ${r.rulesets.health_insurance}　勞退 ${r.rulesets.pension}　扣繳 ${r.rulesets.withholding}`}
+                        {r.rulesets.wage_arrears && `　墊償基金 ${r.rulesets.wage_arrears}`}
                         {r.rulesets.health_dependents && `　健保眷屬計費 ${r.rulesets.health_dependents}`}
                         {r.rulesets.partial_month && `　不足月計費 ${r.rulesets.partial_month}`}
                       </span>
@@ -357,7 +364,8 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                         <td className="num align-right">
                           {money(s.deduction)}
                           <span className="cell-hint cell-hint--block num">
-                            勞保 {money(s.labor_employee)} · 健保 {money(s.health_employee)}
+                            勞保 {money(s.labor_employee)} · 就保 {money(s.employment_employee)} · 健保{' '}
+                            {money(s.health_employee)}
                             {s.health_dependents > 0 && `（含眷屬 ${s.health_dependents} 口）`} · 稅{' '}
                             {money(s.income_tax)}
                           </span>
@@ -366,8 +374,9 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                         <td className="num align-right">
                           {money(s.employer_total)}
                           <span className="cell-hint cell-hint--block num">
-                            勞保 {money(s.labor_employer)} · 健保 {money(s.health_employer)} · 勞退{' '}
-                            {money(s.pension_employer)}
+                            勞保 {money(s.labor_employer)} · 就保 {money(s.employment_employer)} · 職災{' '}
+                            {s.accident_employer === null ? '未計' : money(s.accident_employer)} · 健保{' '}
+                            {money(s.health_employer)} · 勞退 {money(s.pension_employer)}
                           </span>
                         </td>
                       </tr>
@@ -444,6 +453,12 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                     </span>
                   </div>
                   <div className="doc-row doc-row--sub">
+                    <span>就保自付</span>
+                    <span className="num">
+                      {money(result.deduction_breakdown.employment_employee)}
+                    </span>
+                  </div>
+                  <div className="doc-row doc-row--sub">
                     <span>健保自付</span>
                     <span className="num">
                       {money(result.deduction_breakdown.health_employee)}
@@ -460,6 +475,12 @@ export function Payroll({ onToast, reloadKey, onChanged, canVoid }: Props) {
                     <span>實發</span>
                     <span className="num">{money(result.run.net_total)}</span>
                   </div>
+
+                  {result.accident_rate_percent === null && (
+                    <p className="recon recon--off">
+                      本期未計職災保險費。請系統管理員在「基礎設定」填入職災保險行業別災害費率後重新計算。
+                    </p>
+                  )}
 
                   {result.warnings.length > 0 && (
                     <p className="recon recon--off">

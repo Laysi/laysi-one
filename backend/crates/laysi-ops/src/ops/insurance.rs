@@ -19,6 +19,16 @@
 //! of dependants across all insured persons, whoever this employee covers. A
 //! single employee's employer share therefore exceeds twice their own, and the
 //! screen says how both are counted.
+//!
+//! The labour bracket is the one salary the company files, and the bureau
+//! grades it twice: labour insurance, employment insurance and the arrears
+//! wage payment fund up to the labour ceiling, occupational accident insurance
+//! up to its own. Employment insurance is billed and rounded apart from the
+//! ordinary risk premium. Occupational accident insurance adds the commuting
+//! rate to the industry rate the company keeps in its settings, and is not
+//! computed while that is blank. The arrears fund is applied once to a month's
+//! total, so it is a company figure: [`wage_arrears_on`] takes what each
+//! person adds to it, and no row carries a share.
 
 use crate::ops::attendance::month_span;
 #[cfg(test)]
@@ -48,17 +58,82 @@ pub(crate) fn percent(rate: Money) -> String {
     (rate * Decimal::ONE_HUNDRED).normalize().to_string()
 }
 
-/// The three contributions for one person (or one bracket) on a given date.
+/// The company setting holding the occupational accident industry rate the
+/// bureau assigned, as a percentage. Blank until the administrator enters it.
+pub(crate) const ACCIDENT_RATE_SETTING: &str = "accident_industry_rate";
+
+/// The industry rate in [`ACCIDENT_RATE_SETTING`] as a fraction, or `None`
+/// while nobody has entered it.
+pub(crate) fn parse_accident_rate(value: &str) -> Result<Option<Money>, OpError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value.parse::<Money>() {
+        Ok(percent) if percent > Money::ZERO && percent < Money::ONE_HUNDRED => {
+            Ok(Some(percent / Money::ONE_HUNDRED))
+        }
+        _ => Err(OpError::BadInput(format!(
+            "職災保險行業別災害費率填大於 0、小於 100 的百分比，例如 0.07，收到「{value}」"
+        ))),
+    }
+}
+
+/// What the settings screen prints under [`ACCIDENT_RATE_SETTING`]: the rate
+/// the bill states, which adds the commuting rate in force on `on`.
+pub(crate) fn accident_rate_note(on: NaiveDate, stored: &str) -> Result<String, OpError> {
+    let rs = laysi_regulation::resolve("occupational_accident", on)?;
+    let commuting = rs.decimal("commuting_rate")?;
+    Ok(match parse_accident_rate(stored)? {
+        Some(industry) => format!(
+            "加上下班災害費率 {}%，職災保險費率合計 {}%。",
+            percent(commuting),
+            percent(industry + commuting)
+        ),
+        None => format!(
+            "填勞保局核定的費率，另加上下班災害費率 {}%；未填時薪資不計職災保險費。",
+            percent(commuting)
+        ),
+    })
+}
+
+/// The company's occupational accident industry rate, as a fraction.
+pub(crate) async fn accident_rate(ctx: &OpCtx) -> Result<Option<Money>, OpError> {
+    let stored = ctx
+        .store
+        .company_setting(ACCIDENT_RATE_SETTING)
+        .await?
+        .unwrap_or_default();
+    parse_accident_rate(&stored)
+}
+
+/// The contributions for one person (or one bracket) on a given date.
 #[derive(Debug)]
 pub(crate) struct Premiums {
     pub labor: Contribution,
+    /// Zero for someone not in employment insurance.
+    pub employment: Contribution,
+    /// Borne by the company in full. `None` while the company has not entered
+    /// its industry rate.
+    pub accident: Option<Money>,
     pub health: Contribution,
     pub pension: Money,
-    /// Labour insurance salary actually charged, after the ceiling.
+    /// Labour insurance salary actually charged, after the ceiling. Employment
+    /// insurance and the arrears fund are charged on the same figure.
     pub labor_base: Money,
     /// The filed bracket exceeded the rule ceiling, so the ceiling was used.
     pub labor_capped: bool,
+    /// Occupational accident insured salary, after that insurance's ceiling.
+    pub accident_base: Money,
+    /// Insured as an employee and in employment insurance on the roster.
+    pub employment_insured: bool,
+    /// What the person adds to the arrears wage payment fund: the labour
+    /// salary after the ceiling and the part of the month it counts for.
+    /// `None` for an owner, for whom nothing is contributed.
+    pub arrears: Option<(Money, MonthPart)>,
     pub labor_rs: &'static Ruleset,
+    pub employment_rs: &'static Ruleset,
+    pub accident_rs: &'static Ruleset,
     pub health_rs: &'static Ruleset,
     pub pension_rs: &'static Ruleset,
     /// The owner shares that priced health and pension, when the person is
@@ -71,16 +146,103 @@ pub(crate) struct Premiums {
 }
 
 impl Premiums {
-    /// Total employer cost for this employee (labour, health and pension).
+    /// Total employer cost for this person: labour, employment, occupational
+    /// accident and health insurance, and pension. The arrears fund is a
+    /// company figure and is not in it.
     pub fn employer_total(&self) -> Money {
-        self.labor.employer + self.health.employer + self.pension
+        self.labor.employer
+            + self.employment.employer
+            + self.accident.unwrap_or(Money::ZERO)
+            + self.health.employer
+            + self.pension
     }
 
-    /// Total employee deduction (the two items withheld from pay; pension is
-    /// not deducted).
+    /// Total employee deduction: the three items withheld from pay. Pension
+    /// is not deducted.
     pub fn employee_total(&self) -> Money {
-        self.labor.employee + self.health.employee
+        self.labor.employee + self.employment.employee + self.health.employee
     }
+}
+
+/// The filed facts one person is priced on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Enrolment<'a> {
+    /// `employee` or `owner`; picks the shares.
+    pub insured_as: &'a str,
+    /// In employment insurance on the roster. Not read for an owner.
+    pub employment_insured: bool,
+    pub labor_insured: Money,
+    pub health_insured: Money,
+    pub pension_wage: Money,
+    /// Dependants covered under the person's health insurance on the day
+    /// priced ([`covered_dependants`]).
+    pub covered_dependants: u32,
+}
+
+impl<'a> Enrolment<'a> {
+    /// What the roster holds for `e`, with the dependants covered on `on`.
+    pub fn of(e: &'a Employee, on: NaiveDate) -> Enrolment<'a> {
+        Enrolment {
+            insured_as: &e.insured_as,
+            employment_insured: e.employment_insured,
+            labor_insured: e.labor_insured_salary,
+            health_insured: e.health_insured_salary,
+            pension_wage: e.pension_wage,
+            covered_dependants: covered_dependants(e, on),
+        }
+    }
+}
+
+/// The arrears wage payment fund on `as_of`'s rules for everyone in
+/// `arrears`, each entry what one person adds to it ([`Premiums::arrears`]).
+pub(crate) fn wage_arrears_on(
+    as_of: NaiveDate,
+    arrears: impl IntoIterator<Item = Option<(Money, MonthPart)>>,
+) -> Result<(Money, &'static Ruleset), OpError> {
+    let rs = laysi_regulation::resolve("wage_arrears", as_of)?;
+    let fund = laysi_regulation::wage_arrears(rs, arrears.into_iter().flatten())?;
+    Ok((fund, rs))
+}
+
+/// The arrears fund one run of a period records. The fund is the month's,
+/// applied once to its whole total, while a period is paid in more than one
+/// run once somebody is paid late. So a run records what the total comes to
+/// with `this_run` added to the `earlier` runs' payslips, less what those runs
+/// already `recorded`, and the runs of a period add up to one computation.
+/// Never below zero: a run has no way to hand back what an earlier one
+/// recorded.
+pub(crate) fn period_arrears_on(
+    as_of: NaiveDate,
+    earlier: impl IntoIterator<Item = Option<(Money, MonthPart)>>,
+    recorded: Money,
+    this_run: impl IntoIterator<Item = Option<(Money, MonthPart)>>,
+) -> Result<Money, OpError> {
+    let (fund, _) = wage_arrears_on(as_of, earlier.into_iter().chain(this_run))?;
+    Ok((fund - recorded).max(Money::ZERO))
+}
+
+/// What a stored payslip of the month from `month_start` to `month_end` adds
+/// to the arrears fund, as [`Premiums::arrears`] puts it: the labour salary
+/// after the ceiling and the days insured. `None` for an owner.
+///
+/// A payslip of a run from before the fund was recorded counts as well: its
+/// wages are part of the month's total, and its run recorded zero, so the
+/// next run of the period records the fund for it.
+pub(crate) fn slip_arrears(
+    s: &laysi_store::Payslip,
+    month_start: NaiveDate,
+    month_end: NaiveDate,
+) -> Result<Option<(Money, MonthPart)>, OpError> {
+    if s.insured_as == INSURED_OWNER {
+        return Ok(None);
+    }
+    let cap =
+        laysi_regulation::resolve("labor_insurance", month_end)?.decimal("max_insured_salary")?;
+    let part = match s.insured_span {
+        Some((from, to)) => Coverage::of_month(month_start, month_end, from, to)?.labor,
+        None => MonthPart::WHOLE,
+    };
+    Ok(Some((s.labor_insured_salary.min(cap), part)))
 }
 
 /// How much of a month a person is charged for. Labour insurance and pension
@@ -140,50 +302,56 @@ impl Coverage {
     }
 }
 
-/// Compute the three contributions from the rules in force on a date.
+/// Compute one person's contributions from the rules in force on a date.
 ///
 /// Each domain resolves separately: the labour ceiling and the health
 /// brackets are different tables, and an employee may be at the labour
-/// ceiling while still climbing the health brackets. No applicable version
+/// ceiling while still climbing the health brackets. Every domain resolves
+/// whether or not it charges this person anything, and no applicable version
 /// is an error; the system does not compute someone's premium from a guess.
 ///
-/// `insured_as` picks which set of shares applies. Someone insured as the
-/// company's own owner bears the health premium in full and has no pension
-/// contributed for them; both figures come from the `owner_insurance`
-/// ruleset, so neither share appears here. Labour insurance is the same
-/// split either way, which is why only two of the three change.
+/// `who.insured_as` picks which set of shares applies. Someone insured as the
+/// company's own owner bears the health premium in full, has no pension
+/// contributed for them, is not in employment insurance and adds nothing to
+/// the arrears fund; the first two figures come from the `owner_insurance`
+/// ruleset. Labour and occupational accident insurance split the same way
+/// for both.
 ///
-/// `covered_dependants` is how many of the person's dependants were covered
-/// under their health insurance on `as_of` ([`covered_dependants`]), which
-/// every caller that charges a month passes as that month's last day; the cap
-/// on how many are charged comes from `health_dependents`, which resolves
-/// whatever the count, so a missing version stops payroll instead of
-/// charging nobody.
+/// `who.covered_dependants` is how many of the person's dependants were
+/// covered on `as_of`, which every caller that charges a month passes as that
+/// month's last day; the cap on how many are charged comes from
+/// `health_dependents`.
 ///
 /// `cover` is how much of the month is charged ([`Coverage`]). A month with
 /// no health insurance charges no dependants either: they are insured through
-/// the person.
+/// the person. Employment and occupational accident insurance and the arrears
+/// fund are charged for the days labour insurance is.
+///
+/// `accident_rate` is the company's industry rate as a fraction
+/// ([`accident_rate`]); `None` leaves occupational accident insurance out.
 pub(crate) fn premiums_on(
     as_of: NaiveDate,
-    insured_as: &str,
-    labor_insured: Money,
-    health_insured: Money,
-    pension_wage: Money,
-    covered_dependants: u32,
+    who: &Enrolment,
     cover: Coverage,
+    accident_rate: Option<Money>,
 ) -> Result<Premiums, OpError> {
     let labor_rs = laysi_regulation::resolve("labor_insurance", as_of)?;
+    let employment_rs = laysi_regulation::resolve("employment_insurance", as_of)?;
+    let accident_rs = laysi_regulation::resolve("occupational_accident", as_of)?;
     let health_rs = laysi_regulation::resolve("health_insurance", as_of)?;
     let pension_rs = laysi_regulation::resolve("pension", as_of)?;
     let dependants_rs = laysi_regulation::resolve("health_dependents", as_of)?;
-    let owner_rs = match insured_as == INSURED_OWNER {
+    let owner = who.insured_as == INSURED_OWNER;
+    let owner_rs = match owner {
         true => Some(laysi_regulation::resolve("owner_insurance", as_of)?),
         false => None,
     };
 
     let cap = labor_rs.decimal("max_insured_salary")?;
+    let labor_base = who.labor_insured.min(cap);
+    let employment_insured = !owner && who.employment_insured;
     let covered_dependants = match cover.health {
-        true => covered_dependants,
+        true => who.covered_dependants,
         false => 0,
     };
     let health = match owner_rs {
@@ -191,33 +359,52 @@ pub(crate) fn premiums_on(
             health_rs,
             owner,
             dependants_rs,
-            health_insured,
+            who.health_insured,
             covered_dependants,
         )?,
         None => laysi_regulation::health_insurance(
             health_rs,
             dependants_rs,
-            health_insured,
+            who.health_insured,
             covered_dependants,
         )?,
     };
+    let employment =
+        laysi_regulation::employment_insurance(employment_rs, labor_base, cover.labor)?;
     Ok(Premiums {
-        labor: laysi_regulation::labor_insurance(labor_rs, labor_insured, cover.labor)?,
+        labor: laysi_regulation::labor_insurance(labor_rs, who.labor_insured, cover.labor)?,
+        employment: match employment_insured {
+            true => employment,
+            false => Contribution::ZERO,
+        },
+        accident: accident_rate
+            .map(|rate| {
+                laysi_regulation::occupational_accident(
+                    accident_rs,
+                    rate,
+                    who.labor_insured,
+                    cover.labor,
+                )
+            })
+            .transpose()?,
         health: match cover.health {
             true => health,
-            false => Contribution {
-                employer: Money::ZERO,
-                employee: Money::ZERO,
-                government: Money::ZERO,
-            },
+            false => Contribution::ZERO,
         },
         pension: match owner_rs {
-            Some(owner) => laysi_regulation::pension_owner(owner, pension_wage, cover.pension)?,
-            None => laysi_regulation::pension(pension_rs, pension_wage, cover.pension)?,
+            Some(owner) => laysi_regulation::pension_owner(owner, who.pension_wage, cover.pension)?,
+            None => laysi_regulation::pension(pension_rs, who.pension_wage, cover.pension)?,
         },
-        labor_base: labor_insured.min(cap),
-        labor_capped: labor_insured > cap,
+        labor_base,
+        labor_capped: who.labor_insured > cap,
+        accident_base: who
+            .labor_insured
+            .min(accident_rs.decimal("max_insured_salary")?),
+        employment_insured,
+        arrears: (!owner).then_some((labor_base, cover.labor)),
         labor_rs,
+        employment_rs,
+        accident_rs,
         health_rs,
         pension_rs,
         owner_rs,
@@ -331,6 +518,7 @@ pub(crate) fn test_employee(
         employment_type: "full_time".into(),
         pay_basis: BASIS_MONTHLY.into(),
         insured_as: INSURED_EMPLOYEE.into(),
+        employment_insured: true,
         birthday: None,
         hired_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         left_on: None,
@@ -376,7 +564,7 @@ impl Operation for GetInsuranceSummary {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "讀勞健保與勞退：公司負擔、員工自付、逐人投保級距、健保眷口數與三項保費。費率與在保眷屬以指定日期所在月份的月底計，與該月薪資單相同。"
+        "讀勞保、就保、職災、健保、勞退與墊償基金：公司負擔、員工自付、逐人投保級距、健保眷口數與各項保費。費率與在保眷屬以指定日期所在月份的月底計，與該月薪資單相同；墊償基金依全公司投保薪資合計計算，不分攤到個人。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<crate::AsOfInput>()
@@ -401,15 +589,22 @@ impl Operation for GetInsuranceSummary {
             .filter(|e| e.status != "left" || e.left_on.is_some_and(|left| left >= month_start))
             .collect();
 
+        let accident_rate = accident_rate(ctx).await?;
+
         let mut rows = Vec::with_capacity(staff.len());
         let mut labor_er = Money::ZERO;
         let mut labor_ee = Money::ZERO;
+        let mut employment_er = Money::ZERO;
+        let mut employment_ee = Money::ZERO;
+        let mut accident_er = Money::ZERO;
         let mut health_er = Money::ZERO;
         let mut health_ee = Money::ZERO;
         let mut pension_er = Money::ZERO;
         let mut capped = 0usize;
+        let mut accident_capped = 0usize;
+        let mut not_employment_insured = 0usize;
         let mut unfiled = Vec::new();
-        let mut sets: Option<(Value, Value, Value)> = None;
+        let mut arrears = Vec::with_capacity(staff.len());
         let mut owner_set: Option<Value> = None;
         let mut partial = 0usize;
 
@@ -420,25 +615,28 @@ impl Operation for GetInsuranceSummary {
             if cover != Coverage::WHOLE && !cover.is_none() {
                 partial += 1;
             }
-            let p = premiums_on(
-                as_of,
-                &e.insured_as,
-                e.labor_insured_salary,
-                e.health_insured_salary,
-                e.pension_wage,
-                covered,
-                cover,
-            )?;
+            let p = premiums_on(as_of, &Enrolment::of(e, as_of), cover, accident_rate)?;
             if owner_set.is_none() {
                 owner_set = p.owner_rs.map(ruleset_json);
             }
             labor_er += p.labor.employer;
             labor_ee += p.labor.employee;
+            employment_er += p.employment.employer;
+            employment_ee += p.employment.employee;
+            accident_er += p.accident.unwrap_or(Money::ZERO);
             health_er += p.health.employer;
             health_ee += p.health.employee;
             pension_er += p.pension;
+            arrears.push(p.arrears);
             if p.labor_capped {
                 capped += 1;
+            }
+            let over_accident_cap = e.labor_insured_salary > p.accident_base;
+            if over_accident_cap {
+                accident_capped += 1;
+            }
+            if e.insured_as != INSURED_OWNER && !p.employment_insured {
+                not_employment_insured += 1;
             }
             if missing.any() {
                 unfiled.push(json!({
@@ -446,13 +644,6 @@ impl Operation for GetInsuranceSummary {
                     "name": e.name,
                     "missing": missing.labels(),
                 }));
-            }
-            if sets.is_none() {
-                sets = Some((
-                    ruleset_json(p.labor_rs),
-                    ruleset_json(p.health_rs),
-                    ruleset_json(p.pension_rs),
-                ));
             }
 
             rows.push(json!({
@@ -473,6 +664,13 @@ impl Operation for GetInsuranceSummary {
                 "labor_employer": p.labor.employer.to_string(),
                 "labor_employee": p.labor.employee.to_string(),
                 "labor_government": p.labor.government.to_string(),
+                "employment_insured": p.employment_insured,
+                "employment_employer": p.employment.employer.to_string(),
+                "employment_employee": p.employment.employee.to_string(),
+                // Null while the company has no industry rate.
+                "accident_employer": p.accident.map(|a| a.to_string()),
+                "accident_charged_on": p.accident_base.to_string(),
+                "accident_capped": over_accident_cap,
                 "health_insured_salary": e.health_insured_salary.to_string(),
                 // Charged after the cap, and covered on file, so the screen can
                 // say when the two differ.
@@ -492,43 +690,57 @@ impl Operation for GetInsuranceSummary {
             }));
         }
 
-        // With no employees at all it must still answer which ruleset applies.
-        let (labor_set, health_set, pension_set) = match sets {
-            Some(s) => s,
-            None => {
-                let p = premiums_on(
-                    as_of,
-                    "",
-                    Money::ZERO,
-                    Money::ZERO,
-                    Money::ZERO,
-                    0,
-                    Coverage::WHOLE,
-                )?;
-                (
-                    ruleset_json(p.labor_rs),
-                    ruleset_json(p.health_rs),
-                    ruleset_json(p.pension_rs),
-                )
-            }
-        };
-
-        let labor_rs = laysi_regulation::resolve("labor_insurance", as_of)?;
-        let health_rs = laysi_regulation::resolve("health_insurance", as_of)?;
-        let pension_rs = laysi_regulation::resolve("pension", as_of)?;
-        let dependants_rs = laysi_regulation::resolve("health_dependents", as_of)?;
+        // The rules in force are named even with nobody on the roster.
+        let p = premiums_on(
+            as_of,
+            &Enrolment {
+                insured_as: INSURED_EMPLOYEE,
+                employment_insured: true,
+                labor_insured: Money::ZERO,
+                health_insured: Money::ZERO,
+                pension_wage: Money::ZERO,
+                covered_dependants: 0,
+            },
+            Coverage::WHOLE,
+            accident_rate,
+        )?;
+        let (labor_rs, employment_rs, accident_rs) = (p.labor_rs, p.employment_rs, p.accident_rs);
+        let (health_rs, pension_rs, dependants_rs) = (p.health_rs, p.pension_rs, p.dependants_rs);
+        let (wage_arrears, arrears_rs) = wage_arrears_on(as_of, arrears)?;
         let cap = labor_rs.decimal("max_insured_salary")?;
+        let accident_cap = accident_rs.decimal("max_insured_salary")?;
+        let commuting = accident_rs.decimal("commuting_rate")?;
         let avg = health_rs.decimal("avg_dependents")?;
         let dependants_cap = laysi_regulation::dependants_charged(dependants_rs, u32::MAX)?;
-        let employer_total = labor_er + health_er + pension_er;
+        let employer_total =
+            labor_er + employment_er + accident_er + health_er + pension_er + wage_arrears;
+        let employee_total = labor_ee + employment_ee + health_ee;
 
-        // The three explanatory lines on screen. Every number in them is read
-        // from the payload, so a rate change updates the wording too.
+        // The explanatory lines on screen. Every number in them is read from
+        // the payload or the setting, so a rate change updates the wording too.
+        let not_insured = match not_employment_insured {
+            0 => String::new(),
+            n => format!("{n} 位受僱者不參加就業保險。"),
+        };
+        let accident_body = match accident_rate {
+            Some(industry) => format!(
+                "行業別災害費率 {}% 加上下班災害費率 {}%，合計 {}%，全額由公司負擔。投保薪資高於 {} 的以上限計費，目前 {accident_capped} 位。",
+                percent(industry),
+                percent(commuting),
+                percent(industry + commuting),
+                money(accident_cap),
+            ),
+            None => format!(
+                "上下班災害費率 {}% 加上公司的行業別災害費率，全額由公司負擔。投保薪資高於 {} 的以上限計費。",
+                percent(commuting),
+                money(accident_cap),
+            ),
+        };
         let mut notes = json!([
             {
                 "title": "勞保投保薪資有上限",
                 "body": format!(
-                    "月薪高於 {} 的一律以上限計費，目前 {} 位已達上限。普通事故保險費率 {}%，公司負擔 {}%、員工自付 {}%、政府補助 {}%。",
+                    "勞保、就保與墊償基金以 {} 為上限計費，目前 {} 位高於上限。普通事故保險費率 {}%，公司負擔 {}%、員工自付 {}%、政府補助 {}%。",
                     money(cap),
                     capped,
                     percent(labor_rs.decimal("premium_rate")?),
@@ -538,6 +750,24 @@ impl Operation for GetInsuranceSummary {
                 ),
                 "source": labor_rs.source_note,
                 "version": labor_rs.version,
+            },
+            {
+                "title": "就業保險與普通事故分開計算",
+                "body": format!(
+                    "費率 {}%，公司負擔 {}%、員工自付 {}%、政府補助 {}%，兩者各自取整。{not_insured}",
+                    percent(employment_rs.decimal("rate")?),
+                    percent(employment_rs.decimal("employer_share")?),
+                    percent(employment_rs.decimal("employee_share")?),
+                    percent(employment_rs.decimal("government_share")?),
+                ),
+                "source": employment_rs.source_note,
+                "version": employment_rs.version,
+            },
+            {
+                "title": "職災保險",
+                "body": accident_body,
+                "source": accident_rs.source_note,
+                "version": accident_rs.version,
             },
             {
                 "title": "健保依眷口數計費",
@@ -557,6 +787,15 @@ impl Operation for GetInsuranceSummary {
                 "source": pension_rs.source_note,
                 "version": pension_rs.version,
             },
+            {
+                "title": "墊償基金依投保薪資合計提繳",
+                "body": format!(
+                    "受僱者的勞保投保薪資合計乘 {}%，由公司提繳，不分攤到個人。",
+                    percent(arrears_rs.decimal("rate")?),
+                ),
+                "source": arrears_rs.source_note,
+                "version": arrears_rs.version,
+            },
         ]);
 
         // Only when somebody on the roster is insured that way. A page where
@@ -574,7 +813,7 @@ impl Operation for GetInsuranceSummary {
             notes.as_array_mut().expect("剛才建的是陣列").push(json!({
                 "title": "負責人的健保與勞退分開計算",
                 "body": format!(
-                    "{owners} 位以負責人身分投保：健保保費自付 {}%，公司不分攤、政府不補助；勞退提繳率 {}%。勞保分擔比率與受僱者相同。",
+                    "{owners} 位以負責人身分投保：健保保費自付 {}%，公司不分攤、政府不補助；勞退提繳率 {}%；不參加就業保險，也不提繳墊償基金。勞保與職災的分擔方式與受僱者相同。",
                     percent(owner_rs.decimal("health_employee_share")?),
                     percent(owner_rs.decimal("pension_employer_rate")?),
                 ),
@@ -591,9 +830,9 @@ impl Operation for GetInsuranceSummary {
             let labor_days = days_rs.decimal("labor_days_per_month")?;
             let pension_days = days_rs.decimal("pension_days_per_month")?;
             let by_day = match labor_days == pension_days {
-                true => format!("勞保與勞退按日計，每月以 {labor_days} 日計"),
+                true => format!("勞保、就保、職災與勞退按日計，每月以 {labor_days} 日計"),
                 false => format!(
-                    "勞保按日計，每月以 {labor_days} 日計；勞退按日計，每月以 {pension_days} 日計"
+                    "勞保、就保與職災按日計，每月以 {labor_days} 日計；勞退按日計，每月以 {pension_days} 日計"
                 ),
             };
             notes.as_array_mut().expect("剛才建的是陣列").push(json!({
@@ -616,17 +855,26 @@ impl Operation for GetInsuranceSummary {
             0 => String::new(),
             n => format!("（{n} 人尚未設定投保級距）"),
         };
+        let accident_summary = match accident_rate {
+            Some(_) => money(accident_er),
+            None => "未設定費率".to_string(),
+        };
 
         let summary = format!(
-            "讀勞健保與勞退 · {} 人{unfiled_tag} · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）· 依勞保 {}、健保 {}、勞退 {} 規則",
+            "讀勞健保與勞退 · {} 人{unfiled_tag} · 公司負擔 {}（勞保 {}／就保 {}／職災 {accident_summary}／健保 {}／勞退 {}／墊償 {}）· 依勞保 {}、就保 {}、職災 {}、健保 {}、勞退 {}、墊償 {} 規則",
             rows.len(),
             money(employer_total),
             money(labor_er),
+            money(employment_er),
             money(health_er),
             money(pension_er),
+            money(wage_arrears),
             labor_rs.version,
+            employment_rs.version,
+            accident_rs.version,
             health_rs.version,
-            pension_rs.version
+            pension_rs.version,
+            arrears_rs.version,
         );
 
         Ok(OpOutcome::new(
@@ -640,16 +888,33 @@ impl Operation for GetInsuranceSummary {
                 "missing_bracket_note": unfiled_note,
                 "labor_employer": labor_er.to_string(),
                 "labor_employee": labor_ee.to_string(),
+                "employment_employer": employment_er.to_string(),
+                "employment_employee": employment_ee.to_string(),
+                // Null while the company has no industry rate: nothing was
+                // computed, which is not the same as zero.
+                "accident_employer": accident_rate.map(|_| accident_er.to_string()),
+                "accident_rate": accident_rate.map(|industry| json!({
+                    "industry_percent": percent(industry),
+                    "commuting_percent": percent(commuting),
+                    "total_percent": percent(industry + commuting),
+                })),
+                "accident_rate_note": accident_rate.is_none().then_some(
+                    "職災保險費尚未計入：請系統管理員在「基礎設定」填入勞保局核定的職災保險行業別災害費率。"
+                ),
                 "health_employer": health_er.to_string(),
                 "health_employee": health_ee.to_string(),
                 "pension_employer": pension_er.to_string(),
+                "wage_arrears": wage_arrears.to_string(),
                 "employer_total": employer_total.to_string(),
-                "employee_total": (labor_ee + health_ee).to_string(),
+                "employee_total": employee_total.to_string(),
                 "notes": notes,
                 "rulesets": {
-                    "labor": labor_set,
-                    "health": health_set,
-                    "pension": pension_set,
+                    "labor": ruleset_json(labor_rs),
+                    "employment": ruleset_json(employment_rs),
+                    "accident": ruleset_json(accident_rs),
+                    "health": ruleset_json(health_rs),
+                    "pension": ruleset_json(pension_rs),
+                    "wage_arrears": ruleset_json(arrears_rs),
                     "owner": owner_set,
                     "dependents": ruleset_json(dependants_rs),
                 },
@@ -659,7 +924,7 @@ impl Operation for GetInsuranceSummary {
                 // The employer share is not in the ledger yet. State that rather
                 // than letting it look like a booked expense.
                 "posted_to_ledger": false,
-                "posting_note": "公司負擔的勞保、健保與勞退尚未產生分錄，薪資傳票僅含應發、代扣與實發三段。",
+                "posting_note": "公司負擔的保費與提繳尚未產生分錄，薪資傳票僅含應發、代扣與實發三段。",
             }),
             summary,
         ))
@@ -672,7 +937,9 @@ struct ComputeInsurance;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ComputeInsuranceInput {
-    /// Labour insurance salary. Above the rule ceiling the ceiling is charged.
+    /// Labour insurance salary as filed. Labour and employment insurance
+    /// charge it up to the labour ceiling, occupational accident insurance up
+    /// to its own.
     #[serde(with = "rust_decimal::serde::str")]
     #[schemars(with = "String")]
     pub insured_salary: Money,
@@ -707,7 +974,7 @@ impl Operation for ComputeInsurance {
         Risk::ReadOnly
     }
     fn summary(&self) -> &'static str {
-        "試算一個投保級距的勞保、健保與勞退金額，並回報依哪一版規則，以及公司與員工各分攤多少。費率依適用日期解析。"
+        "試算一個投保級距的勞保、就保、職災、健保與勞退金額，並回報依哪一版規則，以及公司與員工各分攤多少。費率依適用日期解析；職災依公司設定的行業別災害費率，未設定時不計。"
     }
     fn input_schema(&self) -> Value {
         schema_of::<ComputeInsuranceInput>()
@@ -725,27 +992,40 @@ impl Operation for ComputeInsurance {
         }
         let health = i.health_insured_salary.unwrap_or(i.insured_salary);
         let pension_wage = i.pension_wage.unwrap_or(health);
+        let industry = accident_rate(ctx).await?;
         let p = premiums_on(
             as_of,
-            insured_as,
-            i.insured_salary,
-            health,
-            pension_wage,
-            i.dependents,
+            &Enrolment {
+                insured_as,
+                employment_insured: true,
+                labor_insured: i.insured_salary,
+                health_insured: health,
+                pension_wage,
+                covered_dependants: i.dependents,
+            },
             Coverage::WHOLE,
+            industry,
         )?;
+        let commuting = p.accident_rs.decimal("commuting_rate")?;
 
+        let accident_summary = match p.accident {
+            Some(a) => money(a),
+            None => "未設定費率".to_string(),
+        };
         let summary = format!(
-            "試算保費 · {} · 勞保級距 {} 健保級距 {} · 公司負擔 {}（勞保 {}／健保 {}／勞退 {}）本人自付 {} · 依勞保 {}、健保 {}、勞退 {} 規則",
+            "試算保費 · {} · 勞保級距 {} 健保級距 {} · 公司負擔 {}（勞保 {}／就保 {}／職災 {accident_summary}／健保 {}／勞退 {}）本人自付 {} · 依勞保 {}、就保 {}、職災 {}、健保 {}、勞退 {} 規則",
             insured_as_label(insured_as),
             money(i.insured_salary),
             money(health),
             money(p.employer_total()),
             money(p.labor.employer),
+            money(p.employment.employer),
             money(p.health.employer),
             money(p.pension),
             money(p.employee_total()),
             p.labor_rs.version,
+            p.employment_rs.version,
+            p.accident_rs.version,
             p.health_rs.version,
             p.pension_rs.version
         );
@@ -765,6 +1045,25 @@ impl Operation for ComputeInsurance {
                     "rate_percent": percent(p.labor_rs.decimal("premium_rate")?),
                     "max_insured_salary": p.labor_rs.decimal("max_insured_salary")?.to_string(),
                     "ruleset": ruleset_json(p.labor_rs),
+                },
+                // Zero for an owner, who is not in employment insurance.
+                "employment": {
+                    "insured": p.employment_insured,
+                    "employer": p.employment.employer.to_string(),
+                    "employee": p.employment.employee.to_string(),
+                    "government": p.employment.government.to_string(),
+                    "rate_percent": percent(p.employment_rs.decimal("rate")?),
+                    "ruleset": ruleset_json(p.employment_rs),
+                },
+                // `employer` is null while the company has no industry rate.
+                "accident": {
+                    "employer": p.accident.map(|a| a.to_string()),
+                    "charged_on": p.accident_base.to_string(),
+                    "max_insured_salary": p.accident_rs.decimal("max_insured_salary")?.to_string(),
+                    "industry_rate_percent": industry.map(percent),
+                    "commuting_rate_percent": percent(commuting),
+                    "rate_percent": industry.map(|rate| percent(rate + commuting)),
+                    "ruleset": ruleset_json(p.accident_rs),
                 },
                 "health": {
                     "insured_salary": health.to_string(),
@@ -815,6 +1114,31 @@ mod tests {
         Decimal::from_str(s).unwrap()
     }
 
+    /// One whole month for someone in employment insurance, with no
+    /// occupational accident rate on file.
+    fn priced(
+        on: NaiveDate,
+        insured_as: &str,
+        labor: &str,
+        health: &str,
+        pension: &str,
+        dependants: u32,
+    ) -> Result<Premiums, OpError> {
+        premiums_on(
+            on,
+            &Enrolment {
+                insured_as,
+                employment_insured: true,
+                labor_insured: n(labor),
+                health_insured: n(health),
+                pension_wage: n(pension),
+                covered_dependants: dependants,
+            },
+            Coverage::WHOLE,
+            None,
+        )
+    }
+
     /// The five regulation reference values. A mismatch means this module has
     /// wired the rules up incorrectly.
     ///
@@ -822,14 +1146,13 @@ mod tests {
     /// bracket and pension wage both 53,000.
     #[test]
     fn the_five_reference_benchmarks_come_out_of_the_ruleset() {
-        let p = premiums_on(
+        let p = priced(
             d(2026, 7, 26),
             INSURED_EMPLOYEE,
-            n("45800"),
-            n("53000"),
-            n("53000"),
+            "45800",
+            "53000",
+            "53000",
             0,
-            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(p.labor.employer, n("3687"), "公司負擔勞保");
@@ -841,9 +1164,144 @@ mod tests {
         );
         assert_eq!(p.health.employee, n("822"), "員工自付健保");
         assert_eq!(p.pension, n("3180"), "公司提繳勞退");
+        assert_eq!(p.employment.employer, n("321"), "公司負擔就保");
+        assert_eq!(p.employment.employee, n("92"), "員工自付就保");
+        assert_eq!(p.accident, None, "沒有行業別費率就不計職災");
 
-        assert_eq!(p.employer_total(), n("9432"), "3687 + 2565 + 3180");
-        assert_eq!(p.employee_total(), n("1875"), "1053 + 822");
+        assert_eq!(p.employer_total(), n("9753"), "3687 + 321 + 2565 + 3180");
+        assert_eq!(p.employee_total(), n("1967"), "1053 + 92 + 822");
+    }
+
+    /// Occupational accident insurance is charged on the filed salary up to
+    /// its own ceiling, while labour and employment insurance stop at theirs.
+    /// The industry rate is the company's; the commuting rate is the rules'.
+    #[test]
+    fn occupational_accident_is_charged_on_its_own_ceiling() {
+        let on = d(2026, 7, 26);
+        let at = |labor: &str, insured_as: &str| {
+            premiums_on(
+                on,
+                &Enrolment {
+                    insured_as,
+                    employment_insured: true,
+                    labor_insured: n(labor),
+                    health_insured: n("53000"),
+                    pension_wage: n("53000"),
+                    covered_dependants: 0,
+                },
+                Coverage::WHOLE,
+                Some(n("0.0007")),
+            )
+            .unwrap()
+        };
+        let p = at("53000", INSURED_EMPLOYEE);
+        assert_eq!(p.labor_base, n("45800"));
+        assert_eq!(p.employment.employee, n("92"), "就保同樣按勞保上限");
+        assert_eq!(p.accident_base, n("53000"));
+        assert_eq!(p.accident, Some(n("74")), "53,000 × 0.14% = 74.2");
+        assert_eq!(
+            p.employer_total(),
+            n("3687") + n("321") + n("74") + n("2565") + n("3180")
+        );
+
+        let p = at("100000", INSURED_EMPLOYEE);
+        assert_eq!(p.accident_base, n("72800"));
+        assert_eq!(p.accident, Some(n("102")), "按職災上限 72,800");
+
+        let boss = at("45800", INSURED_OWNER);
+        assert_eq!(boss.accident, Some(n("64")), "負責人的職災同樣由公司負擔");
+    }
+
+    /// Employment insurance follows the roster: someone marked out of it pays
+    /// nothing and costs nothing, and an owner never pays whatever the roster
+    /// says. The arrears fund counts everyone but the owner.
+    #[test]
+    fn employment_insurance_and_the_arrears_fund_follow_the_identity() {
+        let on = d(2026, 7, 26);
+        let at = |insured_as: &str, employment_insured: bool| {
+            premiums_on(
+                on,
+                &Enrolment {
+                    insured_as,
+                    employment_insured,
+                    labor_insured: n("53000"),
+                    health_insured: n("53000"),
+                    pension_wage: n("53000"),
+                    covered_dependants: 0,
+                },
+                Coverage::WHOLE,
+                None,
+            )
+            .unwrap()
+        };
+        let out = at(INSURED_EMPLOYEE, false);
+        assert!(!out.employment_insured);
+        assert_eq!(out.employment, Contribution::ZERO);
+        assert_eq!(out.labor.employee, n("1053"), "勞保照收");
+        assert_eq!(
+            out.arrears,
+            Some((n("45800"), MonthPart::WHOLE)),
+            "墊償照計"
+        );
+
+        let boss = at(INSURED_OWNER, true);
+        assert!(!boss.employment_insured, "負責人不參加就保，不論名冊");
+        assert_eq!(boss.employment, Contribution::ZERO);
+        assert_eq!(boss.arrears, None, "負責人不提繳墊償");
+
+        let (fund, _) = wage_arrears_on(
+            on,
+            [
+                out.arrears,
+                boss.arrears,
+                at(INSURED_EMPLOYEE, true).arrears,
+            ],
+        )
+        .unwrap();
+        assert_eq!(fund, n("23"), "91,600 × 0.025% = 22.9");
+    }
+
+    /// A period paid in two runs records the fund of the whole month, not two
+    /// funds rounded apart. Someone hired on the 9th of June is insured 22
+    /// days: 33,586.6667 × 0.025% = 8.40 on its own, 8; with a whole month of
+    /// 45,800 beside it, 79,386.6667 × 0.025% = 19.85, 20. The late run
+    /// records the 12 that makes 20, where on its own it would round to 11.
+    #[test]
+    fn the_runs_of_a_period_add_up_to_one_arrears_fund() {
+        let on = d(2026, 6, 30);
+        let hired = Coverage::of_month(d(2026, 6, 1), on, d(2026, 6, 9), on)
+            .unwrap()
+            .labor;
+        assert_eq!(hired.days(), Some(22));
+        let first = Some((n("45800"), hired));
+        let late = Some((n("45800"), MonthPart::WHOLE));
+
+        let recorded = period_arrears_on(on, [], Money::ZERO, [first]).unwrap();
+        assert_eq!(recorded, n("8"));
+        let after = period_arrears_on(on, [first], recorded, [late]).unwrap();
+        assert_eq!(after, n("12"));
+        assert_eq!(
+            recorded + after,
+            wage_arrears_on(on, [first, late]).unwrap().0
+        );
+
+        // An earlier run that recorded more than the total now comes to (the
+        // rate fell in between) leaves the late run at zero, not below it.
+        assert_eq!(
+            period_arrears_on(on, [first], n("50"), [late]).unwrap(),
+            Money::ZERO
+        );
+    }
+
+    /// The setting is a percentage as the bureau prints it; blank is not set.
+    #[test]
+    fn the_accident_rate_setting_reads_as_a_percentage() {
+        assert_eq!(parse_accident_rate("0.07").unwrap(), Some(n("0.0007")));
+        assert_eq!(parse_accident_rate(" 0.11 ").unwrap(), Some(n("0.0011")));
+        assert_eq!(parse_accident_rate("").unwrap(), None);
+        for bad in ["0", "-0.1", "100", "abc", "0.07%"] {
+            assert!(parse_accident_rate(bad).is_err(), "{bad}");
+        }
     }
 
     /// An owner is not an employee of their own company: they bear the whole
@@ -851,32 +1309,23 @@ mod tests {
     /// Labour insurance splits the same way for both, so it must not move.
     #[test]
     fn an_owner_is_priced_on_the_owner_shares() {
-        let staff = premiums_on(
+        let staff = priced(
             d(2026, 7, 26),
             INSURED_EMPLOYEE,
-            n("45800"),
-            n("53000"),
-            n("53000"),
+            "45800",
+            "53000",
+            "53000",
             0,
-            Coverage::WHOLE,
         )
         .unwrap();
-        let boss = premiums_on(
-            d(2026, 7, 26),
-            INSURED_OWNER,
-            n("45800"),
-            n("53000"),
-            n("53000"),
-            0,
-            Coverage::WHOLE,
-        )
-        .unwrap();
+        let boss = priced(d(2026, 7, 26), INSURED_OWNER, "45800", "53000", "53000", 0).unwrap();
 
         assert_eq!(boss.labor, staff.labor, "勞保分擔比率兩者相同");
         assert_eq!(boss.health.employer, Money::ZERO, "健保沒有公司負擔那一份");
         assert_eq!(boss.health.employee, n("2740"), "健保全額自付");
         assert_eq!(boss.pension, Money::ZERO, "勞退不提繳");
         assert_eq!(boss.employer_total(), n("3687"), "公司只剩勞保那一筆");
+        assert_eq!(boss.employment, Contribution::ZERO, "負責人不參加就保");
         assert!(boss.owner_rs.is_some(), "要說得出依哪一版算的");
         assert!(staff.owner_rs.is_none());
     }
@@ -898,24 +1347,22 @@ mod tests {
     /// ceiling comes from the rules rather than from here.
     #[test]
     fn a_salary_above_the_cap_is_charged_at_the_cap() {
-        let capped = premiums_on(
+        let capped = priced(
             d(2026, 7, 26),
             INSURED_EMPLOYEE,
-            n("120000"),
-            n("53000"),
-            n("53000"),
+            "120000",
+            "53000",
+            "53000",
             0,
-            Coverage::WHOLE,
         )
         .unwrap();
-        let at_cap = premiums_on(
+        let at_cap = priced(
             d(2026, 7, 26),
             INSURED_EMPLOYEE,
-            n("45800"),
-            n("53000"),
-            n("53000"),
+            "45800",
+            "53000",
+            "53000",
             0,
-            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(capped.labor, at_cap.labor);
@@ -1159,24 +1606,22 @@ mod tests {
     /// of their own; the employer share and labour insurance do not move.
     #[test]
     fn a_covered_dependant_adds_a_head_to_the_health_deduction() {
-        let alone = premiums_on(
+        let alone = priced(
             d(2026, 7, 26),
             INSURED_EMPLOYEE,
-            n("45800"),
-            n("53000"),
-            n("53000"),
+            "45800",
+            "53000",
+            "53000",
             0,
-            Coverage::WHOLE,
         )
         .unwrap();
-        let two = premiums_on(
+        let two = priced(
             d(2026, 7, 26),
             INSURED_EMPLOYEE,
-            n("45800"),
-            n("53000"),
-            n("53000"),
+            "45800",
+            "53000",
+            "53000",
             2,
-            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(two.health.employee, n("2466"), "822 × 3");
@@ -1184,14 +1629,13 @@ mod tests {
         assert_eq!(two.labor, alone.labor);
         assert_eq!(two.health_dependants, 2);
 
-        let five = premiums_on(
+        let five = priced(
             d(2026, 7, 26),
             INSURED_EMPLOYEE,
-            n("45800"),
-            n("53000"),
-            n("53000"),
+            "45800",
+            "53000",
+            "53000",
             5,
-            Coverage::WHOLE,
         )
         .unwrap();
         assert_eq!(five.health_dependants, 3, "超過上限以上限計");
@@ -1202,14 +1646,13 @@ mod tests {
     /// guessed rate.
     #[test]
     fn a_date_with_no_ruleset_is_refused_never_guessed() {
-        let err = premiums_on(
+        let err = priced(
             d(2025, 12, 31),
             INSURED_EMPLOYEE,
-            n("45800"),
-            n("53000"),
-            n("53000"),
+            "45800",
+            "53000",
+            "53000",
             0,
-            Coverage::WHOLE,
         )
         .unwrap_err();
         assert!(matches!(err, OpError::Regulation(_)));

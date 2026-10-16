@@ -142,6 +142,12 @@ export function MyPayslips({ reloadKey }: Props) {
                   <span>勞保自付</span>
                   <span className="num">{money(shown.deductions.labor_insurance)}</span>
                 </div>
+                {shown.rulesets.employment_insurance && (
+                  <div className="doc-row doc-row--sub">
+                    <span>就保自付</span>
+                    <span className="num">{money(shown.deductions.employment_insurance)}</span>
+                  </div>
+                )}
                 <div className="doc-row doc-row--sub">
                   <span>
                     健保自付
@@ -181,6 +187,24 @@ export function MyPayslips({ reloadKey }: Props) {
                       {money(shown.employer_contributions.labor_insurance)}
                     </span>
                   </div>
+                  {shown.rulesets.employment_insurance && (
+                    <div className="fact">
+                      <span className="fact__key">就保雇主負擔</span>
+                      <span className="fact__value num">
+                        {money(shown.employer_contributions.employment_insurance)}
+                      </span>
+                    </div>
+                  )}
+                  {shown.rulesets.occupational_accident && (
+                    <div className="fact">
+                      <span className="fact__key">職災保險</span>
+                      <span className="fact__value num">
+                        {shown.employer_contributions.occupational_accident === null
+                          ? '未計'
+                          : money(shown.employer_contributions.occupational_accident)}
+                      </span>
+                    </div>
+                  )}
                   <div className="fact">
                     <span className="fact__key">健保雇主負擔</span>
                     <span className="fact__value num">
@@ -198,7 +222,7 @@ export function MyPayslips({ reloadKey }: Props) {
                     <span className="fact__value num">
                       {money(shown.employer_contributions.total)}
                       <span className="fact__note">
-                        上列三項由公司負擔。
+                        上列各項由公司負擔。
                       </span>
                     </span>
                   </div>
@@ -210,6 +234,18 @@ export function MyPayslips({ reloadKey }: Props) {
                     <span className="fact__key">勞保</span>
                     <span className="fact__value num">{shown.rulesets.labor_insurance}</span>
                   </div>
+                  {shown.rulesets.employment_insurance && (
+                    <div className="fact">
+                      <span className="fact__key">就保</span>
+                      <span className="fact__value num">{shown.rulesets.employment_insurance}</span>
+                    </div>
+                  )}
+                  {shown.rulesets.occupational_accident && (
+                    <div className="fact">
+                      <span className="fact__key">職災</span>
+                      <span className="fact__value num">{shown.rulesets.occupational_accident}</span>
+                    </div>
+                  )}
                   <div className="fact">
                     <span className="fact__key">健保</span>
                     <span className="fact__value num">{shown.rulesets.health_insurance}</span>
