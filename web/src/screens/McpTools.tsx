@@ -172,7 +172,7 @@ export function McpTools({ onToast, reloadKey }: Props) {
                     </span>
                   </td>
                   <td className="cell-fit">
-                    {canSwitch && o.name !== SELF ? (
+                    {canSwitch && o.name !== SELF && !o.ui_only ? (
                       <button
                         className={`chip${o.enabled ? ' chip--on' : ''}`}
                         disabled={busy === o.name}
@@ -183,7 +183,7 @@ export function McpTools({ onToast, reloadKey }: Props) {
                     ) : (
                       <>
                         {o.enabled ? '開啟' : <span className="cell-muted">關閉</span>}
-                        {o.name === SELF && (
+                        {(o.name === SELF || o.ui_only) && (
                           <span className="cell-hint cell-hint--block">無法對 AI 開啟</span>
                         )}
                       </>

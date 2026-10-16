@@ -345,24 +345,64 @@ impl WorkSchedule {
     }
 
     /// The moment after which an arrival counts as late: the start, plus the
-    /// flexitime window, plus grace.
-    fn arrival_deadline(&self, date: NaiveDate) -> Option<NaiveDateTime> {
-        Some(
-            date.and_time(self.starts_at?)
-                + chrono::Duration::minutes(self.flex_minutes + self.grace_minutes),
-        )
+    /// flexitime window, plus grace. `None` when lateness is not judged on
+    /// that date: no start time is stated, the calendar does not make it a
+    /// working day, or approved leave runs to the end of the day.
+    ///
+    /// Approved leave in progress at the latest start moves that start to
+    /// where the leave ends, and past the break when it ends inside one:
+    /// nobody expected the person back before then. Only approved leave
+    /// moves it. A request still waiting may be refused, and the day is
+    /// judged again whenever it is read.
+    fn arrival_deadline(&self, date: NaiveDate, leaves: &[DayLeave]) -> Option<NaiveDateTime> {
+        if !self.day_kind(date).works() {
+            return None;
+        }
+        let starts_at = self.starts_at?;
+        // Added to the date and time, not to the time of day, so a window
+        // that runs past midnight does not wrap round to the small hours.
+        let latest = date.and_time(starts_at) + chrono::Duration::minutes(self.flex_minutes);
+        let mut due = latest;
+        // Every step moves `due` strictly later, so two requests back to back
+        // are followed one after the other and the loop ends.
+        while let Some(leave) = leaves
+            .iter()
+            .find(|l| l.status == "approved" && l.from_at <= due && due < l.to_at)
+        {
+            due = leave.to_at;
+            if let Some((start, end)) = self.break_window() {
+                if date.and_time(start) <= due && due < date.and_time(end) {
+                    due = date.and_time(end);
+                }
+            }
+        }
+        // Only leave ends the day before anyone is due. A flexitime window as
+        // long as the day still judges an arrival, and so does a day that
+        // ends after midnight.
+        if due > latest {
+            let day_over = match self.ends_at {
+                Some(end) if end > starts_at => date.and_time(end),
+                Some(end) => date.succ_opt()?.and_time(end),
+                None => date.succ_opt()?.and_time(NaiveTime::MIN),
+            };
+            if due >= day_over {
+                return None;
+            }
+        }
+        Some(due + chrono::Duration::minutes(self.grace_minutes))
     }
 
-    /// Whether an arrival was late, or `None` when no start time is stated.
-    pub fn late(&self, arrived: NaiveDateTime) -> Option<bool> {
-        Some(arrived > self.arrival_deadline(arrived.date())?)
+    /// Whether an arrival was late, or `None` when lateness is not judged on
+    /// that date (see [`Self::arrival_deadline`]).
+    pub fn late(&self, arrived: NaiveDateTime, leaves: &[DayLeave]) -> Option<bool> {
+        Some(arrived > self.arrival_deadline(arrived.date(), leaves)?)
     }
 
-    /// How far past the deadline an arrival was, or `None` when no start time
-    /// is stated. Zero when on time.
-    pub fn late_by_seconds(&self, arrived: NaiveDateTime) -> Option<i64> {
+    /// How far past the deadline an arrival was, or `None` when lateness is
+    /// not judged on that date. Zero when on time.
+    pub fn late_by_seconds(&self, arrived: NaiveDateTime, leaves: &[DayLeave]) -> Option<i64> {
         Some(
-            (arrived - self.arrival_deadline(arrived.date())?)
+            (arrived - self.arrival_deadline(arrived.date(), leaves)?)
                 .num_seconds()
                 .max(0),
         )
@@ -555,6 +595,10 @@ pub(crate) struct DayLeave {
     /// The request's hours on this date, by the split recorded when it was
     /// sent (see [`leave_by_date`]).
     pub hours: Money,
+    /// The whole request, which may run over several dates. Lateness reads
+    /// when it ends (see [`WorkSchedule::arrival_deadline`]).
+    pub from_at: NaiveDateTime,
+    pub to_at: NaiveDateTime,
 }
 
 /// Employment types absence is not judged for. A part timer works the days
@@ -620,6 +664,8 @@ pub(crate) fn mark_days(
                     kind: l.kind.clone(),
                     status: l.status.clone(),
                     hours: part.hours,
+                    from_at: l.from_at,
+                    to_at: l.to_at,
                 })
             })
             .collect();
@@ -678,9 +724,15 @@ impl PunchDay {
         self.arrived.is_some() && self.left.is_none()
     }
 
+    /// Whether the arrival was late, judged against the leave attached by
+    /// [`mark_days`]. A day read without it is judged as if it had none.
+    pub fn late(&self, schedule: &WorkSchedule) -> Option<bool> {
+        schedule.late(self.arrived?, &self.leaves)
+    }
+
     pub fn json(&self, schedule: &WorkSchedule, limits: &OvertimeLimits) -> Value {
         let clock = |t: Option<NaiveDateTime>| t.map(|t| t.format(PUNCH_TIME).to_string());
-        let late = self.arrived.and_then(|a| schedule.late(a));
+        let late = self.late(schedule);
         let overtime = self
             .left
             .and_then(|l| schedule.overtime_seconds(self.arrived, l));
@@ -712,7 +764,9 @@ impl PunchDay {
             "worked_hours": self.worked_seconds(schedule).map(|s| hours(s).to_string()),
             "open": self.open(),
             "late": late,
-            "late_seconds": self.arrived.and_then(|a| schedule.late_by_seconds(a)),
+            "late_seconds": self
+                .arrived
+                .and_then(|a| schedule.late_by_seconds(a, &self.leaves)),
             "expected_end": schedule
                 .expected_end(self.date, self.arrived)
                 .map(|t| t.format(PUNCH_TIME).to_string()),
@@ -771,6 +825,38 @@ pub(crate) fn punch_days(punches: &[AttendancePunch], offset: FixedOffset) -> Ve
         }
     }
     days
+}
+
+/// One person's punches on one date, with that date's leave attached, so a
+/// response about a single punch judges lateness as the monthly detail does.
+/// `None` when nothing was punched that day.
+pub(crate) async fn punch_day(
+    ctx: &OpCtx,
+    employee_id: i32,
+    date: NaiveDate,
+    schedule: &WorkSchedule,
+) -> Result<Option<PunchDay>, OpError> {
+    let month = date.format("%Y-%m").to_string();
+    let mut days: Vec<PunchDay> = punch_days(
+        &ctx.store.punches(&month, Some(employee_id)).await?,
+        ctx.offset,
+    )
+    .into_iter()
+    .filter(|d| d.date == date)
+    .collect();
+    let leaves = ctx
+        .store
+        .leave_requests_matching(true, Some(employee_id), Some((date, date)))
+        .await?;
+    mark_days(
+        &mut days,
+        &leaves.iter().collect::<Vec<_>>(),
+        &[],
+        schedule,
+        false,
+        date,
+    );
+    Ok(days.pop())
 }
 
 /// Every day of `month` between `first` and `last`, with the days that have
@@ -848,7 +934,7 @@ pub(crate) fn summarise(
         worked_seconds: days.iter().filter_map(|d| d.worked_seconds(schedule)).sum(),
         late_days: schedule.starts_at.map(|_| {
             days.iter()
-                .filter(|d| d.arrived.and_then(|a| schedule.late(a)) == Some(true))
+                .filter(|d| d.late(schedule) == Some(true))
                 .count() as i64
         }),
         overtime_seconds,
@@ -1355,12 +1441,7 @@ impl Operation for CorrectPunch {
             .await?;
 
         let schedule = WorkSchedule::load(ctx).await?;
-        let month = i.punched_on.format("%Y-%m").to_string();
-        let days = punch_days(
-            &ctx.store.punches(&month, Some(employee.id)).await?,
-            ctx.offset,
-        );
-        let day = days.iter().find(|d| d.date == i.punched_on);
+        let day = punch_day(ctx, employee.id, i.punched_on, &schedule).await?;
         let limits = OvertimeLimits::resolve(ctx.today)?;
 
         let summary = format!(
@@ -2494,7 +2575,11 @@ mod tests {
         let arrived = at("09:45:00");
 
         let grace = schedule(Some("09:00"), Some("18:00"), 60);
-        assert_eq!(grace.late(arrived), Some(false), "一小時寬限內不算遲到");
+        assert_eq!(
+            grace.late(arrived, &[]),
+            Some(false),
+            "一小時寬限內不算遲到"
+        );
         assert_eq!(
             grace.expected_end(day, Some(arrived)),
             Some(day.and_hms_opt(18, 0, 0).unwrap()),
@@ -2502,7 +2587,7 @@ mod tests {
         );
 
         let flex = flex_schedule(Some("09:00"), Some("18:00"), 0, 60);
-        assert_eq!(flex.late(arrived), Some(false));
+        assert_eq!(flex.late(arrived, &[]), Some(false));
         assert_eq!(
             flex.expected_end(day, Some(arrived)),
             Some(day.and_hms_opt(18, 45, 0).unwrap()),
@@ -2570,8 +2655,12 @@ mod tests {
         let day = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
         let flex = flex_schedule(Some("09:00"), Some("18:00"), 5, 60);
 
-        assert_eq!(flex.late(at("10:05:00")), Some(false), "區間加寬限的邊界");
-        assert_eq!(flex.late(at("10:05:01")), Some(true));
+        assert_eq!(
+            flex.late(at("10:05:00"), &[]),
+            Some(false),
+            "區間加寬限的邊界"
+        );
+        assert_eq!(flex.late(at("10:05:01"), &[]), Some(true));
 
         let early = at("08:00:00");
         assert_eq!(
@@ -2667,13 +2756,17 @@ mod tests {
         let sched = schedule(Some("09:00"), Some("18:00"), 5);
         let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at, tz());
         assert_eq!(
-            sched.late(at("09:05:00")),
+            sched.late(at("09:05:00"), &[]),
             Some(false),
             "剛好等於寬限不算遲到"
         );
-        assert_eq!(sched.late(at("09:05:01")), Some(true), "多一秒就是遲到");
-        assert_eq!(sched.late_by_seconds(at("09:05:01")), Some(1));
-        assert_eq!(sched.late_by_seconds(at("09:00:00")), Some(0));
+        assert_eq!(
+            sched.late(at("09:05:01"), &[]),
+            Some(true),
+            "多一秒就是遲到"
+        );
+        assert_eq!(sched.late_by_seconds(at("09:05:01"), &[]), Some(1));
+        assert_eq!(sched.late_by_seconds(at("09:00:00"), &[]), Some(0));
 
         let days = punch_days(
             &[
@@ -2703,8 +2796,11 @@ mod tests {
     #[test]
     fn lateness_is_unanswered_rather_than_false_without_a_start_time() {
         let arrived = business_time(punch("2026-08-06", "in", "10:30", "self").punched_at, tz());
-        assert_eq!(schedule(None, None, 0).late(arrived), None);
-        assert_eq!(schedule(Some("09:00"), None, 0).late(arrived), Some(true));
+        assert_eq!(schedule(None, None, 0).late(arrived, &[]), None);
+        assert_eq!(
+            schedule(Some("09:00"), None, 0).late(arrived, &[]),
+            Some(true)
+        );
     }
 
     /// The grace period comes from company settings, so the same arrival is
@@ -2712,13 +2808,223 @@ mod tests {
     #[test]
     fn the_grace_period_decides_a_borderline_arrival() {
         let arrived = business_time(punch("2026-08-06", "in", "09:05", "self").punched_at, tz());
-        assert_eq!(schedule(Some("09:00"), None, 0).late(arrived), Some(true));
         assert_eq!(
-            schedule(Some("09:00"), None, 5).late(arrived),
+            schedule(Some("09:00"), None, 0).late(arrived, &[]),
+            Some(true)
+        );
+        assert_eq!(
+            schedule(Some("09:00"), None, 5).late(arrived, &[]),
             Some(false),
             "剛好等於寬限不算遲到"
         );
-        assert_eq!(schedule(Some("09:00"), None, 10).late(arrived), Some(false));
+        assert_eq!(
+            schedule(Some("09:00"), None, 10).late(arrived, &[]),
+            Some(false)
+        );
+    }
+
+    /// Lateness is a question about a working day. A Saturday, a Sunday, a
+    /// public holiday or a day work was stopped has no start to be late for;
+    /// a Saturday the calendar moves back to work does.
+    #[test]
+    fn lateness_is_judged_only_on_working_days() {
+        let on = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+        let mut sched = schedule(Some("09:00"), Some("18:00"), 30);
+        sched
+            .calendar
+            .insert(on("2026-09-26"), (DayKind::Workday, "補行上班".into()));
+        sched
+            .calendar
+            .insert(on("2026-09-28"), (DayKind::Holiday, "教師節".into()));
+        sched
+            .calendar
+            .insert(on("2026-09-29"), (DayKind::NaturalDisaster, "颱風".into()));
+        // 2026-08-06 is a Thursday, 08-08 and 09-26 Saturdays, 08-30 a Sunday.
+        let days = punch_days(
+            &[
+                "2026-08-06",
+                "2026-08-08",
+                "2026-08-30",
+                "2026-09-26",
+                "2026-09-28",
+                "2026-09-29",
+            ]
+            .map(|d| punch(d, "in", "10:00", "self")),
+            tz(),
+        );
+        let late: Vec<Option<bool>> = days.iter().map(|d| d.late(&sched)).collect();
+        assert_eq!(late, [Some(true), None, None, Some(true), None, None]);
+        assert_eq!(
+            days[1].json(&sched, &limits())["late_seconds"],
+            Value::Null,
+            "休息日沒有遲到秒數"
+        );
+        assert_eq!(
+            summarise(&days, &sched, &limits()).late_days,
+            Some(2),
+            "只數平日與補行上班日"
+        );
+    }
+
+    /// One arrival with `leaves` (status, from, to) attached the way the
+    /// detail attaches them.
+    fn day_after(sched: &WorkSchedule, leaves: &[(&str, &str, &str)], at: &str) -> PunchDay {
+        let requests: Vec<LeaveRequest> = leaves
+            .iter()
+            .enumerate()
+            .map(|(n, (status, from, to))| {
+                sent(
+                    sched,
+                    leave(&format!("LV{n}"), "personal", status, from, to),
+                )
+            })
+            .collect();
+        // 2026-08-20 is a Thursday.
+        let mut days = punch_days(&[punch("2026-08-20", "in", at, "self")], tz());
+        let date = days[0].date;
+        mark_days(
+            &mut days,
+            &requests.iter().collect::<Vec<_>>(),
+            &[],
+            sched,
+            false,
+            date,
+        );
+        days.remove(0)
+    }
+
+    /// Approved leave over the start of the day moves the start to where the
+    /// leave ends, past the break when it ends inside one. A request not yet
+    /// approved does not move it, nor does leave that starts later in the day.
+    #[test]
+    fn approved_leave_over_the_start_moves_lateness_to_its_end() {
+        let mut sched = schedule(Some("09:00"), Some("18:00"), 30);
+        sched.break_start = NaiveTime::from_hms_opt(12, 0, 0);
+        sched.break_end = NaiveTime::from_hms_opt(13, 0, 0);
+        let late =
+            |leaves: &[(&str, &str, &str)], at: &str| day_after(&sched, leaves, at).late(&sched);
+
+        let morning = [("approved", "2026-08-20T09:00", "2026-08-20T13:00")];
+        assert_eq!(late(&morning, "13:02"), Some(false), "假後寬限內到班");
+        assert_eq!(late(&morning, "13:30:00"), Some(false));
+        assert_eq!(late(&morning, "13:31"), Some(true), "超過假後的寬限");
+        assert_eq!(
+            day_after(&sched, &morning, "13:31").json(&sched, &limits())["late_seconds"],
+            json!(60),
+            "遲到秒數從假後的寬限算起"
+        );
+
+        let to_noon = [("approved", "2026-08-20T09:00", "2026-08-20T12:00")];
+        assert_eq!(
+            late(&to_noon, "12:52"),
+            Some(false),
+            "假在午休結束，應到時刻是午休之後"
+        );
+        assert_eq!(late(&to_noon, "13:31"), Some(true));
+
+        for status in ["pending", "rejected", "withdrawn", "revoked"] {
+            assert_eq!(
+                late(&[(status, "2026-08-20T09:00", "2026-08-20T13:00")], "13:02"),
+                Some(true),
+                "{status} 的單不移動應到時刻"
+            );
+        }
+
+        let later = [("approved", "2026-08-20T10:00", "2026-08-20T12:00")];
+        assert_eq!(
+            late(&later, "11:00"),
+            Some(true),
+            "沒蓋到上班時刻的假不移動應到時刻"
+        );
+
+        let back_to_back = [
+            ("approved", "2026-08-20T09:00", "2026-08-20T11:00"),
+            ("approved", "2026-08-20T11:00", "2026-08-20T13:00"),
+        ];
+        assert_eq!(
+            late(&back_to_back, "13:20"),
+            Some(false),
+            "相連的兩張假接著算"
+        );
+
+        let overnight = [("approved", "2026-08-19T13:00", "2026-08-20T12:00")];
+        assert_eq!(
+            late(&overnight, "13:20"),
+            Some(false),
+            "跨日的假看本日結束的時刻"
+        );
+
+        let whole_day = [("approved", "2026-08-20T09:00", "2026-08-20T18:00")];
+        assert_eq!(late(&whole_day, "14:00"), None, "整天休假不判定遲到");
+
+        assert_eq!(late(&[], "09:30:00"), Some(false), "沒有休假的工作日不變");
+        assert_eq!(late(&[], "09:30:01"), Some(true));
+    }
+
+    /// Leave only ever moves the deadline later. A short request inside the
+    /// flexitime window leaves the window as it was.
+    #[test]
+    fn leave_never_makes_lateness_stricter_than_flexitime() {
+        let mut flex = flex_schedule(Some("09:00"), Some("18:00"), 0, 60);
+        flex.break_start = NaiveTime::from_hms_opt(12, 0, 0);
+        flex.break_end = NaiveTime::from_hms_opt(13, 0, 0);
+        let short = [("approved", "2026-08-20T09:00", "2026-08-20T09:30")];
+        assert_eq!(day_after(&flex, &short, "09:50").late(&flex), Some(false));
+        assert_eq!(day_after(&flex, &short, "10:00:01").late(&flex), Some(true));
+
+        let morning = [("approved", "2026-08-20T09:00", "2026-08-20T13:00")];
+        assert_eq!(
+            day_after(&flex, &morning, "13:00:00").late(&flex),
+            Some(false)
+        );
+        assert_eq!(
+            day_after(&flex, &morning, "13:00:01").late(&flex),
+            Some(true),
+            "假後的應到時刻不再加彈性區間"
+        );
+    }
+
+    /// Without leave the window is read as it was set, however long it is or
+    /// wherever it ends: only leave stops lateness from being judged.
+    #[test]
+    fn a_long_or_overnight_window_still_judges_lateness() {
+        let at = |t: &str| business_time(punch("2026-08-06", "in", t, "self").punched_at, tz());
+
+        let whole_day = flex_schedule(Some("09:00"), Some("18:00"), 0, 540);
+        assert_eq!(whole_day.late(at("17:59"), &[]), Some(false));
+        assert_eq!(
+            whole_day.late(at("18:30"), &[]),
+            Some(true),
+            "彈性區間和一整天一樣長，仍然判定"
+        );
+
+        let past_midnight = flex_schedule(Some("09:00"), Some("18:00"), 0, 900);
+        assert_eq!(
+            past_midnight.late(at("10:00"), &[]),
+            Some(false),
+            "彈性區間跨過午夜，不會繞回當天凌晨"
+        );
+
+        let night = schedule(Some("22:00"), Some("06:00"), 5);
+        assert_eq!(night.late(at("22:04"), &[]), Some(false));
+        assert_eq!(night.late(at("22:10"), &[]), Some(true), "跨夜班照常判定");
+        let first_hour = DayLeave {
+            leave_no: "LV1".into(),
+            kind: "personal".into(),
+            status: "approved".into(),
+            hours: Money::ONE,
+            from_at: at("22:00"),
+            to_at: at("23:00"),
+        };
+        assert_eq!(
+            night.late(at("23:04"), std::slice::from_ref(&first_hour)),
+            Some(false),
+            "跨夜班的假後應到時刻在隔天下班之前"
+        );
+        assert_eq!(
+            night.late(at("23:06"), std::slice::from_ref(&first_hour)),
+            Some(true)
+        );
     }
 
     /// Days are built from the punch rows, and a day with only an arrival

@@ -28,7 +28,7 @@
 // release can make it exit at start or never pass.
 
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -48,6 +48,10 @@ const BACKUPS = join(ROOT, "backup");
 // while it exists.
 const MARKER = join(RESULTS, "switching.marker");
 const CONTAINER_MARKER = "/var/lib/laysi-update/results/switching.marker";
+// laysi_license_token::update::FALLBACK_BOOT_FILE: the screen shows a notice
+// while it exists.
+const FALLBACK = join(RESULTS, "fallback-boot.marker");
+const CONTAINER_FALLBACK = "/var/lib/laysi-update/results/fallback-boot.marker";
 const UNITS = ["laysi-updater.path", "laysi-updater.service", "laysi-updater-boot.service", "laysi-updater-recover.service", "laysi-updater-fallback.service"];
 const FINAL = new Set([
   "succeeded",
@@ -860,6 +864,9 @@ exec ${realPodman} "$@"
     return done && s === "success";
   });
   check(unitState("laysi-updater-boot.service", "Result") !== "success", "the current updater failed at boot");
+  check(existsSync(FALLBACK) && readFileSync(FALLBACK, "utf8").startsWith("at "), "the previous updater left the fallback marker");
+  check((statSync(FALLBACK).mode & 0o777) === 0o644, "readable by the api's uid");
+  check(sh(["podman", "exec", api, "test", "-r", CONTAINER_FALLBACK], { ok: false }).code === 0, "and the api sees it");
   // A request it cannot run either: the previous updater's ExecStopPost
   // answers it as never started, which busy would not be.
   const v7 = buildRelease({ version: "v1.6.0", rustfs: newRustfs }, known);
@@ -872,7 +879,11 @@ exec ${realPodman} "$@"
     return again && !["activating", "active"].includes(unitState("laysi-updater-fallback.service"));
   });
   check(installed() === "v1.5.0", "and nothing was installed");
+  check(existsSync(FALLBACK), "the fallback marker stays while the current updater keeps failing");
+  // A working updater again: its next start removes the marker.
   writeFileSync(current, saved);
+  const restarted = powerCutAndBoot();
+  check(restarted.code === 0 && !existsSync(FALLBACK), "the current updater's next start removes the fallback marker");
   assertSettledOn("v1.5.0");
   systemctl("reset-failed", ...UNITS);
 

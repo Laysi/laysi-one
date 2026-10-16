@@ -31,7 +31,9 @@
 //! From before step 4 until the final result is written, the results
 //! directory also holds [`SWITCHING_FILE`], which tells api and mcp to refuse
 //! writes: a rollback restores the database as it was at step 5, and would
-//! take back anything written in between.
+//! take back anything written in between. From the moment the previous
+//! updater starts the stack until the current one next does,
+//! [`FALLBACK_BOOT_FILE`] tells the screen the current updater failed.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -39,11 +41,11 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use laysi_license_token::release::{self, Decision, Image, ImageDigest, Refusal, VerifyingKey};
 use laysi_license_token::update::{
-    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, KEEP_RESULTS,
-    MAX_REQUEST_BYTES, MAX_RESULT_BYTES, REQUEST_FILE, SWITCHING_FILE,
+    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, FALLBACK_BOOT_FILE,
+    KEEP_RESULTS, MAX_REQUEST_BYTES, MAX_RESULT_BYTES, REQUEST_FILE, SWITCHING_FILE,
 };
 
 use crate::envfile::{self, EnvFile};
@@ -443,10 +445,46 @@ impl<'h, H: Host> Machine<'h, H> {
     }
 
     /// The machine started: finish whatever the journal says, then start the
-    /// stack. This is the only thing that starts the stack at boot.
+    /// stack. This is the only thing that starts the stack at boot. The boot
+    /// and the recovery unit run it with the current updater, and a start that
+    /// succeeds removes the fallback marker, whatever it started: the marker
+    /// says whether the current updater works, not whether the stack runs,
+    /// and postgres alone, after a rollback that kept its dump, is what a
+    /// working one starts then.
     pub fn boot(&mut self) -> Result<(), String> {
         let _lock = Lock::acquire(&self.layout.lock(), true)
             .map_err(|e| format!("opening the lock: {e}"))?;
+        let started = self.start_up();
+        if started.is_ok() {
+            if let Err(e) = fsx::remove_durable(&self.fallback_marker()) {
+                self.log(format!("could not remove the fallback marker: {e}"));
+            }
+        }
+        started
+    }
+
+    /// [`boot`](Self::boot) run by the fallback unit, with the previous
+    /// updater, after the current one failed. The marker goes first: what it
+    /// says, that the current updater failed to start the stack, holds
+    /// whatever this start does. One that cannot be written is logged, and the
+    /// stack starts all the same.
+    pub fn fallback_boot(&mut self) -> Result<(), String> {
+        let _lock = Lock::acquire(&self.layout.lock(), true)
+            .map_err(|e| format!("opening the lock: {e}"))?;
+        self.log("the current updater failed; starting with the previous one");
+        let at = self.host.now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let marker = format!("at {at}\n");
+        if let Err(e) = fsx::write_atomic(&self.fallback_marker(), marker.as_bytes(), 0o644) {
+            self.log(format!("could not write the fallback marker: {e}"));
+        }
+        self.start_up()
+    }
+
+    fn fallback_marker(&self) -> PathBuf {
+        self.layout.results_dir().join(FALLBACK_BOOT_FILE)
+    }
+
+    fn start_up(&mut self) -> Result<(), String> {
         // An update this updater cannot read or finish is left as it is:
         // started on top of it, the stack could run swapped files on a
         // database that was never restored. The boot fails instead, and the

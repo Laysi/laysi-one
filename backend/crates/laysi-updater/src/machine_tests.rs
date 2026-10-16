@@ -9,8 +9,8 @@ use std::rc::Rc;
 use ed25519_dalek::{Signer, SigningKey};
 use laysi_license_token::release::{self, Image, ImageDigest, KeyId, ReleaseVersion};
 use laysi_license_token::update::{
-    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, REQUEST_FILE,
-    SWITCHING_FILE,
+    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, FALLBACK_BOOT_FILE,
+    REQUEST_FILE, SWITCHING_FILE,
 };
 
 use crate::envfile::EnvFile;
@@ -1015,6 +1015,54 @@ fn an_unreadable_journal_starts_nothing_and_fails_the_boot() {
     std::fs::remove_file(rig.layout.journal()).unwrap();
     assert!(rig.machine(|m| m.boot()).is_ok());
     assert!(rig.world.borrow().containers["web"].running);
+}
+
+#[test]
+fn a_start_by_the_previous_updater_is_marked_until_the_current_one_starts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::new(v1(), &[]);
+    let marker = rig.layout.results_dir().join(FALLBACK_BOOT_FILE);
+    // The boot unit failed, and the fallback unit runs the previous updater.
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.fallback_boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    let text = std::fs::read_to_string(&marker).unwrap();
+    assert!(text.starts_with("at 20") && text.ends_with("Z\n"), "{text}");
+    let mode = std::fs::metadata(&marker).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644, "the api reads it as another uid");
+
+    // A current updater that fails again leaves it.
+    std::fs::write(
+        rig.layout.journal(),
+        "laysi-updater-journal 1\nphase dancing\n",
+    )
+    .unwrap();
+    rig.world.borrow_mut().reboot();
+    assert!(rig.machine(|m| m.boot()).is_err());
+    assert!(marker.is_file());
+
+    // One that starts the stack removes it.
+    std::fs::remove_file(rig.layout.journal()).unwrap();
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(!marker.exists());
+    assert!(rig.world.borrow().containers["web"].running);
+}
+
+#[test]
+fn a_fallback_marker_that_cannot_be_written_does_not_stop_the_start() {
+    let rig = Rig::new(v1(), &[]);
+    let marker = rig.layout.results_dir().join(FALLBACK_BOOT_FILE);
+    // A directory in the way: nothing can be renamed over it.
+    std::fs::create_dir(&marker).unwrap();
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.fallback_boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    // Nor can the current updater remove it, which fails nothing either.
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    assert!(marker.is_dir());
 }
 
 /// Run `scenario` once to count its calls, then again with the power cut at
