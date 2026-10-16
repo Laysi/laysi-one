@@ -634,7 +634,7 @@ fn a_rollback_retried_by_hand_that_fails_again_keeps_the_dump() {
     for service in ["api", "mcp", "web", "backup", "rustfs"] {
         assert!(!rig.running(service), "{service} started");
     }
-    assert!(!rig.switching());
+    assert!(rig.switching(), "the dump is still to be restored");
     // And it can be tried again. This time the first restore fails and its
     // retry succeeds, and the result still says the rollback was retried by
     // hand.
@@ -650,7 +650,7 @@ fn a_rollback_retried_by_hand_that_fails_again_keeps_the_dump() {
 }
 
 #[test]
-fn retry_rollback_refuses_all_but_a_failed_rollback_with_its_dump() {
+fn retry_rollback_refuses_only_what_it_cannot_bring_back() {
     let phase = |rig: &Rig| rig.machine(|m| m.load_journal()).unwrap().map(|j| j.phase);
 
     // No update at all.
@@ -672,7 +672,7 @@ fn retry_rollback_refuses_all_but_a_failed_rollback_with_its_dump() {
     rig.run().unwrap();
     assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
     let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
-    assert!(refused.contains("沒有留下資料庫備份"), "{refused}");
+    assert!(refused.contains("已經還原資料庫"), "{refused}");
     assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
 
     // Another run holds the lock.
@@ -684,13 +684,254 @@ fn retry_rollback_refuses_all_but_a_failed_rollback_with_its_dump() {
     drop(held);
     assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
 
+    // A `.previous` copy is gone: nothing says what the files should be.
+    let previous = Layout::previous_of(&rig.layout.stack_files()[1]);
+    std::fs::remove_file(&previous).unwrap();
+    let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
+    assert!(refused.contains("不在主機上"), "{refused}");
+    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
+    assert_eq!(rig.backups(), vec!["req-byhand-5.dump".to_string()]);
+}
+
+#[test]
+fn retry_rollback_puts_the_stack_files_back_before_it_restores() {
+    let (rig, id) = failed_restore("req-byhand-6");
+    rig.world.borrow_mut().fail_restore = false;
     // The stack files name another release.
     let env = EnvFile::default().for_release(&v2().release(), &rig.layout.root.to_string_lossy());
     std::fs::write(&rig.layout.stack_files()[2], env.render()).unwrap();
-    let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
-    assert!(refused.contains("v0.1.0"), "{refused}");
-    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
-    assert_eq!(rig.backups(), vec!["req-byhand-5.dump".to_string()]);
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    let journal = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(journal.phase, Phase::RollingBack);
+    rig.machine(|m| m.boot()).unwrap();
+
+    rig.assert_settled(&id);
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack);
+    assert!(result
+        .rollback_reason
+        .unwrap()
+        .starts_with("以人工指令重新還原"));
+    for file in rig.layout.stack_files() {
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            std::fs::read(Layout::previous_of(&file)).unwrap(),
+            "{}",
+            file.display()
+        );
+    }
+}
+
+/// The power goes right after step 6 replaced the first stack file, with
+/// v0.2.0 naming another postgres image than v0.1.0: the boot rolls back
+/// from there, with no database to restore.
+fn cut_after_the_first_file_swapped(id: &str) -> (Rig, RequestId) {
+    let mut next = v2();
+    next.postgres = "postgres-2";
+    let rig = Rig::new(v1(), &[next]);
+    rig.world.borrow_mut().crash_on = Some("stack file swapped");
+    let id = rig.request(id, &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err());
+    rig.world.borrow_mut().reboot();
+    (rig, id)
+}
+
+/// The `.previous` copy of stack file `n` replaced by a symlink to it,
+/// which the updater does not follow, until the returned closure puts it
+/// back.
+fn break_previous(rig: &Rig, n: usize) -> impl FnOnce() {
+    let previous = Layout::previous_of(&rig.layout.stack_files()[n]);
+    let aside = previous.with_extension("aside");
+    std::fs::rename(&previous, &aside).unwrap();
+    std::os::unix::fs::symlink(&aside, &previous).unwrap();
+    move || {
+        std::fs::remove_file(&previous).unwrap();
+        std::fs::rename(&aside, &previous).unwrap();
+    }
+}
+
+fn assert_nothing_runs(rig: &Rig) {
+    for service in SERVICES {
+        assert!(!rig.running(service), "{service} started");
+    }
+    // Not even recreated from the new release's image.
+    assert_eq!(
+        rig.world.borrow().containers["postgres"].digest,
+        digest("postgres-1")
+    );
+}
+
+#[test]
+fn a_rollback_that_could_not_put_the_files_back_is_finished_at_the_next_boot() {
+    let (rig, id) = cut_after_the_first_file_swapped("req-files-0001");
+    let mend = break_previous(&rig, 0);
+    rig.machine(|m| m.boot()).unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed, "{result:?}");
+    assert_eq!(result.running, None, "the compose file is v0.2.0's");
+    assert_eq!(rig.backups(), vec!["req-files-0001.dump".to_string()]);
+    // Nothing starts on files half swapped, whatever `.env` names.
+    assert_nothing_runs(&rig);
+    // The new release never ran: the database is not to be restored.
+    assert!(!rig.switching());
+
+    mend();
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    rig.run().unwrap();
+    rig.assert_settled(&id);
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    let why = result.rollback_reason.unwrap();
+    assert!(
+        why.starts_with("開機時重新回退") && why.contains("無法還原"),
+        "{why}"
+    );
+    assert_eq!(rig.world.borrow().restores, 0);
+
+    let next = rig.request("req-files-0002", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&next).status, UpdateStatus::Succeeded);
+    assert_eq!(
+        rig.world.borrow().containers["postgres"].digest,
+        digest("postgres-2")
+    );
+}
+
+#[test]
+fn a_rollback_whose_previous_files_are_gone_starts_nothing_and_changes_nothing() {
+    let (rig, id) = cut_after_the_first_file_swapped("req-files-0003");
+    let kept: Vec<_> = rig
+        .layout
+        .stack_files()
+        .iter()
+        .map(|file| {
+            let previous = Layout::previous_of(file);
+            let bytes = std::fs::read(&previous).unwrap();
+            std::fs::remove_file(&previous).unwrap();
+            (previous, bytes)
+        })
+        .collect();
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    let journal = std::fs::read(rig.layout.journal()).unwrap();
+    let result = std::fs::read(rig.layout.results_dir().join(id.as_str())).unwrap();
+    for boot in 0..3 {
+        if boot > 0 {
+            rig.world.borrow_mut().reboot();
+            rig.machine(|m| m.boot()).unwrap();
+        }
+        assert_nothing_runs(&rig);
+        let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
+        assert!(
+            refused.contains("docker-compose.prod.yml.previous 不在主機上"),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(rig.layout.journal()).unwrap(), journal);
+        assert_eq!(
+            std::fs::read(rig.layout.results_dir().join(id.as_str())).unwrap(),
+            result
+        );
+        assert_eq!(rig.backups(), vec!["req-files-0003.dump".to_string()]);
+    }
+    let next = rig.request("req-files-0004", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&next).status, UpdateStatus::RefusedBlocked);
+
+    // With the copies back, retry-rollback finishes it.
+    for (previous, bytes) in kept {
+        std::fs::write(previous, bytes).unwrap();
+    }
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    let j = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(j.phase, Phase::RollingBack);
+    rig.machine(|m| m.boot()).unwrap();
+    rig.assert_settled(&id);
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    assert!(result
+        .rollback_reason
+        .unwrap()
+        .starts_with("以人工指令重新回退"));
+}
+
+#[test]
+fn a_rollback_with_a_dump_to_restore_gets_its_files_back_and_waits_for_retry_rollback() {
+    let mut broken = never_healthy();
+    broken.postgres = "postgres-2";
+    let rig = Rig::new(v1(), std::slice::from_ref(&broken));
+    rig.world.borrow_mut().crash_on = Some("rolling-back");
+    let id = rig.request("req-files-0005", &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err());
+    rig.world.borrow_mut().reboot();
+    let mend = break_previous(&rig, 0);
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    for service in SERVICES {
+        assert!(!rig.running(service), "{service} started");
+    }
+    assert!(rig.switching(), "the dump is still to be restored");
+
+    // A marker gone meanwhile that cannot be written again fails the boot,
+    // and nothing starts.
+    use std::os::unix::fs::PermissionsExt;
+    mend();
+    std::fs::remove_file(rig.layout.results_dir().join(SWITCHING_FILE)).unwrap();
+    let results = rig.layout.results_dir();
+    std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o500)).unwrap();
+    rig.world.borrow_mut().reboot();
+    let failed = rig.machine(|m| m.boot());
+    std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(failed.is_err(), "{failed:?}");
+    for service in SERVICES {
+        assert!(!rig.running(service), "{service} started");
+    }
+
+    // Nor with the host recording another release than the one rolled back
+    // to.
+    let installed = rig.layout.installed();
+    std::fs::write(&installed, journal::encode_installed(&broken.release())).unwrap();
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    for service in SERVICES {
+        assert!(!rig.running(service), "{service} started");
+    }
+    std::fs::write(&installed, journal::encode_installed(&v1().release())).unwrap();
+
+    // The next boot puts the files back and starts the old postgres alone;
+    // the marker is written again.
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    for file in rig.layout.stack_files() {
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            std::fs::read(Layout::previous_of(&file)).unwrap(),
+            "{}",
+            file.display()
+        );
+    }
+    assert!(rig.running("postgres"));
+    assert_eq!(
+        rig.world.borrow().containers["postgres"].digest,
+        digest("postgres-1")
+    );
+    for service in ["api", "mcp", "web", "backup", "rustfs"] {
+        assert!(!rig.running(service), "{service} started");
+    }
+    assert!(rig.switching());
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    assert_eq!(rig.world.borrow().restores, 0);
+
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    let j = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(j.phase, Phase::Restoring);
+    rig.machine(|m| m.boot()).unwrap();
+    rig.run().unwrap();
+    rig.assert_settled(&id);
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    assert_eq!(rig.world.borrow().restores, 1);
 }
 
 #[test]
@@ -1355,6 +1596,16 @@ fn a_rollback_that_cannot_stop_the_new_release_keeps_the_dump() {
     let env = std::fs::read_to_string(&rig.layout.stack_files()[2]).unwrap();
     assert!(env.contains(&v1().own(Image::Api)));
     assert_eq!(rig.installed(), "v0.1.0");
+    // The new api still runs, and refuses writes: restoring the dump would
+    // take them back.
+    assert!(rig.running("api"));
+    assert!(rig.switching(), "the dump is still to be restored");
+
+    rig.world.borrow_mut().unstoppable = None;
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    rig.machine(|m| m.boot()).unwrap();
+    rig.assert_settled(&id);
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
 }
 
 #[test]
@@ -1519,7 +1770,7 @@ fn a_restore_that_fails_while_recovering_starts_postgres_alone() {
     for service in ["api", "mcp", "web", "backup", "rustfs"] {
         assert!(!rig.running(service), "{service} started");
     }
-    assert!(!rig.switching());
+    assert!(rig.switching(), "the dump is still to be restored");
 }
 
 #[test]
@@ -1912,7 +2163,10 @@ fn a_retry_that_fails_too_ends_the_rollback_and_keeps_the_dump_as_it_was() {
         assert!(!rig.world.borrow().local.contains(&broken.own(image)));
         assert!(rig.world.borrow().local.contains(&v1().own(image)));
     }
-    assert!(!rig.switching(), "the result is final");
+    assert!(
+        rig.switching(),
+        "the result is final and the dump is still to be restored"
+    );
 
     // No boot tries again.
     for _ in 0..3 {
@@ -1921,7 +2175,7 @@ fn a_retry_that_fails_too_ends_the_rollback_and_keeps_the_dump_as_it_was() {
         assert_eq!(rig.world.borrow().restores, 2);
         assert!(rig.running("postgres"));
         assert!(!rig.running("api"));
-        assert!(!rig.switching());
+        assert!(rig.switching());
     }
     assert_eq!(rig.retries_begun(id.as_str()), 1);
 }
@@ -1970,7 +2224,13 @@ fn a_power_cut_during_a_failing_retry_never_begins_a_second_one() {
         let result = rig.result(&id);
         let begun = rig.retries_begun(id.as_str());
         assert!(begun <= 1, "cut at call {k}: {begun} retries");
-        assert!(!rig.switching(), "cut at call {k}: marker left");
+        // Kept only while the dump is still to be restored.
+        assert_eq!(
+            rig.switching(),
+            result.status == UpdateStatus::RollbackFailed,
+            "cut at call {k}: {:?}",
+            result.status
+        );
         match result.status {
             UpdateStatus::RollbackFailed => {
                 assert_eq!(begun, 1, "cut at call {k}");

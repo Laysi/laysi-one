@@ -31,7 +31,9 @@
 //! From before step 4 until the final result is written, the results
 //! directory also holds [`SWITCHING_FILE`], which tells api and mcp to refuse
 //! writes: a rollback restores the database as it was at step 5, and would
-//! take back anything written in between.
+//! take back anything written in between. A rollback that failed with its
+//! dump still to restore keeps it past the final result, since
+//! `retry-rollback` restores that dump too.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -275,8 +277,9 @@ impl<'h, H: Host> Machine<'h, H> {
                     .env_of(&self.stack_files())
                     .get(envfile::RELEASE)
                     .map(str::to_string);
-                (named.as_deref() == Some(j.from.version.to_string().as_str()))
-                    .then(|| j.from.version.clone())
+                (self.files_back(j) == Ok(true)
+                    && named.as_deref() == Some(j.from.version.to_string().as_str()))
+                .then(|| j.from.version.clone())
             }
             _ => Some(j.from.version.clone()),
         };
@@ -308,16 +311,22 @@ impl<'h, H: Host> Machine<'h, H> {
 
     /// The marker goes once no update is left that could still take back a
     /// write: no journal, or one ended in `RollbackFailed` whose final
-    /// result is written. Every run that holds the lock asks after its
-    /// recovery, so one that died between the final result and this, or
-    /// that lost power, leaves the marker only until the boot or recovery
-    /// unit runs.
+    /// result is written and that has no dump left to restore. A dump left
+    /// to restore keeps it: `retry-rollback` restores that dump and takes
+    /// back whatever was written meanwhile, by a container the rollback
+    /// could not stop, say; the retried rollback removes it when it
+    /// finishes. Every run that holds the lock asks after its recovery, so
+    /// one that died between the final result and this, or that lost power,
+    /// leaves the marker only until the boot or recovery unit runs.
     fn settle_switching(&mut self) {
         let done = match self.load_journal() {
             Ok(None) => true,
-            Ok(Some(j)) if j.phase == Phase::RollbackFailed => self
-                .read_result(&j.request)
-                .is_some_and(|r| r.status.is_final()),
+            Ok(Some(j)) if j.phase == Phase::RollbackFailed => {
+                !self.restore_pending(&j)
+                    && self
+                        .read_result(&j.request)
+                        .is_some_and(|r| r.status.is_final())
+            }
             _ => false,
         };
         if done {
@@ -443,7 +452,9 @@ impl<'h, H: Host> Machine<'h, H> {
     }
 
     /// The machine started: finish whatever the journal says, then start the
-    /// stack. This is the only thing that starts the stack at boot.
+    /// stack. This is the only thing that starts the stack at boot. A
+    /// journal ended in `RollbackFailed` is taken up again first, see
+    /// `resume_failed_rollback`.
     pub fn boot(&mut self) -> Result<(), String> {
         let _lock = Lock::acquire(&self.layout.lock(), true)
             .map_err(|e| format!("opening the lock: {e}"))?;
@@ -458,7 +469,13 @@ impl<'h, H: Host> Machine<'h, H> {
                     return Err(e);
                 }
             }
-            Ok(Some(j)) => self.answer_final(&j),
+            Ok(Some(j)) => {
+                self.answer_final(&j);
+                if let Err(e) = self.resume_failed_rollback(j) {
+                    self.log(format!("recovery failed, nothing started: {e}"));
+                    return Err(e);
+                }
+            }
             Ok(None) => {}
             Err(e) => {
                 self.log(format!("the journal cannot be read, nothing started: {e}"));
@@ -473,17 +490,20 @@ impl<'h, H: Host> Machine<'h, H> {
         started
     }
 
-    /// `retry-rollback`: a rollback that ended in `RollbackFailed` with its
-    /// dump kept goes back to restoring it, and the next run that holds the
-    /// lock, a boot or the recovery unit, takes it from there like any
-    /// rollback a run left behind: the restore and its one retry, then the
-    /// old release started and judged. Whoever runs this has dealt with what
-    /// made the restore fail, a full disk say; a restore that fails again
-    /// ends in `RollbackFailed` as before, with the dump kept.
+    /// `retry-rollback`: a rollback that ended in `RollbackFailed` goes back
+    /// to a phase it is finished from, and the next run that holds the lock,
+    /// a boot or the recovery unit, takes it from there like any rollback a
+    /// run left behind. Whoever runs this has dealt with what made it fail,
+    /// a full disk say; a rollback that fails again ends in `RollbackFailed`
+    /// as before, with its dump kept.
     ///
-    /// The rollback put the old stack files and installed release back
-    /// before it restored, and the restore runs the postgres those files
-    /// name; anything else is refused and left as it is.
+    /// With a dump to restore, every stack file back to its `.previous`
+    /// copy and the old release installed, it goes back to restoring: the
+    /// restore and its one retry, then the old release started and judged.
+    /// Otherwise it goes back to `RollingBack`, which puts the files back
+    /// before anything else. Refused and left as it is: a rollback that
+    /// already restored the database, its dump deleted, and one whose
+    /// `.previous` copies are missing or unreadable.
     pub fn retry_rollback(&mut self) -> Result<RequestId, String> {
         let lock = Lock::acquire(&self.layout.lock(), false)
             .map_err(|e| format!("opening the lock: {e}"))?;
@@ -501,31 +521,32 @@ impl<'h, H: Host> Machine<'h, H> {
             Some(j) => j,
         };
         let dump = self.backup_path(&j);
-        if !(j.restore_db && dump.is_file()) {
+        if j.restore_db && !dump.is_file() {
             return Err(format!(
-                "這次回退沒有留下資料庫備份 {}：資料庫不需要還原，是舊版沒有啟動，原因見 {}",
+                "這次回退已經還原資料庫並刪除備份 {}，是舊版沒有啟動；每次開機照常啟動 stack，原因見 {}",
                 dump.display(),
                 self.layout.log().display()
             ));
         }
-        let installed = self.load_installed()?;
-        let named = self
-            .env_of(&self.stack_files())
-            .get(envfile::RELEASE)
-            .map(str::to_string);
-        let from = j.from.version.to_string();
-        if installed.version != j.from.version || named.as_deref() != Some(from.as_str()) {
-            return Err(format!(
-                "主機記錄的版本或 stack 檔不是更新前的 {from}，這個指令救不回來"
-            ));
-        }
+        let files_back = self
+            .files_back(&j)
+            .map_err(|e| format!("{e}，放不回更新前的 stack 檔，這個指令救不回來"))?;
+        let installed = self.load_installed().ok();
+        let restore_now = j.restore_db
+            && files_back
+            && installed.is_some_and(|release| release.version == j.from.version);
+        let (phase, what) = match (restore_now, j.restore_db) {
+            (true, _) => (Phase::Restoring, "以人工指令重新還原"),
+            (false, true) => (Phase::RollingBack, "以人工指令重新還原"),
+            (false, false) => (Phase::RollingBack, "以人工指令重新回退"),
+        };
         // Newest first, as `fail_rollback` writes it.
         j.rollback_reason = Some(match j.rollback_reason.take() {
-            Some(earlier) => format!("以人工指令重新還原，先前：{earlier}"),
-            None => "以人工指令重新還原".into(),
+            Some(earlier) => format!("{what}，先前：{earlier}"),
+            None => what.into(),
         });
         j.restore_retry = None;
-        j.phase = Phase::Restoring;
+        j.phase = phase;
         self.log(format!(
             "request {}: retrying the rollback by hand",
             j.request
@@ -546,33 +567,95 @@ impl<'h, H: Host> Machine<'h, H> {
         }
     }
 
-    /// The stack, unless a rollback that never restored the database left
-    /// its dump as the only copy of the data. Then nothing that serves or
-    /// writes starts on what is left of the database: postgres alone runs,
-    /// so the dump can be restored by hand, and only when the stack files
-    /// are back to the release the host records, so it is the old postgres
-    /// image; otherwise nothing starts. Neither is a failure of the boot,
-    /// which would only have the previous updater start everything.
+    /// At boot, a journal ended in `RollbackFailed`. The stack files go back
+    /// first, each that differs from its `.previous` copy, as `RollingBack`
+    /// puts them: the rollback may have failed before it put them back, with
+    /// the swap half done. When that fails too, a copy missing say, the
+    /// journal is left as it is and nothing starts.
+    ///
+    /// A rollback with no database to restore whose dump is still there
+    /// stopped before it started the old release, and the new release never
+    /// ran on the database: it is finished the way a rollback left in
+    /// `RollingBack` is, and one that fails again ends in `RollbackFailed`
+    /// for the next boot. A dump that is to be restored waits for
+    /// `retry-rollback`.
+    fn resume_failed_rollback(&mut self, mut j: Journal) -> Result<(), String> {
+        // Written again when missing. Unlike `recover`, which has to go on
+        // without it, the boot fails and starts nothing: a container the
+        // rollback could not stop would take writes the restore erases.
+        if self.restore_pending(&j) {
+            self.mark_switching(&j)?;
+        }
+        if let Err(e) = self.put_files_back(&j) {
+            self.log(format!(
+                "request {}: the stack files cannot be put back: {e}",
+                j.request
+            ));
+            return Ok(());
+        }
+        if j.restore_db || !self.backup_path(&j).is_file() {
+            return Ok(());
+        }
+        // Newest first, as `fail_rollback` writes it.
+        j.rollback_reason = Some(match j.rollback_reason.take() {
+            Some(earlier) => format!("開機時重新回退，先前：{earlier}"),
+            None => "開機時重新回退".into(),
+        });
+        j.phase = Phase::RollingBack;
+        self.log(format!(
+            "request {}: finishing the rollback at boot",
+            j.request
+        ));
+        self.save(&j)?;
+        self.recover(j)
+    }
+
+    /// The stack, unless a rollback ended in `RollbackFailed`. Then nothing
+    /// starts until the stack files are the ones from before the update,
+    /// all three and byte for byte, wherever the rollback had to put them
+    /// back: on files that may be the new release's, postgres could come up
+    /// from the new image. With the files back, a rollback that never
+    /// restored the database it was to restore leaves its dump as the only
+    /// copy of the data, and nothing that serves or writes starts on what is
+    /// left of the database: postgres alone runs, the old image, so the
+    /// dump can be restored by hand. Otherwise the stack starts. Nothing
+    /// started is not a failure of the boot, which would only have the
+    /// previous updater start everything.
     fn start_what_is_safe(&mut self) -> Result<(), String> {
-        let failed = matches!(self.load_journal(), Ok(Some(j)) if j.phase == Phase::RollbackFailed);
-        if !(failed && self.retained_backup().is_some()) {
+        let j = match self.load_journal() {
+            Ok(Some(j)) if j.phase == Phase::RollbackFailed => j,
+            _ => return self.start_stack(),
+        };
+        match self.files_back(&j) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.log("a rollback failed and the stack files are not the ones from before the update: nothing started");
+                return Ok(());
+            }
+            Err(e) => {
+                self.log(format!("a rollback failed and {e}: nothing started"));
+                return Ok(());
+            }
+        }
+        if !self.restore_pending(&j) {
             return self.start_stack();
         }
+        // A rollback that failed before it wrote the old release back leaves
+        // that to `retry-rollback`, which goes through `RollingBack`.
         let release = match self.load_installed() {
-            Ok(release) => release,
+            Ok(release) if release.version == j.from.version => release,
+            Ok(release) => {
+                self.log(format!(
+                    "a rollback left its dump and the installed release is {}, not {}: nothing started",
+                    release.version, j.from.version
+                ));
+                return Ok(());
+            }
             Err(e) => {
                 self.log(format!("a rollback left its dump and the installed release is unknown, nothing started: {e}"));
                 return Ok(());
             }
         };
-        let named = self
-            .env_of(&self.stack_files())
-            .get(envfile::RELEASE)
-            .map(str::to_string);
-        if named.as_deref() != Some(release.version.to_string().as_str()) {
-            self.log("a rollback left its dump and the stack files are not the installed release's: nothing started");
-            return Ok(());
-        }
         // Whatever the rollback could not stop must not be writing when the
         // old postgres comes up under it.
         if let Err(e) = self.ensure_stopped() {
@@ -584,6 +667,60 @@ impl<'h, H: Host> Machine<'h, H> {
         self.log("a rollback left its dump: starting postgres only");
         if let Err(e) = self.database_up(false, &release, None) {
             self.log(format!("starting postgres: {e}"));
+        }
+        Ok(())
+    }
+
+    /// A rollback that was to restore the database and has not: the dump
+    /// is still there, and restoring it takes back anything written since.
+    fn restore_pending(&self, j: &Journal) -> bool {
+        j.restore_db && self.backup_path(j).is_file()
+    }
+
+    /// Whether a stack file differs from its `.previous` copy, the file
+    /// from before the update. An error when that copy is missing or
+    /// unreadable: nothing then says what the file should be.
+    fn differs_from_previous(&self, file: &Path) -> Result<bool, String> {
+        let previous = Layout::previous_of(file);
+        let old = fsx::read_own(&previous, MAX_COMPOSE_BYTES)
+            .map_err(|e| format!("無法讀取 {}：{e}", previous.display()))?
+            .ok_or_else(|| format!("{} 不在主機上", previous.display()))?;
+        let now = fsx::read_own(file, MAX_COMPOSE_BYTES).ok().flatten();
+        Ok(now.as_deref() != Some(old.as_slice()))
+    }
+
+    /// Whether the stack files are the ones from before the update. Only a
+    /// rollback from step 6 on has to put them back; before that they were
+    /// never replaced.
+    fn files_back(&self, j: &Journal) -> Result<bool, String> {
+        if !j.restore_files {
+            return Ok(true);
+        }
+        for file in self.stack_files() {
+            if self.differs_from_previous(&file)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Each stack file that differs from its `.previous` copy is replaced
+    /// by it, the way `RollingBack` does.
+    fn put_files_back(&mut self, j: &Journal) -> Result<(), String> {
+        if !j.restore_files {
+            return Ok(());
+        }
+        for file in self.stack_files() {
+            if !self.differs_from_previous(&file)? {
+                continue;
+            }
+            self.log(format!(
+                "request {}: putting {} back",
+                j.request,
+                file.display()
+            ));
+            fsx::copy_atomic(&Layout::previous_of(&file), &file, 0o600, MAX_COMPOSE_BYTES)
+                .map_err(|e| format!("無法還原 {}：{e}", file.display()))?;
         }
         Ok(())
     }
@@ -1091,8 +1228,9 @@ impl<'h, H: Host> Machine<'h, H> {
         self.save(j)
     }
 
-    /// Final: the old version did not come back. Services other than postgres
-    /// stay as they are; the next boot only starts the stack.
+    /// Final for this run: the old version did not come back. Services other
+    /// than postgres stay as they are; what the next boot does is
+    /// `resume_failed_rollback`, then `start_what_is_safe`.
     fn fail_rollback(&mut self, mut j: Journal, reason: String) -> Result<(), String> {
         self.log(format!("request {}: rollback failed: {reason}", j.request));
         // A retried restore that succeeded said so here already.

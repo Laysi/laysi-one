@@ -3521,9 +3521,12 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   8–64 個英數與 `-`，同時是結果的檔名。
 - `CONTAINER_RESULT_DIR` = `/var/lib/laysi-update/results`（api 與 mcp 皆唯讀）。檔名就是
   請求編號，`UpdateResult::decode()` 讀，上限 `MAX_RESULT_BYTES`。每一步都整份換掉，
-  `UpdateStatus::is_final()` 之後不再變；保留最新的 `KEEP_RESULTS` 份。
+  `UpdateStatus::is_final()` 之後不再變，`rollback-failed` 例外（見「回退失敗之後」）；保留最新的
+  `KEEP_RESULTS` 份。
 - 切換標記 `SWITCHING_FILE`（`switching.marker`）：更新程式在第 4 步停下第一個服務之前
-  寫入（暫存檔、fsync、rename），最終結果寫出之後才刪除。**api 與 mcp 在 `update::switching()`
+  寫入（暫存檔、fsync、rename），最終結果寫出之後才刪除；停在 `rollback-failed` 而備份還要
+  還原時一直留著，到 `retry-rollback` 做完回退才刪（見「回退失敗之後」）。
+  **api 與 mcp 在 `update::switching()`
   為真時拒絕所有寫入，讀取照常**：回退把資料庫還原成第 5 步的樣子，這段期間的寫入會被
   還原掉。判斷只看標記在不在，不需要請求編號，所以更新程式自己起的 api 與沒有送出請求的
   mcp 看到的是同一個答案。結果目錄不存在（沒有主機端更新程式的安裝，例如開發環境）時為假；
@@ -3540,7 +3543,8 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   `-installed-unknown`／`-disk-space`／`-busy`／`-blocked`。每份都帶 `received`、
   `updated`，視情況帶 `offered`、`running`、`downtime-from`／`-to`、`reason`、
   `rollback-reason`、`tools`。停機時間從 `downtime-from`（第 4 步）量到 `downtime-to`。
-  `rolled-back` 帶 `rollback-reason` 表示第一次還原失敗、重試成功，內容是第一次的原因。
+  `rolled-back` 帶 `rollback-reason` 表示第一次還原失敗、重試成功，內容是第一次的原因；
+  或者回退失敗之後由開機或 `retry-rollback` 做完，內容寫哪一條路與先前失敗的原因。
   `tools` 是這次執行實際用的版本（`podman=4.9.3 podman-compose=1.6.0`），只記錄、不判斷。
 - 旗標是不可信輸入：以目錄 fd 加 `O_NOFOLLOW | O_NONBLOCK` 開啟、`fstat` 確認是一般檔案、
   有大小上限，驗不過章就丟棄。symlink、FIFO、目錄都不會讓更新程式讀到目錄外的檔案或卡住。
@@ -3605,7 +3609,7 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 | `rolling-back` | 重做回退 |
 | `restoring` | 重新還原資料庫；`restore-retry` 已寫下時是續做那一次重試，不會再開始第二次 |
 | `restored` | 起舊版並判斷 |
-| `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres，直到有人執行 `retry-rollback`（見「回退失敗之後」） |
+| `rollback-failed` | 終止。開機先把三個 stack 檔放回前一版（與 `.previous` 逐位元組比對），放不回就什麼都不啟動；沒有要還原資料庫而備份還在的，接著照 `rolling-back` 做完回退；要還原資料庫而備份還在的只啟動舊版 postgres，直到有人執行 `retry-rollback`；其餘只啟動 stack，不再還原（見「回退失敗之後」） |
 
 **斷電會留下讀不了的容器**：斷電前一刻建立的容器，它那一層的 `link` 與 `lower` 檔已經
 建立卻是空的；`podman ps` 列得出它，任何 inspect 都失敗在 `getting graph driver info`，
@@ -3617,6 +3621,9 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 
 日誌存在、階段在 `stopping` 之後且結果還不是最終時，切換標記一定在；收尾一個這樣的日誌時
 更新程式先補寫標記。最終結果寫出、日誌刪掉之後才刪標記，所以中斷在兩者之間也只會多擋一段。
+停在 `rollback-failed` 而備份還要還原時，標記一直留著，開機發現它不在就補寫：
+`retry-rollback` 還原那份備份時，會把這段期間的寫入一併還原掉，例如回退停不下來的新版容器
+收到的寫入。補寫不了時開機失敗、什麼都不啟動。
 
 **開機時 stack 只由更新程式啟動**：compose 用 `unless-stopped`，而 rootless 的
 `podman-restart.service` 只啟動 `restart: always` 的容器；任何服務都不得設 `always`，
@@ -3667,8 +3674,18 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
 
 ### 回退失敗之後
 
-停在 `rollback-failed` 而備份留著的機器只啟動 postgres，系統的資料庫已經不在：還原前先
-刪掉它，還原失敗時再刪掉還原了一半的那一份。api 沒有執行，畫面打不開，客戶自己救不回來。
+**沒有要還原資料庫的回退由開機做完**：第 6 步換檔時失敗或斷電，新版沒有執行過，資料庫
+還是原樣，但回退可能在放回檔案時失敗，留下一半是新版的 stack 檔與第 5 步的備份。之後每次
+開機先把三個 stack 檔與 `.previous` 逐位元組比對、不同的放回，再照 `rolling-back` 做完回退：
+刪備份、起舊版並判斷，成功就是 `rolled-back`，`rollback-reason` 記下「開機時重新回退」與先前
+失敗的原因。放不回（`.previous` 不見了或讀不了）就什麼都不啟動，日誌與結果不動，
+`retry-rollback` 也拒絕。只看 `.env` 的話，換到一半的 compose 檔會讓 postgres 以新版的映像
+起來。
+
+停在 `rollback-failed`、要還原資料庫而備份留著的機器只啟動舊版的 postgres，系統的資料庫已經
+不在：還原前先刪掉它，還原失敗時再刪掉還原了一半的那一份。api 沒有執行，畫面打不開，客戶
+自己救不回來。開機同樣先放回 stack 檔；放不回，或主機記錄的版本不是更新前那一版，就連
+postgres 都不啟動，由 `retry-rollback` 改回 `rolling-back` 一併寫回。
 
 **由原廠救回**：客戶聯絡經銷商、經銷商轉原廠，原廠取得主機上 stack 使用者的 shell（本機
 主控台或 ssh，由客戶提供）之後執行，更新程式在 `~/.local/share/laysi-one/bin/`：
@@ -3678,8 +3695,10 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
    什麼失敗，先排除。磁碟滿就清出空間；備份本身讀不了時停下來，這個指令救不回來。
    斷電之後 `updater.log` 的尾端可能是一段 NUL、最後幾行沒有落盤（`grep` 要加 `-a`），
    這時原因只在結果檔。
-3. `laysi-updater retry-rollback`。日誌停在 `rollback-failed`、備份還在、主機記錄的版本
-   與 stack 檔都是更新前那一版，三者都成立才把日誌改回 `restoring`，再
+3. `laysi-updater retry-rollback`。日誌停在 `rollback-failed`、備份還在、主機記錄的版本是
+   更新前那一版、三個 stack 檔與 `.previous` 逐位元組相同，都成立時把日誌改回 `restoring`；
+   stack 檔或版本還不是更新前的，改回 `rolling-back`，由它先放回檔案。`.previous` 不見了或
+   讀不了就拒絕。接著
    `systemctl --user start laysi-updater-recover.service`，由收尾 unit 照一般的回退做完：
    還原與那一次重試、起舊版並判斷。工作在 unit 裡做，ssh 斷線不影響；指令等到收尾結束，
    印出回到的版本。
@@ -3689,8 +3708,10 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
    可以再執行一次。
 
 **備份在還原成功的那一刻刪掉**，與一般回退相同：資料已經回到資料庫，之後舊版起不來也
-用不到它。沒有留下備份的 `rollback-failed`（還原成功、是舊版沒有啟動）不走這條路，指令
-會拒絕：那種機器每次開機照常啟動 stack，原因在 `state/updater.log`。
+用不到它。還原成功之後才失敗的 `rollback-failed`（是舊版沒有啟動）不走這條路，指令
+會拒絕：那種機器每次開機照常啟動 stack，原因在 `state/updater.log`。沒有要還原資料庫的
+`rollback-failed`，指令一律改回 `rolling-back` 重做回退，`rollback-reason` 記下「以人工指令
+重新回退」。
 
 ### 出貨與 compose
 
