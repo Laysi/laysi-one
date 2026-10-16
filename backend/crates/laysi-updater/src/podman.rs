@@ -251,6 +251,10 @@ fn run_with_file(
 /// In a process group of its own, so that a deadline ends podman-compose and
 /// every podman it started, not only the process waited on.
 fn spawn(cmd: &mut Command, shown: &str) -> HostResult<Child> {
+    // `spawn` returns once the child has exec'd, which closed its copies of
+    // the close-on-exec descriptors.
+    #[cfg(test)]
+    let _no_lock_open = crate::fsx::fork_gate::spawning();
     cmd.process_group(0)
         .spawn()
         .map_err(|e| format!("{shown}: {e}"))
