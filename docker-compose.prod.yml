@@ -14,13 +14,20 @@
 # LAYSI_VERSION pins all three images to one release. The copy attached to a
 # release has the tag substituted in, so a downloaded file is reproducible;
 # the copy in the repository defaults to `latest`.
+#
+# The third-party images are pinned by digest, the tag kept for the reader:
+# a tag can move under an installation, and a shipped machine has to run the
+# images its release was tested with. Shipped machines run this file from
+# the api image with docker-compose.ship.yml on top, which also pins Laysi's
+# own images by digest. A change to the postgres or rustfs digest goes
+# through scripts/third-party-image-check.ts.
 
 services:
   # Generates what must differ between installations, once, into a volume.
   # Never regenerates: a new database password against an existing pgdata
   # volume would leave a database nobody can open.
   secrets:
-    image: alpine:3.24
+    image: docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     volumes:
       - secrets:/secrets
       # The initialisation code has to reach a person, and the person is at a
@@ -56,7 +63,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-laysi}
 
   postgres:
-    image: postgres:18
+    # The trixie build (ICU 76). The default collation is ICU zh-TW, so a
+    # digest on another Debian base needs the text indexes rebuilt; see
+    # scripts/third-party-image-check.ts.
+    image: docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     restart: unless-stopped
     depends_on:
       secrets:
@@ -76,7 +86,7 @@ services:
       retries: 20
 
   rustfs:
-    image: rustfs/rustfs:1.0.1
+    image: docker.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
     restart: unless-stopped
     environment:
       RUSTFS_VOLUMES: /data
