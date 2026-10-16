@@ -135,6 +135,11 @@ pub struct World {
     /// A container created from the first digest runs the second: the
     /// image in local storage is not the one the reference names.
     pub runs_instead: Option<(String, String)>,
+    /// Digests of an image another digest named first, the way a rebuild
+    /// that changed nothing comes back under a new index digest. Pulled while
+    /// that image is local, one becomes another name of it, and containers
+    /// created from it report the first digest.
+    pub same_image: BTreeMap<String, String>,
     pub restores: usize,
     pub dumps: usize,
     pub pulls: usize,
@@ -173,6 +178,7 @@ impl World {
             private_repo: None,
             unstoppable: None,
             runs_instead: None,
+            same_image: BTreeMap::new(),
             restores: 0,
             dumps: 0,
             pulls: 0,
@@ -204,6 +210,27 @@ impl World {
         self.clock += Duration::seconds(60);
         self.monotonic += 60;
         self.crash_at = None;
+    }
+
+    /// The digest local storage reports for the image a pulled digest
+    /// names: the first digest it was pulled by.
+    fn first_name(&self, digest: &str) -> String {
+        match self.same_image.get(digest) {
+            Some(first) if self.local.contains(first) => first.clone(),
+            _ => digest.to_string(),
+        }
+    }
+
+    /// Every pulled digest of the image `first` names, `first` itself first.
+    fn names_of(&self, first: &str) -> Vec<String> {
+        std::iter::once(first.to_string())
+            .chain(
+                self.local
+                    .iter()
+                    .filter(|d| d.as_str() != first && self.first_name(d) == first)
+                    .cloned(),
+            )
+            .collect()
     }
 
     pub fn spec_of(&self, service: &str) -> Option<&ImageSpec> {
@@ -489,6 +516,7 @@ impl Host for FakeHost {
                 let behaviour = spec.map(|s| s.behaviour).unwrap_or(Behaviour::Plain);
                 let has_healthcheck =
                     matches!(behaviour, Behaviour::Healthy | Behaviour::NeverHealthy);
+                let first = w.first_name(&c.digest);
                 Container {
                     id: format!("id-{service}"),
                     name: format!("laysi-one-{service}"),
@@ -515,7 +543,8 @@ impl Host for FakeHost {
                         }
                     }),
                     image_name: c.reference.clone(),
-                    image_digest: c.digest.clone(),
+                    image_id: format!("id-{first}"),
+                    image_digests: w.names_of(&first),
                     created: c.created,
                 }
             })
@@ -661,14 +690,18 @@ impl Host for FakeHost {
         let w = self.world.borrow();
         Ok(w.local
             .iter()
+            .filter(|digest| w.first_name(digest) == **digest)
             .map(|digest| {
                 let spec = w.registry.get(digest);
+                let pulled_by: Vec<String> = w
+                    .names_of(digest)
+                    .iter()
+                    .filter_map(|name| w.registry.get(name).map(|s| format!("{}@{name}", s.repo)))
+                    .collect();
                 LocalImage {
                     id: format!("id-{digest}"),
-                    repo_digests: spec
-                        .map(|s| vec![format!("{}@{digest}", s.repo)])
-                        .unwrap_or_default(),
-                    names: Vec::new(),
+                    repo_digests: pulled_by.clone(),
+                    names: pulled_by,
                     digest: digest.clone(),
                     size: spec.map(|s| s.size).unwrap_or(0),
                 }
@@ -676,14 +709,38 @@ impl Host for FakeHost {
             .collect())
     }
 
-    fn remove_image(&mut self, id: &str) -> HostResult<()> {
+    /// As podman: an ID with more than one name is refused, and an image in
+    /// use stays. Given by name, every name goes at once, the only way the
+    /// updater removes by name.
+    fn remove_image(&mut self, image: &LocalImage) -> HostResult<()> {
         self.tick("rmi");
-        let digest = id.trim_start_matches("id-").to_string();
+        let first = image.id.trim_start_matches("id-").to_string();
         let mut w = self.world.borrow_mut();
-        if w.containers.values().any(|c| c.digest == digest) {
+        let names = w.names_of(&first);
+        let targets = image.removal_targets();
+        if targets == [image.id.as_str()] {
+            if names.len() > 1 {
+                return Err(format!(
+                    "Error: unable to delete image {:?} by ID with more than one tag: please force removal",
+                    image.id
+                ));
+            }
+        } else {
+            let given: Vec<&str> = targets
+                .iter()
+                .filter_map(|t| t.split_once('@').map(|(_, d)| d))
+                .collect();
+            assert!(
+                names.iter().all(|n| given.contains(&n.as_str())),
+                "rmi {targets:?} leaves some of {names:?}"
+            );
+        }
+        if w.containers.values().any(|c| names.contains(&c.digest)) {
             return Err("image is in use by a container".into());
         }
-        w.local.remove(&digest);
+        for name in names {
+            w.local.remove(&name);
+        }
         Ok(())
     }
 

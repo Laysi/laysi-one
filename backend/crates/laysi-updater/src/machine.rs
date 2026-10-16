@@ -1245,13 +1245,16 @@ impl<'h, H: Host> Machine<'h, H> {
             .host
             .database_size(&postgres)
             .map_err(|e| Space::Unknown(format!("無法取得資料庫大小：{e}")))?;
-        let digests: HashSet<String> = containers.iter().map(|c| c.image_digest.clone()).collect();
+        let digests: HashSet<&str> = containers
+            .iter()
+            .flat_map(|c| c.image_digests.iter().map(String::as_str))
+            .collect();
         let images: u64 = self
             .host
             .images()
             .map_err(Space::Unknown)?
             .iter()
-            .filter(|i| image_digests(i).any(|d| digests.contains(d)))
+            .filter(|i| i.digests().any(|d| digests.contains(d)))
             .map(|i| i.size)
             .sum();
         let images = if pulled {
@@ -1763,7 +1766,11 @@ impl<'h, H: Host> Machine<'h, H> {
                 repos.insert(repo.to_string());
             }
         }
-        keep.extend(containers.iter().map(|c| c.image_digest.clone()));
+        keep.extend(
+            containers
+                .iter()
+                .flat_map(|c| c.image_digests.iter().cloned()),
+        );
 
         let images = match self.host.images() {
             Ok(images) => images,
@@ -1773,7 +1780,7 @@ impl<'h, H: Host> Machine<'h, H> {
             }
         };
         for image in images {
-            if image_digests(&image).any(|d| keep.contains(d)) {
+            if image.digests().any(|d| keep.contains(d)) {
                 continue;
             }
             let ours = image
@@ -1785,7 +1792,7 @@ impl<'h, H: Host> Machine<'h, H> {
             if !ours {
                 continue;
             }
-            if let Err(e) = self.host.remove_image(&image.id) {
+            if let Err(e) = self.host.remove_image(&image) {
                 self.log(format!("removing image {}: {e}", image.id));
             }
         }
@@ -1822,15 +1829,6 @@ fn running_container(containers: &[Container], service: &str) -> Option<String> 
         .filter(|c| c.service == service && c.running)
         .max_by_key(|c| c.created)
         .map(|c| c.name.clone())
-}
-
-fn image_digests(image: &crate::host::LocalImage) -> impl Iterator<Item = &str> {
-    std::iter::once(image.digest.as_str()).chain(
-        image
-            .repo_digests
-            .iter()
-            .filter_map(|r| r.split_once('@').map(|(_, d)| d)),
-    )
 }
 
 /// `repo[:tag]@sha256:…` into the repository, without its tag, and the
@@ -1950,11 +1948,13 @@ pub fn check_release_files(
 /// has a healthcheck, and created after `since` when that is given.
 ///
 /// The compose file has to name every image by digest. The container has to
-/// have been created from that same digest and has to run it: podman reports
-/// the index digest a multi-platform image was pulled by. The images of the
-/// release itself must also carry the manifest's digest. A tag, a container
-/// created from another reference, or one left over from before the switch,
-/// never passes.
+/// have been created from that same digest and has to run an image local
+/// storage knows by it: podman reports only the digest an image was first
+/// pulled by, the index digest for a multi-platform image, and an image
+/// pulled again under another digest keeps reporting that one. The images
+/// of the release itself must also carry the manifest's digest. A tag, a
+/// container created from another reference, or one left over from before
+/// the switch, never passes.
 pub fn judge(
     containers: &[Container],
     services: &[Service],
@@ -1994,10 +1994,13 @@ pub fn judge(
             ));
         }
         let pinned = ImageDigest::parse(digest).expect("split_reference parsed it");
-        if !pinned.matches(&c.image_digest) {
+        if !c.image_digests.iter().any(|d| pinned.matches(d)) {
             return Err(format!(
                 "{name} 執行的映像 {} 與指定的 {digest} 不符",
-                c.image_digest
+                c.image_digests
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or_default()
             ));
         }
         let role = ROLES

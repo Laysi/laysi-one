@@ -3671,8 +3671,10 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
    `--force-recreate` 其餘常駐服務，web 與 mcp 除外。一律帶 `--no-deps`：podman-compose
    把 `depends_on` 譯成 `--requires`，有它就刪不掉、換不掉被依賴的容器。
 8. 等候成功：每個服務的最新容器在執行、是切換之後建立的、建立時的 digest 等於 compose
-   檔指定的那個也正在執行它（多平台映像以 index digest 拉取時 podman 回報的就是 index
-   digest）、自家映像等於清單、有 healthcheck 的是 healthy；反覆重啟的容器立刻算失敗。
+   檔指定的那個、正在執行的映像在本機也以那個 digest 登記、自家映像等於清單、有
+   healthcheck 的是 healthy；反覆重啟的容器立刻算失敗。比對的是映像的每一個 digest：
+   podman 只回報映像第一次被拉取時的那一個（多平台映像是 index digest），一份沒有變動的
+   映像以新的 index digest 再發布，拉下來只是同一份映像多一個名字。
    逾時 20 分鐘，涵蓋 migration。通過之後才起 web 與 mcp，以同樣條件確認（逾時 3 分鐘）。
    逾時用不會跳的單調時鐘計算：沒有電池時鐘的機器（樹莓派）開機後第一次對時，牆上時鐘會
    一口氣往前調關機的那段時間，而那正是斷電後開機復原在等服務就緒的時候。開機時起 stack
@@ -3692,7 +3694,8 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
     換了來源（例如換一個 registry）時，兩版之前那個來源的映像也一起刪：第 3 步結束時先讀
     `.previous` 那份 compose 檔（第 6 步會覆寫它），把用到的來源記進日誌。
     每一次清理都保留現行 compose 檔指定的映像；compose 檔讀不到、或有映像沒以 digest
-    指定，就一個映像都不刪。
+    指定，就一個映像都不刪。映像以它的每一個名字刪除：以兩個 digest 拉取過的映像有兩個
+    名字，podman 拒絕以映像 ID 刪除它。
 
 **換回舊映像不構成回退**：sqlx 遇到資料庫裡有執行檔不認得的 migration 會回
 `VersionMissing` 拒絕啟動，所以回退一定連同資料庫。**入口開放之後才判定失敗時，回退照樣

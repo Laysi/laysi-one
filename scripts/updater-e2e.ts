@@ -147,6 +147,8 @@ interface Spec {
   secretsExtra?: boolean;
   rustfs?: string;
   updater?: "same" | "changed" | "broken";
+  /** A digest already pushed, used as the backup image instead of a new build. */
+  backup?: string;
 }
 
 interface Release {
@@ -214,6 +216,31 @@ function push(tag: string, context: string): string {
   return digest;
 }
 
+/**
+ * Pushes an index holding only the image `digest` names, the way a rebuild
+ * that changes nothing comes back under a new index digest. Written to the
+ * registry directly: `podman manifest push` without --all flattens a list
+ * to the image it holds.
+ */
+async function rewrap(repo: string, digest: string, tag: string): Promise<string> {
+  const [host, ...path] = repo.split("/");
+  const manifests = `http://${host}/v2/${path.join("/")}/manifests`;
+  const child = await fetch(`${manifests}/${digest}`, {
+    headers: { Accept: "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" },
+  });
+  if (!child.ok) fail(`reading ${repo}@${digest}: ${child.status}`);
+  const mediaType = child.headers.get("content-type") ?? "";
+  const size = (await child.arrayBuffer()).byteLength;
+  const indexType = mediaType.includes("docker") ? "application/vnd.docker.distribution.manifest.list.v2+json" : "application/vnd.oci.image.index.v1+json";
+  const architecture = process.arch === "arm64" ? "arm64" : "amd64";
+  const body = JSON.stringify({ schemaVersion: 2, mediaType: indexType, manifests: [{ mediaType, digest, size, platform: { architecture, os: "linux" } }] });
+  const put = await fetch(`${manifests}/${tag}`, { method: "PUT", headers: { "Content-Type": indexType }, body });
+  if (!put.ok) fail(`pushing an index for ${repo}@${digest}: ${put.status} ${await put.text()}`);
+  const index = `sha256:${sha256(body)}`;
+  if (put.headers.get("docker-content-digest") !== index) fail(`the registry stored ${put.headers.get("docker-content-digest")}, not ${index}`);
+  return index;
+}
+
 function buildRelease(spec: Spec, known: string[]): Release {
   const migration = `m-${spec.version}`;
   const dir = mkdtempSync(join(workDir, "release-"));
@@ -254,7 +281,7 @@ ENTRYPOINT ["/usr/local/bin/laysi-server"]
     podman("rmi", `${REGISTRY}/laysi-one-${name}:${spec.version}`);
     return readFileSync(digestFile, "utf8").trim();
   };
-  const digests = { api: build("api", "Containerfile.api"), web: build("web", "Containerfile.plain"), backup: build("backup", "Containerfile.plain") };
+  const digests = { api: build("api", "Containerfile.api"), web: build("web", "Containerfile.plain"), backup: spec.backup ?? build("backup", "Containerfile.plain") };
   const manifest = sign(spec.version, digests);
   const release = { spec, migration, digests, manifest, compose };
   releases.set(spec.version, release);
@@ -306,6 +333,7 @@ interface Ctr {
   service: string;
   running: boolean;
   image: string;
+  imageId: string;
   digest: string;
   health: string;
   restart: string;
@@ -328,6 +356,7 @@ function containers(): Ctr[] {
     service: c.Config?.Labels?.["com.docker.compose.service"] ?? "",
     running: c.State?.Running === true,
     image: c.ImageName,
+    imageId: c.Image ?? "",
     digest: c.ImageDigest,
     health: (c.State?.Health ?? c.State?.Healthcheck)?.Status ?? "",
     restart: c.HostConfig?.RestartPolicy?.Name ?? "",
@@ -348,6 +377,13 @@ function byService(): Map<string, Ctr> {
 /** Whether local storage holds an image pulled by this digest. */
 function hasImage(digest: string): boolean {
   return JSON.parse(podman("images", "--format", "json")).some((i: any) => (i.RepoDigests ?? []).some((d: string) => d.endsWith(`@${digest}`)));
+}
+
+/** Whether a container was created from this digest and runs an image local storage knows by it. */
+function runs(c: Ctr, digest: string): boolean {
+  if (!c.image.endsWith(`@${digest}`)) return false;
+  const image = JSON.parse(podman("image", "inspect", c.imageId))[0];
+  return image?.Digest === digest || (image?.RepoDigests ?? []).some((d: string) => d.endsWith(`@${digest}`));
 }
 
 function psql(sql: string): string {
@@ -428,14 +464,15 @@ function assertSettledOn(version: string) {
   for (const service of ["postgres", "rustfs", "api", "mcp", "backup", "web"]) {
     const c = services.get(service);
     if (!c?.running) fail(`${service} is not running on ${version}`);
-    if (own[service] && c.digest !== own[service]) fail(`${service} runs ${c.digest}, not ${version}'s ${own[service]}`);
+    if (own[service] && !runs(c, own[service])) fail(`${service} runs ${c.image} (${c.digest}), not ${version}'s ${own[service]}`);
     if (c.health && c.health !== "healthy") fail(`${service} is ${c.health}`);
   }
   for (const [service, port] of Object.entries(PUBLISHED)) {
     check(accepts(port), `${service}'s published port ${port} accepts connections`);
   }
   const rustfs = release.spec.rustfs ?? RUSTFS;
-  check(services.get("rustfs")?.digest === rustfs.split("@")[1], `rustfs runs the image ${version} names`);
+  const rustfsCtr = services.get("rustfs");
+  check(!!rustfsCtr && runs(rustfsCtr, rustfs.split("@")[1]), `rustfs runs the image ${version} names`);
   check(migrations().at(-1) === release.migration || migrations().includes(release.migration), `the database carries ${version}'s migration`);
   check(requestsLeft().length === 0, "the requests directory is empty");
   check(journalPhase() === undefined, "no journal is left");
@@ -1005,15 +1042,41 @@ exec ${realPodman} "$@"
   check(r.status === "succeeded", "a later good release recovers the machine");
   assertSettledOn("v1.11.0");
 
+  // --- an image that did not change, under a new index digest ---------------
+  // The host already holds v1.11.0's backup image: podman files the new
+  // digest as one more name of it and goes on reporting the one it was first
+  // pulled by.
+  const sameBackup = await rewrap(`${REGISTRY}/laysi-one-backup`, v12.digests.backup, "v1.11.1");
+  const unchanged = buildRelease({ version: "v1.11.1", rustfs: newRustfs, backup: sameBackup }, known);
+  known.push(unchanged.migration);
+  r = await update("e2e-unchanged-backup", unchanged.manifest);
+  check(r.status === "succeeded", "a release whose backup image is the previous one under a new index digest is installed");
+  check(byService().get("backup")?.digest === v12.digests.backup, "podman reports the backup image by the digest it was first pulled by");
+  assertSettledOn("v1.11.1");
+
+  // Once no release names it, that image goes with the clean-up. podman
+  // refuses to remove an image with two names by its ID.
+  const vRenamedNext = buildRelease({ version: "v1.11.2", rustfs: newRustfs }, known);
+  known.push(vRenamedNext.migration);
+  r = await update("e2e-after-unchanged", vRenamedNext.manifest);
+  check(r.status === "succeeded", "the release after it is installed");
+  assertSettledOn("v1.11.2");
+  check(hasImage(sameBackup), "the previous release's backup image is kept");
+  const vRenamedGone = buildRelease({ version: "v1.11.3", api: "exit", rustfs: newRustfs }, known);
+  r = await update("e2e-renamed-removed", vRenamedGone.manifest);
+  check(r.status === "rolled-back" && r.running === "v1.11.2", "the release after that is rolled back");
+  assertSettledOn("v1.11.2");
+  check(!hasImage(v12.digests.backup) && !hasImage(sameBackup), "the backup image pulled under two digests is removed once no release names it");
+
   // --- many runs in a row ---------------------------------------------------
   for (let n = 0; n < 10; n++) {
-    r = await update(`e2e-repeat-${String(n).padStart(4, "0")}`, v12.manifest);
+    r = await update(`e2e-repeat-${String(n).padStart(4, "0")}`, vRenamedNext.manifest);
     if (r.status !== "refused-same-version") fail(`repeat ${n}: ${r.status}`);
   }
   // Six requests faster than the service runs: the default start limit would
   // have stopped the path unit here.
   for (let n = 0; n < 6; n++) {
-    writeRequest(`e2e-burst-${String(n).padStart(4, "0")}`, v12.manifest);
+    writeRequest(`e2e-burst-${String(n).padStart(4, "0")}`, vRenamedNext.manifest);
     await sleep(150);
   }
   await settledRun();
