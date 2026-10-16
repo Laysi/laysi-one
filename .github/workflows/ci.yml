@@ -179,7 +179,7 @@ jobs:
       - run: npm run build
         working-directory: web
 
-      # All four read web/src, so they run after the install above.
+      # All of them read web/src, so they run after the install above.
       - run: bun scripts/schema-test.ts
 
       - run: bun scripts/markdown-test.ts
@@ -188,9 +188,16 @@ jobs:
 
       - run: bun scripts/nav-test.ts
 
+      - run: bun scripts/update-test.ts
+
       # The release page is the whole distribution, so it has to be written
       # even when the model behind the notes is down.
       - run: bun scripts/release-notes-test.ts
+
+      # A release candidate that took `latest` would reach every install that
+      # pulls from the repository's compose file, and nothing between the tag
+      # and that pull checks it.
+      - run: bun scripts/release-workflow-test.ts
 
       # A rule file the generator cannot read would publish a feed that is
       # missing a rate, and the failure would land on the installation.
