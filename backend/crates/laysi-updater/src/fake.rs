@@ -125,6 +125,7 @@ pub struct World {
     pub runs_instead: Option<(String, String)>,
     pub restores: usize,
     pub dumps: usize,
+    /// Images fetched from the registry, by `pull` or by `compose_up`.
     pub pulls: usize,
     /// Moments an entry point ran while the rest of the stack was not proven.
     pub violations: Vec<String>,
@@ -393,7 +394,10 @@ impl Host for FakeHost {
                     _ => digest.clone(),
                 };
                 let spec = w.registry.get(&actual).cloned().ok_or("image not found")?;
-                w.local.insert(digest);
+                // podman-compose pulls what local storage does not have.
+                if w.local.insert(digest) {
+                    w.pulls += 1;
+                }
                 let digest = actual;
                 let now = w.clock;
                 let fresh = recreate

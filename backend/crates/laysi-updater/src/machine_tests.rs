@@ -995,6 +995,39 @@ fn a_third_party_image_whose_repository_changed_is_removed_two_releases_later() 
 }
 
 #[test]
+fn a_power_cut_after_the_commit_keeps_the_third_party_images_the_new_files_name() {
+    let mut next = v2();
+    next.postgres = "postgres-2";
+    next.rustfs = "rustfs-2";
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    rig.world.borrow_mut().crash_on = Some("committed");
+    let id = rig.request("req-cutcommit-1", &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err(), "the power went once the switch was committed");
+    {
+        let mut w = rig.world.borrow_mut();
+        w.reboot();
+        // podman removes the containers whose layers the cut left unreadable.
+        w.containers.clear();
+    }
+    let pulls = rig.world.borrow().pulls;
+
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    {
+        let w = rig.world.borrow();
+        assert_eq!(w.pulls, pulls, "the stack started without pulling again");
+        for image in images_of(&next) {
+            assert!(w.local.contains(&image), "{image} was removed");
+        }
+        let ancient = Spec::good("v0.0.9", "m0").own(Image::Api);
+        assert!(!w.local.contains(&ancient), "the clean-up did not run");
+    }
+    rig.run().unwrap();
+    rig.assert_settled(&id);
+}
+
+#[test]
 fn an_unreadable_journal_starts_nothing_and_fails_the_boot() {
     let rig = Rig::new(v1(), &[]);
     std::fs::write(

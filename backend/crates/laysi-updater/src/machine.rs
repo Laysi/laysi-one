@@ -1651,11 +1651,25 @@ impl<'h, H: Host> Machine<'h, H> {
     }
 
     /// Remove the images of the repositories this stack uses, or of
-    /// `also_repos`, that neither a container, the releases in `releases`
-    /// nor the references in `j.keep` use.
+    /// `also_repos`, that neither a container, the current stack files, the
+    /// releases in `releases` nor the references in `j.keep` use.
+    ///
+    /// The stack files name what the next start runs, and a container is no
+    /// proof of that: after a power cut podman removes the containers it
+    /// cannot read, so at the recovery's clean-up none may use the images
+    /// the files name, and an image removed here would have to be pulled
+    /// again before the stack can start. Files whose services cannot be
+    /// read leave every image as it is.
     fn prune_images(&mut self, j: &Journal, releases: &[&Release], also_repos: &[String]) {
         let registry = match self.read_env(&self.stack_files()) {
             Ok(env) => env.registry(),
+            Err(e) => {
+                self.log(format!("images left as they are: {e}"));
+                return;
+            }
+        };
+        let named = match self.host.compose_config(&self.stack_files()) {
+            Ok(services) => services,
             Err(e) => {
                 self.log(format!("images left as they are: {e}"));
                 return;
@@ -1670,6 +1684,11 @@ impl<'h, H: Host> Machine<'h, H> {
         for release in releases {
             for image in Image::ALL {
                 keep.insert(release.digest(image).to_string());
+            }
+        }
+        for service in &named {
+            if let Some((_, digest)) = split_reference(&service.image) {
+                keep.insert(digest.to_string());
             }
         }
         for reference in j
