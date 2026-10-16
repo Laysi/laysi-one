@@ -122,6 +122,8 @@ pub struct LicenseRow {
     pub bound_at: Option<DateTime<Utc>>,
     pub last_seen_at: Option<DateTime<Utc>>,
     pub version: String,
+    /// The release offered to this licence, `None` when nothing is.
+    pub release_version: Option<String>,
     pub conflicts: i32,
     pub denials: i64,
 }
@@ -141,6 +143,7 @@ fn license_row(r: &sqlx::postgres::PgRow) -> LicenseRow {
         bound_at: r.get("bound_at"),
         last_seen_at: r.get("last_seen_at"),
         version: r.get("version"),
+        release_version: r.get("release_version"),
         conflicts: r.get("conflicts"),
         denials: r.get("denials"),
     }
@@ -149,7 +152,7 @@ fn license_row(r: &sqlx::postgres::PgRow) -> LicenseRow {
 const LICENSE_SELECT: &str = "SELECT l.license_no, l.licensee, l.licensee_tax_id,
             p.name AS partner_name, p.partner_no, l.key_prefix, l.expires_on,
             l.status, l.note, l.fingerprint, l.bound_at,
-            l.last_seen_at, l.version, l.conflicts,
+            l.last_seen_at, l.version, l.release_version, l.conflicts,
             (SELECT count(*) FROM license_denial d WHERE d.license_id = l.id) AS denials
        FROM license l JOIN partner p ON p.id = l.partner_id";
 
@@ -177,6 +180,98 @@ pub async fn license(pool: &PgPool, actor: &Actor, no: &str) -> Result<Option<Li
         .fetch_optional(pool)
         .await?;
     Ok(row.as_ref().map(license_row))
+}
+
+/// One stored release manifest, as the version page lists it.
+pub struct ManifestRow {
+    pub version: String,
+    /// Exactly as uploaded.
+    pub manifest: String,
+    pub uploaded_at: DateTime<Utc>,
+    pub uploaded_by: String,
+    /// Licences this version is released to.
+    pub licenses: i64,
+}
+
+/// Every stored manifest, newest release first.
+///
+/// Ordered here by release order rather than by the text of the version, in
+/// which `v0.1.10` sorts before `v0.1.9`.
+pub async fn manifests(pool: &PgPool) -> Result<Vec<ManifestRow>> {
+    let rows = sqlx::query(
+        "SELECT m.version, m.manifest, m.uploaded_at, COALESCE(u.email, '') AS uploaded_by,
+                (SELECT count(*) FROM license l WHERE l.release_version = m.version) AS licenses
+           FROM release_manifest m LEFT JOIN partner_user u ON u.id = m.uploaded_by",
+    )
+    .fetch_all(pool)
+    .await
+    .context("讀取版本清單失敗")?;
+    let mut out: Vec<ManifestRow> = rows
+        .iter()
+        .map(|r| ManifestRow {
+            version: r.get("version"),
+            manifest: r.get("manifest"),
+            uploaded_at: r.get("uploaded_at"),
+            uploaded_by: r.get("uploaded_by"),
+            licenses: r.get("licenses"),
+        })
+        .collect();
+    out.sort_by_cached_key(|m| {
+        std::cmp::Reverse(laysi_license_token::release::ReleaseVersion::parse(&m.version).ok())
+    });
+    Ok(out)
+}
+
+pub async fn manifest(pool: &PgPool, version: &str) -> Result<Option<String>> {
+    Ok(
+        sqlx::query("SELECT manifest FROM release_manifest WHERE version = $1")
+            .bind(version)
+            .fetch_optional(pool)
+            .await
+            .context("讀取版本清單失敗")?
+            .map(|r| r.get("manifest")),
+    )
+}
+
+/// Store a verified manifest under its version. The insert is the claim, so
+/// two uploads of one version at once cannot both land; whichever loses is
+/// compared with the winner like any later upload.
+pub async fn store_manifest(
+    pool: &PgPool,
+    version: &str,
+    text: &str,
+    user_id: i32,
+) -> Result<crate::release::Stored> {
+    let inserted = sqlx::query(
+        "INSERT INTO release_manifest (version, manifest, uploaded_by) VALUES ($1, $2, $3)
+         ON CONFLICT (version) DO NOTHING",
+    )
+    .bind(version)
+    .bind(text)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .context("儲存版本清單失敗")?
+    .rows_affected()
+        == 1;
+    if inserted {
+        return Ok(crate::release::Stored::New);
+    }
+    let existing = manifest(pool, version).await?;
+    Ok(crate::release::compare(existing.as_deref(), text))
+}
+
+/// Offer `version` to one licence, or nothing with `None`. Touches that row
+/// and no other, which is the whole of a staged rollout. `false` when there
+/// is no such licence.
+pub async fn set_release(pool: &PgPool, license_no: &str, version: Option<&str>) -> Result<bool> {
+    let done = sqlx::query("UPDATE license SET release_version = $2 WHERE license_no = $1")
+        .bind(license_no)
+        .bind(version)
+        .execute(pool)
+        .await
+        .context("設定放行版本失敗")?;
+    Ok(done.rows_affected() == 1)
 }
 
 /// Next licence number for this month: `L{yy}{mm}-{nnn}`.

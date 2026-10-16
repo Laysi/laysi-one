@@ -1,0 +1,75 @@
+# The overlay every shipped machine runs with, on top of
+# docker-compose.prod.yml. Both files travel inside the api image of each
+# release, at /usr/local/share/laysi-one/, and the host-side updater
+# (backend/crates/laysi-updater) takes them from the image it is installing.
+# Nobody edits them on the machine.
+#
+#   podman-compose -p laysi-one -f docker-compose.prod.yml \
+#       -f docker-compose.ship.yml --env-file .env up -d --no-deps <services>
+#
+# The updater writes .env: the registry, the release and the three digests
+# from the signed release manifest, and the host directory it lives in.
+#
+# 1. Images by digest. `:?` makes a .env without one refuse to start rather
+#    than run some other image; the third-party images are already pinned in
+#    docker-compose.prod.yml.
+#
+# 2. No service waits on `secrets`. podman-compose turns depends_on into
+#    `podman --requires`, which wants the dependency running, and `secrets`
+#    exits once it has written the volume. The updater runs it to completion
+#    before starting anything else, and always calls podman-compose with
+#    --no-deps, so none of these edges become --requires.
+#
+# 3. Container names are pinned: podman-compose and docker compose generate
+#    different ones.
+#
+# 4. Only the api mounts the requests directory, so only the api can ask for
+#    an update (`U` chowns it to the api's uid). The api and mcp both mount
+#    the results directory read-only: the api reads results from it, and
+#    both refuse writes while the updater's switching marker is in it
+#    (laysi_license_token::update::switching).
+#
+# Nothing here or in docker-compose.prod.yml may use `restart: always`:
+# podman-restart.service would start such a container at boot before the
+# updater has finished an interrupted update. The services keep
+# `unless-stopped`, which restarts a crashed container while the system runs
+# and which that unit does not start at boot: rootless, podman 4.9 runs
+# `podman start --all --filter restart-policy=always` and podman 5 starts
+# the containers marked should-start-on-boot, and neither includes
+# unless-stopped (measured on 4.9.3 and 5.8.7 for #61). At boot only the
+# updater starts the stack.
+
+services:
+  secrets:
+    container_name: laysi-one-secrets
+
+  postgres:
+    container_name: laysi-one-postgres
+    depends_on: !override []
+
+  rustfs:
+    container_name: laysi-one-rustfs
+
+  api:
+    container_name: laysi-one-api
+    image: ${LAYSI_REGISTRY:?}/laysi-one-api@${LAYSI_API_DIGEST:?}
+    volumes:
+      - ${LAYSI_HOST_DIR:?}/requests:/var/lib/laysi-update/requests:U,z
+      - ${LAYSI_HOST_DIR:?}/results:/var/lib/laysi-update/results:ro,z
+
+  mcp:
+    container_name: laysi-one-mcp
+    image: ${LAYSI_REGISTRY:?}/laysi-one-api@${LAYSI_API_DIGEST:?}
+    volumes:
+      - ${LAYSI_HOST_DIR:?}/results:/var/lib/laysi-update/results:ro,z
+
+  backup:
+    container_name: laysi-one-backup
+    image: ${LAYSI_REGISTRY:?}/laysi-one-backup@${LAYSI_BACKUP_DIGEST:?}
+
+  web:
+    container_name: laysi-one-web
+    image: ${LAYSI_REGISTRY:?}/laysi-one-web@${LAYSI_WEB_DIGEST:?}
+
+x-podman:
+  in_pod: false

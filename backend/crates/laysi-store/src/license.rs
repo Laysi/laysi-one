@@ -47,6 +47,11 @@ pub struct LicenseState {
     pub last_error: String,
     /// Set only on installations that predate licensing.
     pub grace_until: Option<NaiveDate>,
+    /// The signed release manifest the last successful check carried, byte
+    /// for byte. Empty when nothing is released to this installation. Only
+    /// ever a manifest that verified when it was stored; readers verify it
+    /// again, so a hand-edited row is never believed.
+    pub release_manifest: String,
 }
 
 /// This machine, as 64 hex characters.
@@ -75,7 +80,7 @@ pub fn fingerprint(install_id: Uuid) -> String {
 }
 
 const SELECT_STATE: &str = "SELECT install_id, activation_key, token, nonce, last_check_at,
-                                   last_error, grace_until
+                                   last_error, grace_until, release_manifest
                               FROM license_state WHERE id = 1";
 
 fn state_from(row: &sqlx::postgres::PgRow) -> LicenseState {
@@ -87,6 +92,7 @@ fn state_from(row: &sqlx::postgres::PgRow) -> LicenseState {
         last_check_at: row.get("last_check_at"),
         last_error: row.get("last_error"),
         grace_until: row.get("grace_until"),
+        release_manifest: row.get("release_manifest"),
     }
 }
 
@@ -115,16 +121,29 @@ impl LicenseLock {
     /// real licence has arrived, an installation that predates licensing is
     /// no longer one of the cases that needed it, and leaving the date behind
     /// would make a later lapse look like it still had time.
-    pub async fn save(mut self, key: &str, token: &str, nonce: &str) -> Result<()> {
+    ///
+    /// `release_manifest` replaces whatever was stored, including with the
+    /// empty string: a check that carries no manifest means nothing is
+    /// released any more, and keeping the old one would go on offering a
+    /// version the licence server has withdrawn.
+    pub async fn save(
+        mut self,
+        key: &str,
+        token: &str,
+        nonce: &str,
+        release_manifest: &str,
+    ) -> Result<()> {
         sqlx::query(
             "UPDATE license_state
                 SET activation_key = $1, token = $2, nonce = $3,
+                    release_manifest = $4,
                     last_check_at = now(), last_error = '', grace_until = NULL
               WHERE id = 1",
         )
         .bind(key)
         .bind(token)
         .bind(nonce)
+        .bind(release_manifest)
         .execute(&mut *self.tx)
         .await?;
         self.tx.commit().await?;

@@ -17,6 +17,7 @@
 //! to reach the same answer, and none of them can sign one.
 
 pub mod release;
+pub mod update;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};

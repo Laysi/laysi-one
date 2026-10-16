@@ -35,7 +35,7 @@
 //! most of a tampered file by the time the mismatch showed.
 
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
-use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, MetadataDirective};
 use aws_sdk_s3::Client;
@@ -745,7 +745,19 @@ impl ObjectStore {
             .metadata("blake3", checksum)
             .send()
             .await
-            .map_err(StorageError::s3("copy_object"))?;
+            .map_err(|e| {
+                // A staged upload whose object a restored database still
+                // points at, after the object was filed or swept away.
+                // Only the named code: a 404 can also be a missing bucket,
+                // which says nothing about this upload.
+                if e.code() == Some("NoSuchKey") {
+                    StorageError::NotFound {
+                        key: from.to_string(),
+                    }
+                } else {
+                    StorageError::s3("copy_object")(e)
+                }
+            })?;
         Ok(())
     }
 
