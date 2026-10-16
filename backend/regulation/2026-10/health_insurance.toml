@@ -1,0 +1,24 @@
+# National health insurance, ordinary premium: correction to 2026.1
+#
+# 2026.1 first shipped an employer multiplier of 1.61. The insurer has put the
+# average number of dependants at 0.56 since 2024-01-01, so the multiplier is
+# 1.56. A database applies a published version once and never rewrites it, so
+# installations that hold the first 2026.1 are corrected by this later version.
+# Periods ending before it keep the figure they were paid with; the difference
+# is settled in a later period.
+#
+# Named after its domain like every rule file, which is why it has a directory
+# of its own: the feed keys an update by effective date and file name, the
+# factory seed by effective date and domain, and the two must agree.
+
+domain = "health_insurance"
+version = "2026.2"
+effective_from = "2026-10-01"
+source_note = "全民健康保險法第 18 條、第 27 條；更正 2026.1 的平均眷口數"
+
+[payload]
+rate = "0.0517"
+employer_share = "0.60"
+employee_share = "0.30"
+government_share = "0.10"
+avg_dependents = "1.56"

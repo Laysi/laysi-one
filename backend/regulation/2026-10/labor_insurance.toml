@@ -1,0 +1,24 @@
+# Labour insurance, ordinary risk premium: correction to 2026.1
+#
+# 2026.1 first shipped 11%, the rate for 2023 and 2024. The rate has been 11.5%
+# since 2025-01-01 (12.5% with the 1% employment insurance added) and was not
+# raised for 2026. A database applies a published version once and never
+# rewrites it, so installations that hold the first 2026.1 are corrected by this
+# later version. Periods ending before it keep the figure they were paid with;
+# the difference is settled in a later period.
+#
+# Named after its domain like every rule file, which is why it has a directory
+# of its own: the feed keys an update by effective date and file name, the
+# factory seed by effective date and domain, and the two must agree.
+
+domain = "labor_insurance"
+version = "2026.2"
+effective_from = "2026-10-01"
+source_note = "勞工保險條例第 13 條、第 15 條；更正 2026.1 的普通事故保險費率"
+
+[payload]
+max_insured_salary = "45800"
+premium_rate = "0.115"
+employer_share = "0.70"
+employee_share = "0.20"
+government_share = "0.10"

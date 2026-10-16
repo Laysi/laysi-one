@@ -9,8 +9,8 @@ use std::rc::Rc;
 use ed25519_dalek::{Signer, SigningKey};
 use laysi_license_token::release::{self, Image, ImageDigest, KeyId, ReleaseVersion};
 use laysi_license_token::update::{
-    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, REQUEST_FILE,
-    SWITCHING_FILE,
+    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, FALLBACK_BOOT_FILE,
+    REQUEST_FILE, SWITCHING_FILE,
 };
 
 use crate::envfile::EnvFile;
@@ -470,6 +470,44 @@ fn an_api_that_exits_at_start_is_rolled_back() {
     rig.run().unwrap();
     assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
     rig.assert_settled(&id);
+}
+
+/// Healthy after a few polls, and the time server answers in between: the
+/// wall clock jumps by more than every timeout.
+fn step_the_clock_while_starting(rig: &Rig) {
+    let mut w = rig.world.borrow_mut();
+    w.warmup_secs = 12;
+    w.clock_step = Some(chrono::Duration::hours(6));
+}
+
+#[test]
+fn a_wall_clock_set_forward_while_the_new_release_starts_does_not_fail_it() {
+    let rig = Rig::new(v1(), &[v2()]);
+    step_the_clock_while_starting(&rig);
+    let id = rig.request("req-clockstep-01", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert!(
+        rig.world.borrow().clock_step.is_none(),
+        "the clock never jumped"
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_wall_clock_set_forward_while_the_stack_starts_at_boot_does_not_fail_the_boot() {
+    let rig = Rig::new(v1(), &[]);
+    rig.world.borrow_mut().reboot();
+    step_the_clock_while_starting(&rig);
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(
+        rig.world.borrow().clock_step.is_none(),
+        "the clock never jumped"
+    );
+    for service in SERVICES {
+        assert!(rig.running(service), "{service} is not running");
+    }
 }
 
 #[test]
@@ -1050,6 +1088,54 @@ fn an_unreadable_journal_starts_nothing_and_fails_the_boot() {
     assert!(rig.world.borrow().containers["web"].running);
 }
 
+#[test]
+fn a_start_by_the_previous_updater_is_marked_until_the_current_one_starts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::new(v1(), &[]);
+    let marker = rig.layout.results_dir().join(FALLBACK_BOOT_FILE);
+    // The boot unit failed, and the fallback unit runs the previous updater.
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.fallback_boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    let text = std::fs::read_to_string(&marker).unwrap();
+    assert!(text.starts_with("at 20") && text.ends_with("Z\n"), "{text}");
+    let mode = std::fs::metadata(&marker).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644, "the api reads it as another uid");
+
+    // A current updater that fails again leaves it.
+    std::fs::write(
+        rig.layout.journal(),
+        "laysi-updater-journal 1\nphase dancing\n",
+    )
+    .unwrap();
+    rig.world.borrow_mut().reboot();
+    assert!(rig.machine(|m| m.boot()).is_err());
+    assert!(marker.is_file());
+
+    // One that starts the stack removes it.
+    std::fs::remove_file(rig.layout.journal()).unwrap();
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(!marker.exists());
+    assert!(rig.world.borrow().containers["web"].running);
+}
+
+#[test]
+fn a_fallback_marker_that_cannot_be_written_does_not_stop_the_start() {
+    let rig = Rig::new(v1(), &[]);
+    let marker = rig.layout.results_dir().join(FALLBACK_BOOT_FILE);
+    // A directory in the way: nothing can be renamed over it.
+    std::fs::create_dir(&marker).unwrap();
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.fallback_boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    // Nor can the current updater remove it, which fails nothing either.
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    assert!(marker.is_dir());
+}
+
 /// Run `scenario` once to count its calls, then again with the power cut at
 /// each of them, reboot, boot and let the path unit see the request again.
 /// Wherever it was cut, the machine ends on one release with everything
@@ -1326,7 +1412,8 @@ fn a_container_not_created_from_the_compose_file_does_not_pass() {
         has_healthcheck: true,
         health: Some("healthy".into()),
         image_name: image.into(),
-        image_digest: digest.into(),
+        image_id: "img".into(),
+        image_digests: vec![digest.into()],
         created: at,
     };
     let (old, new) = (digest("rustfs-1"), digest("rustfs-2"));
@@ -1343,6 +1430,13 @@ fn a_container_not_created_from_the_compose_file_does_not_pass() {
     // Created from the right reference, running something else.
     let other = container(&format!("docker.io/rustfs/rustfs@{new}"), &old);
     assert!(judge(&[other], services, None, REGISTRY, None).is_err());
+    // The image it runs was pulled first by another digest: local storage
+    // reports that one and knows the image by both.
+    let renamed = Container {
+        image_digests: vec![old.clone(), new.clone()],
+        ..container(&format!("docker.io/rustfs/rustfs@{new}"), &old)
+    };
+    assert_eq!(judge(&[renamed], services, None, REGISTRY, None), Ok(()));
     // A tag in the compose file never passes.
     let tagged = Service {
         name: "rustfs".into(),
@@ -1433,7 +1527,8 @@ fn a_tagged_reference_to_an_own_image_is_still_checked_against_the_release() {
         has_healthcheck: false,
         health: None,
         image_name: tagged,
-        image_digest: other,
+        image_id: "img".into(),
+        image_digests: vec![other],
         created: chrono::Utc::now(),
     };
     let verdict = judge(&[container], &[service], Some(&release), REGISTRY, None);
@@ -1529,6 +1624,84 @@ fn a_container_running_another_image_than_its_digest_names_is_rolled_back_before
     assert_eq!(w.restores, 1);
     drop(w);
     rig.assert_settled(&id);
+}
+
+/// A rig on v1 offering `next`, whose backup image is v1's pushed again
+/// under the digest the manifest of `next` names.
+fn backup_renamed(next: Spec) -> Rig {
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    rig.world
+        .borrow_mut()
+        .same_image
+        .insert(next.own(Image::Backup), v1().own(Image::Backup));
+    rig
+}
+
+#[test]
+fn an_unchanged_image_under_a_new_digest_passes_as_the_release_that_names_it() {
+    let rig = backup_renamed(v2());
+    let id = rig.request("req-renamed-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert_eq!(rig.installed(), "v0.2.0");
+    use crate::host::Host;
+    let backup = FakeHost {
+        world: rig.world.clone(),
+    }
+    .containers()
+    .unwrap()
+    .into_iter()
+    .find(|c| c.service == "backup")
+    .unwrap();
+    assert_eq!(
+        backup.image_digests,
+        [v1().own(Image::Backup), v2().own(Image::Backup)],
+        "local storage reports the digest the image was first pulled by"
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_rollback_keeps_the_old_image_the_new_release_named_by_another_digest() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = backup_renamed(broken);
+    let id = rig.request("req-renamed-2", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    assert!(
+        rig.world.borrow().local.contains(&v1().own(Image::Backup)),
+        "v1 runs it again"
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn an_image_pulled_under_two_digests_goes_once_no_release_names_it() {
+    let rig = Rig::new(v1(), &[v2()]);
+    // A backup image from before v1, pulled under v0.0.9's digest and then
+    // again under v0.0.8's: podman refuses to remove it by ID.
+    let (ancient, older) = (Spec::good("v0.0.9", "m0"), Spec::good("v0.0.8", "m0"));
+    {
+        let mut w = rig.world.borrow_mut();
+        older.publish(&mut w);
+        w.local.insert(ancient.own(Image::Backup));
+        w.local.insert(older.own(Image::Backup));
+        w.same_image
+            .insert(older.own(Image::Backup), ancient.own(Image::Backup));
+    }
+    let id = rig.request("req-renamed-3", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    let w = rig.world.borrow();
+    assert!(!w.local.contains(&ancient.own(Image::Backup)));
+    assert!(!w.local.contains(&older.own(Image::Backup)));
+    assert!(w.local.contains(&v1().own(Image::Backup)), "v1 is kept");
 }
 
 #[test]
@@ -1847,6 +2020,108 @@ fn a_rollback_removes_the_images_of_the_release_it_left() {
         "the new rustfs was kept"
     );
     assert!(w.local.contains(&digest("rustfs-1")));
+    // The first update since the install has no `.previous` files, so no
+    // repository is superseded: exactly v1 stays, and the image from before
+    // v1 goes as it always did.
+    assert_eq!(w.local, images_of(&v1()));
+}
+
+/// rustfs moves to another repository in the second release, and the third
+/// never passes.
+fn rustfs_moved_then_broken() -> (Spec, Spec) {
+    let mut second = v2();
+    second.rustfs = "rustfs-2";
+    second.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    let mut third = Spec::good("v0.3.0", "m3");
+    third.api = Behaviour::NeverHealthy;
+    third.rustfs = "rustfs-3";
+    third.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    (second, third)
+}
+
+#[test]
+fn a_rollback_after_a_repository_change_removes_the_image_of_the_old_repository() {
+    let (second, third) = rustfs_moved_then_broken();
+    let rig = Rig::new(v1(), &[second.clone(), third]);
+    let id = rig.request("req-moved-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    assert!(rig.world.borrow().local.contains(&digest("rustfs-1")));
+
+    let id = rig.request("req-moved-0002", &rig.manifest("v0.3.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    rig.assert_settled(&id);
+    // rustfs-1 came from the repository only v1 used; after the rollback
+    // `.previous` names v0.2.0, and no later update would read v1 again.
+    assert_eq!(rig.world.borrow().local, images_of(&second));
+}
+
+#[test]
+fn an_update_given_up_before_step_6_leaves_the_old_repository_to_the_next_one() {
+    let (second, _) = rustfs_moved_then_broken();
+    let mut third = Spec::good("v0.3.0", "m3");
+    third.rustfs = "rustfs-2";
+    third.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    let rig = Rig::new(v1(), &[second, third]);
+    let id = rig.request("req-given-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+
+    rig.world.borrow_mut().crash_on = Some("prepared");
+    let id = rig.request("req-given-0002", &rig.manifest("v0.3.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err(), "the power went in the prepared phase");
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::FailedUnchanged);
+    // `.previous` still names v1, and the next update reads it again.
+    assert!(rig.world.borrow().local.contains(&digest("rustfs-1")));
+
+    let id = rig.request("req-given-0003", &rig.manifest("v0.3.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    assert!(!rig.world.borrow().local.contains(&digest("rustfs-1")));
+}
+
+#[test]
+fn a_retried_restore_keeps_what_the_restored_files_name_with_no_record_of_what_ran() {
+    let (second, third) = rustfs_moved_then_broken();
+    let rig = Rig::new(v1(), &[second.clone(), third]);
+    let id = rig.request("req-nokeep-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+
+    rig.world.borrow_mut().crash_on = Some("restoring");
+    let id = rig.request("req-nokeep-0002", &rig.manifest("v0.3.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err(), "the power went in the restoring phase");
+    // A journal whose step 4 could not list the containers.
+    let text = std::fs::read_to_string(rig.layout.journal()).unwrap();
+    assert!(text.lines().any(|l| l.starts_with("keep ")));
+    let without_keep: String = text
+        .lines()
+        .filter(|l| !l.starts_with("keep "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(rig.layout.journal(), without_keep).unwrap();
+    {
+        let mut w = rig.world.borrow_mut();
+        w.reboot();
+        w.fail_next_restores = 1;
+    }
+
+    // The retry removes every container but postgres before it clears
+    // images; the restored stack files still say what v0.2.0 runs.
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    let w = rig.world.borrow();
+    assert_eq!(w.restores, 2);
+    let before_retry = &w.local_at_restore[1];
+    for image in images_of(&second) {
+        assert!(before_retry.contains(&image), "{image} was removed");
+    }
+    assert!(!before_retry.contains(&digest("rustfs-3")));
 }
 
 #[test]

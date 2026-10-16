@@ -10,7 +10,8 @@ license-file = "LICENSE.txt"
 # that holds the signing key is the wrong place to widen the supply chain.
 anyhow = "1"
 argon2 = "0.5"
-axum = { version = "0.8", features = ["macros"] }
+# `multipart` for the release manifest upload; the product enables it too.
+axum = { version = "0.8", features = ["macros", "multipart"] }
 base64 = "0.23"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
