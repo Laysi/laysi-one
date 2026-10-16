@@ -1165,6 +1165,14 @@ impl<'h, H: Host> Machine<'h, H> {
     /// What was pulled for a release that is not staying goes again, or every
     /// failed attempt keeps a release's worth of images that check_space
     /// never counts. Then the files taken from it.
+    ///
+    /// The repositories in `j.superseded_repos` that the `.previous` files
+    /// no longer name go too, as after a success. Step 6 put the stack
+    /// files of `from` over `.previous`, so no later update reads the
+    /// release before `from` again, and a third-party image only that
+    /// release used would otherwise stay for good. Those the `.previous`
+    /// files still name, as when the update stopped before step 6, are left
+    /// for the next update to record.
     fn drop_offered(&mut self, j: &Journal) {
         let incoming = self.layout.incoming_files();
         let pulled: Vec<String> = self
@@ -1174,7 +1182,17 @@ impl<'h, H: Host> Machine<'h, H> {
             .iter()
             .filter_map(|s| split_reference(&s.image).map(|(repo, _)| repo.to_string()))
             .collect();
-        self.prune_images(j, &[&j.from], &pulled);
+        let still_previous = self.superseded_repos();
+        let repos: Vec<String> = pulled
+            .into_iter()
+            .chain(
+                j.superseded_repos
+                    .iter()
+                    .filter(|repo| !still_previous.contains(repo))
+                    .cloned(),
+            )
+            .collect();
+        self.prune_images(j, &[&j.from], &repos);
         self.empty_incoming();
     }
 
@@ -1184,10 +1202,11 @@ impl<'h, H: Host> Machine<'h, H> {
         }
     }
 
-    /// The repositories the stack files kept from the switch before this
-    /// one name, which step 6 is about to replace. None on a host that has
-    /// not switched since it was installed, or whose files cannot be read:
-    /// the clean-up then removes less, never more.
+    /// The repositories the `.previous` stack files name. Read at the end of
+    /// step 3, those are the files kept from the switch before this one,
+    /// which step 6 is about to replace. None on a host that has not
+    /// switched since it was installed, or whose files cannot be read: the
+    /// clean-up after a success then removes less, never more.
     fn superseded_repos(&mut self) -> Vec<String> {
         let files = self.stack_files().map(|file| Layout::previous_of(&file));
         if !files.iter().all(|file| file.exists()) {
@@ -1689,18 +1708,42 @@ impl<'h, H: Host> Machine<'h, H> {
     }
 
     /// Remove the images of the repositories this stack uses, or of
-    /// `also_repos`, that neither a container, the releases in `releases`
-    /// nor the references in `j.keep` use.
+    /// `also_repos`, that neither a container, the releases in `releases`,
+    /// the references in `j.keep` nor the stack files use.
+    ///
+    /// The stack files name what the next boot starts. The containers and
+    /// `j.keep` normally name the same images, but a retried restore has
+    /// removed the containers first, and `j.keep` is empty when podman
+    /// could not list them at step 4. Stack files that cannot be read, or
+    /// that name an image without a digest, leave every image as it is.
     fn prune_images(&mut self, j: &Journal, releases: &[&Release], also_repos: &[String]) {
-        let registry = match self.read_env(&self.stack_files()) {
+        let files = self.stack_files();
+        let registry = match self.read_env(&files) {
             Ok(env) => env.registry(),
             Err(e) => {
                 self.log(format!("images left as they are: {e}"));
                 return;
             }
         };
-        let containers = self.host.containers().unwrap_or_default();
+        let services = match self.host.compose_config(&files) {
+            Ok(services) => services,
+            Err(e) => {
+                self.log(format!("images left as they are: {e}"));
+                return;
+            }
+        };
         let mut keep: HashSet<String> = HashSet::new();
+        for service in &services {
+            let Some((_, digest)) = split_reference(&service.image) else {
+                self.log(format!(
+                    "images left as they are: {} names {} without a digest",
+                    service.name, service.image
+                ));
+                return;
+            };
+            keep.insert(digest.to_string());
+        }
+        let containers = self.host.containers().unwrap_or_default();
         let mut repos: HashSet<String> = also_repos.iter().cloned().collect();
         for image in Image::ALL {
             repos.insert(envfile::repository(&registry, image));
