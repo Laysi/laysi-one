@@ -72,26 +72,12 @@ jobs:
       # the signing key, and a tag moves.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
 
+      # In the script rather than inline, so ci.yml runs the same comparison
+      # with throwaway keys on every push: this job runs on a tag only.
       - name: The signing key is one the product trusts
         env:
           RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
-        run: |
-          set -eu
-          # Every quoted key from the declaration to its closing `];`, which
-          # rustfmt puts on one line or several depending on how many keys
-          # there are. A renamed constant finds nothing and fails here.
-          trusted=$(awk '/^pub const TRUSTED_KEYS: &\[&str\] =/ { on = 1 } on { print } on && /\];$/ { exit }' \
-            backend/crates/laysi-license-token/src/release.rs | grep -o '"[0-9a-f]\{64\}"' | tr -d '"' || true)
-          test -n "$trusted" || { echo "TRUSTED_KEYS not found; did the constant change shape?"; exit 1; }
-          derived=$(bun scripts/release-manifest.ts public-key)
-          echo "product trusts:"
-          printf '  %s\n' $trusted
-          echo "secret signs as:"
-          printf '  %s\n' $derived
-          for key in $derived; do
-              printf '%s\n' "$trusted" | grep -qx "$key" \
-                  || { echo "$key is not in TRUSTED_KEYS"; exit 1; }
-          done
+        run: bun scripts/release-manifest.ts check-trusted
 
   images:
     needs: signing-key
