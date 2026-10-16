@@ -9,8 +9,8 @@ use std::rc::Rc;
 use ed25519_dalek::{Signer, SigningKey};
 use laysi_license_token::release::{self, Image, ImageDigest, KeyId, ReleaseVersion};
 use laysi_license_token::update::{
-    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, REQUEST_FILE,
-    SWITCHING_FILE,
+    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, FALLBACK_BOOT_FILE,
+    REQUEST_FILE, SWITCHING_FILE,
 };
 
 use crate::envfile::EnvFile;
@@ -472,6 +472,44 @@ fn an_api_that_exits_at_start_is_rolled_back() {
     rig.assert_settled(&id);
 }
 
+/// Healthy after a few polls, and the time server answers in between: the
+/// wall clock jumps by more than every timeout.
+fn step_the_clock_while_starting(rig: &Rig) {
+    let mut w = rig.world.borrow_mut();
+    w.warmup_secs = 12;
+    w.clock_step = Some(chrono::Duration::hours(6));
+}
+
+#[test]
+fn a_wall_clock_set_forward_while_the_new_release_starts_does_not_fail_it() {
+    let rig = Rig::new(v1(), &[v2()]);
+    step_the_clock_while_starting(&rig);
+    let id = rig.request("req-clockstep-01", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert!(
+        rig.world.borrow().clock_step.is_none(),
+        "the clock never jumped"
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_wall_clock_set_forward_while_the_stack_starts_at_boot_does_not_fail_the_boot() {
+    let rig = Rig::new(v1(), &[]);
+    rig.world.borrow_mut().reboot();
+    step_the_clock_while_starting(&rig);
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(
+        rig.world.borrow().clock_step.is_none(),
+        "the clock never jumped"
+    );
+    for service in SERVICES {
+        assert!(rig.running(service), "{service} is not running");
+    }
+}
+
 #[test]
 fn entry_points_never_start_before_the_rest_has_passed() {
     // web is the one that fails, so the core of the new release did pass and
@@ -634,7 +672,7 @@ fn a_rollback_retried_by_hand_that_fails_again_keeps_the_dump() {
     for service in ["api", "mcp", "web", "backup", "rustfs"] {
         assert!(!rig.running(service), "{service} started");
     }
-    assert!(!rig.switching());
+    assert!(rig.switching(), "the dump is still to be restored");
     // And it can be tried again. This time the first restore fails and its
     // retry succeeds, and the result still says the rollback was retried by
     // hand.
@@ -650,7 +688,7 @@ fn a_rollback_retried_by_hand_that_fails_again_keeps_the_dump() {
 }
 
 #[test]
-fn retry_rollback_refuses_all_but_a_failed_rollback_with_its_dump() {
+fn retry_rollback_refuses_only_what_it_cannot_bring_back() {
     let phase = |rig: &Rig| rig.machine(|m| m.load_journal()).unwrap().map(|j| j.phase);
 
     // No update at all.
@@ -672,7 +710,7 @@ fn retry_rollback_refuses_all_but_a_failed_rollback_with_its_dump() {
     rig.run().unwrap();
     assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
     let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
-    assert!(refused.contains("沒有留下資料庫備份"), "{refused}");
+    assert!(refused.contains("已經還原資料庫"), "{refused}");
     assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
 
     // Another run holds the lock.
@@ -684,13 +722,254 @@ fn retry_rollback_refuses_all_but_a_failed_rollback_with_its_dump() {
     drop(held);
     assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
 
+    // A `.previous` copy is gone: nothing says what the files should be.
+    let previous = Layout::previous_of(&rig.layout.stack_files()[1]);
+    std::fs::remove_file(&previous).unwrap();
+    let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
+    assert!(refused.contains("不在主機上"), "{refused}");
+    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
+    assert_eq!(rig.backups(), vec!["req-byhand-5.dump".to_string()]);
+}
+
+#[test]
+fn retry_rollback_puts_the_stack_files_back_before_it_restores() {
+    let (rig, id) = failed_restore("req-byhand-6");
+    rig.world.borrow_mut().fail_restore = false;
     // The stack files name another release.
     let env = EnvFile::default().for_release(&v2().release(), &rig.layout.root.to_string_lossy());
     std::fs::write(&rig.layout.stack_files()[2], env.render()).unwrap();
-    let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
-    assert!(refused.contains("v0.1.0"), "{refused}");
-    assert_eq!(phase(&rig), Some(Phase::RollbackFailed));
-    assert_eq!(rig.backups(), vec!["req-byhand-5.dump".to_string()]);
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    let journal = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(journal.phase, Phase::RollingBack);
+    rig.machine(|m| m.boot()).unwrap();
+
+    rig.assert_settled(&id);
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack);
+    assert!(result
+        .rollback_reason
+        .unwrap()
+        .starts_with("以人工指令重新還原"));
+    for file in rig.layout.stack_files() {
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            std::fs::read(Layout::previous_of(&file)).unwrap(),
+            "{}",
+            file.display()
+        );
+    }
+}
+
+/// The power goes right after step 6 replaced the first stack file, with
+/// v0.2.0 naming another postgres image than v0.1.0: the boot rolls back
+/// from there, with no database to restore.
+fn cut_after_the_first_file_swapped(id: &str) -> (Rig, RequestId) {
+    let mut next = v2();
+    next.postgres = "postgres-2";
+    let rig = Rig::new(v1(), &[next]);
+    rig.world.borrow_mut().crash_on = Some("stack file swapped");
+    let id = rig.request(id, &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err());
+    rig.world.borrow_mut().reboot();
+    (rig, id)
+}
+
+/// The `.previous` copy of stack file `n` replaced by a symlink to it,
+/// which the updater does not follow, until the returned closure puts it
+/// back.
+fn break_previous(rig: &Rig, n: usize) -> impl FnOnce() {
+    let previous = Layout::previous_of(&rig.layout.stack_files()[n]);
+    let aside = previous.with_extension("aside");
+    std::fs::rename(&previous, &aside).unwrap();
+    std::os::unix::fs::symlink(&aside, &previous).unwrap();
+    move || {
+        std::fs::remove_file(&previous).unwrap();
+        std::fs::rename(&aside, &previous).unwrap();
+    }
+}
+
+fn assert_nothing_runs(rig: &Rig) {
+    for service in SERVICES {
+        assert!(!rig.running(service), "{service} started");
+    }
+    // Not even recreated from the new release's image.
+    assert_eq!(
+        rig.world.borrow().containers["postgres"].digest,
+        digest("postgres-1")
+    );
+}
+
+#[test]
+fn a_rollback_that_could_not_put_the_files_back_is_finished_at_the_next_boot() {
+    let (rig, id) = cut_after_the_first_file_swapped("req-files-0001");
+    let mend = break_previous(&rig, 0);
+    rig.machine(|m| m.boot()).unwrap();
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RollbackFailed, "{result:?}");
+    assert_eq!(result.running, None, "the compose file is v0.2.0's");
+    assert_eq!(rig.backups(), vec!["req-files-0001.dump".to_string()]);
+    // Nothing starts on files half swapped, whatever `.env` names.
+    assert_nothing_runs(&rig);
+    // The new release never ran: the database is not to be restored.
+    assert!(!rig.switching());
+
+    mend();
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    rig.run().unwrap();
+    rig.assert_settled(&id);
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    let why = result.rollback_reason.unwrap();
+    assert!(
+        why.starts_with("開機時重新回退") && why.contains("無法還原"),
+        "{why}"
+    );
+    assert_eq!(rig.world.borrow().restores, 0);
+
+    let next = rig.request("req-files-0002", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&next).status, UpdateStatus::Succeeded);
+    assert_eq!(
+        rig.world.borrow().containers["postgres"].digest,
+        digest("postgres-2")
+    );
+}
+
+#[test]
+fn a_rollback_whose_previous_files_are_gone_starts_nothing_and_changes_nothing() {
+    let (rig, id) = cut_after_the_first_file_swapped("req-files-0003");
+    let kept: Vec<_> = rig
+        .layout
+        .stack_files()
+        .iter()
+        .map(|file| {
+            let previous = Layout::previous_of(file);
+            let bytes = std::fs::read(&previous).unwrap();
+            std::fs::remove_file(&previous).unwrap();
+            (previous, bytes)
+        })
+        .collect();
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    let journal = std::fs::read(rig.layout.journal()).unwrap();
+    let result = std::fs::read(rig.layout.results_dir().join(id.as_str())).unwrap();
+    for boot in 0..3 {
+        if boot > 0 {
+            rig.world.borrow_mut().reboot();
+            rig.machine(|m| m.boot()).unwrap();
+        }
+        assert_nothing_runs(&rig);
+        let refused = rig.machine(|m| m.retry_rollback()).unwrap_err();
+        assert!(
+            refused.contains("docker-compose.prod.yml.previous 不在主機上"),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(rig.layout.journal()).unwrap(), journal);
+        assert_eq!(
+            std::fs::read(rig.layout.results_dir().join(id.as_str())).unwrap(),
+            result
+        );
+        assert_eq!(rig.backups(), vec!["req-files-0003.dump".to_string()]);
+    }
+    let next = rig.request("req-files-0004", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&next).status, UpdateStatus::RefusedBlocked);
+
+    // With the copies back, retry-rollback finishes it.
+    for (previous, bytes) in kept {
+        std::fs::write(previous, bytes).unwrap();
+    }
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    let j = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(j.phase, Phase::RollingBack);
+    rig.machine(|m| m.boot()).unwrap();
+    rig.assert_settled(&id);
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    assert!(result
+        .rollback_reason
+        .unwrap()
+        .starts_with("以人工指令重新回退"));
+}
+
+#[test]
+fn a_rollback_with_a_dump_to_restore_gets_its_files_back_and_waits_for_retry_rollback() {
+    let mut broken = never_healthy();
+    broken.postgres = "postgres-2";
+    let rig = Rig::new(v1(), std::slice::from_ref(&broken));
+    rig.world.borrow_mut().crash_on = Some("rolling-back");
+    let id = rig.request("req-files-0005", &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err());
+    rig.world.borrow_mut().reboot();
+    let mend = break_previous(&rig, 0);
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    for service in SERVICES {
+        assert!(!rig.running(service), "{service} started");
+    }
+    assert!(rig.switching(), "the dump is still to be restored");
+
+    // A marker gone meanwhile that cannot be written again fails the boot,
+    // and nothing starts.
+    use std::os::unix::fs::PermissionsExt;
+    mend();
+    std::fs::remove_file(rig.layout.results_dir().join(SWITCHING_FILE)).unwrap();
+    let results = rig.layout.results_dir();
+    std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o500)).unwrap();
+    rig.world.borrow_mut().reboot();
+    let failed = rig.machine(|m| m.boot());
+    std::fs::set_permissions(&results, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(failed.is_err(), "{failed:?}");
+    for service in SERVICES {
+        assert!(!rig.running(service), "{service} started");
+    }
+
+    // Nor with the host recording another release than the one rolled back
+    // to.
+    let installed = rig.layout.installed();
+    std::fs::write(&installed, journal::encode_installed(&broken.release())).unwrap();
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    for service in SERVICES {
+        assert!(!rig.running(service), "{service} started");
+    }
+    std::fs::write(&installed, journal::encode_installed(&v1().release())).unwrap();
+
+    // The next boot puts the files back and starts the old postgres alone;
+    // the marker is written again.
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    for file in rig.layout.stack_files() {
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            std::fs::read(Layout::previous_of(&file)).unwrap(),
+            "{}",
+            file.display()
+        );
+    }
+    assert!(rig.running("postgres"));
+    assert_eq!(
+        rig.world.borrow().containers["postgres"].digest,
+        digest("postgres-1")
+    );
+    for service in ["api", "mcp", "web", "backup", "rustfs"] {
+        assert!(!rig.running(service), "{service} started");
+    }
+    assert!(rig.switching());
+    assert_eq!(rig.result(&id).status, UpdateStatus::RollbackFailed);
+    assert_eq!(rig.world.borrow().restores, 0);
+
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    let j = rig.machine(|m| m.load_journal()).unwrap().unwrap();
+    assert_eq!(j.phase, Phase::Restoring);
+    rig.machine(|m| m.boot()).unwrap();
+    rig.run().unwrap();
+    rig.assert_settled(&id);
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    assert_eq!(rig.world.borrow().restores, 1);
 }
 
 #[test]
@@ -1041,6 +1320,39 @@ fn a_third_party_image_whose_repository_changed_is_removed_two_releases_later() 
 }
 
 #[test]
+fn a_power_cut_after_the_commit_keeps_the_third_party_images_the_new_files_name() {
+    let mut next = v2();
+    next.postgres = "postgres-2";
+    next.rustfs = "rustfs-2";
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    rig.world.borrow_mut().crash_on = Some("committed");
+    let id = rig.request("req-cutcommit-1", &rig.manifest("v0.2.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err(), "the power went once the switch was committed");
+    {
+        let mut w = rig.world.borrow_mut();
+        w.reboot();
+        // podman removes the containers whose layers the cut left unreadable.
+        w.containers.clear();
+    }
+    let pulls = rig.world.borrow().pulls;
+
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    {
+        let w = rig.world.borrow();
+        assert_eq!(w.pulls, pulls, "the stack started without pulling again");
+        for image in images_of(&next) {
+            assert!(w.local.contains(&image), "{image} was removed");
+        }
+        let ancient = Spec::good("v0.0.9", "m0").own(Image::Api);
+        assert!(!w.local.contains(&ancient), "the clean-up did not run");
+    }
+    rig.run().unwrap();
+    rig.assert_settled(&id);
+}
+
+#[test]
 fn an_unreadable_journal_starts_nothing_and_fails_the_boot() {
     let rig = Rig::new(v1(), &[]);
     std::fs::write(
@@ -1061,6 +1373,54 @@ fn an_unreadable_journal_starts_nothing_and_fails_the_boot() {
     std::fs::remove_file(rig.layout.journal()).unwrap();
     assert!(rig.machine(|m| m.boot()).is_ok());
     assert!(rig.world.borrow().containers["web"].running);
+}
+
+#[test]
+fn a_start_by_the_previous_updater_is_marked_until_the_current_one_starts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::new(v1(), &[]);
+    let marker = rig.layout.results_dir().join(FALLBACK_BOOT_FILE);
+    // The boot unit failed, and the fallback unit runs the previous updater.
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.fallback_boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    let text = std::fs::read_to_string(&marker).unwrap();
+    assert!(text.starts_with("at 20") && text.ends_with("Z\n"), "{text}");
+    let mode = std::fs::metadata(&marker).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644, "the api reads it as another uid");
+
+    // A current updater that fails again leaves it.
+    std::fs::write(
+        rig.layout.journal(),
+        "laysi-updater-journal 1\nphase dancing\n",
+    )
+    .unwrap();
+    rig.world.borrow_mut().reboot();
+    assert!(rig.machine(|m| m.boot()).is_err());
+    assert!(marker.is_file());
+
+    // One that starts the stack removes it.
+    std::fs::remove_file(rig.layout.journal()).unwrap();
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(!marker.exists());
+    assert!(rig.world.borrow().containers["web"].running);
+}
+
+#[test]
+fn a_fallback_marker_that_cannot_be_written_does_not_stop_the_start() {
+    let rig = Rig::new(v1(), &[]);
+    let marker = rig.layout.results_dir().join(FALLBACK_BOOT_FILE);
+    // A directory in the way: nothing can be renamed over it.
+    std::fs::create_dir(&marker).unwrap();
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.fallback_boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    // Nor can the current updater remove it, which fails nothing either.
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    assert!(rig.world.borrow().containers["web"].running);
+    assert!(marker.is_dir());
 }
 
 /// Run `scenario` once to count its calls, then again with the power cut at
@@ -1339,7 +1699,8 @@ fn a_container_not_created_from_the_compose_file_does_not_pass() {
         has_healthcheck: true,
         health: Some("healthy".into()),
         image_name: image.into(),
-        image_digest: digest.into(),
+        image_id: "img".into(),
+        image_digests: vec![digest.into()],
         created: at,
     };
     let (old, new) = (digest("rustfs-1"), digest("rustfs-2"));
@@ -1356,6 +1717,13 @@ fn a_container_not_created_from_the_compose_file_does_not_pass() {
     // Created from the right reference, running something else.
     let other = container(&format!("docker.io/rustfs/rustfs@{new}"), &old);
     assert!(judge(&[other], services, None, REGISTRY, None).is_err());
+    // The image it runs was pulled first by another digest: local storage
+    // reports that one and knows the image by both.
+    let renamed = Container {
+        image_digests: vec![old.clone(), new.clone()],
+        ..container(&format!("docker.io/rustfs/rustfs@{new}"), &old)
+    };
+    assert_eq!(judge(&[renamed], services, None, REGISTRY, None), Ok(()));
     // A tag in the compose file never passes.
     let tagged = Service {
         name: "rustfs".into(),
@@ -1401,6 +1769,16 @@ fn a_rollback_that_cannot_stop_the_new_release_keeps_the_dump() {
     let env = std::fs::read_to_string(&rig.layout.stack_files()[2]).unwrap();
     assert!(env.contains(&v1().own(Image::Api)));
     assert_eq!(rig.installed(), "v0.1.0");
+    // The new api still runs, and refuses writes: restoring the dump would
+    // take them back.
+    assert!(rig.running("api"));
+    assert!(rig.switching(), "the dump is still to be restored");
+
+    rig.world.borrow_mut().unstoppable = None;
+    assert_eq!(rig.machine(|m| m.retry_rollback()), Ok(id.clone()));
+    rig.machine(|m| m.boot()).unwrap();
+    rig.assert_settled(&id);
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
 }
 
 #[test]
@@ -1446,7 +1824,8 @@ fn a_tagged_reference_to_an_own_image_is_still_checked_against_the_release() {
         has_healthcheck: false,
         health: None,
         image_name: tagged,
-        image_digest: other,
+        image_id: "img".into(),
+        image_digests: vec![other],
         created: chrono::Utc::now(),
     };
     let verdict = judge(&[container], &[service], Some(&release), REGISTRY, None);
@@ -1544,6 +1923,84 @@ fn a_container_running_another_image_than_its_digest_names_is_rolled_back_before
     rig.assert_settled(&id);
 }
 
+/// A rig on v1 offering `next`, whose backup image is v1's pushed again
+/// under the digest the manifest of `next` names.
+fn backup_renamed(next: Spec) -> Rig {
+    let rig = Rig::new(v1(), std::slice::from_ref(&next));
+    rig.world
+        .borrow_mut()
+        .same_image
+        .insert(next.own(Image::Backup), v1().own(Image::Backup));
+    rig
+}
+
+#[test]
+fn an_unchanged_image_under_a_new_digest_passes_as_the_release_that_names_it() {
+    let rig = backup_renamed(v2());
+    let id = rig.request("req-renamed-1", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::Succeeded, "{result:?}");
+    assert_eq!(rig.installed(), "v0.2.0");
+    use crate::host::Host;
+    let backup = FakeHost {
+        world: rig.world.clone(),
+    }
+    .containers()
+    .unwrap()
+    .into_iter()
+    .find(|c| c.service == "backup")
+    .unwrap();
+    assert_eq!(
+        backup.image_digests,
+        [v1().own(Image::Backup), v2().own(Image::Backup)],
+        "local storage reports the digest the image was first pulled by"
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn a_rollback_keeps_the_old_image_the_new_release_named_by_another_digest() {
+    let mut broken = v2();
+    broken.api = Behaviour::NeverHealthy;
+    let rig = backup_renamed(broken);
+    let id = rig.request("req-renamed-2", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    let result = rig.result(&id);
+    assert_eq!(result.status, UpdateStatus::RolledBack, "{result:?}");
+    assert!(
+        rig.world.borrow().local.contains(&v1().own(Image::Backup)),
+        "v1 runs it again"
+    );
+    rig.assert_settled(&id);
+}
+
+#[test]
+fn an_image_pulled_under_two_digests_goes_once_no_release_names_it() {
+    let rig = Rig::new(v1(), &[v2()]);
+    // A backup image from before v1, pulled under v0.0.9's digest and then
+    // again under v0.0.8's: podman refuses to remove it by ID.
+    let (ancient, older) = (Spec::good("v0.0.9", "m0"), Spec::good("v0.0.8", "m0"));
+    {
+        let mut w = rig.world.borrow_mut();
+        older.publish(&mut w);
+        w.local.insert(ancient.own(Image::Backup));
+        w.local.insert(older.own(Image::Backup));
+        w.same_image
+            .insert(older.own(Image::Backup), ancient.own(Image::Backup));
+    }
+    let id = rig.request("req-renamed-3", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    let w = rig.world.borrow();
+    assert!(!w.local.contains(&ancient.own(Image::Backup)));
+    assert!(!w.local.contains(&older.own(Image::Backup)));
+    assert!(w.local.contains(&v1().own(Image::Backup)), "v1 is kept");
+}
+
 #[test]
 fn a_restore_that_fails_while_recovering_starts_postgres_alone() {
     let mut broken = v2();
@@ -1565,7 +2022,7 @@ fn a_restore_that_fails_while_recovering_starts_postgres_alone() {
     for service in ["api", "mcp", "web", "backup", "rustfs"] {
         assert!(!rig.running(service), "{service} started");
     }
-    assert!(!rig.switching());
+    assert!(rig.switching(), "the dump is still to be restored");
 }
 
 #[test]
@@ -1860,6 +2317,108 @@ fn a_rollback_removes_the_images_of_the_release_it_left() {
         "the new rustfs was kept"
     );
     assert!(w.local.contains(&digest("rustfs-1")));
+    // The first update since the install has no `.previous` files, so no
+    // repository is superseded: exactly v1 stays, and the image from before
+    // v1 goes as it always did.
+    assert_eq!(w.local, images_of(&v1()));
+}
+
+/// rustfs moves to another repository in the second release, and the third
+/// never passes.
+fn rustfs_moved_then_broken() -> (Spec, Spec) {
+    let mut second = v2();
+    second.rustfs = "rustfs-2";
+    second.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    let mut third = Spec::good("v0.3.0", "m3");
+    third.api = Behaviour::NeverHealthy;
+    third.rustfs = "rustfs-3";
+    third.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    (second, third)
+}
+
+#[test]
+fn a_rollback_after_a_repository_change_removes_the_image_of_the_old_repository() {
+    let (second, third) = rustfs_moved_then_broken();
+    let rig = Rig::new(v1(), &[second.clone(), third]);
+    let id = rig.request("req-moved-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    assert!(rig.world.borrow().local.contains(&digest("rustfs-1")));
+
+    let id = rig.request("req-moved-0002", &rig.manifest("v0.3.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    rig.assert_settled(&id);
+    // rustfs-1 came from the repository only v1 used; after the rollback
+    // `.previous` names v0.2.0, and no later update would read v1 again.
+    assert_eq!(rig.world.borrow().local, images_of(&second));
+}
+
+#[test]
+fn an_update_given_up_before_step_6_leaves_the_old_repository_to_the_next_one() {
+    let (second, _) = rustfs_moved_then_broken();
+    let mut third = Spec::good("v0.3.0", "m3");
+    third.rustfs = "rustfs-2";
+    third.rustfs_repo = "ghcr.io/rustfs/rustfs";
+    let rig = Rig::new(v1(), &[second, third]);
+    let id = rig.request("req-given-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+
+    rig.world.borrow_mut().crash_on = Some("prepared");
+    let id = rig.request("req-given-0002", &rig.manifest("v0.3.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err(), "the power went in the prepared phase");
+    rig.world.borrow_mut().reboot();
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::FailedUnchanged);
+    // `.previous` still names v1, and the next update reads it again.
+    assert!(rig.world.borrow().local.contains(&digest("rustfs-1")));
+
+    let id = rig.request("req-given-0003", &rig.manifest("v0.3.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+    assert!(!rig.world.borrow().local.contains(&digest("rustfs-1")));
+}
+
+#[test]
+fn a_retried_restore_keeps_what_the_restored_files_name_with_no_record_of_what_ran() {
+    let (second, third) = rustfs_moved_then_broken();
+    let rig = Rig::new(v1(), &[second.clone(), third]);
+    let id = rig.request("req-nokeep-0001", &rig.manifest("v0.2.0"));
+    rig.run().unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::Succeeded);
+
+    rig.world.borrow_mut().crash_on = Some("restoring");
+    let id = rig.request("req-nokeep-0002", &rig.manifest("v0.3.0"));
+    let cut = catch_unwind(AssertUnwindSafe(|| rig.machine(|m| m.run_request())));
+    assert!(cut.is_err(), "the power went in the restoring phase");
+    // A journal whose step 4 could not list the containers.
+    let text = std::fs::read_to_string(rig.layout.journal()).unwrap();
+    assert!(text.lines().any(|l| l.starts_with("keep ")));
+    let without_keep: String = text
+        .lines()
+        .filter(|l| !l.starts_with("keep "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(rig.layout.journal(), without_keep).unwrap();
+    {
+        let mut w = rig.world.borrow_mut();
+        w.reboot();
+        w.fail_next_restores = 1;
+    }
+
+    // The retry removes every container but postgres before it clears
+    // images; the restored stack files still say what v0.2.0 runs.
+    rig.machine(|m| m.boot()).unwrap();
+    assert_eq!(rig.result(&id).status, UpdateStatus::RolledBack);
+    let w = rig.world.borrow();
+    assert_eq!(w.restores, 2);
+    let before_retry = &w.local_at_restore[1];
+    for image in images_of(&second) {
+        assert!(before_retry.contains(&image), "{image} was removed");
+    }
+    assert!(!before_retry.contains(&digest("rustfs-3")));
 }
 
 #[test]
@@ -1958,7 +2517,10 @@ fn a_retry_that_fails_too_ends_the_rollback_and_keeps_the_dump_as_it_was() {
         assert!(!rig.world.borrow().local.contains(&broken.own(image)));
         assert!(rig.world.borrow().local.contains(&v1().own(image)));
     }
-    assert!(!rig.switching(), "the result is final");
+    assert!(
+        rig.switching(),
+        "the result is final and the dump is still to be restored"
+    );
 
     // No boot tries again.
     for _ in 0..3 {
@@ -1967,7 +2529,7 @@ fn a_retry_that_fails_too_ends_the_rollback_and_keeps_the_dump_as_it_was() {
         assert_eq!(rig.world.borrow().restores, 2);
         assert!(rig.running("postgres"));
         assert!(!rig.running("api"));
-        assert!(!rig.switching());
+        assert!(rig.switching());
     }
     assert_eq!(rig.retries_begun(id.as_str()), 1);
 }
@@ -2016,7 +2578,13 @@ fn a_power_cut_during_a_failing_retry_never_begins_a_second_one() {
         let result = rig.result(&id);
         let begun = rig.retries_begun(id.as_str());
         assert!(begun <= 1, "cut at call {k}: {begun} retries");
-        assert!(!rig.switching(), "cut at call {k}: marker left");
+        // Kept only while the dump is still to be restored.
+        assert_eq!(
+            rig.switching(),
+            result.status == UpdateStatus::RollbackFailed,
+            "cut at call {k}: {:?}",
+            result.status
+        );
         match result.status {
             UpdateStatus::RollbackFailed => {
                 assert_eq!(begun, 1, "cut at call {k}");

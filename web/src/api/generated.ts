@@ -17,6 +17,8 @@ export type OpName =
   | 'reverse_voucher'
   | 'get_license'
   | 'activate_license'
+  | 'get_update_ticket'
+  | 'get_update_result'
   | 'get_ar_aging'
   | 'list_receivables'
   | 'create_ar_invoice'
@@ -171,8 +173,10 @@ export const OPS: readonly OpMeta[] = [
   { name: 'update_voucher', risk: 'needs_confirm', riskLabel: '需人確認', summary: "修改一張還沒過帳的傳票，整份分錄改為送出的內容。已過帳的不能修改：不應存在的請作廢，記錯的請開立反向傳票。由應收、應付、薪資、折舊、報支或匯入產生的傳票請到產生它的那一頁處理。日期改到別的月份時，傳票號碼會換成該月份的號碼。" },
   { name: 'discard_voucher', risk: 'needs_confirm', riskLabel: '需人確認', summary: "刪除一張還沒過帳的手工傳票。已過帳的不能刪除：不應存在的請作廢，記錯的請開立反向傳票。由應收、應付、薪資、折舊、報支或匯入產生的傳票也不能單獨刪除，請到產生它的那一頁處理。" },
   { name: 'reverse_voucher', risk: 'high_risk', riskLabel: '高風險', summary: "以指定日期開立並過帳反向傳票，更正確實發生但金額或科目記載錯誤的交易；原傳票不應存在時，請改為作廢。" },
-  { name: 'get_license', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀本安裝的授權：被授權單位、經銷商、到期日、主機識別碼與最後一次驗證的結果。" },
+  { name: 'get_license', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀本安裝的授權：被授權單位、經銷商、到期日、主機識別碼、最後一次驗證的結果，以及執行中與可安裝的版本。" },
   { name: 'activate_license', risk: 'admin_only', riskLabel: '限系統管理員', summary: "啟用或重新驗證授權：輸入經銷商提供的啟動金鑰，向授權伺服器取得授權。" },
+  { name: 'get_update_ticket', risk: 'admin_only', riskLabel: '限系統管理員', summary: "更新系統：要求主機把本安裝更新為授權伺服器放行的版本，回傳請求編號供查詢結果。更新期間系統暫時無法使用。" },
+  { name: 'get_update_result', risk: 'admin_only', riskLabel: '限系統管理員', summary: "讀更新結果：依請求編號回報進行中、成功、已回復或沒有執行。" },
   { name: 'get_ar_aging', risk: 'read_only', riskLabel: '唯讀', summary: "讀應收帳齡：未到期與各逾期區間的未收金額，並與 1131 應收帳款的總帳餘額對帳" },
   { name: 'list_receivables', risk: 'read_only', riskLabel: '唯讀', summary: "讀應收明細：客戶、發票號碼、到期日與未收金額，逾期者予以標示" },
   { name: 'create_ar_invoice', risk: 'needs_confirm', riskLabel: '需人確認', summary: "建立應收單據，並一併產生待過帳傳票（借應收帳款／貸指定收益科目＋代收營業稅）。營業稅依開立日期適用的稅率拆出，零稅率與免稅填 0；傳票過帳後才列入未收合計。" },
@@ -320,6 +324,8 @@ export const INPUT_SCHEMAS: Record<OpName, unknown> = {
   'reverse_voucher': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"date":{"description":"Date of the reversing voucher, usually the day the error was found.","format":"date","type":"string"},"no":{"description":"Number of the posted voucher to reverse.","type":"string"}},"required":["no","date"],"title":"ReverseVoucherInput","type":"object"},
   'get_license': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"An operation that takes no parameters.","title":"Empty","type":"object"},
   'activate_license': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"activation_key":{"default":null,"description":"The activation key the reseller supplied. Omitted to re-check with the\nkey already stored, which is what the screen's 「立即驗證」 does.","type":["string","null"]}},"title":"ActivateLicenseInput","type":"object"},
+  'get_update_ticket': {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"GetUpdateTicketInput","type":"object"},
+  'get_update_result': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"request_id":{"description":"The request id `get_update_ticket` returned. A result is only ever\ngiven for the request that asked for it.","type":"string"}},"required":["request_id"],"title":"GetUpdateResultInput","type":"object"},
   'get_ar_aging': {"$schema":"https://json-schema.org/draft/2020-12/schema","description":"Query as of a date. Needed by the regulation and balance operations.","properties":{"as_of":{"default":null,"description":"Cut-off date (YYYY-MM-DD). Defaults to today.","format":"date","type":["string","null"]}},"title":"AsOfInput","type":"object"},
   'list_receivables': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"include_settled":{"default":false,"description":"Include fully settled invoices; excluded by default.","type":"boolean"},"limit":{"default":null,"description":"Maximum rows, default 200.","format":"int64","type":["integer","null"]},"only_overdue":{"default":false,"description":"Only invoices past their payment terms.","type":"boolean"},"q":{"default":null,"description":"Keyword matched against customer name and invoice number.","type":["string","null"]}},"title":"ListReceivablesInput","type":"object"},
   'create_ar_invoice': {"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"amount":{"default":null,"description":"Tax-inclusive total, which is what the customer owes. Amounts are\nstrings in JSON. Give any one or two of `amount`, `net_amount` and\n`tax_amount`; the rest follow from the VAT rules in force on the issue\ndate.","type":["string","null"]},"customer":{"description":"Customer name.","type":"string"},"due_on":{"description":"Due date.","format":"date","type":"string"},"invoice_no":{"description":"Receivable document number; it need not be an e-invoice track number.","type":"string"},"issued_on":{"default":null,"description":"Issue date. Defaults to today.","format":"date","type":["string","null"]},"memo":{"default":"","description":"Description.","type":"string"},"net_amount":{"default":null,"description":"Amount before tax, credited to the revenue account.","type":["string","null"]},"output_tax_account_code":{"default":"2211","description":"Output tax account, default 2211. The VAT return reads the period\nmovement of this account.","type":"string"},"receivable_account_code":{"default":"1131","description":"Receivables control account, default 1131.","type":"string"},"revenue_account_code":{"description":"Credit revenue account.","type":"string"},"tax_amount":{"default":null,"description":"Output tax, credited to 2211. Send `0` for a zero-rated export or an\nexempt sale.","type":["string","null"]}},"required":["invoice_no","customer","due_on","revenue_account_code"],"title":"CreateArInvoiceInput","type":"object"},
