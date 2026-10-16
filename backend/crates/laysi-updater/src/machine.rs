@@ -33,7 +33,9 @@
 //! writes: a rollback restores the database as it was at step 5, and would
 //! take back anything written in between. A rollback that failed with its
 //! dump still to restore keeps it past the final result, since
-//! `retry-rollback` restores that dump too.
+//! `retry-rollback` restores that dump too. From the moment the previous
+//! updater starts the stack until the current one next does,
+//! [`FALLBACK_BOOT_FILE`] tells the screen the current updater failed.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -41,11 +43,11 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use laysi_license_token::release::{self, Decision, Image, ImageDigest, Refusal, VerifyingKey};
 use laysi_license_token::update::{
-    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, KEEP_RESULTS,
-    MAX_REQUEST_BYTES, MAX_RESULT_BYTES, REQUEST_FILE, SWITCHING_FILE,
+    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, FALLBACK_BOOT_FILE,
+    KEEP_RESULTS, MAX_REQUEST_BYTES, MAX_RESULT_BYTES, REQUEST_FILE, SWITCHING_FILE,
 };
 
 use crate::envfile::{self, EnvFile};
@@ -454,10 +456,45 @@ impl<'h, H: Host> Machine<'h, H> {
     /// The machine started: finish whatever the journal says, then start the
     /// stack. This is the only thing that starts the stack at boot. A
     /// journal ended in `RollbackFailed` is taken up again first, see
-    /// `resume_failed_rollback`.
+    /// `resume_failed_rollback`. The boot and the recovery unit run it with
+    /// the current updater, and a start that succeeds removes the fallback
+    /// marker, whatever it started: the marker says whether the current
+    /// updater works, not whether the stack runs, and postgres alone, after
+    /// a rollback that kept its dump, is what a working one starts then.
     pub fn boot(&mut self) -> Result<(), String> {
         let _lock = Lock::acquire(&self.layout.lock(), true)
             .map_err(|e| format!("opening the lock: {e}"))?;
+        let started = self.start_up();
+        if started.is_ok() {
+            if let Err(e) = fsx::remove_durable(&self.fallback_marker()) {
+                self.log(format!("could not remove the fallback marker: {e}"));
+            }
+        }
+        started
+    }
+
+    /// [`boot`](Self::boot) run by the fallback unit, with the previous
+    /// updater, after the current one failed. The marker goes first: what it
+    /// says, that the current updater failed to start the stack, holds
+    /// whatever this start does. One that cannot be written is logged, and the
+    /// stack starts all the same.
+    pub fn fallback_boot(&mut self) -> Result<(), String> {
+        let _lock = Lock::acquire(&self.layout.lock(), true)
+            .map_err(|e| format!("opening the lock: {e}"))?;
+        self.log("the current updater failed; starting with the previous one");
+        let at = self.host.now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let marker = format!("at {at}\n");
+        if let Err(e) = fsx::write_atomic(&self.fallback_marker(), marker.as_bytes(), 0o644) {
+            self.log(format!("could not write the fallback marker: {e}"));
+        }
+        self.start_up()
+    }
+
+    fn fallback_marker(&self) -> PathBuf {
+        self.layout.results_dir().join(FALLBACK_BOOT_FILE)
+    }
+
+    fn start_up(&mut self) -> Result<(), String> {
         // An update this updater cannot read or finish is left as it is:
         // started on top of it, the stack could run swapped files on a
         // database that was never restored. The boot fails instead, and the
@@ -1265,6 +1302,14 @@ impl<'h, H: Host> Machine<'h, H> {
     /// What was pulled for a release that is not staying goes again, or every
     /// failed attempt keeps a release's worth of images that check_space
     /// never counts. Then the files taken from it.
+    ///
+    /// The repositories in `j.superseded_repos` that the `.previous` files
+    /// no longer name go too, as after a success. Step 6 put the stack
+    /// files of `from` over `.previous`, so no later update reads the
+    /// release before `from` again, and a third-party image only that
+    /// release used would otherwise stay for good. Those the `.previous`
+    /// files still name, as when the update stopped before step 6, are left
+    /// for the next update to record.
     fn drop_offered(&mut self, j: &Journal) {
         let incoming = self.layout.incoming_files();
         let pulled: Vec<String> = self
@@ -1274,7 +1319,17 @@ impl<'h, H: Host> Machine<'h, H> {
             .iter()
             .filter_map(|s| split_reference(&s.image).map(|(repo, _)| repo.to_string()))
             .collect();
-        self.prune_images(j, &[&j.from], &pulled);
+        let still_previous = self.superseded_repos();
+        let repos: Vec<String> = pulled
+            .into_iter()
+            .chain(
+                j.superseded_repos
+                    .iter()
+                    .filter(|repo| !still_previous.contains(repo))
+                    .cloned(),
+            )
+            .collect();
+        self.prune_images(j, &[&j.from], &repos);
         self.empty_incoming();
     }
 
@@ -1284,10 +1339,11 @@ impl<'h, H: Host> Machine<'h, H> {
         }
     }
 
-    /// The repositories the stack files kept from the switch before this
-    /// one name, which step 6 is about to replace. None on a host that has
-    /// not switched since it was installed, or whose files cannot be read:
-    /// the clean-up then removes less, never more.
+    /// The repositories the `.previous` stack files name. Read at the end of
+    /// step 3, those are the files kept from the switch before this one,
+    /// which step 6 is about to replace. None on a host that has not
+    /// switched since it was installed, or whose files cannot be read: the
+    /// clean-up after a success then removes less, never more.
     fn superseded_repos(&mut self) -> Vec<String> {
         let files = self.stack_files().map(|file| Layout::previous_of(&file));
         if !files.iter().all(|file| file.exists()) {
@@ -1326,13 +1382,16 @@ impl<'h, H: Host> Machine<'h, H> {
             .host
             .database_size(&postgres)
             .map_err(|e| Space::Unknown(format!("無法取得資料庫大小：{e}")))?;
-        let digests: HashSet<String> = containers.iter().map(|c| c.image_digest.clone()).collect();
+        let digests: HashSet<&str> = containers
+            .iter()
+            .flat_map(|c| c.image_digests.iter().map(String::as_str))
+            .collect();
         let images: u64 = self
             .host
             .images()
             .map_err(Space::Unknown)?
             .iter()
-            .filter(|i| image_digests(i).any(|d| digests.contains(d)))
+            .filter(|i| i.digests().any(|d| digests.contains(d)))
             .map(|i| i.size)
             .sum();
         let images = if pulled {
@@ -1684,7 +1743,7 @@ impl<'h, H: Host> Machine<'h, H> {
         timeout_secs: u64,
     ) -> Result<(), String> {
         let registry = self.read_env(files)?.registry();
-        let deadline = self.host.now() + chrono::Duration::seconds(timeout_secs as i64);
+        let deadline = self.host.monotonic() + std::time::Duration::from_secs(timeout_secs);
         loop {
             let verdict = match self.host.containers() {
                 Ok(containers) => {
@@ -1702,7 +1761,7 @@ impl<'h, H: Host> Machine<'h, H> {
                 Ok(()) => return Ok(()),
                 Err(reason) => reason,
             };
-            if self.host.now() >= deadline {
+            if self.host.monotonic() >= deadline {
                 return Err(format!("{timeout_secs} 秒內沒有全部就緒：{reason}"));
             }
             self.host.sleep(self.config.poll_secs);
@@ -1789,18 +1848,44 @@ impl<'h, H: Host> Machine<'h, H> {
     }
 
     /// Remove the images of the repositories this stack uses, or of
-    /// `also_repos`, that neither a container, the releases in `releases`
-    /// nor the references in `j.keep` use.
+    /// `also_repos`, that neither a container, the releases in `releases`,
+    /// the references in `j.keep` nor the stack files use.
+    ///
+    /// The stack files name what the next boot starts, and a container is no
+    /// proof of that: after a power cut podman removes the containers it
+    /// cannot read, so at the recovery's clean-up none may use the images
+    /// the files name, a retried restore has removed the containers first,
+    /// and `j.keep` is empty when podman could not list them at step 4.
+    /// Stack files that cannot be read, or that name an image without a
+    /// digest, leave every image as it is.
     fn prune_images(&mut self, j: &Journal, releases: &[&Release], also_repos: &[String]) {
-        let registry = match self.read_env(&self.stack_files()) {
+        let files = self.stack_files();
+        let registry = match self.read_env(&files) {
             Ok(env) => env.registry(),
             Err(e) => {
                 self.log(format!("images left as they are: {e}"));
                 return;
             }
         };
-        let containers = self.host.containers().unwrap_or_default();
+        let services = match self.host.compose_config(&files) {
+            Ok(services) => services,
+            Err(e) => {
+                self.log(format!("images left as they are: {e}"));
+                return;
+            }
+        };
         let mut keep: HashSet<String> = HashSet::new();
+        for service in &services {
+            let Some((_, digest)) = split_reference(&service.image) else {
+                self.log(format!(
+                    "images left as they are: {} names {} without a digest",
+                    service.name, service.image
+                ));
+                return;
+            };
+            keep.insert(digest.to_string());
+        }
+        let containers = self.host.containers().unwrap_or_default();
         let mut repos: HashSet<String> = also_repos.iter().cloned().collect();
         for image in Image::ALL {
             repos.insert(envfile::repository(&registry, image));
@@ -1820,7 +1905,11 @@ impl<'h, H: Host> Machine<'h, H> {
                 repos.insert(repo.to_string());
             }
         }
-        keep.extend(containers.iter().map(|c| c.image_digest.clone()));
+        keep.extend(
+            containers
+                .iter()
+                .flat_map(|c| c.image_digests.iter().cloned()),
+        );
 
         let images = match self.host.images() {
             Ok(images) => images,
@@ -1830,7 +1919,7 @@ impl<'h, H: Host> Machine<'h, H> {
             }
         };
         for image in images {
-            if image_digests(&image).any(|d| keep.contains(d)) {
+            if image.digests().any(|d| keep.contains(d)) {
                 continue;
             }
             let ours = image
@@ -1842,7 +1931,7 @@ impl<'h, H: Host> Machine<'h, H> {
             if !ours {
                 continue;
             }
-            if let Err(e) = self.host.remove_image(&image.id) {
+            if let Err(e) = self.host.remove_image(&image) {
                 self.log(format!("removing image {}: {e}", image.id));
             }
         }
@@ -1879,15 +1968,6 @@ fn running_container(containers: &[Container], service: &str) -> Option<String> 
         .filter(|c| c.service == service && c.running)
         .max_by_key(|c| c.created)
         .map(|c| c.name.clone())
-}
-
-fn image_digests(image: &crate::host::LocalImage) -> impl Iterator<Item = &str> {
-    std::iter::once(image.digest.as_str()).chain(
-        image
-            .repo_digests
-            .iter()
-            .filter_map(|r| r.split_once('@').map(|(_, d)| d)),
-    )
 }
 
 /// `repo[:tag]@sha256:…` into the repository, without its tag, and the
@@ -2007,11 +2087,13 @@ pub fn check_release_files(
 /// has a healthcheck, and created after `since` when that is given.
 ///
 /// The compose file has to name every image by digest. The container has to
-/// have been created from that same digest and has to run it: podman reports
-/// the index digest a multi-platform image was pulled by. The images of the
-/// release itself must also carry the manifest's digest. A tag, a container
-/// created from another reference, or one left over from before the switch,
-/// never passes.
+/// have been created from that same digest and has to run an image local
+/// storage knows by it: podman reports only the digest an image was first
+/// pulled by, the index digest for a multi-platform image, and an image
+/// pulled again under another digest keeps reporting that one. The images
+/// of the release itself must also carry the manifest's digest. A tag, a
+/// container created from another reference, or one left over from before
+/// the switch, never passes.
 pub fn judge(
     containers: &[Container],
     services: &[Service],
@@ -2051,10 +2133,13 @@ pub fn judge(
             ));
         }
         let pinned = ImageDigest::parse(digest).expect("split_reference parsed it");
-        if !pinned.matches(&c.image_digest) {
+        if !c.image_digests.iter().any(|d| pinned.matches(d)) {
             return Err(format!(
                 "{name} 執行的映像 {} 與指定的 {digest} 不符",
-                c.image_digest
+                c.image_digests
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or_default()
             ));
         }
         let role = ROLES
