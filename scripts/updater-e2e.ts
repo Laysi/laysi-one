@@ -324,6 +324,15 @@ function switching(): boolean {
   return existsSync(MARKER);
 }
 
+/// A rollback ended in rollback-failed with a dump still to restore, which
+/// retry-rollback restores: the switching marker stays until then.
+function restorePending(): boolean {
+  const path = join(ROOT, "state/journal");
+  if (!existsSync(path)) return false;
+  const journal = readFileSync(path, "utf8");
+  return /^phase rollback-failed$/m.test(journal) && /^restore-db yes$/m.test(journal) && backups().length > 0;
+}
+
 function installed(): string {
   return readFileSync(join(ROOT, "state/installed"), "utf8").match(/^version (\S+)$/m)?.[1] ?? "";
 }
@@ -437,7 +446,8 @@ async function update(id: string, manifest: string, seconds = 1800, during?: () 
   await settledRun();
   log(`${id}: ${result.status}${result.reason ? ` (${result.reason})` : ""}${result["rollback-reason"] ? ` / ${result["rollback-reason"]}` : ""}`);
   if (result.tools) log(`${id}: ${result.tools}`);
-  check(!switching(), `no switching marker is left after ${result.status}`);
+  if (restorePending()) check(switching(), "the switching marker stays while the dump is still to be restored");
+  else check(!switching(), `no switching marker is left after ${result.status}`);
   return result;
 }
 
@@ -819,6 +829,7 @@ exec ${realPodman} "$@"
   await settledRun();
   const up = [...byService().values()].filter((c) => c.running).map((c) => c.service);
   check(up.length === 1 && up[0] === "postgres", "a boot starts postgres alone");
+  check(switching(), "and the switching marker stays");
   check(sh(["podman", "exec", `${PROJECT}-postgres`, "psql", "-U", "laysi", "-d", "laysi", "-Atc", "select 1"], { ok: false }).code !== 0, "the database is gone");
   // The disk is freed; the updater runs the podman it was installed with.
   rmSync(failRestores);
