@@ -49,9 +49,10 @@ use sha2::{Digest, Sha256};
 /// Compiled in, and kept apart from the licence key in the product's
 /// `ops/license.rs`. release.yml derives the public key from the signing
 /// secret and fails the release before any image is built when it is not in
-/// this list. It reads every quoted 64-hex string from the line that declares
-/// this constant to the `];` that closes it, so a rename fails the release
-/// rather than skipping the check.
+/// this list (`scripts/release-manifest.ts check-trusted`). That reads every
+/// quoted 64-hex string from the line that declares this constant to the `];`
+/// that closes it, so a rename fails the release rather than skipping the
+/// check.
 pub const TRUSTED_KEYS: &[&str] =
     &["000aef2b6ed55b8cfb5481af7bce7b0e65584aaec863073348c68e132d1021a5"];
 
