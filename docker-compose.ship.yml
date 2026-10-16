@@ -24,9 +24,12 @@
 #    different ones.
 #
 # 4. Only the api mounts the requests directory, so only the api can ask for
-#    an update (`U` chowns it to the api's uid). The api and mcp both mount
-#    the results directory read-only: the api reads results from it, and
-#    both refuse writes while the updater's switching marker is in it
+#    an update. Without `U`: the directory stays the stack user's, mode
+#    1777, and the api, another uid, can write a request into it but not
+#    change its mode or owner. The updater sets both again at every boot and
+#    after every run. The api and mcp both mount the results directory
+#    read-only: the api reads results from it, and both refuse writes while
+#    the updater's switching marker is in it
 #    (laysi_license_token::update::switching).
 #
 # Nothing here or in docker-compose.prod.yml may use `restart: always`:
@@ -54,7 +57,7 @@ services:
     container_name: laysi-one-api
     image: ${LAYSI_REGISTRY:?}/laysi-one-api@${LAYSI_API_DIGEST:?}
     volumes:
-      - ${LAYSI_HOST_DIR:?}/requests:/var/lib/laysi-update/requests:U,z
+      - ${LAYSI_HOST_DIR:?}/requests:/var/lib/laysi-update/requests:z
       - ${LAYSI_HOST_DIR:?}/results:/var/lib/laysi-update/results:ro,z
 
   mcp:

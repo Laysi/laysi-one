@@ -94,7 +94,7 @@ pub fn decode_installed(text: &str) -> Result<Release, String> {
 /// | `RollingBack` | stopping, restoring files, old postgres | start the rollback over |
 /// | `Restoring` | `pg_restore` into the old postgres; after one failure, the retry | restore again from the dump; a retry begun is resumed, never a second one begun |
 /// | `Restored` | database back as it was | start the old version and judge it |
-/// | `RollbackFailed` | final | only start the stack |
+/// | `RollbackFailed` | final | at boot, the stack files back first, or nothing starts; then, with no database to restore and the dump kept, finish the rollback from `RollingBack`; with a dump to restore, postgres alone until `retry-rollback`; otherwise the stack |
 ///
 /// The line between returning and finishing is `Switching`: before it the
 /// database has seen only the old version, after it the new version may have
@@ -194,9 +194,10 @@ pub struct Journal {
     /// rollback by hand and never deleted by the clean-up.
     pub keep: Vec<String>,
     /// Repositories the stack files of the release before `from` name,
-    /// read before step 6 replaces those files. The clean-up after a
-    /// success removes their images too: a third-party image whose
-    /// repository `from` and `to` no longer use is otherwise never removed.
+    /// read before step 6 replaces those files. The clean-ups after a
+    /// success and after a rollback remove their images too: a third-party
+    /// image whose repository `from` and `to` no longer use is otherwise
+    /// never removed.
     pub superseded_repos: Vec<String>,
     /// Rolling back has to put the previous stack files back.
     pub restore_files: bool,

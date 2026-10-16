@@ -31,7 +31,11 @@
 //! From before step 4 until the final result is written, the results
 //! directory also holds [`SWITCHING_FILE`], which tells api and mcp to refuse
 //! writes: a rollback restores the database as it was at step 5, and would
-//! take back anything written in between.
+//! take back anything written in between. A rollback that failed with its
+//! dump still to restore keeps it past the final result, since
+//! `retry-rollback` restores that dump too. From the moment the previous
+//! updater starts the stack until the current one next does,
+//! [`FALLBACK_BOOT_FILE`] tells the screen the current updater failed.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -39,11 +43,11 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use laysi_license_token::release::{self, Decision, Image, ImageDigest, Refusal, VerifyingKey};
 use laysi_license_token::update::{
-    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, KEEP_RESULTS,
-    MAX_REQUEST_BYTES, MAX_RESULT_BYTES, REQUEST_FILE, SWITCHING_FILE,
+    RequestId, ToolVersions, UpdateRequest, UpdateResult, UpdateStatus, FALLBACK_BOOT_FILE,
+    KEEP_RESULTS, MAX_REQUEST_BYTES, MAX_RESULT_BYTES, REQUEST_FILE, SWITCHING_FILE,
 };
 
 use crate::envfile::{self, EnvFile};
@@ -275,8 +279,9 @@ impl<'h, H: Host> Machine<'h, H> {
                     .env_of(&self.stack_files())
                     .get(envfile::RELEASE)
                     .map(str::to_string);
-                (named.as_deref() == Some(j.from.version.to_string().as_str()))
-                    .then(|| j.from.version.clone())
+                (self.files_back(j) == Ok(true)
+                    && named.as_deref() == Some(j.from.version.to_string().as_str()))
+                .then(|| j.from.version.clone())
             }
             _ => Some(j.from.version.clone()),
         };
@@ -308,16 +313,22 @@ impl<'h, H: Host> Machine<'h, H> {
 
     /// The marker goes once no update is left that could still take back a
     /// write: no journal, or one ended in `RollbackFailed` whose final
-    /// result is written. Every run that holds the lock asks after its
-    /// recovery, so one that died between the final result and this, or
-    /// that lost power, leaves the marker only until the boot or recovery
-    /// unit runs.
+    /// result is written and that has no dump left to restore. A dump left
+    /// to restore keeps it: `retry-rollback` restores that dump and takes
+    /// back whatever was written meanwhile, by a container the rollback
+    /// could not stop, say; the retried rollback removes it when it
+    /// finishes. Every run that holds the lock asks after its recovery, so
+    /// one that died between the final result and this, or that lost power,
+    /// leaves the marker only until the boot or recovery unit runs.
     fn settle_switching(&mut self) {
         let done = match self.load_journal() {
             Ok(None) => true,
-            Ok(Some(j)) if j.phase == Phase::RollbackFailed => self
-                .read_result(&j.request)
-                .is_some_and(|r| r.status.is_final()),
+            Ok(Some(j)) if j.phase == Phase::RollbackFailed => {
+                !self.restore_pending(&j)
+                    && self
+                        .read_result(&j.request)
+                        .is_some_and(|r| r.status.is_final())
+            }
             _ => false,
         };
         if done {
@@ -443,10 +454,51 @@ impl<'h, H: Host> Machine<'h, H> {
     }
 
     /// The machine started: finish whatever the journal says, then start the
-    /// stack. This is the only thing that starts the stack at boot.
+    /// stack. This is the only thing that starts the stack at boot. A
+    /// journal ended in `RollbackFailed` is taken up again first, see
+    /// `resume_failed_rollback`. The boot and the recovery unit run it with
+    /// the current updater, and a start that succeeds removes the fallback
+    /// marker, whatever it started: the marker says whether the current
+    /// updater works, not whether the stack runs, and postgres alone, after
+    /// a rollback that kept its dump, is what a working one starts then.
     pub fn boot(&mut self) -> Result<(), String> {
         let _lock = Lock::acquire(&self.layout.lock(), true)
             .map_err(|e| format!("opening the lock: {e}"))?;
+        let started = self.start_up();
+        if started.is_ok() {
+            if let Err(e) = fsx::remove_durable(&self.fallback_marker()) {
+                self.log(format!("could not remove the fallback marker: {e}"));
+            }
+        }
+        started
+    }
+
+    /// [`boot`](Self::boot) run by the fallback unit, with the previous
+    /// updater, after the current one failed. The marker goes first: what it
+    /// says, that the current updater failed to start the stack, holds
+    /// whatever this start does. One that cannot be written is logged, and the
+    /// stack starts all the same.
+    pub fn fallback_boot(&mut self) -> Result<(), String> {
+        let _lock = Lock::acquire(&self.layout.lock(), true)
+            .map_err(|e| format!("opening the lock: {e}"))?;
+        self.log("the current updater failed; starting with the previous one");
+        let at = self.host.now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let marker = format!("at {at}\n");
+        if let Err(e) = fsx::write_atomic(&self.fallback_marker(), marker.as_bytes(), 0o644) {
+            self.log(format!("could not write the fallback marker: {e}"));
+        }
+        self.start_up()
+    }
+
+    fn fallback_marker(&self) -> PathBuf {
+        self.layout.results_dir().join(FALLBACK_BOOT_FILE)
+    }
+
+    fn start_up(&mut self) -> Result<(), String> {
+        // The path unit runs as the stack user and sees a request only in a
+        // directory the stack user can search. First, so that a boot that
+        // stops at the journal leaves it right as well.
+        self.reclaim_requests();
         // An update this updater cannot read or finish is left as it is:
         // started on top of it, the stack could run swapped files on a
         // database that was never restored. The boot fails instead, and the
@@ -458,7 +510,13 @@ impl<'h, H: Host> Machine<'h, H> {
                     return Err(e);
                 }
             }
-            Ok(Some(j)) => self.answer_final(&j),
+            Ok(Some(j)) => {
+                self.answer_final(&j);
+                if let Err(e) = self.resume_failed_rollback(j) {
+                    self.log(format!("recovery failed, nothing started: {e}"));
+                    return Err(e);
+                }
+            }
             Ok(None) => {}
             Err(e) => {
                 self.log(format!("the journal cannot be read, nothing started: {e}"));
@@ -473,17 +531,20 @@ impl<'h, H: Host> Machine<'h, H> {
         started
     }
 
-    /// `retry-rollback`: a rollback that ended in `RollbackFailed` with its
-    /// dump kept goes back to restoring it, and the next run that holds the
-    /// lock, a boot or the recovery unit, takes it from there like any
-    /// rollback a run left behind: the restore and its one retry, then the
-    /// old release started and judged. Whoever runs this has dealt with what
-    /// made the restore fail, a full disk say; a restore that fails again
-    /// ends in `RollbackFailed` as before, with the dump kept.
+    /// `retry-rollback`: a rollback that ended in `RollbackFailed` goes back
+    /// to a phase it is finished from, and the next run that holds the lock,
+    /// a boot or the recovery unit, takes it from there like any rollback a
+    /// run left behind. Whoever runs this has dealt with what made it fail,
+    /// a full disk say; a rollback that fails again ends in `RollbackFailed`
+    /// as before, with its dump kept.
     ///
-    /// The rollback put the old stack files and installed release back
-    /// before it restored, and the restore runs the postgres those files
-    /// name; anything else is refused and left as it is.
+    /// With a dump to restore, every stack file back to its `.previous`
+    /// copy and the old release installed, it goes back to restoring: the
+    /// restore and its one retry, then the old release started and judged.
+    /// Otherwise it goes back to `RollingBack`, which puts the files back
+    /// before anything else. Refused and left as it is: a rollback that
+    /// already restored the database, its dump deleted, and one whose
+    /// `.previous` copies are missing or unreadable.
     pub fn retry_rollback(&mut self) -> Result<RequestId, String> {
         let lock = Lock::acquire(&self.layout.lock(), false)
             .map_err(|e| format!("opening the lock: {e}"))?;
@@ -501,31 +562,32 @@ impl<'h, H: Host> Machine<'h, H> {
             Some(j) => j,
         };
         let dump = self.backup_path(&j);
-        if !(j.restore_db && dump.is_file()) {
+        if j.restore_db && !dump.is_file() {
             return Err(format!(
-                "這次回退沒有留下資料庫備份 {}：資料庫不需要還原，是舊版沒有啟動，原因見 {}",
+                "這次回退已經還原資料庫並刪除備份 {}，是舊版沒有啟動；每次開機照常啟動 stack，原因見 {}",
                 dump.display(),
                 self.layout.log().display()
             ));
         }
-        let installed = self.load_installed()?;
-        let named = self
-            .env_of(&self.stack_files())
-            .get(envfile::RELEASE)
-            .map(str::to_string);
-        let from = j.from.version.to_string();
-        if installed.version != j.from.version || named.as_deref() != Some(from.as_str()) {
-            return Err(format!(
-                "主機記錄的版本或 stack 檔不是更新前的 {from}，這個指令救不回來"
-            ));
-        }
+        let files_back = self
+            .files_back(&j)
+            .map_err(|e| format!("{e}，放不回更新前的 stack 檔，這個指令救不回來"))?;
+        let installed = self.load_installed().ok();
+        let restore_now = j.restore_db
+            && files_back
+            && installed.is_some_and(|release| release.version == j.from.version);
+        let (phase, what) = match (restore_now, j.restore_db) {
+            (true, _) => (Phase::Restoring, "以人工指令重新還原"),
+            (false, true) => (Phase::RollingBack, "以人工指令重新還原"),
+            (false, false) => (Phase::RollingBack, "以人工指令重新回退"),
+        };
         // Newest first, as `fail_rollback` writes it.
         j.rollback_reason = Some(match j.rollback_reason.take() {
-            Some(earlier) => format!("以人工指令重新還原，先前：{earlier}"),
-            None => "以人工指令重新還原".into(),
+            Some(earlier) => format!("{what}，先前：{earlier}"),
+            None => what.into(),
         });
         j.restore_retry = None;
-        j.phase = Phase::Restoring;
+        j.phase = phase;
         self.log(format!(
             "request {}: retrying the rollback by hand",
             j.request
@@ -546,33 +608,95 @@ impl<'h, H: Host> Machine<'h, H> {
         }
     }
 
-    /// The stack, unless a rollback that never restored the database left
-    /// its dump as the only copy of the data. Then nothing that serves or
-    /// writes starts on what is left of the database: postgres alone runs,
-    /// so the dump can be restored by hand, and only when the stack files
-    /// are back to the release the host records, so it is the old postgres
-    /// image; otherwise nothing starts. Neither is a failure of the boot,
-    /// which would only have the previous updater start everything.
+    /// At boot, a journal ended in `RollbackFailed`. The stack files go back
+    /// first, each that differs from its `.previous` copy, as `RollingBack`
+    /// puts them: the rollback may have failed before it put them back, with
+    /// the swap half done. When that fails too, a copy missing say, the
+    /// journal is left as it is and nothing starts.
+    ///
+    /// A rollback with no database to restore whose dump is still there
+    /// stopped before it started the old release, and the new release never
+    /// ran on the database: it is finished the way a rollback left in
+    /// `RollingBack` is, and one that fails again ends in `RollbackFailed`
+    /// for the next boot. A dump that is to be restored waits for
+    /// `retry-rollback`.
+    fn resume_failed_rollback(&mut self, mut j: Journal) -> Result<(), String> {
+        // Written again when missing. Unlike `recover`, which has to go on
+        // without it, the boot fails and starts nothing: a container the
+        // rollback could not stop would take writes the restore erases.
+        if self.restore_pending(&j) {
+            self.mark_switching(&j)?;
+        }
+        if let Err(e) = self.put_files_back(&j) {
+            self.log(format!(
+                "request {}: the stack files cannot be put back: {e}",
+                j.request
+            ));
+            return Ok(());
+        }
+        if j.restore_db || !self.backup_path(&j).is_file() {
+            return Ok(());
+        }
+        // Newest first, as `fail_rollback` writes it.
+        j.rollback_reason = Some(match j.rollback_reason.take() {
+            Some(earlier) => format!("開機時重新回退，先前：{earlier}"),
+            None => "開機時重新回退".into(),
+        });
+        j.phase = Phase::RollingBack;
+        self.log(format!(
+            "request {}: finishing the rollback at boot",
+            j.request
+        ));
+        self.save(&j)?;
+        self.recover(j)
+    }
+
+    /// The stack, unless a rollback ended in `RollbackFailed`. Then nothing
+    /// starts until the stack files are the ones from before the update,
+    /// all three and byte for byte, wherever the rollback had to put them
+    /// back: on files that may be the new release's, postgres could come up
+    /// from the new image. With the files back, a rollback that never
+    /// restored the database it was to restore leaves its dump as the only
+    /// copy of the data, and nothing that serves or writes starts on what is
+    /// left of the database: postgres alone runs, the old image, so the
+    /// dump can be restored by hand. Otherwise the stack starts. Nothing
+    /// started is not a failure of the boot, which would only have the
+    /// previous updater start everything.
     fn start_what_is_safe(&mut self) -> Result<(), String> {
-        let failed = matches!(self.load_journal(), Ok(Some(j)) if j.phase == Phase::RollbackFailed);
-        if !(failed && self.retained_backup().is_some()) {
+        let j = match self.load_journal() {
+            Ok(Some(j)) if j.phase == Phase::RollbackFailed => j,
+            _ => return self.start_stack(),
+        };
+        match self.files_back(&j) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.log("a rollback failed and the stack files are not the ones from before the update: nothing started");
+                return Ok(());
+            }
+            Err(e) => {
+                self.log(format!("a rollback failed and {e}: nothing started"));
+                return Ok(());
+            }
+        }
+        if !self.restore_pending(&j) {
             return self.start_stack();
         }
+        // A rollback that failed before it wrote the old release back leaves
+        // that to `retry-rollback`, which goes through `RollingBack`.
         let release = match self.load_installed() {
-            Ok(release) => release,
+            Ok(release) if release.version == j.from.version => release,
+            Ok(release) => {
+                self.log(format!(
+                    "a rollback left its dump and the installed release is {}, not {}: nothing started",
+                    release.version, j.from.version
+                ));
+                return Ok(());
+            }
             Err(e) => {
                 self.log(format!("a rollback left its dump and the installed release is unknown, nothing started: {e}"));
                 return Ok(());
             }
         };
-        let named = self
-            .env_of(&self.stack_files())
-            .get(envfile::RELEASE)
-            .map(str::to_string);
-        if named.as_deref() != Some(release.version.to_string().as_str()) {
-            self.log("a rollback left its dump and the stack files are not the installed release's: nothing started");
-            return Ok(());
-        }
         // Whatever the rollback could not stop must not be writing when the
         // old postgres comes up under it.
         if let Err(e) = self.ensure_stopped() {
@@ -588,9 +712,63 @@ impl<'h, H: Host> Machine<'h, H> {
         Ok(())
     }
 
+    /// A rollback that was to restore the database and has not: the dump
+    /// is still there, and restoring it takes back anything written since.
+    fn restore_pending(&self, j: &Journal) -> bool {
+        j.restore_db && self.backup_path(j).is_file()
+    }
+
+    /// Whether a stack file differs from its `.previous` copy, the file
+    /// from before the update. An error when that copy is missing or
+    /// unreadable: nothing then says what the file should be.
+    fn differs_from_previous(&self, file: &Path) -> Result<bool, String> {
+        let previous = Layout::previous_of(file);
+        let old = fsx::read_own(&previous, MAX_COMPOSE_BYTES)
+            .map_err(|e| format!("無法讀取 {}：{e}", previous.display()))?
+            .ok_or_else(|| format!("{} 不在主機上", previous.display()))?;
+        let now = fsx::read_own(file, MAX_COMPOSE_BYTES).ok().flatten();
+        Ok(now.as_deref() != Some(old.as_slice()))
+    }
+
+    /// Whether the stack files are the ones from before the update. Only a
+    /// rollback from step 6 on has to put them back; before that they were
+    /// never replaced.
+    fn files_back(&self, j: &Journal) -> Result<bool, String> {
+        if !j.restore_files {
+            return Ok(true);
+        }
+        for file in self.stack_files() {
+            if self.differs_from_previous(&file)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Each stack file that differs from its `.previous` copy is replaced
+    /// by it, the way `RollingBack` does.
+    fn put_files_back(&mut self, j: &Journal) -> Result<(), String> {
+        if !j.restore_files {
+            return Ok(());
+        }
+        for file in self.stack_files() {
+            if !self.differs_from_previous(&file)? {
+                continue;
+            }
+            self.log(format!(
+                "request {}: putting {} back",
+                j.request,
+                file.display()
+            ));
+            fsx::copy_atomic(&Layout::previous_of(&file), &file, 0o600, MAX_COMPOSE_BYTES)
+                .map_err(|e| format!("無法還原 {}：{e}", file.display()))?;
+        }
+        Ok(())
+    }
+
     /// After every run: a request that arrived while it ran is discarded and
-    /// told so, then the directory is emptied, or the path unit stops
-    /// watching it.
+    /// told so, then the directory is given back to the stack user and
+    /// emptied, or the path unit stops watching it.
     ///
     /// A request this run accepted but never wrote a journal for, because it
     /// died in between, is answered as failed here: nothing will pick it up
@@ -625,6 +803,15 @@ impl<'h, H: Host> Machine<'h, H> {
         }
         let dir = self.layout.requests_dir();
         self.host.clear_requests(&dir)
+    }
+
+    /// [`Host::reclaim_requests`]. A failure is logged and does not stop the
+    /// boot.
+    fn reclaim_requests(&mut self) {
+        let dir = self.layout.requests_dir();
+        if let Err(e) = self.host.reclaim_requests(&dir) {
+            self.log(format!("the requests directory: {e}"));
+        }
     }
 
     fn answer_not_started(&mut self, id: &RequestId) {
@@ -1091,8 +1278,9 @@ impl<'h, H: Host> Machine<'h, H> {
         self.save(j)
     }
 
-    /// Final: the old version did not come back. Services other than postgres
-    /// stay as they are; the next boot only starts the stack.
+    /// Final for this run: the old version did not come back. Services other
+    /// than postgres stay as they are; what the next boot does is
+    /// `resume_failed_rollback`, then `start_what_is_safe`.
     fn fail_rollback(&mut self, mut j: Journal, reason: String) -> Result<(), String> {
         self.log(format!("request {}: rollback failed: {reason}", j.request));
         // A retried restore that succeeded said so here already.
@@ -1127,6 +1315,14 @@ impl<'h, H: Host> Machine<'h, H> {
     /// What was pulled for a release that is not staying goes again, or every
     /// failed attempt keeps a release's worth of images that check_space
     /// never counts. Then the files taken from it.
+    ///
+    /// The repositories in `j.superseded_repos` that the `.previous` files
+    /// no longer name go too, as after a success. Step 6 put the stack
+    /// files of `from` over `.previous`, so no later update reads the
+    /// release before `from` again, and a third-party image only that
+    /// release used would otherwise stay for good. Those the `.previous`
+    /// files still name, as when the update stopped before step 6, are left
+    /// for the next update to record.
     fn drop_offered(&mut self, j: &Journal) {
         let incoming = self.layout.incoming_files();
         let pulled: Vec<String> = self
@@ -1136,7 +1332,17 @@ impl<'h, H: Host> Machine<'h, H> {
             .iter()
             .filter_map(|s| split_reference(&s.image).map(|(repo, _)| repo.to_string()))
             .collect();
-        self.prune_images(j, &[&j.from], &pulled);
+        let still_previous = self.superseded_repos();
+        let repos: Vec<String> = pulled
+            .into_iter()
+            .chain(
+                j.superseded_repos
+                    .iter()
+                    .filter(|repo| !still_previous.contains(repo))
+                    .cloned(),
+            )
+            .collect();
+        self.prune_images(j, &[&j.from], &repos);
         self.empty_incoming();
     }
 
@@ -1146,10 +1352,11 @@ impl<'h, H: Host> Machine<'h, H> {
         }
     }
 
-    /// The repositories the stack files kept from the switch before this
-    /// one name, which step 6 is about to replace. None on a host that has
-    /// not switched since it was installed, or whose files cannot be read:
-    /// the clean-up then removes less, never more.
+    /// The repositories the `.previous` stack files name. Read at the end of
+    /// step 3, those are the files kept from the switch before this one,
+    /// which step 6 is about to replace. None on a host that has not
+    /// switched since it was installed, or whose files cannot be read: the
+    /// clean-up after a success then removes less, never more.
     fn superseded_repos(&mut self) -> Vec<String> {
         let files = self.stack_files().map(|file| Layout::previous_of(&file));
         if !files.iter().all(|file| file.exists()) {
@@ -1188,13 +1395,16 @@ impl<'h, H: Host> Machine<'h, H> {
             .host
             .database_size(&postgres)
             .map_err(|e| Space::Unknown(format!("無法取得資料庫大小：{e}")))?;
-        let digests: HashSet<String> = containers.iter().map(|c| c.image_digest.clone()).collect();
+        let digests: HashSet<&str> = containers
+            .iter()
+            .flat_map(|c| c.image_digests.iter().map(String::as_str))
+            .collect();
         let images: u64 = self
             .host
             .images()
             .map_err(Space::Unknown)?
             .iter()
-            .filter(|i| image_digests(i).any(|d| digests.contains(d)))
+            .filter(|i| i.digests().any(|d| digests.contains(d)))
             .map(|i| i.size)
             .sum();
         let images = if pulled {
@@ -1546,7 +1756,7 @@ impl<'h, H: Host> Machine<'h, H> {
         timeout_secs: u64,
     ) -> Result<(), String> {
         let registry = self.read_env(files)?.registry();
-        let deadline = self.host.now() + chrono::Duration::seconds(timeout_secs as i64);
+        let deadline = self.host.monotonic() + std::time::Duration::from_secs(timeout_secs);
         loop {
             let verdict = match self.host.containers() {
                 Ok(containers) => {
@@ -1564,7 +1774,7 @@ impl<'h, H: Host> Machine<'h, H> {
                 Ok(()) => return Ok(()),
                 Err(reason) => reason,
             };
-            if self.host.now() >= deadline {
+            if self.host.monotonic() >= deadline {
                 return Err(format!("{timeout_secs} 秒內沒有全部就緒：{reason}"));
             }
             self.host.sleep(self.config.poll_secs);
@@ -1651,18 +1861,44 @@ impl<'h, H: Host> Machine<'h, H> {
     }
 
     /// Remove the images of the repositories this stack uses, or of
-    /// `also_repos`, that neither a container, the releases in `releases`
-    /// nor the references in `j.keep` use.
+    /// `also_repos`, that neither a container, the releases in `releases`,
+    /// the references in `j.keep` nor the stack files use.
+    ///
+    /// The stack files name what the next boot starts, and a container is no
+    /// proof of that: after a power cut podman removes the containers it
+    /// cannot read, so at the recovery's clean-up none may use the images
+    /// the files name, a retried restore has removed the containers first,
+    /// and `j.keep` is empty when podman could not list them at step 4.
+    /// Stack files that cannot be read, or that name an image without a
+    /// digest, leave every image as it is.
     fn prune_images(&mut self, j: &Journal, releases: &[&Release], also_repos: &[String]) {
-        let registry = match self.read_env(&self.stack_files()) {
+        let files = self.stack_files();
+        let registry = match self.read_env(&files) {
             Ok(env) => env.registry(),
             Err(e) => {
                 self.log(format!("images left as they are: {e}"));
                 return;
             }
         };
-        let containers = self.host.containers().unwrap_or_default();
+        let services = match self.host.compose_config(&files) {
+            Ok(services) => services,
+            Err(e) => {
+                self.log(format!("images left as they are: {e}"));
+                return;
+            }
+        };
         let mut keep: HashSet<String> = HashSet::new();
+        for service in &services {
+            let Some((_, digest)) = split_reference(&service.image) else {
+                self.log(format!(
+                    "images left as they are: {} names {} without a digest",
+                    service.name, service.image
+                ));
+                return;
+            };
+            keep.insert(digest.to_string());
+        }
+        let containers = self.host.containers().unwrap_or_default();
         let mut repos: HashSet<String> = also_repos.iter().cloned().collect();
         for image in Image::ALL {
             repos.insert(envfile::repository(&registry, image));
@@ -1682,7 +1918,11 @@ impl<'h, H: Host> Machine<'h, H> {
                 repos.insert(repo.to_string());
             }
         }
-        keep.extend(containers.iter().map(|c| c.image_digest.clone()));
+        keep.extend(
+            containers
+                .iter()
+                .flat_map(|c| c.image_digests.iter().cloned()),
+        );
 
         let images = match self.host.images() {
             Ok(images) => images,
@@ -1692,7 +1932,7 @@ impl<'h, H: Host> Machine<'h, H> {
             }
         };
         for image in images {
-            if image_digests(&image).any(|d| keep.contains(d)) {
+            if image.digests().any(|d| keep.contains(d)) {
                 continue;
             }
             let ours = image
@@ -1704,7 +1944,7 @@ impl<'h, H: Host> Machine<'h, H> {
             if !ours {
                 continue;
             }
-            if let Err(e) = self.host.remove_image(&image.id) {
+            if let Err(e) = self.host.remove_image(&image) {
                 self.log(format!("removing image {}: {e}", image.id));
             }
         }
@@ -1741,15 +1981,6 @@ fn running_container(containers: &[Container], service: &str) -> Option<String> 
         .filter(|c| c.service == service && c.running)
         .max_by_key(|c| c.created)
         .map(|c| c.name.clone())
-}
-
-fn image_digests(image: &crate::host::LocalImage) -> impl Iterator<Item = &str> {
-    std::iter::once(image.digest.as_str()).chain(
-        image
-            .repo_digests
-            .iter()
-            .filter_map(|r| r.split_once('@').map(|(_, d)| d)),
-    )
 }
 
 /// `repo[:tag]@sha256:…` into the repository, without its tag, and the
@@ -1869,11 +2100,13 @@ pub fn check_release_files(
 /// has a healthcheck, and created after `since` when that is given.
 ///
 /// The compose file has to name every image by digest. The container has to
-/// have been created from that same digest and has to run it: podman reports
-/// the index digest a multi-platform image was pulled by. The images of the
-/// release itself must also carry the manifest's digest. A tag, a container
-/// created from another reference, or one left over from before the switch,
-/// never passes.
+/// have been created from that same digest and has to run an image local
+/// storage knows by it: podman reports only the digest an image was first
+/// pulled by, the index digest for a multi-platform image, and an image
+/// pulled again under another digest keeps reporting that one. The images
+/// of the release itself must also carry the manifest's digest. A tag, a
+/// container created from another reference, or one left over from before
+/// the switch, never passes.
 pub fn judge(
     containers: &[Container],
     services: &[Service],
@@ -1913,10 +2146,13 @@ pub fn judge(
             ));
         }
         let pinned = ImageDigest::parse(digest).expect("split_reference parsed it");
-        if !pinned.matches(&c.image_digest) {
+        if !c.image_digests.iter().any(|d| pinned.matches(d)) {
             return Err(format!(
                 "{name} 執行的映像 {} 與指定的 {digest} 不符",
-                c.image_digest
+                c.image_digests
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or_default()
             ));
         }
         let role = ROLES

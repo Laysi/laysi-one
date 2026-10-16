@@ -6,7 +6,7 @@
 //! fsynced: after a crash a reader finds the old file or the new one, never
 //! half of either.
 //!
-//! The requests directory belongs to the api container. A process in it can
+//! The api container writes into the requests directory. A process in it can
 //! put a symlink, a FIFO or a directory where the request should be, so the
 //! request is opened relative to a directory descriptor, without following
 //! symlinks and without blocking, and read only when it is a regular file.
@@ -33,28 +33,22 @@ fn check(ret: libc::c_int) -> io::Result<libc::c_int> {
 
 /// Create a directory, and its parents, when it is missing, with `mode`.
 ///
-/// An existing one has to be a directory and not a symlink to one. When it is
-/// this user's, it is given `mode`. One that belongs to another uid is the
-/// requests directory after podman chowned it for the api (`:U`); it is
-/// accepted as long as nobody but that owner can write to it.
+/// An existing one has to be this user's directory, not a symlink to one, and
+/// is given `mode`.
 pub fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => {
-            let current = meta.mode() & 0o7777;
-            if meta.uid() == unsafe { libc::geteuid() } {
-                if current != mode {
-                    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-                }
-                Ok(())
-            } else if current & 0o022 == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::other(format!(
-                    "{} belongs to another user and others can write to it",
+            if meta.uid() != unsafe { libc::geteuid() } {
+                return Err(io::Error::other(format!(
+                    "{} belongs to another user",
                     path.display()
-                )))
+                )));
             }
+            if meta.mode() & 0o7777 != mode {
+                fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            }
+            Ok(())
         }
         Ok(_) => Err(io::Error::other(format!(
             "{} exists and is not a directory",
@@ -70,6 +64,50 @@ pub fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Give a directory to this process's uid and gid with exactly `mode` and no
+/// POSIX ACL, without following a symlink to it.
+///
+/// Run on the requests directory inside `podman unshare`, where uid 0 is the
+/// stack user and the api's uid is mapped: whatever an api did to it while it
+/// owned it, the stack user owns it again and the api, no longer the owner,
+/// cannot change it back.
+pub fn reclaim_dir(dir: &Path, mode: u32) -> io::Result<()> {
+    let fd = open_dir_nofollow(dir)?;
+    let raw = fd.as_raw_fd();
+    check(unsafe { libc::fchown(raw, libc::geteuid(), libc::getegid()) })?;
+    remove_acls(raw)?;
+    check(unsafe { libc::fchmod(raw, mode as libc::mode_t) })?;
+    check(unsafe { libc::fsync(raw) }).map(drop)
+}
+
+/// Both ACLs a directory can carry: the one that grants and denies access to
+/// it, and the default one that every entry created in it inherits.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const ACL_XATTRS: [&CStr; 2] = [c"system.posix_acl_access", c"system.posix_acl_default"];
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn remove_acls(fd: RawFd) -> io::Result<()> {
+    for name in ACL_XATTRS {
+        if unsafe { libc::fremovexattr(fd, name.as_ptr()) } < 0 {
+            let e = io::Error::last_os_error();
+            // None set, or a filesystem without ACLs.
+            if !matches!(
+                e.raw_os_error(),
+                Some(libc::ENODATA) | Some(libc::EOPNOTSUPP)
+            ) {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The updater runs on Linux; elsewhere only the tests run.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn remove_acls(_fd: RawFd) -> io::Result<()> {
+    Ok(())
 }
 
 pub fn fsync_dir(dir: &Path) -> io::Result<()> {
@@ -288,76 +326,220 @@ pub fn read_untrusted(
 /// The api can still be writing into the directory, or swapping an entry
 /// for a directory between the stat and the unlink, so the directory is
 /// listed again after every pass and is only reported empty once a listing
-/// finds nothing. A directory that never empties is an error.
+/// finds nothing. A tree of any depth is cleared; one still not empty after
+/// `CLEAR_BUDGET` entries were visited is an error.
 pub fn clear_untrusted(dir: &Path) -> io::Result<usize> {
-    let dirfd = open_dir_nofollow(dir)?;
-    let mut removed = 0;
-    for _ in 0..CLEAR_PASSES {
-        if list(&dirfd)?.is_empty() {
-            check(unsafe { libc::fsync(dirfd.as_raw_fd()) })?;
-            return Ok(removed);
-        }
-        removed += clear_fd(&dirfd, 0)?;
-    }
-    Err(io::Error::other(format!(
-        "{} is still not empty after {CLEAR_PASSES} passes",
-        dir.display()
-    )))
+    clear_within(dir, CLEAR_BUDGET)
 }
 
+/// Directory descriptors held open at once below the top one. A directory
+/// deeper than this is moved to the top instead of opened.
 const MAX_DEPTH: usize = 16;
-const CLEAR_PASSES: usize = 8;
+const _: () = assert!(MAX_DEPTH > 0);
 
-/// One pass over a directory. An entry that changed under it is left for
-/// the next pass rather than reported.
-fn clear_fd(dirfd: &OwnedFd, depth: usize) -> io::Result<usize> {
-    if depth > MAX_DEPTH {
-        return Err(io::Error::other("directory nesting too deep"));
-    }
-    let names = list(dirfd)?;
+/// Entries visited in one call. A tree that is not changing costs at most
+/// three visits per entry (where it was found, after it was moved to the
+/// top, and once as a name a move found taken). Every visit but those to the
+/// directories a call is inside when it runs out removes or moves an entry,
+/// so the next call gets further.
+const CLEAR_BUDGET: usize = 1_000_000;
+
+fn clear_within(dir: &Path, budget: usize) -> io::Result<usize> {
+    let root = open_dir_nofollow(dir)?;
+    let mut clearing = Clearing {
+        root: &root,
+        budget,
+        left: budget,
+        next_name: first_name(),
+    };
     let mut removed = 0;
-    for name in names {
-        let st = match fstatat_nofollow(dirfd.as_raw_fd(), &name) {
-            Ok(st) => st,
-            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => continue,
-            Err(e) => return Err(e),
-        };
-        if is_dir(&st) {
-            let fd = unsafe {
-                libc::openat(
-                    dirfd.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
+    loop {
+        if list(&root)?.is_empty() {
+            check(unsafe { libc::fsync(root.as_raw_fd()) })?;
+            return Ok(removed);
+        }
+        removed += clearing.pass(&root, 0)?;
+    }
+}
+
+/// Where a call starts numbering the names it moves directories to. The api
+/// can create names at the top; from a fixed start, a tree listed before a
+/// million taken names would spend every call's budget on them and never
+/// change. `RandomState` keys come from the operating system's randomness.
+fn first_name() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+}
+
+struct Clearing<'a> {
+    root: &'a OwnedFd,
+    budget: usize,
+    left: usize,
+    next_name: u64,
+}
+
+impl Clearing<'_> {
+    fn spend(&mut self) -> io::Result<()> {
+        if self.left == 0 {
+            return Err(io::Error::other(format!(
+                "still not empty after visiting {} entries",
+                self.budget
+            )));
+        }
+        self.left -= 1;
+        Ok(())
+    }
+
+    /// One pass over a directory. An entry that changed under it is left
+    /// for the next pass rather than reported.
+    fn pass(&mut self, dirfd: &OwnedFd, depth: usize) -> io::Result<usize> {
+        let names = list(dirfd)?;
+        let mut removed = 0;
+        for name in names {
+            self.spend()?;
+            let st = match fstatat_nofollow(dirfd.as_raw_fd(), &name) {
+                Ok(st) => st,
+                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => continue,
+                Err(e) => return Err(e),
             };
-            if fd >= 0 {
-                let sub = unsafe { OwnedFd::from_raw_fd(fd) };
-                removed += clear_fd(&sub, depth + 1)?;
+            if is_dir(&st) {
+                if depth == MAX_DEPTH {
+                    self.move_to_top(dirfd, &name)?;
+                    continue;
+                }
+                let fd = unsafe {
+                    libc::openat(
+                        dirfd.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                if fd >= 0 {
+                    let sub = unsafe { OwnedFd::from_raw_fd(fd) };
+                    removed += self.pass(&sub, depth + 1)?;
+                }
+                match check(unsafe {
+                    libc::unlinkat(dirfd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
+                }) {
+                    Ok(_) => removed += 1,
+                    Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
+                    // Written into, or swapped for a file, since the stat.
+                    Err(e)
+                        if matches!(
+                            e.raw_os_error(),
+                            Some(libc::ENOTEMPTY) | Some(libc::EEXIST) | Some(libc::ENOTDIR)
+                        ) => {}
+                    Err(e) => return Err(e),
+                }
+            } else {
+                match check(unsafe { libc::unlinkat(dirfd.as_raw_fd(), name.as_ptr(), 0) }) {
+                    Ok(_) => removed += 1,
+                    Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
+                    // Swapped for a directory since the stat: the next pass gets it.
+                    Err(e)
+                        if matches!(e.raw_os_error(), Some(libc::EISDIR) | Some(libc::EPERM)) => {}
+                    Err(e) => return Err(e),
+                }
             }
-            match check(unsafe {
-                libc::unlinkat(dirfd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
-            }) {
-                Ok(_) => removed += 1,
-                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
-                // Written into, or swapped for a file, since the stat.
+        }
+        Ok(removed)
+    }
+
+    /// Move `name` to a name of its own at the top, where a later pass of
+    /// the same call gets it. The rename acts on the entry, never on what a
+    /// symlink points at, and both ends are descriptors this call opened
+    /// without following one. It replaces nothing, so a name that is taken,
+    /// even by an empty directory, is skipped for the next. Where the kernel
+    /// or the filesystem cannot promise that, the call fails rather than
+    /// check the name and rename: the api can create the name in between.
+    fn move_to_top(&mut self, dirfd: &OwnedFd, name: &CStr) -> io::Result<()> {
+        let root = self.root.as_raw_fd();
+        loop {
+            let to = cstr(OsStr::new(&format!(".laysi-clear-{:x}", self.next_name)))?;
+            self.next_name = self.next_name.wrapping_add(1);
+            match rename_noreplace(dirfd.as_raw_fd(), name, root, &to) {
+                Err(e) if e.raw_os_error().is_some_and(cannot_refuse_to_replace) => {
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!(
+                            "cannot move a directory deeper than {MAX_DEPTH} levels without \
+                             replacing an entry on this filesystem: {e}"
+                        ),
+                    ));
+                }
+                Ok(()) => return Ok(()),
+                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+                // Taken, or `name` was swapped for a file since the stat.
                 Err(e)
                     if matches!(
                         e.raw_os_error(),
-                        Some(libc::ENOTEMPTY) | Some(libc::EEXIST) | Some(libc::ENOTDIR)
-                    ) => {}
-                Err(e) => return Err(e),
-            }
-        } else {
-            match check(unsafe { libc::unlinkat(dirfd.as_raw_fd(), name.as_ptr(), 0) }) {
-                Ok(_) => removed += 1,
-                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
-                // Swapped for a directory since the stat: the next pass gets it.
-                Err(e) if matches!(e.raw_os_error(), Some(libc::EISDIR) | Some(libc::EPERM)) => {}
+                        Some(libc::EEXIST)
+                            | Some(libc::ENOTEMPTY)
+                            | Some(libc::ENOTDIR)
+                            | Some(libc::EISDIR)
+                    ) =>
+                {
+                    self.spend()?
+                }
                 Err(e) => return Err(e),
             }
         }
     }
-    Ok(removed)
+}
+
+/// What `rename_noreplace` answers when the kernel or the filesystem cannot
+/// refuse to replace. Compared rather than matched: `ENOTSUP` and
+/// `EOPNOTSUPP` are one number on Linux and two on macOS.
+fn cannot_refuse_to_replace(code: i32) -> bool {
+    code == libc::EINVAL
+        || code == libc::ENOSYS
+        || code == libc::ENOTSUP
+        || code == libc::EOPNOTSUPP
+}
+
+/// `renameat` that fails with `EEXIST` rather than replace an entry, or
+/// with an error `cannot_refuse_to_replace` accepts when the kernel or the
+/// filesystem cannot promise that. It never falls back to a plain rename.
+#[cfg(target_os = "linux")]
+fn rename_noreplace(from_dir: RawFd, from: &CStr, to_dir: RawFd, to: &CStr) -> io::Result<()> {
+    // The system call itself: the static musl build does not depend on its
+    // libc having a renameat2 wrapper.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            from_dir,
+            from.as_ptr(),
+            to_dir,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_noreplace(from_dir: RawFd, from: &CStr, to_dir: RawFd, to: &CStr) -> io::Result<()> {
+    check(unsafe {
+        libc::renameatx_np(
+            from_dir,
+            from.as_ptr(),
+            to_dir,
+            to.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    })
+    .map(drop)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_noreplace(_: RawFd, _: &CStr, _: RawFd, _: &CStr) -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
 
 fn list(dirfd: &OwnedFd) -> io::Result<Vec<CString>> {
@@ -406,11 +588,15 @@ unsafe fn errno() -> *mut libc::c_int {
 /// and the conmon processes it leaves behind never hold it.
 pub struct Lock {
     _file: File,
+    #[cfg(test)]
+    _open: fork_gate::Open,
 }
 
 impl Lock {
     /// `Ok(None)` when another run holds it and `wait` is false.
     pub fn acquire(path: &Path, wait: bool) -> io::Result<Option<Lock>> {
+        #[cfg(test)]
+        let open = fork_gate::lock_opened();
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -426,7 +612,11 @@ impl Lock {
         };
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
-                return Ok(Some(Lock { _file: file }));
+                return Ok(Some(Lock {
+                    _file: file,
+                    #[cfg(test)]
+                    _open: open,
+                }));
             }
             let e = io::Error::last_os_error();
             match e.raw_os_error() {
@@ -451,6 +641,89 @@ pub fn free_bytes(path: &Path) -> io::Result<u64> {
 pub fn same_device(a: &Path, b: &Path) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     Ok(fs::metadata(a)?.dev() == fs::metadata(b)?.dev())
+}
+
+/// A fork copies every open descriptor into the child until it execs, and a
+/// copy of a lock's descriptor holds the flock. In a test process, a test
+/// that spawns a command while a test on another thread holds a lock would
+/// make that thread's next acquire find the lock busy. A spawn waits until
+/// no lock's descriptor is open, and none opens while a spawn waits, except
+/// one taken by a thread that already holds one.
+#[cfg(test)]
+pub(crate) mod fork_gate {
+    use std::cell::Cell;
+    use std::marker::PhantomData;
+    use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+
+    struct Gate {
+        open: usize,
+        spawning: bool,
+    }
+
+    static GATE: Mutex<Gate> = Mutex::new(Gate {
+        open: 0,
+        spawning: false,
+    });
+    static CHANGED: Condvar = Condvar::new();
+
+    thread_local! {
+        static HELD: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn gate() -> MutexGuard<'static, Gate> {
+        GATE.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait(gate: MutexGuard<'static, Gate>) -> MutexGuard<'static, Gate> {
+        CHANGED.wait(gate).unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A lock's descriptor is open while this lives. It counts against the
+    /// thread that took it, so it is not `Send`: a lock moved to another
+    /// thread would be released against that thread's count.
+    pub struct Open(PhantomData<*const ()>);
+
+    pub fn lock_opened() -> Open {
+        let mut g = gate();
+        while g.spawning && HELD.get() == 0 {
+            g = wait(g);
+        }
+        g.open += 1;
+        HELD.set(HELD.get() + 1);
+        Open(PhantomData)
+    }
+
+    impl Drop for Open {
+        fn drop(&mut self) {
+            let mut g = gate();
+            g.open -= 1;
+            HELD.set(HELD.get() - 1);
+            CHANGED.notify_all();
+        }
+    }
+
+    /// No lock's descriptor is open while this lives.
+    pub struct Spawning;
+
+    pub fn spawning() -> Spawning {
+        assert_eq!(HELD.get(), 0, "a spawn while this thread holds a lock");
+        let mut g = gate();
+        while g.spawning {
+            g = wait(g);
+        }
+        g.spawning = true;
+        while g.open > 0 {
+            g = wait(g);
+        }
+        Spawning
+    }
+
+    impl Drop for Spawning {
+        fn drop(&mut self) {
+            gate().spawning = false;
+            CHANGED.notify_all();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -492,6 +765,94 @@ mod tests {
         );
         symlink(&sub, dir.join("link")).unwrap();
         assert!(ensure_dir(&dir.join("link"), 0o700).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reclaimed_directory_is_this_users_with_exactly_the_mode() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempdir("reclaim");
+        let requests = dir.join("requests");
+        fs::create_dir(&requests).unwrap();
+        fs::write(requests.join("request"), "x").unwrap();
+        fs::set_permissions(&requests, fs::Permissions::from_mode(0o2700)).unwrap();
+        reclaim_dir(&requests, 0o1777).unwrap();
+        let meta = fs::metadata(&requests).unwrap();
+        assert_eq!(meta.mode() & 0o7777, 0o1777);
+        assert_eq!(meta.uid(), unsafe { libc::geteuid() });
+        assert_eq!(meta.gid(), unsafe { libc::getegid() });
+        // What is in it is left to the clearing.
+        assert_eq!(fs::read_to_string(requests.join("request")).unwrap(), "x");
+
+        // Neither a symlink to a directory nor what it points to.
+        let elsewhere = dir.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&elsewhere, dir.join("link")).unwrap();
+        assert!(reclaim_dir(&dir.join("link"), 0o1777).is_err());
+        assert_eq!(fs::metadata(&elsewhere).unwrap().mode() & 0o7777, 0o700);
+        assert!(reclaim_dir(&requests.join("request"), 0o1777).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An access ACL can deny the api the directory once it is no longer the
+    /// owner, and a default ACL is inherited by every request it writes and
+    /// can deny the stack user reading them.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn a_reclaimed_directory_has_no_acl() {
+        // ACL_USER_OBJ rwx, ACL_USER 0 ---, ACL_GROUP_OBJ r-x, ACL_MASK r-x,
+        // ACL_OTHER r-x, in the kernel's xattr layout.
+        let entry = |tag: u16, perm: u16, id: u32| {
+            let mut e = tag.to_le_bytes().to_vec();
+            e.extend(perm.to_le_bytes());
+            e.extend(id.to_le_bytes());
+            e
+        };
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for e in [
+            entry(0x01, 7, u32::MAX),
+            entry(0x02, 0, 0),
+            entry(0x04, 5, u32::MAX),
+            entry(0x10, 5, u32::MAX),
+            entry(0x20, 5, u32::MAX),
+        ] {
+            acl.extend(e);
+        }
+        let dir = tempdir("acl");
+        let requests = dir.join("requests");
+        fs::create_dir(&requests).unwrap();
+        let path = cstr(requests.as_os_str()).unwrap();
+        for name in ACL_XATTRS {
+            let set = unsafe {
+                libc::setxattr(
+                    path.as_ptr(),
+                    name.as_ptr(),
+                    acl.as_ptr().cast(),
+                    acl.len(),
+                    0,
+                )
+            };
+            if set < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EOPNOTSUPP) {
+                eprintln!("skipped: {} has no ACLs", dir.display());
+                fs::remove_dir_all(dir).unwrap();
+                return;
+            }
+            check(set).unwrap();
+        }
+
+        reclaim_dir(&requests, 0o1777).unwrap();
+
+        for name in ACL_XATTRS {
+            let got =
+                unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+            assert_eq!(got, -1, "{name:?} is still set");
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENODATA),
+                "{name:?}"
+            );
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -592,6 +953,152 @@ mod tests {
         fs::remove_dir_all(outside).unwrap();
     }
 
+    /// `levels` directories named `d`, each in the one before, starting in
+    /// `dir`. Made relative to a descriptor, so no path grows past PATH_MAX.
+    /// `at` gets each level's depth, 1 being `dir/d`, and descriptor.
+    fn nested(dir: &Path, levels: usize, mut at: impl FnMut(usize, &OwnedFd)) {
+        let mut fd = open_dir_nofollow(dir).unwrap();
+        for depth in 1..=levels {
+            check(unsafe { libc::mkdirat(fd.as_raw_fd(), c"d".as_ptr(), 0o755) }).unwrap();
+            let sub = check(unsafe {
+                libc::openat(
+                    fd.as_raw_fd(),
+                    c"d".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            })
+            .unwrap();
+            fd = unsafe { OwnedFd::from_raw_fd(sub) };
+            at(depth, &fd);
+        }
+    }
+
+    /// Every entry under `dir`, without following symlinks.
+    fn count_entries(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                1 + if entry.file_type().unwrap().is_dir() {
+                    count_entries(&entry.path())
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_request_one_level_deeper_than_the_descriptors_held_is_cleared() {
+        let dir = tempdir("deeper");
+        let mut path = dir.join("request");
+        for i in 1..=MAX_DEPTH {
+            path = path.join(format!("a{i}"));
+        }
+        fs::create_dir_all(&path).unwrap();
+        assert_eq!(clear_untrusted(&dir).unwrap(), MAX_DEPTH + 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_tree_hundreds_deep_is_cleared_in_one_call_and_follows_nothing() {
+        let dir = tempdir("hundreds");
+        let outside = tempdir("hundreds-kept");
+        fs::write(outside.join("keep"), "x").unwrap();
+        let to_dir = cstr(outside.as_os_str()).unwrap();
+        let to_file = cstr(outside.join("keep").as_os_str()).unwrap();
+        // Paths past PATH_MAX on macOS, 1024 bytes.
+        let levels = 520;
+        let mut planted = 0;
+        nested(&dir, levels, |depth, fd| {
+            if depth % 50 == 0 || depth == MAX_DEPTH || depth == MAX_DEPTH + 1 {
+                let fd = fd.as_raw_fd();
+                check(unsafe { libc::symlinkat(to_dir.as_ptr(), fd, c"to-outside".as_ptr()) })
+                    .unwrap();
+                check(unsafe { libc::symlinkat(to_file.as_ptr(), fd, c"file-link".as_ptr()) })
+                    .unwrap();
+                check(unsafe { libc::mkfifoat(fd, c"fifo".as_ptr(), 0o644) }).unwrap();
+                planted += 3;
+            }
+        });
+
+        assert_eq!(clear_untrusted(&dir).unwrap(), levels + planted);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(fs::read_to_string(outside.join("keep")).unwrap(), "x");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn a_name_taken_at_the_top_is_skipped_not_replaced() {
+        let dir = tempdir("taken");
+        let outside = tempdir("taken-kept");
+        fs::write(outside.join("keep"), "x").unwrap();
+        // The first names a move starting at 0 picks: a file, a symlink to a
+        // directory outside, a directory that is not empty and an empty one.
+        fs::write(dir.join(".laysi-clear-0"), "x").unwrap();
+        symlink(&outside, dir.join(".laysi-clear-1")).unwrap();
+        fs::create_dir_all(dir.join(".laysi-clear-2/full")).unwrap();
+        fs::create_dir(dir.join(".laysi-clear-3")).unwrap();
+        fs::create_dir_all(dir.join("a/deep/inside")).unwrap();
+
+        let root = open_dir_nofollow(&dir).unwrap();
+        let a = open_dir_nofollow(&dir.join("a")).unwrap();
+        let mut clearing = Clearing {
+            root: &root,
+            budget: 10,
+            left: 10,
+            next_name: 0,
+        };
+        clearing.move_to_top(&a, c"deep").unwrap();
+        assert_eq!(clearing.left, 6);
+        assert!(dir.join(".laysi-clear-4/inside").is_dir());
+        assert_eq!(fs::read_dir(dir.join(".laysi-clear-3")).unwrap().count(), 0);
+        assert!(!dir.join("a/deep").exists());
+        assert_eq!(fs::read_to_string(dir.join(".laysi-clear-0")).unwrap(), "x");
+        assert_eq!(fs::read_link(dir.join(".laysi-clear-1")).unwrap(), outside);
+        assert!(dir.join(".laysi-clear-2/full").is_dir());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+
+        // The four names, `full`, `a`, and `.laysi-clear-4` with `inside`.
+        assert_eq!(clear_untrusted(&dir).unwrap(), 8);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(fs::read_to_string(outside.join("keep")).unwrap(), "x");
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn each_call_numbers_its_moves_from_somewhere_else() {
+        let starts: std::collections::HashSet<u64> = (0..64).map(|_| first_name()).collect();
+        assert_eq!(starts.len(), 64);
+        assert!(!starts.contains(&0));
+    }
+
+    #[test]
+    fn a_tree_larger_than_the_budget_is_an_error_and_each_call_gets_further() {
+        let dir = tempdir("budget");
+        for i in 0..40 {
+            fs::write(dir.join(format!("f{i}")), "x").unwrap();
+        }
+        nested(&dir, 100, |_, _| {});
+        let mut left = count_entries(&dir);
+        let mut calls = 0;
+        while let Err(e) = clear_within(&dir, 30) {
+            assert!(e.to_string().contains("still not empty"), "{e}");
+            let now = count_entries(&dir);
+            assert!(now < left, "{now} entries left, {left} before");
+            left = now;
+            calls += 1;
+            assert!(calls < 20);
+        }
+        assert!(calls > 0);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn the_lock_is_exclusive() {
         let dir = tempdir("lock");
@@ -604,6 +1111,31 @@ mod tests {
         assert!(Lock::acquire(&path, false).unwrap().is_none());
         drop(held);
         assert!(Lock::acquire(&path, false).unwrap().is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_spawn_waits_until_no_lock_is_open() {
+        let dir = tempdir("gate");
+        let held = Lock::acquire(&dir.join("lock"), false)
+            .unwrap()
+            .expect("nobody holds it");
+        let (spawned, waiting) = std::sync::mpsc::channel();
+        let spawner = std::thread::spawn(move || {
+            let _gate = fork_gate::spawning();
+            spawned.send(()).unwrap();
+        });
+        assert!(
+            waiting
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "a spawn went ahead while a lock was open"
+        );
+        drop(held);
+        waiting
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the spawn goes ahead once the lock is closed");
+        spawner.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 }

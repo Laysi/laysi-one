@@ -4,11 +4,12 @@
 //! laysi-updater install --manifest <file> [--registry <registry>]
 //! laysi-updater run                 # a request arrived (laysi-updater.service)
 //! laysi-updater boot                # recover, then start the stack (boot unit)
+//! laysi-updater boot --fallback     # the same as the previous updater (fallback unit)
 //! laysi-updater discard-requests    # after every run (ExecStopPost)
 //! laysi-updater stop-stack          # at shutdown (ExecStop of the boot unit)
 //! laysi-updater self-check          # run on a new updater before it replaces this one
 //! laysi-updater write-units
-//! laysi-updater retry-rollback      # by hand, after a rollback-failed with its dump kept
+//! laysi-updater retry-rollback      # by hand, after a rollback-failed
 //! laysi-updater status
 //! laysi-updater version
 //! ```
@@ -23,8 +24,8 @@ use laysi_updater::host::Host;
 use laysi_updater::journal::Phase;
 use laysi_updater::layout::Layout;
 use laysi_updater::machine::{Config, Machine, DATABASE, ENTRIES};
-use laysi_updater::podman::PodmanHost;
-use laysi_updater::{fsx, install, trusted_keys, units, TEST_KEYS};
+use laysi_updater::podman::{self, PodmanHost};
+use laysi_updater::{install, trusted_keys, units, TEST_KEYS};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,9 +42,13 @@ fn dispatch(args: &[String]) -> Result<(), String> {
     let command = args.first().map(String::as_str).unwrap_or("");
     match command {
         "run" => with_machine(|m| m.run_request()),
+        "boot" if args.get(1).is_some_and(|a| a == "--fallback") => {
+            with_machine(|m| m.fallback_boot())
+        }
         "boot" => with_machine(|m| m.boot()),
         "discard-requests" => with_machine(|m| m.discard_requests(run_failed())),
-        "clear-requests-inside" => clear_requests_inside(args.get(1)),
+        "reclaim-requests-inside" => requests_inside(args.get(1), false),
+        "clear-requests-inside" => requests_inside(args.get(1), true),
         "stop-stack" => stop_stack(),
         "self-check" => self_check(),
         "write-units" => units::write(&Layout::from_env()?),
@@ -87,17 +92,15 @@ fn with_machine(
     outcome
 }
 
-/// Inside `podman unshare`, where the requests directory's entries, which
-/// belong to the api's uid, can be removed.
-fn clear_requests_inside(dir: Option<&String>) -> Result<(), String> {
+/// Inside `podman unshare`, where the requests directory can be given back to
+/// the stack user and its entries, which belong to the api's uid, removed.
+fn requests_inside(dir: Option<&String>, clear: bool) -> Result<(), String> {
     let dir = Path::new(dir.ok_or("which directory?")?);
     let expected = Layout::from_env()?.requests_dir();
     if dir != expected {
         return Err(format!("{} is not {}", dir.display(), expected.display()));
     }
-    fsx::clear_untrusted(dir)
-        .map(drop)
-        .map_err(|e| format!("emptying {}: {e}", dir.display()))
+    podman::requests_inside(dir, clear)
 }
 
 /// Stop the stack at shutdown, web and mcp first and postgres last, so the
@@ -148,7 +151,7 @@ fn self_check() -> Result<(), String> {
     Ok(())
 }
 
-/// Set a rollback that failed with its dump kept back to restoring, have
+/// Set a rollback that failed back to a phase it is finished from, have
 /// the recovery unit finish it, and say how it ended. The unit does the
 /// work rather than this process: a restore outlives the ssh session that
 /// asked for it, and the unit runs with the tool paths of `updater.env`.
@@ -157,9 +160,17 @@ fn retry_rollback() -> Result<(), String> {
     let layout = Layout::from_env()?;
     let mut host = PodmanHost::from_env(&layout.root);
     let systemctl = host.systemctl.clone();
-    let request =
-        Machine::new(&mut host, layout.clone(), Vec::new(), Config::default()).retry_rollback()?;
-    println!("{request}: 重新還原資料庫並啟動更新前的版本，完成前不要關機");
+    let (request, restores) = {
+        let mut machine = Machine::new(&mut host, layout.clone(), Vec::new(), Config::default());
+        let request = machine.retry_rollback()?;
+        let restores = matches!(machine.load_journal(), Ok(Some(j)) if j.restore_db);
+        (request, restores)
+    };
+    if restores {
+        println!("{request}: 重新還原資料庫並啟動更新前的版本，完成前不要關機");
+    } else {
+        println!("{request}: 啟動更新前的版本，完成前不要關機");
+    }
     let started = Command::new(&systemctl)
         .args(["--user", "start", units::RECOVER_UNIT])
         .status()
@@ -176,7 +187,12 @@ fn retry_rollback() -> Result<(), String> {
             Ok(())
         }
         Some(j) if j.phase == Phase::RollbackFailed => Err(format!(
-            "{request}: 仍然回退失敗，資料庫備份保留著：{}",
+            "{request}: 仍然回退失敗{}：{}",
+            if j.restore_db {
+                "，資料庫備份保留著"
+            } else {
+                ""
+            },
             j.rollback_reason.unwrap_or_default()
         )),
         Some(j) => Err(format!(

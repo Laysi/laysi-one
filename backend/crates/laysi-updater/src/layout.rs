@@ -15,7 +15,7 @@
 //!   state/updater.log
 //!   backup/                       database dumps taken before a switch, 0600
 //!   incoming/                     files taken from the release being installed
-//!   requests/                     mounted into api read-write (`:U`)
+//!   requests/                     mounted into api read-write, 1777
 //!   results/                      mounted into api and mcp read-only
 //! ```
 //!
@@ -37,6 +37,15 @@ pub const ENV_FILE: &str = ".env";
 pub const PREVIOUS: &str = ".previous";
 
 pub const UPDATER: &str = "laysi-updater";
+
+/// The requests directory's mode. It stays the stack user's, so only the
+/// stack user can change its mode or owner. The api runs as another uid and
+/// creates, fsyncs and renames its request there: others get `rwx`, read
+/// included because fsyncing the directory opens it. Sticky, so the
+/// kernel's protections for shared directories (`fs.protected_symlinks` and
+/// the like) apply. `<root>` is 0700: the api reaches it through its mount,
+/// and no other uid reaches it at all.
+pub const REQUESTS_MODE: u32 = 0o1777;
 
 #[derive(Debug, Clone)]
 pub struct Layout {
@@ -151,10 +160,8 @@ impl Layout {
             // Read by the api, which runs as another uid: listing and reading
             // are what it needs, and nothing in it is secret.
             (self.results_dir(), 0o755),
-            // Chowned to the api's uid by `:U` when the container starts. The
-            // stack user keeps read access, which inotify and reading the
-            // request need.
-            (self.requests_dir(), 0o755),
+            // Every boot and every run set its owner and mode again.
+            (self.requests_dir(), REQUESTS_MODE),
         ]
     }
 }
