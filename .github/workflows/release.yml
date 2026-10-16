@@ -4,9 +4,10 @@
 #
 # Three images go to ghcr.io — api (the server binary, run twice as api and
 # mcp), web (Caddy plus the built bundle) and backup — each tagged with the
-# version and with `latest`, and each published for linux/amd64 and
-# linux/arm64 under one manifest, so `docker compose pull` picks the right one
-# on an Apple silicon Mac or an ARM server without being told.
+# version and, for a final release, with `latest`, and each published for
+# linux/amd64 and linux/arm64 under one manifest, so `docker compose pull`
+# picks the right one on an Apple silicon Mac or an ARM server without being
+# told.
 #
 # docker-compose.prod.yml is attached to the release with LAYSI_VERSION pinned
 # to that tag, so downloading it and running
@@ -19,6 +20,13 @@
 # this workflow: the licence server carries manifests and cannot produce one.
 # Every `v*` tag is signed; whether a machine is offered it is decided per
 # machine on the licence server.
+#
+# A tag with a `-` in it (v0.2.0-rc.1) is a release candidate: built, signed
+# and published like any other, so a machine the licence server points at it
+# installs exactly what the final release would ship, but it does not move
+# `latest` on ghcr.io, its release is a prerelease -- which keeps it out of
+# releases/latest, the URL README.md tells people to install from -- and the
+# demo does not run it. scripts/release-workflow-test.ts holds those three.
 #
 # CI (ci.yml) still guards the code; this workflow only packages a tag that
 # already passed it.
@@ -119,13 +127,19 @@ jobs:
 
       # Lowercases the owner (ghcr.io rejects uppercase) and emits the
       # org.opencontainers.image.* labels that link the package back here.
+      #
+      # `latest` is what the repository's docker-compose.prod.yml pulls, so a
+      # release candidate must not take it. The action would add it on its own
+      # for a final semver tag; that is switched off so the one line below is
+      # the whole rule.
       - id: meta
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}-${{ matrix.name }}
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - id: build
         uses: docker/build-push-action@v7
@@ -228,6 +242,17 @@ jobs:
       - name: Pin the compose file to this tag
         run: sed -i "s/\${LAYSI_VERSION:-latest}/\${LAYSI_VERSION:-${GITHUB_REF_NAME#v}}/g" docker-compose.prod.yml
 
+      # A final release counts from the final release before it, a release
+      # candidate from whatever tag came before it. The commit list in
+      # release-notes.sh asks the same script, so both halves of the page
+      # cover one range.
+      - id: previous
+        name: The tag these notes count from
+        run: |
+          set -eu
+          previous=$(sh .github/previous-tag.sh "$GITHUB_REF_NAME")
+          echo "tag=$previous" >> "$GITHUB_OUTPUT"
+
       # Written here rather than by --generate-notes, which lists merged pull
       # requests and finds none: this repository commits to main. The page a
       # customer lands on has to answer how to install and how to upgrade,
@@ -261,11 +286,16 @@ jobs:
       # manifest that fails to load fails the step, and without this the tag
       # ends up with images on ghcr and no page to download them from. The
       # next step then falls back to the commit list.
+      #
+      # previous-tag is handed in rather than found by the action: plain
+      # version order puts v0.2.0-rc.2 after v0.2.0, so v0.2.1 would count
+      # from that release candidate.
       - id: changes
         continue-on-error: true
         uses: Laysi/release-notes-action@ad6ed96c1975be6724225d3c18132e08ad474070  # v1.3.0
         with:
           tag: ${{ github.ref_name }}
+          previous-tag: ${{ steps.previous.outputs.tag }}
           tag-pattern: v*
           exclude-paths: license-server
           context: Laysi One 是台灣中小企業的財務與人事系統，讀者是安裝與維運這套系統的人。
@@ -291,11 +321,19 @@ jobs:
       # The same digests sign to the same bytes, so re-running the later jobs
       # replaces the file with itself; other digests under a version that
       # installations already took stop here, whatever path led to them.
+      #
+      # The prerelease flag is set on both paths, so a release first made by
+      # hand ends up flagged the way its tag says. A prerelease is never the
+      # repository's latest release, which is what releases/latest serves.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          case $GITHUB_REF_NAME in
+          *-*) prerelease=true ;;
+          *) prerelease=false ;;
+          esac
           sh .github/published-manifest.sh "$GITHUB_REF_NAME" published.txt
           if [ -e published.txt ]; then
               head -n 5 published.txt > published.body
@@ -306,8 +344,8 @@ jobs:
               }
           fi
           gh release create "$GITHUB_REF_NAME" docker-compose.prod.yml release-manifest.txt \
-              --notes-file notes.md \
-            || { gh release edit "$GITHUB_REF_NAME" --notes-file notes.md &&
+              --notes-file notes.md --prerelease="$prerelease" \
+            || { gh release edit "$GITHUB_REF_NAME" --notes-file notes.md --prerelease="$prerelease" &&
                  gh release upload "$GITHUB_REF_NAME" docker-compose.prod.yml release-manifest.txt --clobber; }
 
   # The demo tracks the newest release; one.laysi.io does not. A customer's
@@ -318,8 +356,12 @@ jobs:
   # After the release rather than after the images: a tag whose manifest did
   # not sign or verify is not one any installation can take, so the demo does
   # not run it either.
+  #
+  # Final releases only. A release candidate is checked on a machine of its
+  # own, and the demo is what a prospective customer evaluates.
   demo:
     needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
     uses: ./.github/workflows/deploy.yml
     with:
       version: ${{ github.ref_name }}

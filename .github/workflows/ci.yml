@@ -194,6 +194,11 @@ jobs:
       # even when the model behind the notes is down.
       - run: bun scripts/release-notes-test.ts
 
+      # A release candidate that took `latest` would reach every install that
+      # pulls from the repository's compose file, and nothing between the tag
+      # and that pull checks it.
+      - run: bun scripts/release-workflow-test.ts
+
       # A rule file the generator cannot read would publish a feed that is
       # missing a rate, and the failure would land on the installation.
       - run: bun scripts/regulation-manifest.ts /dev/null
