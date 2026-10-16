@@ -181,6 +181,49 @@ for (const stub of ["api-error", "view-error", "download-error"]) {
   ok(`GitHub 回錯誤時失敗（${stub}）`, published(stub).code !== 0);
 }
 
+// check-trusted is the signing-key step of release.yml, which runs on a tag
+// only. Each case gives it a release.rs of its own, in the shapes rustfmt
+// gives the constant: two lines for one key, one key per line for several.
+const rs = (name: string, text: string): string => {
+  const path = join(dir, `${name}.rs`);
+  writeFileSync(path, text);
+  return path;
+};
+const declare = (...keys: string[]): string =>
+  keys.length === 1
+    ? `pub const TRUSTED_KEYS: &[&str] =\n    &["${keys[0]}"];\n`
+    : `pub const TRUSTED_KEYS: &[&str] = &[\n${keys.map((k) => `    "${k}",\n`).join("")}];\n`;
+const trustsA = rs("trusts-a", `/// Compiled in.\n${declare(publicHex(a))}\npub const MAX_MANIFEST_BYTES: usize = 4096;\n`);
+const trustsAB = rs("trusts-ab", declare(publicHex(a), publicHex(b)));
+const oneLine = rs("one-line", `pub const TRUSTED_KEYS: &[&str] = &["${publicHex(a)}"];\n`);
+const elsewhere = rs(
+  "elsewhere",
+  `/// Not this one: "${publicHex(c)}".\n${declare(publicHex(a))}\nconst OTHER: &str = "${publicHex(c)}";\n`,
+);
+const renamed = rs("renamed", declare(publicHex(a)).replace("TRUSTED_KEYS", "TRUSTED"));
+const check = (source: string | null, secret: string): Run =>
+  signer(["check-trusted", ...(source ? ["--source", source] : [])], secret);
+
+const trustedRuns: Run[] = [];
+const expect = (label: string, r: Run, pass: boolean, says = ""): void => {
+  trustedRuns.push(r);
+  ok(label, pass ? r.code === 0 : r.code !== 0 && r.err.includes(says), `${r.code} ${r.out}${r.err}`);
+};
+expect("secret 的公鑰在 TRUSTED_KEYS 裡時通過", check(trustsA, a), true);
+expect("多把公鑰分行列出時，兩把金鑰一起簽也通過", check(trustsAB, `${a} ${b}`), true);
+expect("常數寫在同一行時通過", check(oneLine, a), true);
+expect("secret 的公鑰不在 TRUSTED_KEYS 裡時失敗", check(trustsA, c), false, `${publicHex(c)}（${keyId(c)}）不在`);
+expect("換金鑰時每一把都要在清單裡", check(trustsA, `${a} ${c}`), false, publicHex(c));
+expect("常數以外的地方出現的公鑰不算", check(elsewhere, c), false, "不在");
+expect("常數改名時失敗，不會略過比對", check(renamed, a), false, "找不到");
+expect("未設定金鑰時失敗", check(trustsA, ""), false, "未設定");
+// The repository's own release.rs: its constant has to be found, or the next
+// tag fails here instead. A throwaway key is never one it trusts.
+expect("repo 裡的 release.rs 讀得出 TRUSTED_KEYS，測試金鑰不在其中", check(null, c), false, "不在");
+const listed = check(trustsAB, `${a} ${b}`);
+ok("兩邊的公鑰都印出來", listed.out.includes(publicHex(a)) && listed.out.includes(publicHex(b)), listed.out);
+ok("check-trusted 的輸出不含私鑰", ![...trustedRuns, listed].some(leaks));
+
 rmSync(dir, { recursive: true, force: true });
 if (failed > 0) {
   console.error(`${failed} 項失敗`);

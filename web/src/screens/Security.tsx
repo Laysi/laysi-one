@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCurrentUser } from '../auth';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { CopyButton } from '../components/CopyButton';
+import { UpdateCard } from '../components/UpdateCard';
 import {
   apiTokenList,
   backupSetting,
@@ -26,6 +27,7 @@ import {
   type OidcSetting,
   type SystemHealth,
 } from '../api/client';
+import { canRequestUpdate, serverUnreachable } from '../update';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -173,7 +175,7 @@ export function Security({ onToast, reloadKey }: Props) {
     if (canReadLicence) {
       callOp('get_license', {}, undefined, licenseState)
         .then((d) => live && setLicence(d))
-        .catch(() => live && setLicence(null));
+        .catch((e: unknown) => live && !serverUnreachable(e) && setLicence(null));
     }
     return () => running.current?.();
   }, [canReadOidc, canReadBackup, canReadLicence]);
@@ -324,6 +326,28 @@ export function Security({ onToast, reloadKey }: Props) {
     } finally {
       setSavingBackup(false);
     }
+  }
+
+  function refreshAfterUpdate() {
+    callOp('get_license', {}, undefined, licenseState)
+      .then(setLicence)
+      .catch(() => undefined);
+    Promise.all([
+      callOp('list_api_tokens', {}, undefined, apiTokenList),
+      callOp('get_system_health', {}, undefined, systemHealth),
+    ])
+      .then(([t, h]) => {
+        setTokens(t);
+        setHealth(h);
+        setError(null);
+      })
+      .catch(() => undefined);
+    getHealthz()
+      .then(setHz)
+      .catch(() => undefined);
+    getMeta()
+      .then(setInfo)
+      .catch(() => undefined);
   }
 
   async function checkLicence(input: Record<string, string>) {
@@ -482,6 +506,14 @@ export function Security({ onToast, reloadKey }: Props) {
         </section>
       )}
 
+      {licence && (
+        <UpdateCard
+          licence={licence}
+          canUpdate={canRequestUpdate(me.permissions)}
+          onFinished={refreshAfterUpdate}
+        />
+      )}
+
       {tokens && health && (
         <div className="split-columns">
           <section>
@@ -518,7 +550,7 @@ export function Security({ onToast, reloadKey }: Props) {
                 <span className="fact__key">稽核紀錄</span>
                 <span className="fact__value">
                   <span className="num">
-                    {health.stats.audit_entries} 筆（{health.stats.audit_blocked} 筆被權限擋下、
+                    {health.stats.audit_entries} 筆（{health.stats.audit_blocked} 筆被擋下、
                     {health.stats.audit_errors} 筆被規則拒絕）
                   </span>
                 </span>
