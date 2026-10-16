@@ -871,6 +871,19 @@ impl Operation for SetMcpToolGrant {
             ));
         }
 
+        // An operation that only a person may run from its page stays closed:
+        // `dispatch` refuses AI before it reads the grant, so a switch that
+        // looks open would be one that does nothing.
+        if i.enabled
+            && crate::ops::all()
+                .iter()
+                .any(|op| op.name() == i.tool_name && op.ui_only().is_some())
+        {
+            return Err(OpError::BadInput(
+                "這項工具只能由系統管理員在畫面上執行，無法對 AI 開啟。".into(),
+            ));
+        }
+
         let grant = ctx
             .store
             .set_tool_grant(&i.tool_name, i.enabled)
