@@ -3544,6 +3544,13 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   `tools` 是這次執行實際用的版本（`podman=4.9.3 podman-compose=1.6.0`），只記錄、不判斷。
 - 旗標是不可信輸入：以目錄 fd 加 `O_NOFOLLOW | O_NONBLOCK` 開啟、`fstat` 確認是一般檔案、
   有大小上限，驗不過章就丟棄。symlink、FIFO、目錄都不會讓更新程式讀到目錄外的檔案或卡住。
+  清空請求目錄（`fsx::clear_untrusted`）同樣只用目錄 fd、不跟隨 symlink；同時開著的目錄
+  至多 17 層，更深的目錄搬到請求目錄頂層、換一個沒有人用的名稱再清，所以多深的目錄樹都在
+  一次呼叫內清完。搬移用 `renameat2` 的 `RENAME_NOREPLACE`，名稱被占用（空目錄也算）就換
+  下一個；每次呼叫從隨機的編號開始，api 預先占不住要試的那一段名稱。核心或檔案系統不支援
+  時回錯誤，不先查名稱再 `renameat`——api 能在兩步之間建出那個名稱；ext4、xfs、btrfs 與
+  tmpfs 都支援。清不掉的 `request` 會讓 path unit 一輪接一輪重跑，乾淨的 api 也 rename
+  不進去。api 邊清邊寫時，看過一百萬個項目仍不空就回錯誤；刪掉的不會回來，下一次接著清。
 
 ### 一次更新
 
