@@ -4,7 +4,7 @@
 -- restart against an existing database is a no-op and there is no migration
 -- runner to keep in step.
 --
--- Six tables. The installation a licence is bound to lives on `license`
+-- Eight tables. The installation a licence is bound to lives on `license`
 -- itself rather than in a table of its own: it is one row per licence either
 -- way, and unbinding is then one UPDATE instead of a join.
 
@@ -91,6 +91,27 @@ COMMENT ON COLUMN license.nonce IS
     '上一次發出的續期識別字；下一次檢查必須帶著它回來，兩份複本會互相沖銷。';
 
 CREATE INDEX IF NOT EXISTS license_partner_idx ON license (partner_id, issued_at DESC);
+
+-- Signed release manifests, as uploaded by Laysi staff from the GitHub
+-- release. Kept byte for byte: the signature covers the exact text, so the
+-- check answer forwards this column unchanged and nothing here re-serialises
+-- it. One row per version, because a version is built once and has one
+-- manifest; a second upload with other bytes is refused, not replaced.
+CREATE TABLE IF NOT EXISTS release_manifest (
+    version text PRIMARY KEY,
+    manifest text NOT NULL,
+    uploaded_by integer REFERENCES partner_user(id),
+    uploaded_at timestamptz NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE release_manifest IS
+    '雷希人員上傳的發布版本清單，一個版本一份，原樣保存並原樣轉送。';
+
+-- The release offered to this licence, and so to the one machine it is bound
+-- to. NULL offers nothing and the check answer carries no manifest. On the
+-- licence row, beside `fingerprint` and `version`, rather than in a table of
+-- its own: releasing to one customer is setting one value on one row.
+ALTER TABLE license
+    ADD COLUMN IF NOT EXISTS release_version text REFERENCES release_manifest(version);
 
 CREATE TABLE IF NOT EXISTS license_term (
     id serial PRIMARY KEY,
