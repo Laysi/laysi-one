@@ -66,6 +66,34 @@ RUN --mount=type=cache,id=laysi-cargo-registry,target=/usr/local/cargo/registry 
     && cp "target/$(cat /triple)/release/laysi-server" \
           "target/$(cat /triple)/release/laysi-admin" /out/
 
+# The host-side updater, which travels in this image so that the release
+# being installed brings the next one (backend/crates/laysi-updater). It runs
+# on the host, not in a container, so it is a static musl binary: linked by
+# rust-lld against the musl the Rust target ships, with no C toolchain and
+# no glibc to match on the host. Its own stage, so it builds alongside the
+# server and invalidates nothing there.
+FROM --platform=$BUILDPLATFORM rust:1-slim-trixie AS updater
+WORKDIR /src
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+        amd64) echo x86_64-unknown-linux-musl ;; \
+        arm64) echo aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac > /triple \
+    && rustup target add "$(cat /triple)"
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
+COPY LICENSE.txt ./LICENSE.txt
+COPY backend ./backend
+WORKDIR /src/backend
+ARG LAYSI_BUILD
+RUN --mount=type=cache,id=laysi-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=laysi-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=laysi-target-updater-$TARGETARCH,target=/src/backend/target \
+    cargo build --release --locked --target "$(cat /triple)" -p laysi-updater --bin laysi-updater \
+    && mkdir -p /out \
+    && cp "target/$(cat /triple)/release/laysi-updater" /out/
+
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -73,6 +101,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=build /out/laysi-server /usr/local/bin/laysi-server
 COPY --from=build /out/laysi-admin /usr/local/bin/laysi-admin
+
+# What the host-side updater takes out of this image when it installs this
+# release: the compose files the release runs with and the updater that
+# will handle the next one. The paths are fixed in
+# backend/crates/laysi-updater/src/layout.rs.
+COPY docker-compose.prod.yml docker-compose.ship.yml /usr/local/share/laysi-one/
+COPY --from=updater /out/laysi-updater /usr/local/share/laysi-one/laysi-updater
 
 # Migrations and rulesets are already compiled into the binary (sqlx::migrate!
 # and include_str!), so the runtime needs no sources.

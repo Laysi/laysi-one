@@ -557,6 +557,16 @@ async fn file_staged(
             objects.discard(&staged.object_key).await;
             Ok(doc)
         }
+        // The staged object is gone while its row was still waiting: the
+        // database was restored to before the filing or the sweep that
+        // removed it. Handled like an expired upload: the row goes, and the
+        // person uploads again.
+        Err(OpError::Storage(laysi_store::StorageError::NotFound { .. })) => {
+            if let Err(error) = ctx.store.delete_staged_upload(upload_id).await {
+                tracing::warn!(%error, %upload_id, "could not remove a staged upload whose object is gone");
+            }
+            Err(OpError::BadInput("暫存檔已不存在，請重新上傳。".into()))
+        }
         Err(e) => {
             if let Err(error) = ctx.store.return_staged_upload(upload_id).await {
                 tracing::warn!(%error, %upload_id, "could not put a staged upload back after a failed filing");

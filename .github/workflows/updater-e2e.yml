@@ -1,0 +1,115 @@
+# The host-side updater against a throwaway stack, with the same tools a
+# shipped machine runs: rootless podman, podman-compose, systemd user units.
+# scripts/updater-e2e.ts says what it checks; it breaks releases on purpose
+# and expects every one of them to end on a single release with its data.
+#
+# A shipped machine runs Ubuntu 24.04's podman 4.9.3 with netavark and
+# aardvark-dns, and podman-compose 1.6.0 installed with uv. Both are pinned
+# here and the job fails rather than test anything else. `install` refuses
+# any other podman-compose; PODMAN_COMPOSE_VERSION has to equal
+# PODMAN_COMPOSE_VERSION in backend/crates/laysi-updater/src/install.rs,
+# which a unit test of that crate checks in ci.yml.
+
+name: Updater end-to-end
+
+on:
+  pull_request:
+    paths:
+      - backend/crates/laysi-updater/**
+      - backend/crates/laysi-license-token/**
+      - backend/Cargo.lock
+      - backend/Cargo.toml
+      - docker-compose.prod.yml
+      - docker-compose.ship.yml
+      - scripts/updater-e2e.ts
+      - scripts/release-manifest.ts
+      - .github/workflows/updater-e2e.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PODMAN_VERSION: 4.9.3
+  PODMAN_COMPOSE_VERSION: 1.6.0
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Without a user manager healthchecks never run and the path unit cannot
+      # be tested. Whether a hosted runner starts one for its user was not
+      # known when this was written, so it is made to and then asked.
+      - name: The runner user has a systemd user manager
+        run: |
+          set -eu
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 30); do
+              [ -S "/run/user/$uid/bus" ] && break
+              sleep 1
+          done
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          systemctl --user show-environment > /dev/null
+          systemctl --user is-system-running || true
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+
+      - name: podman, pinned, with netavark
+        run: |
+          set -eu
+          sudo apt-get update -q
+          sudo apt-get install -y -q podman netavark aardvark-dns uidmap
+          podman --version
+          [ "$(podman --version)" = "podman version $PODMAN_VERSION" ] \
+              || { echo "expected podman $PODMAN_VERSION"; exit 1; }
+          podman system reset -f
+          [ "$(podman info --format '{{.Host.NetworkBackend}}')" = netavark ]
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: podman-compose, pinned
+        run: |
+          set -eu
+          uv tool install "podman-compose==$PODMAN_COMPOSE_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/podman-compose" --version | grep -q "podman-compose version $PODMAN_COMPOSE_VERSION"
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      # The binary a shipped machine runs, plus the one key the test releases
+      # are signed with. Only a build with this feature trusts it.
+      - name: Build the updater with the test key
+        working-directory: backend
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: |
+          set -eu
+          LAYSI_UPDATER_TEST_KEYS=$(bun ../scripts/updater-e2e.ts public-key)
+          export LAYSI_UPDATER_TEST_KEYS
+          cargo build --release --locked -p laysi-updater --bin laysi-updater \
+              --features test-keys --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/laysi-updater | grep -q 'static'
+
+      - name: Run the end-to-end test
+        run: |
+          bun scripts/updater-e2e.ts run --yes \
+              --updater backend/target/x86_64-unknown-linux-musl/release/laysi-updater
+
+      - name: Logs
+        if: failure()
+        run: |
+          cat ~/.local/share/laysi-one/state/updater.log || true
+          journalctl --user --no-pager -n 300 || true
+          podman ps -a || true

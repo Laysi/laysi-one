@@ -1,0 +1,27 @@
+[package]
+name = "laysi-updater"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Laysi One 主機端更新程式：依簽章版本清單更新整套系統，失敗時連同資料庫回到前一版"
+
+# Linked as a static musl binary with rust-lld alone and run on the host, not
+# in a container, so nothing here may compile C: no laysi-ops or laysi-store
+# (ring, blake3, cc). CI checks the tree for both musl targets.
+[dependencies]
+laysi-license-token.workspace = true
+chrono.workspace = true
+serde.workspace = true
+# podman reports containers and images as JSON.
+serde_json.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+
+[features]
+# Also trust the keys in LAYSI_UPDATER_TEST_KEYS at compile time. For
+# scripts/updater-e2e.ts only; the api image never enables it.
+test-keys = []
