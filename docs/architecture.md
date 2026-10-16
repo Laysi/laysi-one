@@ -3360,7 +3360,7 @@ crate。
 
 預設由 `risk()` 推導，所以只有少數「帶身分底線的讀取」需要覆寫 `writes()`：
 `list_payslips`、`list_withholding_statements`、`get_backup_setting`、`get_oidc_setting`、
-`list_user_accounts`、`get_license`。`reads_are_not_writes_whatever_floor_they_carry` 依
+`list_user_accounts`、`get_license`、`get_update_ticket`、`get_update_result`。`reads_are_not_writes_whatever_floor_they_carry` 依
 命名動詞把關，新增一個 `get_*` 而忘了覆寫就會紅。
 
 `activate_license` 是唯一豁免的寫入，它是離開唯讀的那條路。被擋下的呼叫照樣寫稽核。
@@ -3492,13 +3492,29 @@ Rust 驗證端不必約定正規化形式。純文字也讓授權伺服器只能
 
 1. `signing-key`：建映像之前，由 secret 推出公鑰，與 `TRUSTED_KEYS` 比對，不在清單裡就
    讓發布失敗——不然 ghcr.io 上會留下沒有任何安裝接受的映像。比照 `license-deploy.yml`
-   比對 `PUBLIC_KEY_HEX` 的那一步。同一個 job 也擋下已經附過清單的版本。
+   比對 `PUBLIC_KEY_HEX` 的那一步。比對由 `release-manifest.ts check-trusted` 做；這個 job
+   只在標籤上跑，所以 `release-manifest-test.ts` 每次 push 都以測試金鑰跑一遍相符與不相符
+   兩種情況。同一個 job 也擋下已經附過清單的版本。
 2. `images`：每份映像把這次推上去的 index digest 寫成 artifact（matrix job 的 output
    互相覆蓋，不能用）。
 3. `manifest`：獨立的 job 簽章，執行器上除了 checkout、Bun 與 artifact 之外什麼都不跑；
    `release` job 會把 `AI_API_KEY` 交給第三方 action，兩者不同機。
 4. `release`：先用 Rust 驗證端與這個標籤編進去的公鑰驗過清單、比對版本等於標籤，才附上。
-5. `demo`：在 `release` 之後。清單沒簽成或驗不過的標籤，任何安裝都裝不了，示範站也不跑。
+5. `demo`：在 `release` 之後，只跑正式版。清單沒簽成或驗不過的標籤，任何安裝都裝不了，
+   示範站也不跑。
+
+**發布候選版是帶 `-` 的標籤**（`v0.2.0-rc.1`）：建置、簽章與附上清單都與正式版相同，
+授權伺服器指到它的機器裝到的就是正式版會出貨的那一份——驗證的對象因此是真的發布，不是
+另一套建置。差別只有三件：不推 ghcr.io 的 `latest`（repo 裡的 `docker-compose.prod.yml`
+預設拉它）、release 標成 prerelease（README 給的 `releases/latest` 網址只指正式版），以及
+不部署示範站（那是潛在客戶在評估的東西）。`scripts/release-workflow-test.ts` 把三處釘住：
+`latest` 與示範站是 runner 才求值的運算式，照字面比對；發布那一步是 shell，換一個記錄參數
+的 `gh` 實際跑一次。`ReleaseVersion` 不收 `+` 建置資訊，所以 `-` 只會出現在預發布段。
+
+發布說明的起算點由 `.github/previous-tag.sh` 決定，AI 寫的那段與 commit 清單同一個區間：
+正式版從上一個正式版起算，列出客戶上一次裝的版本之後的每一項變更；候選版從前一個標籤
+起算，不論正式與否，只列上一輪驗證沒看過的部分。git 預設的版本排序把 `v0.2.0-rc.2` 排在
+`v0.2.0` 之後，`v0.2.1` 會從那個候選版起算，所以候選版那一支用 `versionsort.suffix=-`。
 
 **一個版本只建一次**。映像建置不是逐位元組可重現的，整套重跑會在同一個標籤下推出新的
 digest；已經照第一份清單更新的安裝認為自己是最新版，跑的卻是別人不再跑的那一份。所以
@@ -3507,7 +3523,7 @@ digest；已經照第一份清單更新的安裝認為自己是最新版，跑�
 的 job 等於換成自己）。要改就打一個新標籤。兩處都問 `.github/published-manifest.sh`：只有
 release 或檔案不存在才算「還沒發布」，GitHub 回任何其他錯誤都讓發布失敗，不當成沒有。
 
-簽章腳本是 `scripts/release-manifest.ts`（`sign`／`public-key`／`keygen`）。私鑰只從環境
+簽章腳本是 `scripts/release-manifest.ts`（`sign`／`public-key`／`check-trusted`／`keygen`）。私鑰只從環境
 變數讀，編碼與 `LICENSE_SIGNING_KEY` 相同（32 位元組 seed 的十六進位）；多把以空白分隔就
 各簽一行。`keygen` 在記憶體裡產生金鑰，私鑰經 stdin 直接交給 `gh secret set`，只印公鑰與
 識別碼；secret 已經存在就拒絕，因為 GitHub 讀不回 secret，覆寫等於丟掉每一台安裝信任的那
@@ -3583,7 +3599,7 @@ NULL＝不放行，外鍵指向 `release_manifest`。一張授權綁一台主機
 | `backup/` | 0700 | 切換前的 `pg_dump -Fc`（0600），成功或回退完成即刪 |
 | `incoming/` | 0700 | 從新版 api 映像取出的檔案 |
 | `requests/` | 0755 | 掛進 api（`:U,z`），api 寫旗標 |
-| `results/` | 0755 | 掛進 api 與 mcp（`:ro,z`，不加 `U`），更新程式寫結果與切換標記 |
+| `results/` | 0755 | 掛進 api 與 mcp（`:ro,z`，不加 `U`），更新程式寫結果、切換標記與備用開機標記 |
 
 只有最後兩個目錄掛進容器。請求目錄只掛進 `api`，所以從 MCP 寫不了旗標；結果目錄以唯讀
 掛進 `api` 與 `mcp`，兩者都要讀得到切換標記。日誌、資料庫備份、`.env` 與 compose 檔都不在
@@ -3602,9 +3618,12 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   8–64 個英數與 `-`，同時是結果的檔名。
 - `CONTAINER_RESULT_DIR` = `/var/lib/laysi-update/results`（api 與 mcp 皆唯讀）。檔名就是
   請求編號，`UpdateResult::decode()` 讀，上限 `MAX_RESULT_BYTES`。每一步都整份換掉，
-  `UpdateStatus::is_final()` 之後不再變；保留最新的 `KEEP_RESULTS` 份。
+  `UpdateStatus::is_final()` 之後不再變，`rollback-failed` 例外（見「回退失敗之後」）；保留最新的
+  `KEEP_RESULTS` 份。
 - 切換標記 `SWITCHING_FILE`（`switching.marker`）：更新程式在第 4 步停下第一個服務之前
-  寫入（暫存檔、fsync、rename），最終結果寫出之後才刪除。**api 與 mcp 在 `update::switching()`
+  寫入（暫存檔、fsync、rename），最終結果寫出之後才刪除；停在 `rollback-failed` 而備份還要
+  還原時一直留著，到 `retry-rollback` 做完回退才刪（見「回退失敗之後」）。
+  **api 與 mcp 在 `update::switching()`
   為真時拒絕所有寫入，讀取照常**：回退把資料庫還原成第 5 步的樣子，這段期間的寫入會被
   還原掉。判斷只看標記在不在，不需要請求編號，所以更新程式自己起的 api 與沒有送出請求的
   mcp 看到的是同一個答案。結果目錄不存在（沒有主機端更新程式的安裝，例如開發環境）時為假；
@@ -3613,7 +3632,16 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   標記寫不進去就不停任何服務，回 `failed-unchanged`。斷電或程序中斷留下的標記，由下一次
   取得鎖的執行（開機與收尾 unit 都是）在發現沒有進行中的更新時刪掉；在那之前它留著，
   寧可多擋一段。名稱含 `.`，不可能是請求編號，清理舊結果時不會碰到它。
-  拒絕寫入接在 `dispatch` 第 0 步（`op.writes()`），由 #63 實作。
+  拒絕寫入接在 `dispatch` 第 0a 步（`op.writes()`），見〈產品畫面的更新卡〉。
+- 備用開機標記 `FALLBACK_BOOT_FILE`（`fallback-boot.marker`）：開機或收尾 unit 失敗後，
+  fallback unit 以 `boot --fallback` 執行前一版更新程式；前一版取得鎖之後先寫入標記
+  （暫存檔、rename，0644，內容 `at <時間>`），再照常收尾並啟動 stack。現行更新程式下一次
+  開機或收尾成功時刪掉它。寫不進去、刪不掉都只記日誌，不影響啟動。api 只讀：
+  `update::fallback_boot_in()` 在它是一般檔案時為真，任何錯誤（含目錄不存在）都是假，因為
+  它只決定畫面多不多一句提示；`get_license` 以 `fallback_boot` 回給畫面。名稱含 `.`，清理
+  舊結果時不會碰到。比這個參數舊的更新程式只看第一個參數，照常開機但不留標記；出貨的第一版
+  就帶著它，所以只有演練機與開發機會遇到。標記追的是現行更新程式有沒有起來，不是 stack
+  能不能用：停在 `rollback-failed` 而只起 postgres 的開機也算成功，照樣刪掉。
 - 狀態：進行中 `accepted`→`preparing`→`switching`→（`rolling-back`）；結束
   `succeeded`、`succeeded-updater-kept`（新版已在執行，但新版更新程式自我檢查不通過，
   `reason` 說原因）、`failed-unchanged`（停機前就失敗，什麼都沒變）、`rolled-back`、
@@ -3621,10 +3649,18 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
   `-installed-unknown`／`-disk-space`／`-busy`／`-blocked`。每份都帶 `received`、
   `updated`，視情況帶 `offered`、`running`、`downtime-from`／`-to`、`reason`、
   `rollback-reason`、`tools`。停機時間從 `downtime-from`（第 4 步）量到 `downtime-to`。
-  `rolled-back` 帶 `rollback-reason` 表示第一次還原失敗、重試成功，內容是第一次的原因。
+  `rolled-back` 帶 `rollback-reason` 表示第一次還原失敗、重試成功，內容是第一次的原因；
+  或者回退失敗之後由開機或 `retry-rollback` 做完，內容寫哪一條路與先前失敗的原因。
   `tools` 是這次執行實際用的版本（`podman=4.9.3 podman-compose=1.6.0`），只記錄、不判斷。
 - 旗標是不可信輸入：以目錄 fd 加 `O_NOFOLLOW | O_NONBLOCK` 開啟、`fstat` 確認是一般檔案、
   有大小上限，驗不過章就丟棄。symlink、FIFO、目錄都不會讓更新程式讀到目錄外的檔案或卡住。
+  清空請求目錄（`fsx::clear_untrusted`）同樣只用目錄 fd、不跟隨 symlink；同時開著的目錄
+  至多 17 層，更深的目錄搬到請求目錄頂層、換一個沒有人用的名稱再清，所以多深的目錄樹都在
+  一次呼叫內清完。搬移用 `renameat2` 的 `RENAME_NOREPLACE`，名稱被占用（空目錄也算）就換
+  下一個；每次呼叫從隨機的編號開始，api 預先占不住要試的那一段名稱。核心或檔案系統不支援
+  時回錯誤，不先查名稱再 `renameat`——api 能在兩步之間建出那個名稱；ext4、xfs、btrfs 與
+  tmpfs 都支援。清不掉的 `request` 會讓 path unit 一輪接一輪重跑，乾淨的 api 也 rename
+  不進去。api 邊清邊寫時，看過一百萬個項目仍不空就回錯誤；刪掉的不會回來，下一次接著清。
 
 ### 一次更新
 
@@ -3646,9 +3682,14 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
    `--force-recreate` 其餘常駐服務，web 與 mcp 除外。一律帶 `--no-deps`：podman-compose
    把 `depends_on` 譯成 `--requires`，有它就刪不掉、換不掉被依賴的容器。
 8. 等候成功：每個服務的最新容器在執行、是切換之後建立的、建立時的 digest 等於 compose
-   檔指定的那個也正在執行它（多平台映像以 index digest 拉取時 podman 回報的就是 index
-   digest）、自家映像等於清單、有 healthcheck 的是 healthy；反覆重啟的容器立刻算失敗。
+   檔指定的那個、正在執行的映像在本機也以那個 digest 登記、自家映像等於清單、有
+   healthcheck 的是 healthy；反覆重啟的容器立刻算失敗。比對的是映像的每一個 digest：
+   podman 只回報映像第一次被拉取時的那一個（多平台映像是 index digest），一份沒有變動的
+   映像以新的 index digest 再發布，拉下來只是同一份映像多一個名字。
    逾時 20 分鐘，涵蓋 migration。通過之後才起 web 與 mcp，以同樣條件確認（逾時 3 分鐘）。
+   逾時用不會跳的單調時鐘計算：沒有電池時鐘的機器（樹莓派）開機後第一次對時，牆上時鐘會
+   一口氣往前調關機的那段時間，而那正是斷電後開機復原在等服務就緒的時候。開機時起 stack
+   的等候也一樣。
 9. 失敗：先放回前一版的檔案，確認 postgres 以外都停了，以**舊版的 postgres 映像**重建
    容器，`DROP DATABASE … WITH (FORCE)` 後 `pg_restore --create`（保留 ICU zh-TW 定序），
    成功才刪備份、起舊版並以第 8 步的條件確認。**還原失敗（含之前的 DROP）在同一次執行裡
@@ -3656,18 +3697,120 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
    的容器與新版的映像釋出空間，重建舊版 postgres，再從同一份備份還原。備份從頭到尾不改寫，
    還原成功才刪。重試成功就照常起舊版並判斷，結果是 `rolled-back`，`rollback-reason`
    寫第一次失敗的原因；重試也失敗就是 `rollback-failed`，備份留著。回退不通過就停在舊版、
-   不再重試。
+   不再重試。回退完成後刪掉新版的映像與前一版的自家映像；第 3 步記下的兩版之前那個來源，
+   `.previous` 已經不再列出的，第三方映像也一起刪：第 6 步把 `.previous` 換成現行版的
+   檔案之後，之後的更新不會再讀到它。還沒到第 6 步就停下的，留給下一次更新的第 3 步。
 10. 成功：新版更新程式先在本機跑 `self-check`（讀得了這次的日誌、寫得出 unit），通過才
     換上，前一版留在 `.previous`；接著刪掉現行與前一版以外的映像與資料庫備份。第三方映像
     換了來源（例如換一個 registry）時，兩版之前那個來源的映像也一起刪：第 3 步結束時先讀
-    `.previous` 那份 compose 檔（第 6 步會覆寫它），把用到的來源記進日誌。
+    `.previous` 那份 compose 檔（第 6 步會覆寫它），把用到的來源記進日誌。每一次清理
+    （含回退後與放棄更新時刪掉新版映像）都留下現行 compose 檔指定的映像，那是下一次啟動要跑
+    的東西：斷電後 podman 刪掉讀不了的容器（見「日誌與開機」），收尾時新版的 postgres 與
+    rustfs 可能沒有任何容器在用，只看容器就會刪掉，下一次啟動要重新拉，離線的主機起不來。
+    回退之後現行的是舊版的檔案，新版的映像照樣刪。compose 檔讀不到、或有映像沒以 digest
+    指定，就一個映像都不刪。映像以它的每一個名字刪除：以兩個 digest 拉取過的映像有兩個
+    名字，podman 拒絕以映像 ID 刪除它。
 
 **換回舊映像不構成回退**：sqlx 遇到資料庫裡有執行檔不認得的 migration 會回
 `VersionMissing` 拒絕啟動，所以回退一定連同資料庫。**入口開放之後才判定失敗時，回退照樣
 還原資料庫**：第 8 步通過核心之後 web 與 mcp 才啟動，之後若 web 或 mcp 自己沒通過（上限
 是入口的逾時），資料庫仍要回到第 5 步。這段期間 api 與 mcp 要依切換標記拒絕寫入，寫入才
-不會隨回退消失；拒絕寫入由 #63 接上，在那之前這段期間的寫入仍會被還原。結果的 `reason`
+不會隨回退消失；`dispatch` 的第 0a 步已經接上這道檢查。結果的 `reason`
 寫出入口開放了多久。
+
+### 產品畫面的更新卡
+
+「安全與營運」的「系統更新」卡（`components/UpdateCard.tsx`，狀態機在 `web/src/update.ts`）
+是上面那份契約的畫面端。
+
+**放行的版本存在 `license_state.release_manifest`**：授權檢查的回應帶一份簽章版本清單，
+`ops/license.rs` 的 `released_manifest()` 用 `release::verify_with` 驗過才存，驗不過存空字串；
+每次成功的檢查整份換掉，所以撤回放行也一併生效。存的是簽章全文、逐位元組不動，因為請求原樣
+帶它，更新程式再驗一次。資料列只是一份副本：讀版本與寫請求每次都重新驗章，手改資料庫
+換不到任何版本。`get_license` 因此多回四個欄位：`running_version`、`released_version`（驗過
+章且 `decide()` 為 `Install` 才有，否則 `null`）、`updater_present`（請求目錄存在才為真，
+沒有更新程式的安裝不畫按鈕，也不畫「更新期間」與「更新失敗時」兩列——那兩句講的是更新程式
+的行為，由維運人員更新的安裝兩句都不成立），以及 `fallback_boot`（備用開機標記在不在，見
+〈旗標與結果〉）。畫面只知道有沒有放行給這台機器，沒有放行版本時不說「最新」。
+
+**兩個操作，同屬 `manage_license`**（migration `0025_release_manifest.sql` 整列改寫那條
+permission，並種兩列 `mcp_tool_grant`，檔案接在 `laysi-ops` 測試的 `SCHEMA` 後面）：
+
+| 操作 | `risk()` | `writes()` | `ui_only` | MCP 開關 |
+|---|---|---|---|---|
+| `get_update_ticket` | `AdminOnly` | false | 是 | 關閉，且開不起來 |
+| `get_update_result` | `AdminOnly` | false | 否 | 關閉 |
+
+`get_update_ticket` 把請求寫進旗標目錄（暫存檔、fsync、0644、rename、fsync 目錄）並回傳
+請求編號。`writes()` 為 false，授權到期而唯讀的安裝照樣更新得了自己；名稱用 `get_` 開頭，
+由 `reads_are_not_writes_whatever_floor_they_carry` 把關。`get_update_result { request_id }`
+讀 `results/<編號>`，並核對檔案內的編號等於要求的編號；找不到時回 `found = false`，目錄
+不存在也一樣，所以結果目錄裡上一次的結果不會被當成這一次的。
+
+**`ui_only`** 是 `Operation` trait 的新掛鉤（預設 `None`），回傳該去的畫面名稱。MCP 呼叫
+在讀 `mcp_tool_grant` 之前就被擋下，錯誤訊息請使用者到「安全與營運」執行；
+`set_mcp_tool_grant` 也拒絕把這類操作打開。理由：旗標目錄只掛進 api 容器，AI 不該決定系統
+何時停機。`schema-live-test` 的 `NEVER_CALLED` 列出 `get_update_ticket`，因為呼叫它會
+真的寫旗標。
+
+**更新期間唯讀**：`dispatch` 第 0a 步在授權檢查之前問 `op.writes()` 與
+`UpdateDirs::switching()`，兩個 channel 都擋，回 `OpError::Updating`（`updating`，HTTP
+403），被擋下的呼叫照樣寫稽核。授權底線的 `Unlicensed` 原本沒有對應的狀態碼，一併對到 403。
+測試以 `Registry::in_update_dirs` 指向自己的目錄。
+
+**卡片的狀態**：沒有放行版本、可更新（按鈕依 `permissions` 與 `updater_present` 決定畫不畫，
+沒有權限時印誰維護）、進行中，以及六種結束：
+
+| 狀態 | 條件 |
+|---|---|
+| 成功 | 結果為 `succeeded`／`succeeded-updater-kept`，或結果讀不到而 `/v1/meta` 的版本已變 |
+| 失敗並已回復 | `failed-unchanged`／`rolled-back`，說出回到的版本 |
+| 失敗且未回復 | `rollback-failed` |
+| 沒有執行 | 任一種 `refused-*`，每一種各有一句；或「已接收」在 60 秒內從未出現 |
+| 無法確認 | 「已接收」出現過或 api 曾經消失，卻在 45 分鐘內沒有最終結果，而最後一次輪詢有回應 |
+| 沒有回應 | 同上，但最後一次輪詢 `/v1/meta` 與 `get_update_result` 都沒有回應 |
+
+**前一版更新程式接手啟動時**：`fallback_boot` 為真，卡片在事實列下方多一句
+`FALLBACK_BOOT_MESSAGE`（`web/src/update.ts` 的 `updaterNotice`），與上表的狀態並存，有沒有
+放行版本都畫。系統照常可用，只有主機的 systemd 紀錄看得到這件事，而機器每次開機都靠前一版，
+直到有人按「更新」才會發現——那時現行更新程式仍起不來，請求回 `failed-unchanged`。所以按鈕
+照畫，提示請人洽經銷商檢修。現行更新程式下一次啟動成功，標記刪掉，提示跟著消失。
+
+**「沒有執行」只留給拒絕，以及「已接收」從未出現**。已接收之後逾時，更新可能已經執行，說
+沒有執行會讓人重按；那一格說無法確認結果、請重新整理本頁查看目前版本。輪詢同時問
+`/v1/meta` 與 `get_update_result`（帶請求編號），每次 5 秒逾時，api 在換版途中消失時
+回應失敗只會記為「曾經消失」，不會讓畫面壞掉。
+
+**沒有回應另成一格**：回退失敗而保留了資料庫備份時，更新程式只啟動 postgres（`machine.rs`
+的 `start_what_is_safe`），api 不會回來。這時請人重新整理，換來的是一個讀不到任何東西的頁面，
+卡片上的結果也跟著消失；所以那一格不畫「重新載入」，只請使用者盡快洽經銷商。兩個端點都沒有
+回應才算，`get_update_result` 失敗而 `/v1/meta` 有回應仍是無法確認。
+
+`refused-disk-space` 的那一句帶出結果檔的 `reason`（更新程式算出的剩餘與需要的容量），
+沒有 `reason` 才用固定句；其餘拒絕的 `reason` 寫給維運人員看，畫面不印。結束時卡片重讀授權、
+`/v1/meta`、`list_api_tokens`、`get_system_health` 與 `/healthz`，讀不到就保留原值：同一頁
+「系統健康」的版本與 migration 才不會停在更新前，而 api 不在時卡片也不會因為授權讀不到而整張
+消失。讀得到時一併清掉頁首的錯誤，停機期間重讀失敗留下的「伺服器回應異常」不會在更新完成後
+還掛著。
+
+**整頁重讀時也保留授權**：分頁重新變成可見時 App 會 `reload()`，「安全與營運」整頁重讀。
+停機那一分鐘裡切一次分頁，`get_license` 必定失敗；原本這時把授權清成 `null`，更新卡連同它
+正在等的結果一起被拆掉，api 回來之後也不會自己出現。現在連不上伺服器（`update.ts` 的
+`serverUnreachable`：不是 `OpFailed`，或代碼為 `network`）就保留上一次的值，只有操作本身
+回拒絕才清掉。
+
+**重新整理後接續**：請求編號與已看到的狀態（`seenResult`、`wentDown`、起始版本與時間）存在
+`localStorage` 的 `laysi.update.run`。選 `localStorage` 而不是 `sessionStorage`，是因為更新
+是以分鐘計的，管理員可能關掉分頁再回來；兩個分頁同時開著只是各自輪詢同一個編號，結果
+相同。卡片掛載時讀回，繼續輪詢同一個編號；出現最終狀態、顯示出來的同時清除。讀回的編號
+只用來輪詢，新的更新永遠向 `get_update_ticket` 要新的編號，所以不會把舊編號當成新的更新：
+結果已是最終的編號只會顯示那個結果一次，然後清除。超過一天、格式不符或無法讀取的紀錄
+一律丟掉。這些規則都在 `update.ts` 的純函式裡，由 `scripts/update-test.ts` 驗證。
+
+**停機時間**：畫面寫「約一分鐘」，只存在 `update.ts` 的 `DOWNTIME_PHRASE`。數字來自 #61 的
+CI 端對端測試，從第 4 步停止服務量到最終結果，成功路徑 18–20 秒、最長 30 秒，用的是假
+映像，真實映像的 migration 與拉取不在其中；取整到一分鐘留出餘裕。#64 的實機演練量到
+實測值之後換掉這個字串。
 
 ### 日誌與開機
 
@@ -3686,7 +3829,7 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 | `rolling-back` | 重做回退 |
 | `restoring` | 重新還原資料庫；`restore-retry` 已寫下時是續做那一次重試，不會再開始第二次 |
 | `restored` | 起舊版並判斷 |
-| `rollback-failed` | 終止：之後只啟動 stack，不再還原；還原本身失敗、備份留著時只啟動 postgres，直到有人執行 `retry-rollback`（見「回退失敗之後」） |
+| `rollback-failed` | 終止。開機先把三個 stack 檔放回前一版（與 `.previous` 逐位元組比對），放不回就什麼都不啟動；沒有要還原資料庫而備份還在的，接著照 `rolling-back` 做完回退；要還原資料庫而備份還在的只啟動舊版 postgres，直到有人執行 `retry-rollback`；其餘只啟動 stack，不再還原（見「回退失敗之後」） |
 
 **斷電會留下讀不了的容器**：斷電前一刻建立的容器，它那一層的 `link` 與 `lower` 檔已經
 建立卻是空的；`podman ps` 列得出它，任何 inspect 都失敗在 `getting graph driver info`，
@@ -3698,6 +3841,9 @@ api 的 uid 10001 在主機上對應的 subuid，stack 使用者從此刪不掉�
 
 日誌存在、階段在 `stopping` 之後且結果還不是最終時，切換標記一定在；收尾一個這樣的日誌時
 更新程式先補寫標記。最終結果寫出、日誌刪掉之後才刪標記，所以中斷在兩者之間也只會多擋一段。
+停在 `rollback-failed` 而備份還要還原時，標記一直留著，開機發現它不在就補寫：
+`retry-rollback` 還原那份備份時，會把這段期間的寫入一併還原掉，例如回退停不下來的新版容器
+收到的寫入。補寫不了時開機失敗、什麼都不啟動。
 
 **開機時 stack 只由更新程式啟動**：compose 用 `unless-stopped`，而 rootless 的
 `podman-restart.service` 只啟動 `restart: always` 的容器；任何服務都不得設 `always`，
@@ -3725,7 +3871,7 @@ systemd unit 由更新程式自己寫出（`units.rs`），跟著更新程式一
   收不到更新請求。端對端測試只重啟開機 unit、不經過 user manager 開機，看不到這件事。
 - `laysi-updater-boot.service`：開機收尾並啟動 stack，`ExecStop=` 在關機時依序停下 web／
   mcp、其餘、postgres。`OnFailure=` 啟動 `laysi-updater-fallback.service`，以
-  `bin/laysi-updater.previous` 再做一次。
+  `bin/laysi-updater.previous boot --fallback` 再做一次，並留下備用開機標記。
 - `laysi-updater.service` 失敗時（例如程序被殺），`OnFailure=` 的
   `laysi-updater-recover.service` 立刻收尾，不必等下一次開機；它失敗同樣交給前一版。
 - 每一次執行（旗標、開機、收尾）都先取 `state/lock` 的 `flock`。旗標那次拿不到就回
@@ -3748,8 +3894,18 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
 
 ### 回退失敗之後
 
-停在 `rollback-failed` 而備份留著的機器只啟動 postgres，系統的資料庫已經不在：還原前先
-刪掉它，還原失敗時再刪掉還原了一半的那一份。api 沒有執行，畫面打不開，客戶自己救不回來。
+**沒有要還原資料庫的回退由開機做完**：第 6 步換檔時失敗或斷電，新版沒有執行過，資料庫
+還是原樣，但回退可能在放回檔案時失敗，留下一半是新版的 stack 檔與第 5 步的備份。之後每次
+開機先把三個 stack 檔與 `.previous` 逐位元組比對、不同的放回，再照 `rolling-back` 做完回退：
+刪備份、起舊版並判斷，成功就是 `rolled-back`，`rollback-reason` 記下「開機時重新回退」與先前
+失敗的原因。放不回（`.previous` 不見了或讀不了）就什麼都不啟動，日誌與結果不動，
+`retry-rollback` 也拒絕。只看 `.env` 的話，換到一半的 compose 檔會讓 postgres 以新版的映像
+起來。
+
+停在 `rollback-failed`、要還原資料庫而備份留著的機器只啟動舊版的 postgres，系統的資料庫已經
+不在：還原前先刪掉它，還原失敗時再刪掉還原了一半的那一份。api 沒有執行，畫面打不開，客戶
+自己救不回來。開機同樣先放回 stack 檔；放不回，或主機記錄的版本不是更新前那一版，就連
+postgres 都不啟動，由 `retry-rollback` 改回 `rolling-back` 一併寫回。
 
 **由原廠救回**：客戶聯絡經銷商、經銷商轉原廠，原廠取得主機上 stack 使用者的 shell（本機
 主控台或 ssh，由客戶提供）之後執行，更新程式在 `~/.local/share/laysi-one/bin/`：
@@ -3759,8 +3915,10 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
    什麼失敗，先排除。磁碟滿就清出空間；備份本身讀不了時停下來，這個指令救不回來。
    斷電之後 `updater.log` 的尾端可能是一段 NUL、最後幾行沒有落盤（`grep` 要加 `-a`），
    這時原因只在結果檔。
-3. `laysi-updater retry-rollback`。日誌停在 `rollback-failed`、備份還在、主機記錄的版本
-   與 stack 檔都是更新前那一版，三者都成立才把日誌改回 `restoring`，再
+3. `laysi-updater retry-rollback`。日誌停在 `rollback-failed`、備份還在、主機記錄的版本是
+   更新前那一版、三個 stack 檔與 `.previous` 逐位元組相同，都成立時把日誌改回 `restoring`；
+   stack 檔或版本還不是更新前的，改回 `rolling-back`，由它先放回檔案。`.previous` 不見了或
+   讀不了就拒絕。接著
    `systemctl --user start laysi-updater-recover.service`，由收尾 unit 照一般的回退做完：
    還原與那一次重試、起舊版並判斷。工作在 unit 裡做，ssh 斷線不影響；指令等到收尾結束，
    印出回到的版本。
@@ -3770,8 +3928,10 @@ podman 在 systemd 底下會把 conmon 留在呼叫的 unit 的 cgroup 裡，one
    可以再執行一次。
 
 **備份在還原成功的那一刻刪掉**，與一般回退相同：資料已經回到資料庫，之後舊版起不來也
-用不到它。沒有留下備份的 `rollback-failed`（還原成功、是舊版沒有啟動）不走這條路，指令
-會拒絕：那種機器每次開機照常啟動 stack，原因在 `state/updater.log`。
+用不到它。還原成功之後才失敗的 `rollback-failed`（是舊版沒有啟動）不走這條路，指令
+會拒絕：那種機器每次開機照常啟動 stack，原因在 `state/updater.log`。沒有要還原資料庫的
+`rollback-failed`，指令一律改回 `rolling-back` 重做回退，`rollback-reason` 記下「以人工指令
+重新回退」。
 
 ### 出貨與 compose
 

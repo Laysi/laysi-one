@@ -34,6 +34,12 @@
 //! request id: a service started by the updater itself, or one that never
 //! asked for the update, sees it the same way.
 //!
+//! Telling the screen the previous updater started the stack:
+//! [`FALLBACK_BOOT_FILE`] exists in the results directory from the moment
+//! the fallback unit has the previous updater start the stack until the
+//! current updater next starts it without failing. Readers only ask
+//! [`fallback_boot_in`].
+//!
 //! Both files are line text like the release manifest rather than JSON: the
 //! manifest inside a request is carried byte for byte, and this crate stays
 //! free of dependencies the host-side updater would have to link.
@@ -118,6 +124,26 @@ pub fn switching_in(dir: &Path) -> bool {
 /// [`CONTAINER_RESULT_DIR`]. Writes are refused while this is true.
 pub fn switching() -> bool {
     switching_in(Path::new(CONTAINER_RESULT_DIR))
+}
+
+/// Present in the results directory once the previous updater has started
+/// the stack: the fallback unit runs it when the boot or recovery unit, which
+/// run the current updater, failed. Written as that start begins, and removed
+/// when the current updater next starts the stack without failing. The system
+/// runs, but on an updater an update would replace, so the screen says the
+/// current one needs looking at.
+///
+/// It contains the time it was written, for whoever looks; readers only ask
+/// whether it is there. The dot keeps it from ever being a request id, as
+/// with [`SWITCHING_FILE`].
+pub const FALLBACK_BOOT_FILE: &str = "fallback-boot.marker";
+
+/// Whether the previous updater started the stack last, judged from a results
+/// directory: [`FALLBACK_BOOT_FILE`] is a regular file in `dir`. Any error, a
+/// missing directory included, is false: all it decides is whether the screen
+/// shows a notice.
+pub fn fallback_boot_in(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(FALLBACK_BOOT_FILE)).is_ok_and(|m| m.is_file())
 }
 
 /// Names one request and the result that answers it. Also the result's file
@@ -359,8 +385,9 @@ impl fmt::Display for UpdateStatus {
 /// `succeeded-updater-kept` it says why the new updater was not installed.
 /// After `rolled-back`, `rollback-reason` is present when the first restore
 /// of the database failed and the one retry succeeded, and says why the
-/// first one failed; after a `rollback-failed` that `retry-rollback` brought
-/// back, it says so and why the restores failed before that, newest first.
+/// first one failed; after a `rollback-failed` that `retry-rollback` or a
+/// later boot brought back, it says which and why the rollback failed before
+/// that, newest first.
 ///
 /// A reader skips keys it does not know, so a later updater can add one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -863,5 +890,28 @@ mod tests {
         // Never a result's name, so never pruned or overwritten as one.
         assert!(RequestId::parse(SWITCHING_FILE).is_err());
         assert!(!switching());
+    }
+
+    #[test]
+    fn a_fallback_boot_is_a_marker_file_in_the_results_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("laysi-update-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!fallback_boot_in(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!fallback_boot_in(&dir));
+        let marker = dir.join(FALLBACK_BOOT_FILE);
+        std::fs::write(&marker, "at 2026-10-15T06:00:00Z\n").unwrap();
+        assert!(fallback_boot_in(&dir));
+        // Only a regular file counts.
+        std::fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", &marker).unwrap();
+        assert!(!fallback_boot_in(&dir));
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert!(!fallback_boot_in(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(RequestId::parse(FALLBACK_BOOT_FILE).is_err());
     }
 }

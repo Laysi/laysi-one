@@ -57,14 +57,22 @@ pub mod security;
 pub mod selfservice;
 pub mod settings;
 pub mod tax;
+pub mod update;
 pub mod uploads;
 pub mod webhook;
 
 /// Collect every module's operations. Used by `Registry::new()`.
 pub fn all() -> Vec<Box<dyn Operation>> {
+    all_in(&update::UpdateDirs::container())
+}
+
+/// Every module's operations, with the ones that look for the host-side
+/// updater looking in `dirs`.
+pub fn all_in(dirs: &update::UpdateDirs) -> Vec<Box<dyn Operation>> {
     let mut out = Vec::new();
     out.extend(ledger::ops());
-    out.extend(license::ops());
+    out.extend(license::ops_in(dirs));
+    out.extend(update::ops_in(dirs));
     out.extend(receivables::ops());
     out.extend(payables::ops());
     out.extend(banking::ops());
